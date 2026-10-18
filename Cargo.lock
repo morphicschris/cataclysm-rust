@@ -699,6 +699,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "hwc-kas"
+version = "0.1.0"
+
+[[package]]
 name = "hwc-math"
 version = "0.1.0"
 

@@ -1,0 +1,1 @@
+//! hwc-kas (scaffold).
