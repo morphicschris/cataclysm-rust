@@ -1,0 +1,23 @@
+[package]
+name = "hwc-import"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "First-run importer: builds the game's data directory from the player's own Homeworld: Cataclysm install"
+
+[lib]
+name = "hwc_import"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hwc-import"
+path = "src/main.rs"
+
+[dependencies]
+hwc-formats = { path = "../../crates/hwc-formats" }
+hwc-kas = { path = "../../crates/hwc-kas" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "1"
