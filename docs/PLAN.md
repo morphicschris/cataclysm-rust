@@ -30,7 +30,7 @@ the **same layout as Homeworld 1** — plus the WON "Titan" networking library f
 
 | File | Size | Format |
 | --- | --- | --- |
-| `cataclysm.big` | 76.9 MB | `RBF1.23` archive, 16,528 files (128 MB unpacked), 16,081 LZSS-compressed. Same as HW1 except the TOC entry is the naturally aligned 32-byte struct, not packed 27 bytes. Full listing: `docs/inventory/cataclysm_big_toc.tsv`. |
+| `cataclysm.big` | 76.9 MB | `RBF1.23` archive, 16,528 files (128 MB unpacked), 16,081 LZSS-compressed. Same format as HW1 (32-byte aligned TOC entries; HomeworldSDL later packed it to 27 bytes). Full listing: `docs/inventory/cataclysm_big_toc.tsv`. |
 | `Music4Cat.wxd` | 68.8 MB | `WXD1` music bank. |
 | `BeastSpeech.vce`, `SectSpeech.vce` | 16.7 / 43.1 MB | `VCE0` speech banks. |
 | `Movies\*.bik` | ~200 MB | Bink animatics. |
@@ -158,3 +158,22 @@ of it is committed.
     copy of the game, ship no game data, stay non-commercial, avoid "Homeworld" in the project name, and
     keep the raw decompiled/recovered C tree (`recovered/`) private as a research artifact.
 - Repository hosting: `D:\Git\HWC_Modern` is not a git repo yet.
+
+## 6. Progress log
+
+- 2026-10-18 — Stage 0 done. Stage 1 started:
+  - `reference/hw1-2003/` = first commit of HomeworldSDL (2003-10-12), the closest available copy of
+    Relic's original release. It also contains the `rgl` renderer source (software, D3D and Glide back
+    ends) and `src/Generated/` (KAS missions compiled to C), so the rgl*.dll files can be matched too.
+  - The entry point is a copy-protection wrapper in `.cms_t` with its own CRT; it is not analysed or
+    ported. Game code it reaches only indirectly was missed by Ghidra's first pass.
+  - Recovered functions: 10,982 → 11,174 (aggressive instruction finder) → 13,332 (seeding 2,343
+    table/immediate pointers into a 630 KB block at 0x5d1930–0x66b32f). That block is compiled KAS
+    mission code (scope setup + hashed calls), i.e. Cataclysm's missions.
+  - All HW1 headers (game + ships) preprocessed with MSVC x86 and imported into Ghidra: 5,674 types
+    (`Ship` 1136 B, `ShipStaticInfo` 844 B, `SpaceObj` 116 B as HW1 defines them; Cataclysm's layouts
+    will differ and get fixed per struct). Pipeline: `tools/scripts/filter_pp.py` + `import_types.py`,
+    working files in `recovered/types/` (private).
+  - Still unreached: ~1 MB of `.text` in gaps with orphan instructions; next is the KAS function
+    table, tweak/script tables and string anchors to name functions, then BSim against a 32-bit build
+    of `reference/hw1-2003`.
