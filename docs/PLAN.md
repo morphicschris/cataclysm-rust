@@ -196,3 +196,12 @@ of it is committed.
   Slipgate, Worker, NomadMoon, Dreadnought, ...) are in `recovered/naming/` (private).
   Remaining stage 1 work: compiled missions (2,256 functions, to be turned back into mission scripts), the
   library region (CRT, WON/Titan, STL), and the leftover unnamed functions.
+- Correction: the copy-protection wrapper lives in the `.cms_t`/`.cms_d` sections at VA 0xAFA000+, not at
+  0x6FA000 (that was an RVA/VA mix-up). 0x6FA000–0x71F000 is ordinary library code (MSVC6 C++ std library,
+  CRT tail) and ~2,700 compiler-generated exception-handling stubs. All Win32 API calls go through one
+  pointer redirected by the wrapper, so the OS API behind each call is inferred from its arguments.
+- Libraries identified (details private in `recovered/libraries.md`): MSVC6 debug CRT, IJG libjpeg 6, WON Titan
+  SDK (WONMsg/WONCommon/WONCrypt/WONAuth/sockets), Crypto++ 3.x, WON AdApi, ImageMagick (GIF/BMP only). Only the
+  CRT, JPEG load/save and the Titan socket/message layer matter to the port; the rest is dropped.
+- Determinism traps for stage 4: x87 `__ftol` returns 0x80000000 for NaN/out-of-range where Rust `as`
+  saturates, and MSVC `qsort` is not stable — both need exact emulation where the simulation depends on them.
