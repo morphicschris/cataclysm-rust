@@ -11,6 +11,9 @@ pub mod mex;
 pub mod mad;
 pub mod btg;
 pub mod font;
+pub mod fib;
+pub mod hsf;
+pub mod nis;
 
 use std::path::PathBuf;
 
