@@ -797,14 +797,18 @@ dependencies = [
 name = "hwc-ui"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "hwc-formats",
+ "png",
+ "wgpu",
 ]
 
 [[package]]
 name = "hwc-video"
 version = "0.1.0"
 dependencies = [
- "hwc-formats",
+ "png",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

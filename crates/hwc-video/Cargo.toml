@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Pure-Rust Bink 1 movie decoder for the Homeworld: Cataclysm cinematics"
 
 [dependencies]
-hwc-formats = { path = "../hwc-formats" }
+thiserror = "1"
+
+[dev-dependencies]
+png = "0.18"
