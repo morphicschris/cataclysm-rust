@@ -210,3 +210,7 @@ of it is committed.
   a case-insensitive ELF-style hash; 974 of 2,706 label hashes recovered exactly, 369 more as guesses. The exe
   embeds Cataclysm's own kas2c function table (486 entries), which corrected ~200 runtime (kasf*) names.
   Open: remaining label names, and a recompile-and-compare check of the translator.
+- Stage 4 foundation: `hwc-math` reproduces the original's float behaviour (x87 at 53-bit precision, MSVC6
+  evaluation order, x87 FSIN/FCOS, table sqrt), the 27-stream RNG, MSVC6 `__ftol` (64-bit FISTP; NaN -> 0) and
+  `qsort`, Cataclysm's spline changes, and the 16 Hz universe / 240 Hz task timing with the new game-speed factor.
+  Still missing: FPATAN/FPTAN/F2XM1 emulation (camera, cloak, Mimic).
