@@ -11,4 +11,3 @@ hwc-render = { path = "../../crates/hwc-render" }
 winit = "0.30"
 pollster = "0.4"
 png = "0.18"
-glam = "0.30"
