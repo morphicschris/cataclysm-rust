@@ -6,6 +6,11 @@ pub mod lzss;
 pub mod lif;
 pub mod geo;
 pub mod script;
+pub mod audio;
+pub mod mex;
+pub mod mad;
+pub mod btg;
+pub mod font;
 
 use std::path::PathBuf;
 
