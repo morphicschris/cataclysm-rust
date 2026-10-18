@@ -214,3 +214,11 @@ of it is committed.
   evaluation order, x87 FSIN/FCOS, table sqrt), the 27-stream RNG, MSVC6 `__ftol` (64-bit FISTP; NaN -> 0) and
   `qsort`, Cataclysm's spline changes, and the 16 Hz universe / 240 Hz task timing with the new game-speed factor.
   Still missing: FPATAN/FPTAN/F2XM1 emulation (camera, cloak, Mimic).
+
+## 7. Distribution model (decided 2026-10-18)
+
+We ship only our own Rust code. A first-run importer (`hwc-import`, planned) takes the player's own Cataclysm
+install, reads everything we need from it — `cataclysm.big`, music/speech banks, movies, and the mission logic
+extracted from `cataclysm.exe` — and writes it into the new game's data directory in whatever form the engine
+wants. Nothing from the original game is ever distributed with the project; tests that need game data read the
+player's install and skip when it is absent.
