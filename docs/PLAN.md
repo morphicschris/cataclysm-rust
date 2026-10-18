@@ -177,3 +177,15 @@ of it is committed.
   - Still unreached: ~1 MB of `.text` in gaps with orphan instructions; next is the KAS function
     table, tweak/script tables and string anchors to name functions, then BSim against a 32-bit build
     of `reference/hw1-2003`.
+- 2026-10-18 (later) — Stage 1 game-code naming pass:
+  - Ghidra now sees 16,503 functions (fixed two functions wrongly marked no-return, filled padded gaps).
+  - Six workers compared decompiled code with the HW1 source file by file. In the game region (src/game,
+    5,156 functions) 3,624 now carry HW1 names, each tagged same/modified; 665 are logged as Cataclysm-only.
+    Per-file reports and logs are in `recovered/naming/` (private).
+  - Cataclysm-only game modules identified: Beast/infection, Salvage, PopupMenu, OverlayIcons, a new camera
+    system, time compression, ship linking/docking rewrite, research-module tech tree, upgrade builds.
+  - Still to do in stage 1: the platform layer (src/win32), ship modules, the Cataclysm-only modules, the
+    compiled missions, and re-running the automatic matcher with the new anchors.
+- 2026-10-18 — Stage 3: `hwc-formats` reads every data format in the game with tests over the full data
+  (archive/LZSS, LIF, GEO/PEO, MEX, MAD, BTG, HFF fonts, FIB screens, HSF lighting, NIS + NIS scripts, tweak
+  files and ship stats, audio banks/LUTs/music/speech incl. the transform codec). Format notes in `docs/formats/`.
