@@ -1,67 +1,47 @@
 //! Reading missions from the player's own `cataclysm.exe` (install-time extractor).
 //!
-//! The published game ships no mission logic: it must rebuild each mission's IR from the
-//! compiled kas2c code inside the player's executable, then cache it (see [`crate::binary`]).
-//! This module has the first stage (locating the missions in the exe bytes); the rest is the
-//! design for porting `tools/scripts/kas_decompile.py` (plus `crates/hwc-kas/tools/kas_ir_export.py`)
-//! to Rust.
+//! The published game ships no mission logic: it rebuilds each mission's IR from the compiled
+//! kas2c code inside the player's executable, then caches it (see [`crate::binary`]).
+//! [`extract_missions`] does the whole job:
 //!
-//! # What the extractor needs
+//! 1. **PE mapping** ([`PeImage`]): sections, virtual address to file offset, C strings.
+//! 2. **Mission discovery** ([`find_missions`]): `kasMissionStart("missionNN", Init, Watch)`
+//!    call sites (`push watch; push init; push name; call`), the callee being the function most
+//!    such sites call.
+//! 3. **Runtime map** (`runtime`): the embedded kas2c function table and the debug console's
+//!    hash dispatcher give every table function's address; the console's argument parser gives
+//!    the label lookups; `kasfMsgSend` gives `CurrentTeamP` and the queue send function;
+//!    `kasJump`/`kasFSMCreate` are recognised by their bodies. Nothing is located by address, so
+//!    other builds with the same runtime structure work too.
+//! 4. **Decoding** (`x86`): a small x86-32 decoder for the instructions MSVC emitted.
+//! 5. **Symbolic execution** (`decomp`): registers and the argument stack as expressions, calls
+//!    with their pushed arguments, branch conditions from the flags, MSVC division idioms folded,
+//!    jump tables, and the message loop over the team's queue.
+//! 6. **Structuring** (`decomp`): short-circuit conditions, post-dominator IF/ELSE regions,
+//!    switches from jump tables and compare trees (the message switch drops case 0).
+//! 7. **Lowering** (`lower`): `kasJump` -> `JUMP`, `kasFSMCreate` -> `FSMCreate`, IFONCE guards,
+//!    label lookups -> typed references, `char*` constants -> strings, `table[strCurLanguage]` ->
+//!    LSTRINGs; arguments typed by the function table.
+//! 8. **Mission graph** (`lower`): from `Init_M`/`Watch_M` follow `FSMCreate` to FSMs and
+//!    `kasJump` to states (per owning FSM: the linker folded identical functions across states
+//!    and missions); unreferenced 16-byte-aligned functions between a mission's code and the next
+//!    are attached as states of the FSM whose code precedes them.
+//! 9. **Validation**: a mission that does not lower completely (unknown calls, leftover symbolic
+//!    values) is an error; the result passes [`crate::binary::validate`].
 //!
-//! 1. **PE mapping** ([`PeImage`]): section table, virtual address to file offset, C strings.
-//! 2. **Mission discovery** ([`find_missions`]): the level-start selector (0x005148f0 in the
-//!    Aug 2000 build) and `tutInitTutorial` (0x0052a740) call
-//!    `kasMissionStart("missionNN", Init_MissionNN, Watch_MissionNN)` as `push watch; push init;
-//!    push name; call kasMissionStart`. Scanning for that push/push/push/call pattern gives the
-//!    name and both entry points. To be robust against other builds, identify `kasMissionStart`
-//!    itself by its body (memStrncpy of 0x2f bytes, store of the watch pointer, `hsStaticInit`,
-//!    tail jump to the init function) rather than by address.
-//! 3. **Runtime map**: the address of every `kasf*` function, `kasJump`, `kasFSMCreate`, the
-//!    label lookups (`kasAITeamPtr`, `kasAITeamShipsPtr`, `kasGrowSelectionPtr`, `kasVolumePtr`,
-//!    `kasPathPtr` and its no-check variant, `kasVectorPtr`, `kasShipsVectorPtr`,
-//!    `kasTeamsVectorPtr`, `kasVolumeVectorPtr`, `kasThisTeamsVectorPtr`), `aitMsgGet`,
-//!    `aitMsgSend`, and the globals `CurrentTeamP`, `CurrentMissionScope`,
-//!    `CurrentMissionScopeName`, `strCurLanguage`. The exe embeds the kas2c function table for its
-//!    debug console (KAS name, C name pointer, parameter descriptors) and
-//!    `consoleCallKASFunction` dispatches on the hashed KAS name with direct calls, so the table
-//!    and the dispatcher give the `FuncId -> address` map without any hard-coded addresses.
-//!    The remaining runtime entry points are the callees of `kasMissionStart`'s callers and of the
-//!    mission functions with fixed argument shapes (3 args = `kasJump`, 4 = `kasFSMCreate`, 1
-//!    constant arg = label lookups) and can be confirmed by their short bodies.
-//! 4. **Function decoding**: an x86-32 decoder for the subset MSVC emitted for kas2c output
-//!    (mov/push/pop/call/ret/jmp/jcc/cmp/test/add/sub/imul/idiv/cdq/sar/shl/shr/and/or/xor/neg/not/
-//!    inc/dec/lea/setcc/sbb, `[abs]`/`[reg+disp]`/`[reg*4+abs]` operands). A table-driven decoder
-//!    of a few hundred lines covers it; no general-purpose disassembler is needed.
-//! 5. **Symbolic execution per function** (kas_decompile `FuncDecomp`): track registers and the
-//!    argument stack symbolically (constants, calls, `CurrentTeamP`, loaded globals), turn each
-//!    `call` into a call node with its pushed arguments (arity from the function table, or from
-//!    callee `ret n`/caller `add esp` for the runtime helpers), and conditional branches into
-//!    conditions over the flags (`cmp`/`test` + `jcc`, `setcc`/`sbb` idioms for values). Fold
-//!    MSVC's division-by-constant sequences (`imul` magic + `sar` + sign fix) back to `/`.
-//!    Recognise the message loop: load of `team->msgQueue` (+0x50), count, the `aitMsgGet(team, i)`
-//!    call, the compare tree on its result, the `aitMsgSend(team, team, msg)` re-queue, and the
-//!    back edge.
-//! 6. **Structuring** (kas_decompile `Structurer`): build the CFG, merge short-circuit
-//!    condition chains into AND/OR, compute post-dominators and emit IF/ELSE regions; recover
-//!    `switch` from compare trees on a single call value (the message switch drops case 0, the
-//!    "empty slot" continue).
-//! 7. **Lowering to IR** (kas_ir_export): `kasJump(h, init, watch)` → `Stmt::Jump`;
-//!    `kasFSMCreate(h, init, watch, team)` → `Stmt::FsmCreate`; IFONCE = `if (!VarGet(h) &&
-//!    cond) { VarCreateSet(h, 1); ... }`; label lookups → typed references; `CHARPTR` constants →
-//!    the C string at that address; `table[strCurLanguage]` → LSTRING (read the three string
-//!    pointers of the table).
-//! 8. **Mission graph**: start from `Init_M`/`Watch_M`, follow `FSMCreate` to FSM INIT/WATCH and
-//!    `kasJump` to state INIT/WATCH (per owning FSM, because MSVC folded identical functions
-//!    across states and missions). kas2c also emitted states nothing jumps to; find them as
-//!    unreferenced 16-byte-aligned functions between a mission's code and the next, paired as
-//!    (INIT, WATCH) in address order and attached to the FSM whose code precedes them.
-//! 9. **Validation**: every mission must lower without unknown calls or leftover symbolic values;
-//!    compare against a known-good digest of the IR (a hash of [`crate::binary::encode`]) for the
-//!    known executable versions, and refuse to run a mission that fails to lower.
-//!
-//! The Python pipeline lowers all 18 scripts of the Aug 2000 build without errors (2,083 kas2c
-//! functions), so the approach is proven; porting it is a mechanical but sizeable task.
+//! Label names are not in the executable (only their hashes), so [`Mission::names`] is empty.
 
+mod decomp;
+mod lower;
+mod runtime;
+mod x86;
+
+use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+
+use crate::ir::Mission;
+use crate::kas_hash;
 use crate::Error;
 
 /// A minimal PE32 image over the executable's bytes.
@@ -75,7 +55,7 @@ pub struct PeImage<'a> {
 
 impl<'a> PeImage<'a> {
     /// Parses the PE headers.
-    pub fn parse(data: &'a [u8]) -> Result<Self, Error> {
+    pub fn parse(data: &'a [u8]) -> Result<Self, crate::Error> {
         let rd32 = |o: usize| data.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
         let rd16 = |o: usize| data.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
         if data.get(..2) != Some(b"MZ") {
@@ -122,6 +102,43 @@ impl<'a> PeImage<'a> {
         let tail = self.data.get(o..)?;
         let end = tail.iter().take(max).position(|&b| b == 0)?;
         Some(tail[..end].iter().map(|&b| b as char).collect())
+    }
+
+    /// The whole file.
+    pub fn data(&self) -> &'a [u8] {
+        self.data
+    }
+
+    fn section(&self, va: u32) -> Option<(u32, usize, usize, u32)> {
+        let rva = va.checked_sub(self.image_base)?;
+        (0..self.nsections).find_map(|i| {
+            let s = &self.data[self.sections_at + i * 40..self.sections_at + i * 40 + 40];
+            let g = |o: usize| u32::from_le_bytes([s[o], s[o + 1], s[o + 2], s[o + 3]]);
+            let (vaddr, rsize, raw, flags) = (g(12), g(16), g(20), g(36));
+            (rva >= vaddr && rva - vaddr < rsize).then_some((vaddr, raw as usize, rsize as usize, flags))
+        })
+    }
+
+    /// The bytes from `va` to the end of its section's raw data.
+    pub fn code_at(&self, va: u32) -> Option<&'a [u8]> {
+        let (vaddr, raw, rsize, _) = self.section(va)?;
+        let o = raw + (va - self.image_base - vaddr) as usize;
+        self.data.get(o..(raw + rsize).min(self.data.len()))
+    }
+
+    /// True when `va` lies in an executable section.
+    pub fn is_code(&self, va: u32) -> bool {
+        self.section(va).is_some_and(|s| s.3 & 0x2000_0000 != 0)
+    }
+
+    /// The little-endian `u32` at `va` (0 when unmapped).
+    pub fn u32_at(&self, va: u32) -> u32 {
+        self.bytes(va, 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    /// The byte at `va` (0 when unmapped).
+    pub fn u8_at(&self, va: u32) -> u8 {
+        self.bytes(va, 1).map_or(0, |b| b[0])
     }
 
     /// Executable sections as (virtual address, bytes).
@@ -191,6 +208,161 @@ pub fn find_missions(pe: &PeImage<'_>) -> Vec<MissionEntry> {
         }
     }
     out
+}
+
+/// An extraction failure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtractError {
+    /// The mission it concerns, if any.
+    pub mission: Option<String>,
+    /// Description, innermost context last.
+    pub message: String,
+}
+
+impl ExtractError {
+    /// A new error.
+    pub fn new(message: impl Into<String>) -> Self {
+        ExtractError { mission: None, message: message.into() }
+    }
+
+    /// Prefixes the message with where it happened.
+    pub fn context(mut self, at: &str) -> Self {
+        self.message = format!("{at}: {}", self.message);
+        self
+    }
+
+    fn in_mission(mut self, name: &str) -> Self {
+        self.mission = Some(name.to_string());
+        self
+    }
+}
+
+impl fmt::Display for ExtractError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.mission {
+            Some(m) => write!(f, "{m}: {}", self.message),
+            None => f.write_str(&self.message),
+        }
+    }
+}
+
+impl std::error::Error for ExtractError {}
+
+impl From<Error> for ExtractError {
+    fn from(e: Error) -> Self {
+        ExtractError::new(e.message)
+    }
+}
+
+/// `mission01` -> `Mission01`, `tutorial1` -> `Tutorial1`.
+pub fn canonical_name(name: &str) -> String {
+    let mut c = name.chars();
+    match c.next() {
+        Some(f) => f.to_ascii_uppercase().to_string() + &c.as_str().to_ascii_lowercase(),
+        None => String::new(),
+    }
+}
+
+/// Extracts every mission from the executable's bytes. Fails if any mission does not lower
+/// completely.
+pub fn extract_missions(exe_bytes: &[u8]) -> Result<Vec<Mission>, ExtractError> {
+    extract_each(exe_bytes)?.into_iter().collect()
+}
+
+/// Extracts every mission, reporting failures per mission (in discovery order).
+pub fn extract_each(exe_bytes: &[u8]) -> Result<Vec<Result<Mission, ExtractError>>, ExtractError> {
+    let pe = PeImage::parse(exe_bytes)?;
+    let entries = find_missions(&pe);
+    if entries.is_empty() {
+        return Err(ExtractError::new("no kasMissionStart call sites found"));
+    }
+    let mut rt = runtime::Runtime::build(&pe)?;
+    rt.scope = scope_globals(&pe, &entries[0])?;
+    let rt = rt;
+
+    // Each mission's code ends with its Watch function; unreferenced states are looked for
+    // between the previous mission's end and this one's.
+    let mut by_watch: Vec<usize> = (0..entries.len()).collect();
+    by_watch.sort_by_key(|&i| entries[i].watch);
+    let mut cache = decomp::TargetCache::new();
+    let mut ends = vec![0u32; entries.len()];
+    for &i in &by_watch {
+        ends[i] = lower::function_end(&pe, &rt, &mut cache, entries[i].watch).unwrap_or(entries[i].watch);
+    }
+    let prev_end = |i: usize| -> Option<u32> {
+        let k = by_watch.iter().position(|&x| x == i)?;
+        (k > 0).then(|| ends[by_watch[k - 1]])
+    };
+
+    type Lowered = Result<(Mission, Option<u32>), ExtractError>;
+    let results: Mutex<Vec<Option<Lowered>>> = Mutex::new(vec![None; entries.len()]);
+    let next = AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get()).min(entries.len());
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            let (pe, rt, entries, ends, results, next) = (&pe, &rt, &entries, &ends, &results, &next);
+            let prev_end = &prev_end;
+            std::thread::Builder::new()
+                .stack_size(256 << 20)
+                .spawn_scoped(s, move || loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(e) = entries.get(i) else { break };
+                    let name = canonical_name(&e.name);
+                    let mut mx = lower::MissionX::new(pe, rt, name.clone(), e.init, e.watch);
+                    mx.discover();
+                    let lo = prev_end(i).or_else(|| mx.extent().map(|x| x.0)).unwrap_or(ends[i]);
+                    mx.orphans(lo, ends[i]);
+                    let r = mx.lower().map_err(|err| err.in_mission(&name));
+                    results.lock().unwrap()[i] = Some(r);
+                })
+                .expect("spawn extractor thread");
+        }
+    });
+    let results = results.into_inner().unwrap();
+
+    let mut lang: Option<u32> = None;
+    let mut out = Vec::with_capacity(entries.len());
+    for (i, r) in results.into_iter().enumerate() {
+        let r = r.unwrap_or_else(|| Err(ExtractError::new("not extracted").in_mission(&entries[i].name)));
+        out.push(r.and_then(|(m, l)| {
+            if let Some(l) = l {
+                if lang.is_some_and(|x| x != l) {
+                    return Err(ExtractError::new("localised strings indexed by different globals").in_mission(&m.name));
+                }
+                lang = Some(l);
+            }
+            crate::binary::validate(&m).map_err(|e| ExtractError::from(e).in_mission(&m.name))?;
+            Ok(m)
+        }));
+    }
+    Ok(out)
+}
+
+/// `CurrentMissionScope` and `CurrentMissionScopeName`: the mission Init function starts by
+/// storing 0 and the mission's name hash into them.
+fn scope_globals(pe: &PeImage<'_>, m: &MissionEntry) -> Result<[u32; 2], ExtractError> {
+    let want = kas_hash(&m.name);
+    let (mut scope, mut name) = (None, None);
+    let mut a = m.init;
+    for _ in 0..8 {
+        let Some(i) = pe.code_at(a).and_then(|b| x86::decode(b, a)) else { break };
+        if i.op == x86::Op::Mov {
+            if let (Some(x86::Operand::Mem(d)), Some(x86::Operand::Imm(v))) = (i.op(0), i.op(1)) {
+                if d.base.is_none() && d.index.is_none() {
+                    if v == want {
+                        name = Some(d.disp as u32);
+                    } else if v == 0 {
+                        scope = Some(d.disp as u32);
+                    }
+                }
+            }
+        }
+        a = i.next();
+    }
+    match (scope, name) {
+        (Some(s), Some(n)) => Ok([s, n]),
+        _ => Err(ExtractError::new(format!("unexpected prologue of the {} INIT function", m.name))),
+    }
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@
 //! * Loaders: [`json`] (exact structured form exported from the machine code, the dev path),
 //!   [`text`] (the `.kas` text rendering, lossy), [`binary`] (compact cache form). [`print`](mod@print)
 //!   renders IR back to KAS-like text.
-//! * [`extract`]: notes on reading missions straight from the player's `cataclysm.exe`.
+//! * [`extract`]: rebuilds the IR of every mission from the player's `cataclysm.exe`.
 //!
 //! No game content is part of this crate: missions are loaded at run time from data the player
 //! provides.
