@@ -9,13 +9,13 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hwc_formats::big::{normalize_name, BigArchive};
-use hwc_formats::{audio, btg, fib, font, geo, hsf, lif, mad, mex, nis, script};
+use hwc_formats::audio;
+use hwc_formats::datadir::{join_rel, scan_overrides, OVERRIDES_DIR};
 
-use crate::datadir::scan_overrides;
 use crate::hash;
-use crate::import::OVERRIDES_DIR;
 use crate::install::{self, FileKind};
 use crate::manifest::Manifest;
+use crate::missions;
 use crate::{Progress, Stage};
 
 #[derive(Debug, Clone, Copy)]
@@ -55,6 +55,9 @@ pub struct VerifyReport {
     /// Archive or override files with no parser (images, demos, ...), by extension.
     pub unchecked: BTreeMap<String, usize>,
     pub overrides: usize,
+    /// Non-fatal findings (no Bink tables, mission IR that differs from the reference digests of
+    /// a known build, ...). They do not make [`VerifyReport::ok`] false.
+    pub warnings: Vec<String>,
     pub elapsed: Duration,
 }
 
@@ -79,50 +82,8 @@ impl VerifyReport {
     }
 }
 
-/// Extensions of the keyword/value text files.
-const TEXT_EXTS: [&str; 14] = ["script", "shp", "dist", "missphere", "level", "mission", "ebg", "plug", "mif", "lod", "cred", "lst", "list", "txt"];
-
-fn extension(name: &str) -> String {
-    let file = name.rsplit(['\\', '/']).next().unwrap_or(name);
-    file.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default()
-}
-
-fn stem_path(name: &str) -> &str {
-    name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name)
-}
-
-/// Whether `ext` is handled by [`check_asset`].
-pub fn is_checked(ext: &str) -> bool {
-    matches!(ext, "lif" | "geo" | "peo" | "mex" | "mad" | "btg" | "hff" | "fib" | "hsf" | "nis" | "bnk" | "lut" | "wxh")
-        || TEXT_EXTS.contains(&ext)
-}
-
-/// Parses one asset by extension. `nis_script` says the file is the event list of a `.nis`.
-pub fn check_asset(ext: &str, bytes: &[u8], nis_script: bool) -> Result<(), String> {
-    fn s<E: std::fmt::Display>(r: Result<impl Sized, E>) -> Result<(), String> {
-        r.map(|_| ()).map_err(|e| e.to_string())
-    }
-    match ext {
-        "lif" => s(lif::Lif::parse(bytes)),
-        "geo" | "peo" => s(geo::Geo::parse(bytes)),
-        "mex" => s(mex::Mex::parse(bytes)),
-        "mad" => s(mad::Mad::parse(bytes)),
-        "btg" => s(btg::Btg::parse(bytes)),
-        "hff" => s(font::Font::parse(bytes)),
-        "fib" => s(fib::Fib::parse(bytes)),
-        "hsf" => s(hsf::Hsf::parse(bytes)),
-        "nis" => s(nis::Nis::parse(bytes)),
-        "bnk" => s(audio::Bank::parse(bytes)),
-        "lut" => s(audio::Lut::parse(bytes)),
-        "wxh" => s(audio::MusicIndex::parse(bytes)),
-        "script" if nis_script => {
-            s(script::ScriptFile::parse_bytes(bytes))?;
-            s(nis::NisScript::parse_bytes(bytes))
-        }
-        e if TEXT_EXTS.contains(&e) => s(script::ScriptFile::parse_bytes(bytes)),
-        _ => Ok(()),
-    }
-}
+pub use hwc_formats::check::{check_asset, is_checked, TEXT_EXTS};
+use hwc_formats::check::{extension, stem_path};
 
 enum Source {
     Archive(usize),
@@ -142,7 +103,7 @@ pub fn verify(dir: &Path, opts: VerifyOptions, progress: &mut dyn FnMut(&Progres
     let manifest = Manifest::load(dir)?
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{}: no manifest", dir.display())))?;
     let mut report = VerifyReport::default();
-    let path_of = |rel: &str| rel.split('/').fold(dir.to_path_buf(), |p, part| p.join(part));
+    let path_of = |rel: &str| join_rel(dir, rel);
 
     if opts.hashes {
         progress(&Progress::Stage(Stage::VerifyHashes));
@@ -184,6 +145,20 @@ pub fn verify(dir: &Path, opts: VerifyOptions, progress: &mut dyn FnMut(&Progres
         progress(&Progress::Stage(Stage::VerifyAssets));
         check_assets(dir, &manifest, opts.threads, &mut report, progress)?;
     }
+
+    // Reference digests of the extracted missions, and the Bink tables' presence.
+    let known = install::identify_exe(&manifest.exe.sha256);
+    let mut warnings = Vec::new();
+    if let Err(problems) = missions::check_reference(known, &manifest.missions) {
+        warnings.extend(problems);
+    }
+    if !manifest.files.iter().any(|f| f.kind == FileKind::CodecTables) {
+        warnings.push(format!("no {} in the data directory: movies are unavailable", hwc_video::TABLES_FILE_NAME));
+    }
+    for w in &warnings {
+        progress(&Progress::Warning(w));
+    }
+    report.warnings = warnings;
     report.elapsed = start.elapsed();
     Ok(report)
 }
@@ -195,7 +170,7 @@ fn check_assets(
     report: &mut VerifyReport,
     progress: &mut dyn FnMut(&Progress),
 ) -> std::io::Result<()> {
-    let path_of = |rel: &str| rel.split('/').fold(dir.to_path_buf(), |p, part| p.join(part));
+    let path_of = |rel: &str| join_rel(dir, rel);
     let big_rec = manifest.files.iter().find(|f| f.kind == FileKind::Archive);
     let archive = match big_rec.map(|r| BigArchive::open(path_of(&r.path))) {
         Some(Ok(a)) => Some(a),
@@ -280,6 +255,7 @@ fn check_assets(
 
     check_streams(dir, manifest, archive.as_ref(), &overrides, report);
     check_missions(dir, manifest, report);
+    check_codec_tables(dir, manifest, report);
     Ok(())
 }
 
@@ -339,6 +315,14 @@ fn check_streams(
     }
 }
 
+/// The Bink tables load with the decoder's own reader.
+fn check_codec_tables(dir: &Path, manifest: &Manifest, report: &mut VerifyReport) {
+    for f in manifest.files.iter().filter(|f| f.kind == FileKind::CodecTables) {
+        let result = hwc_video::BinkTables::load(join_rel(dir, &f.path)).map(|_| ()).map_err(|e| e.to_string());
+        report.record("bink", &f.path, result);
+    }
+}
+
 fn check_missions(dir: &Path, manifest: &Manifest, report: &mut VerifyReport) {
     for m in &manifest.missions.missions {
         let Some(rel) = &m.path else { continue };
@@ -351,28 +335,5 @@ fn check_missions(dir: &Path, manifest: &Manifest, report: &mut VerifyReport) {
             Ok(())
         });
         report.record("kasb", rel, result);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extensions() {
-        assert_eq!(extension("race_sect\\smothership\\rl0\\lod0\\smothership.GEO"), "geo");
-        assert_eq!(extension("dir.d\\noext"), "");
-        assert_eq!(stem_path("nis\\n01.script"), "nis\\n01");
-        assert!(is_checked("peo") && is_checked("shp") && !is_checked("jpg"));
-    }
-
-    #[test]
-    fn garbage_fails_binary_parsers() {
-        for ext in ["lif", "geo", "mex", "mad", "btg", "hff", "fib", "hsf", "nis", "bnk", "lut", "wxh"] {
-            assert!(check_asset(ext, b"garbage!garbage!", false).is_err(), "{ext} accepted garbage");
-        }
-        assert!(check_asset("shp", b"\x01\x02binary", false).is_err());
-        assert!(check_asset("shp", b"Key 1\n", false).is_ok());
-        assert!(check_asset("jpg", b"anything", false).is_ok());
     }
 }

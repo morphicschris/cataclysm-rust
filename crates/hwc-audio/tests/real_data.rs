@@ -24,6 +24,25 @@ fn data() -> Option<Arc<SoundData>> {
     .clone()
 }
 
+/// The same sound data loads through `hwc_formats::GameData`, from an install (`HWC_GAME_DIR`)
+/// and from an imported data directory (`HWC_DATA_DIR`), music and speech included.
+#[test]
+fn loads_through_game_data() {
+    let dirs: Vec<std::path::PathBuf> =
+        ["HWC_GAME_DIR", "HWC_DATA_DIR"].iter().filter_map(std::env::var_os).map(Into::into).collect();
+    if dirs.is_empty() {
+        eprintln!("HWC_GAME_DIR / HWC_DATA_DIR not set; skipping");
+        return;
+    }
+    for dir in dirs {
+        let game = hwc_formats::GameData::open(&dir).unwrap();
+        let data = SoundData::load(&DataSource::from_game_data(game)).unwrap();
+        assert!(!data.guns.patches.is_empty(), "{}", dir.display());
+        assert!(data.music.as_ref().is_some_and(|m| !m.tracks.is_empty()), "{}: no music", dir.display());
+        assert!(data.speech(Race::Beast).is_some() && data.speech(Race::Somtaaw).is_some(), "{}: no speech", dir.display());
+    }
+}
+
 fn system(data: &Arc<SoundData>) -> SoundSystem {
     SoundSystem::new(data.clone(), Arc::new(Mutex::new(Mixer::default())))
 }

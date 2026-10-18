@@ -1,7 +1,8 @@
 //! Jukebox: list and play the game's music, sound events and speech.
 //!
-//! Data comes from `HWC_EXTRACTED_DIR` (extracted archive) and `HWC_GAME_DIR` (install, needed
-//! for music and speech), or `--extracted <dir>` / `--game <dir>`.
+//! Data comes from `HWC_DATA_DIR` / `--data <dir>` (an `hwc-import` data directory, or an
+//! install), or else from `HWC_EXTRACTED_DIR` (extracted archive) and `HWC_GAME_DIR` (install,
+//! needed for music and speech), or `--extracted <dir>` / `--game <dir>`.
 //!
 //! ```text
 //! cargo run -p hwc-audio --example jukebox -- list
@@ -29,6 +30,7 @@ use hwc_audio::tables::Listener;
 use hwc_audio::{DataSource, Race, SoundData};
 
 struct Args {
+    data: Option<PathBuf>,
     extracted: Option<PathBuf>,
     game: Option<PathBuf>,
     wav: Option<PathBuf>,
@@ -38,6 +40,7 @@ struct Args {
 
 fn parse_args() -> Args {
     let mut a = Args {
+        data: std::env::var_os("HWC_DATA_DIR").map(PathBuf::from),
         extracted: std::env::var_os("HWC_EXTRACTED_DIR").map(PathBuf::from),
         game: std::env::var_os("HWC_GAME_DIR").map(PathBuf::from),
         wav: None,
@@ -47,6 +50,7 @@ fn parse_args() -> Args {
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
+            "--data" => a.data = it.next().map(PathBuf::from),
             "--extracted" => a.extracted = it.next().map(PathBuf::from),
             "--game" => a.game = it.next().map(PathBuf::from),
             "--wav" => a.wav = it.next().map(PathBuf::from),
@@ -205,12 +209,25 @@ fn run(sys: &mut SoundSystem, words: &[String]) -> bool {
 
 fn main() {
     let args = parse_args();
-    let src = match DataSource::new(args.extracted.clone(), args.game.clone()) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{e}\nset HWC_EXTRACTED_DIR / HWC_GAME_DIR or pass --extracted / --game");
-            std::process::exit(1);
-        }
+    let src = match &args.data {
+        Some(dir) => match hwc_formats::GameData::open(dir) {
+            Ok(g) => {
+                let mut src = DataSource::from_game_data(g);
+                src.extracted = args.extracted.clone();
+                src
+            }
+            Err(e) => {
+                eprintln!("{}: {e}", dir.display());
+                std::process::exit(1);
+            }
+        },
+        None => match DataSource::new(args.extracted.clone(), args.game.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{e}\nset HWC_DATA_DIR, or HWC_EXTRACTED_DIR / HWC_GAME_DIR, or pass --data / --extracted / --game");
+                std::process::exit(1);
+            }
+        },
     };
     let data = match SoundData::load(&src) {
         Ok(d) => Arc::new(d),

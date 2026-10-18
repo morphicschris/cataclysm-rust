@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use hwc_formats::audio::{self, Bank, Lut, MusicIndex, PhraseLut, SentenceLut, SfxLut, SpeechBank};
 use hwc_formats::big::BigArchive;
+use hwc_formats::GameData;
 use hwc_formats::script::ScriptFile;
 
 use crate::codec::{Eq, FLAT_EQ};
@@ -39,21 +40,38 @@ impl std::error::Error for DataError {}
 
 pub type Result<T> = std::result::Result<T, DataError>;
 
-/// Where to find the files: an extracted copy of the archive and/or the archive itself for the
-/// small files, and the install directory for the large stream files.
+/// Where to find the files: the game's data ([`GameData`]: an imported data directory, or an
+/// install or archive during development), and/or an extracted copy of the archive, the archive
+/// itself and the install directory.
+///
+/// Archive files are looked up in the extracted copy first, then in the game data (overrides,
+/// then archive), then in `archive`. The stream files (music, speech) come from the game data
+/// when it has them, otherwise from `game_dir`.
 pub struct DataSource {
     pub extracted: Option<PathBuf>,
     pub archive: Option<BigArchive>,
     pub game_dir: Option<PathBuf>,
+    pub game: Option<GameData>,
 }
 
 impl DataSource {
-    /// From the `HWC_EXTRACTED_DIR` and `HWC_GAME_DIR` environment variables; the archive is
-    /// opened from the install when no extracted copy is given.
+    /// From the environment: `HWC_DATA_DIR` (an imported data directory) when set; otherwise
+    /// `HWC_EXTRACTED_DIR` and `HWC_GAME_DIR`, opening the archive from the install when no
+    /// extracted copy is given. An `HWC_EXTRACTED_DIR` also layers over `HWC_DATA_DIR`.
     pub fn from_env() -> Option<Self> {
         let extracted = std::env::var_os("HWC_EXTRACTED_DIR").map(PathBuf::from);
+        if let Some(dir) = std::env::var_os(hwc_formats::gamedata::ENV_DATA_DIR) {
+            let mut src = Self::from_game_data(GameData::open(PathBuf::from(dir)).ok()?);
+            src.extracted = extracted;
+            return Some(src);
+        }
         let game_dir = hwc_formats::game_dir();
         Self::new(extracted, game_dir).ok()
+    }
+
+    /// Everything from the game's data (see [`GameData::open`]).
+    pub fn from_game_data(game: GameData) -> Self {
+        Self { extracted: None, archive: None, game_dir: None, game: Some(game) }
     }
 
     pub fn new(extracted: Option<PathBuf>, game_dir: Option<PathBuf>) -> Result<Self> {
@@ -67,7 +85,7 @@ impl DataSource {
         if extracted.is_none() && game_dir.is_none() {
             return Err(DataError::Missing("data location (extracted dir or game dir)".into()));
         }
-        Ok(Self { extracted, archive, game_dir })
+        Ok(Self { extracted, archive, game_dir, game: None })
     }
 
     /// Read a file stored in the archive (`soundfx\guns.bnk`, `soundevent.script`, ...).
@@ -76,6 +94,11 @@ impl DataSource {
             let path = name.split(['\\', '/']).fold(dir.clone(), |p, c| p.join(c));
             if path.exists() {
                 return std::fs::read(&path).map_err(|e| DataError::Io(path, e));
+            }
+        }
+        if let Some(g) = &self.game {
+            if let Some(bytes) = g.read(name).map_err(|e| DataError::Archive(format!("{name}: {e}")))? {
+                return Ok(bytes);
             }
         }
         if let Some(a) = &self.archive {
@@ -87,8 +110,12 @@ impl DataSource {
         Err(DataError::Missing(name.into()))
     }
 
-    /// Read a file from the install directory (case-insensitive name match).
+    /// Read a file kept outside the archive (`Music4Cat.wxd`, `SectSpeech.vce`), from the game
+    /// data or the install directory (case-insensitive name match).
     pub fn read_install(&self, name: &str) -> Result<Vec<u8>> {
+        if let Some(path) = self.game.as_ref().and_then(|g| g.install_file(name)) {
+            return std::fs::read(&path).map_err(|e| DataError::Io(path, e));
+        }
         let dir = self.game_dir.as_ref().ok_or_else(|| DataError::Missing(format!("{name} (no game dir)")))?;
         let path = find_case_insensitive(dir, name).unwrap_or_else(|| dir.join(name));
         std::fs::read(&path).map_err(|e| DataError::Io(path, e))

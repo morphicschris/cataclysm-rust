@@ -743,6 +743,8 @@ dependencies = [
 name = "hwc-formats"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 
@@ -752,6 +754,7 @@ version = "0.1.0"
 dependencies = [
  "hwc-formats",
  "hwc-kas",
+ "hwc-video",
  "serde",
  "serde_json",
  "sha2",
@@ -799,6 +802,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "hwc-formats",
+ "jpeg-decoder",
  "png",
  "wgpu",
 ]
@@ -908,6 +912,12 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
 ]
+
+[[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
 
 [[package]]
 name = "js-sys"

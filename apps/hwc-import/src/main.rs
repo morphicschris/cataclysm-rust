@@ -45,6 +45,7 @@ impl Printer {
             Progress::Stage(s) => self.line(match s {
                 Stage::Detect => "Checking install...",
                 Stage::Copy => "Copying files...",
+                Stage::Codecs => "Extracting Bink codec tables...",
                 Stage::Missions => "Extracting missions...",
                 Stage::Finish => "Writing manifest...",
                 Stage::VerifyHashes => "Verifying file hashes...",
@@ -97,6 +98,9 @@ fn print_verify(r: &VerifyReport) {
     }
     for (p, e) in &r.parse_failures {
         println!("  PARSE {p}: {e}");
+    }
+    for w in &r.warnings {
+        println!("  warning: {w}");
     }
     println!("verify: {}", if r.ok() { "OK" } else { "FAILED" });
 }

@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::hash;
-use crate::install::{self, Install};
+use crate::install::{self, FileKind, Install};
 use crate::manifest::{
     now_unix, ExeRecord, FileRecord, Manifest, MissionRecord, MissionsRecord, Mtime, SourceRecord, FORMAT,
     MANIFEST_FILE, MANIFEST_VERSION,
@@ -13,12 +13,9 @@ use crate::manifest::{
 use crate::missions;
 use crate::{ImportError, Progress, Stage};
 
-/// Folder of loose files that shadow archive entries.
-pub const OVERRIDES_DIR: &str = "overrides";
-/// Folder of extracted mission IR.
-pub const MISSIONS_DIR: &str = "missions";
-/// Top-level folders the importer owns (and may delete stale files from).
-const MANAGED_DIRS: [&str; 5] = ["base", "audio", "movies", "config", MISSIONS_DIR];
+pub use hwc_formats::datadir::{MISSIONS_DIR, OVERRIDES_DIR};
+/// Top-level folders and files the importer owns (and may delete stale outputs from).
+const MANAGED: [&str; 6] = ["base", "audio", "movies", "config", MISSIONS_DIR, hwc_video::TABLES_FILE_NAME];
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ImportOptions {
@@ -228,6 +225,18 @@ pub fn import(
             source: SourceRecord { path: src.rel.clone(), size: meta.len(), mtime: src_mtime, sha256 },
         });
     }
+
+    // Bink codec tables, from the install's binkw32.dll.
+    progress(&Progress::Stage(Stage::Codecs));
+    if let Some((record, written)) = import_bink_tables(&install, out_dir, previous.as_ref(), &mut warnings, progress)? {
+        if written {
+            bytes_copied += record.size;
+            copied.push(record.path.clone());
+        } else {
+            skipped.push(record.path.clone());
+        }
+        records.push(record);
+    }
     records.sort_by(|a, b| a.path.cmp(&b.path));
 
     // Missions.
@@ -245,7 +254,7 @@ pub fn import(
             .collect();
         let old_paths = prev.files.iter().map(|f| f.path.as_str()).chain(prev.missions.missions.iter().filter_map(|m| m.path.as_deref()));
         for old in old_paths {
-            let managed = MANAGED_DIRS.iter().any(|d| old.split('/').next() == Some(d)) && !old.split('/').any(|p| p == "..");
+            let managed = MANAGED.iter().any(|d| old.split('/').next() == Some(d)) && !old.split('/').any(|p| p == "..");
             if managed && !keep.contains(&old) {
                 let p = to_native(out_dir, old);
                 if p.is_file() {
@@ -304,7 +313,23 @@ fn import_missions(
     warnings: &mut Vec<String>,
     progress: &mut dyn FnMut(&Progress),
 ) -> Result<(MissionsRecord, bool), ImportError> {
-    let verified_exe = install.exe.known.is_some();
+    // Reference digests are re-checked on every run (cheap), so the warning is not lost when the
+    // extraction itself is skipped.
+    let check = |record: &mut MissionsRecord, warnings: &mut Vec<String>, progress: &mut dyn FnMut(&Progress)| {
+        match missions::check_reference(install.exe.known, record) {
+            Ok(()) => record.verified_exe = true,
+            Err(problems) => {
+                record.verified_exe = false;
+                // An unknown build was already reported by `detect`.
+                if install.exe.known.is_some() {
+                    for w in problems {
+                        progress(&Progress::Warning(&w));
+                        warnings.push(w);
+                    }
+                }
+            }
+        }
+    };
     if let Some(prev) = previous.map(|m| &m.missions) {
         let outputs_intact = prev.missions.iter().all(|m| match (&m.path, m.size) {
             (Some(p), Some(size)) => to_native(out_dir, p).metadata().is_ok_and(|d| d.len() == size),
@@ -316,7 +341,9 @@ fn import_missions(
                     progress(&Progress::FileSkipped { path: p });
                 }
             }
-            return Ok((prev.clone(), false));
+            let mut record = prev.clone();
+            check(&mut record, warnings, progress);
+            return Ok((record, false));
         }
     }
 
@@ -350,17 +377,78 @@ fn import_missions(
         (n, total) if n == total && extraction.errors.is_empty() => "extracted",
         _ => "partial",
     };
-    Ok((
-        MissionsRecord {
-            status: status.into(),
-            extractor: missions::EXTRACTOR.into(),
-            exe_sha256: install.exe.sha256.clone(),
-            verified_exe,
-            missions: records,
-            errors: extraction.errors,
+    let mut record = MissionsRecord {
+        status: status.into(),
+        extractor: missions::EXTRACTOR.into(),
+        exe_sha256: install.exe.sha256.clone(),
+        verified_exe: false,
+        missions: records,
+        errors: extraction.errors,
+    };
+    check(&mut record, warnings, progress);
+    Ok((record, true))
+}
+
+/// Extracts the Bink codec tables from `binkw32.dll` into `bink_tables.bin`. Returns the
+/// manifest record and whether it was (re)written, or `None` (after a warning) when the tables
+/// are unavailable: the rest of the import does not depend on them, only movie playback does.
+fn import_bink_tables(
+    install: &Install,
+    out_dir: &Path,
+    previous: Option<&Manifest>,
+    warnings: &mut Vec<String>,
+    progress: &mut dyn FnMut(&Progress),
+) -> Result<Option<(FileRecord, bool)>, ImportError> {
+    let Some(src) = &install.binkw32 else { return Ok(None) };
+    let mut warn = |w: String, progress: &mut dyn FnMut(&Progress)| {
+        progress(&Progress::Warning(&w));
+        warnings.push(w);
+    };
+    let dll = match fs::read(&src.path) {
+        Ok(b) => b,
+        Err(e) => {
+            warn(format!("{}: {e}; movies will be unavailable", src.rel), progress);
+            return Ok(None);
+        }
+    };
+    let meta = src.path.metadata().map_err(ImportError::io(&src.path))?;
+    let source = SourceRecord { path: src.rel.clone(), size: dll.len() as u64, mtime: Mtime::of(&meta), sha256: hash::sha256_bytes(&dll) };
+    let dest = to_native(out_dir, &src.dest);
+
+    let old = previous.and_then(|m| m.file(&src.dest)).filter(|o| o.kind == FileKind::CodecTables);
+    if let Some(old) = old {
+        let up_to_date = old.source.sha256 == source.sha256
+            && old.source.path.eq_ignore_ascii_case(&source.path)
+            && dest.metadata().is_ok_and(|d| d.len() == old.size && Mtime::of(&d) == old.mtime)
+            && hwc_video::BinkTables::load(&dest).is_ok();
+        if up_to_date {
+            progress(&Progress::FileSkipped { path: &src.dest });
+            // The record (and so the manifest) stays unchanged even if only the DLL's mtime moved.
+            return Ok(Some((old.clone(), false)));
+        }
+    }
+
+    let tables = match hwc_video::import_tables(&dll) {
+        Ok(t) => t,
+        Err(e) => {
+            warn(format!("{}: could not extract the Bink codec tables ({e}); movies will be unavailable", src.rel), progress);
+            return Ok(None);
+        }
+    };
+    progress(&Progress::FileStarted { path: &src.dest, size: tables.len() as u64 });
+    write_atomic(&dest, &tables)?;
+    let out_meta = dest.metadata().map_err(ImportError::io(&dest))?;
+    Ok(Some((
+        FileRecord {
+            path: src.dest.clone(),
+            kind: FileKind::CodecTables,
+            size: tables.len() as u64,
+            sha256: hash::sha256_bytes(&tables),
+            mtime: Mtime::of(&out_meta),
+            source,
         },
         true,
-    ))
+    )))
 }
 
 #[cfg(test)]

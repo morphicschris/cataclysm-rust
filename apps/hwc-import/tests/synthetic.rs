@@ -37,6 +37,8 @@ fn unknown_exe_imports_with_warning() {
     let (inst, out) = (root.join("install"), root.join("data"));
     fs::create_dir_all(&inst).unwrap();
     fake_install(&inst);
+    // A DLL without the codec tables: the import warns and continues without movies.
+    fs::write(inst.join("BinkW32.dll"), b"MZ not the real library").unwrap();
 
     let mut warnings = Vec::new();
     let report = import(&inst, &out, ImportOptions::default(), &mut |p| {
@@ -49,6 +51,17 @@ fn unknown_exe_imports_with_warning() {
     assert_eq!(report.manifest.exe.known_version, None);
     assert_eq!(report.manifest.missions.status, "failed");
     assert!(!report.manifest.missions.verified_exe);
+    assert!(warnings.iter().any(|w| w.contains("Bink codec tables") && w.contains("movies will be unavailable")), "{warnings:?}");
+    assert!(report.manifest.file(hwc_video::TABLES_FILE_NAME).is_none());
+    assert!(!out.join(hwc_video::TABLES_FILE_NAME).exists());
+    let v = hwc_import::verify(&out, hwc_import::VerifyOptions::default(), &mut no_progress).unwrap();
+    assert!(v.hash_failures.is_empty(), "{:?}", v.hash_failures);
+    assert!(v.warnings.iter().any(|w| w.contains("movies are unavailable")), "{:?}", v.warnings);
+    // The shared reader sees the same data directory.
+    let gd = hwc_formats::GameData::open(&out).unwrap();
+    assert_eq!(gd.layout(), hwc_formats::gamedata::Layout::Imported);
+    assert!(gd.bink_tables().is_none());
+    assert!(gd.movie_path("ANIMATIC01.BIK").is_some());
     // Canonical output names regardless of the install's spelling.
     assert!(out.join("base/cataclysm.big").is_file());
     assert!(out.join("audio/Music4Cat.wxd").is_file());

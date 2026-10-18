@@ -5,7 +5,9 @@
 //! * [`install::detect`] recognises and validates an install (read-only).
 //! * [`import()`] builds or incrementally refreshes a data directory, reporting [`Progress`].
 //! * [`verify()`] re-hashes a data directory against its manifest and parse-checks every asset.
-//! * [`DataDir`] is the engine-side reader: loose files in `overrides\` first, then the archive.
+//! * [`DataDir`] (re-exported from `hwc_formats::datadir`) is the engine-side reader: loose files
+//!   in `overrides\` first, then the archive. `hwc_formats::GameData` wraps it together with the
+//!   development layouts (an install read in place, a bare `.big`).
 //!
 //! The layout and manifest are documented in `docs/import.md`.
 
@@ -52,6 +54,8 @@ impl ImportError {
 pub enum Stage {
     Detect,
     Copy,
+    /// Extracting the Bink codec tables from `binkw32.dll`.
+    Codecs,
     Missions,
     Finish,
     VerifyHashes,

@@ -16,11 +16,11 @@ pub const BIG: &str = "cataclysm.big";
 /// The executable; only read to identify the version and to extract the missions.
 pub const EXE: &str = "cataclysm.exe";
 /// Streamed music data (its index, `soundfx\music4cat.wxh`, lives in the archive).
-pub const MUSIC: &str = "Music4Cat.wxd";
+pub const MUSIC: &str = hwc_formats::datadir::MUSIC_FILE;
 /// Beast speech fragments.
-pub const BEAST_SPEECH: &str = "BeastSpeech.vce";
+pub const BEAST_SPEECH: &str = hwc_formats::datadir::BEAST_SPEECH_FILE;
 /// Somtaaw speech fragments.
-pub const SECT_SPEECH: &str = "SectSpeech.vce";
+pub const SECT_SPEECH: &str = hwc_formats::datadir::SECT_SPEECH_FILE;
 /// Default key bindings shipped with the game.
 pub const DEFAULT_KEYS: &str = "default_keys.cfg";
 /// Player settings; written by the original on first run, so it may be absent.
@@ -29,6 +29,9 @@ pub const SETTINGS: &str = "Cataclysm.cfg";
 pub const DEVSTATS: &str = "devstats.dat";
 /// Movie folder.
 pub const MOVIES_DIR: &str = "Movies";
+/// RAD's Bink library; only read, to extract the codec tables the movie decoder needs (optional:
+/// without it the movies are unavailable).
+pub const BINKW32: &str = "binkw32.dll";
 
 /// The Bink movies of the retail release.
 pub const MOVIES: [&str; 20] = [
@@ -63,6 +66,19 @@ pub struct KnownExe {
     pub description: &'static str,
     pub sha256: &'static str,
     pub size: u64,
+    /// SHA-256 of each mission's encoded IR as extracted from this build, for checking the
+    /// extraction (see [`crate::missions::check_reference`]).
+    pub missions: Option<MissionDigests>,
+}
+
+/// Reference digests of the missions extracted from one executable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissionDigests {
+    /// The [`crate::missions::EXTRACTOR`] value the digests were taken with. The IR (and so its
+    /// digest) can change with the extractor; a different extractor cannot be checked.
+    pub extractor: &'static str,
+    /// (mission name, SHA-256 of `missions/<name>.kasb`), in extraction order.
+    pub missions: &'static [(&'static str, &'static str)],
 }
 
 /// Executables whose missions the extractor is validated against.
@@ -71,6 +87,29 @@ pub const KNOWN_EXES: &[KnownExe] = &[KnownExe {
     description: "Homeworld: Cataclysm retail release (build of 25 August 2000)",
     sha256: "b4ba4b044fcdad04fbbe0445dcf806fca3f03bfaaaf86978eda29baaf5128da1",
     size: 5_359_747,
+    missions: Some(MissionDigests {
+        extractor: "hwc-kas-extract/0.1.0+ir1",
+        missions: &[
+            ("Mission01", "1bd6725114b4c6ede334e3570d0a5d6de75addbe253a85f3d84aef3393eb3ccf"),
+            ("Mission02", "6bc4a464f5eeb83af66f04702fdf73c339325f63866f130d11ddea1b6faa4278"),
+            ("Mission03", "deabf7d710b4cce8cd74e8b507f787771aa123c04ab749ff9c119cf15aa0e1c4"),
+            ("Mission04", "f51d35cf727634649b93441e247e5198c9a3e6dc4919abc402de96b507ea6caa"),
+            ("Mission05", "95af08bf4d6dcbd96511cf8deb1caf38cb9b9f65443a5ed2b6552bf7a9fdfab6"),
+            ("Mission06", "49c9f2864943d8f2eecef5b8d43b52227707d46aea25a6bc21109e010d4e8850"),
+            ("Mission07", "6e7cf454acb26be05fde92ddf519801a119dfa5b1d36f2331ae675e8c640b986"),
+            ("Mission08", "9a5f5209d9b115de4e41202d755130fb4a2071cb57168e80116b6dd2ff73e85c"),
+            ("Mission09", "179eeb85f2d015b0e3d07a60361d937310117fbfa0323c8ece826e4169b3b875"),
+            ("Mission10", "566a84cc1b930fbd6ecbfeee6cfe3f70ed53297d27c7862811c82455320d9879"),
+            ("Mission11", "88f1506cda2985e3aafbaf49d1edb6ef1d51c0558a9072d16acd67c8ac62af8d"),
+            ("Mission12", "2d15f3373c5945ee8c073291bc7d9cc62896cf76227985cd9ef0345f52bf1222"),
+            ("Mission13", "e7fba174e1e3f3418b3a4fb782da10fa7b500cb8d7322d3ec84c08e20b06a170"),
+            ("Mission14", "5e429541915a45122fe0304b83edb6536bf7daef54e0a820e0f607fdf8783394"),
+            ("Mission15", "85c36ee945a5338ddbd94ef27ed7335804ce9499f3ea72b0b4e3be6d5b9d1892"),
+            ("Mission16", "2bb3da672d6a3bfd87c08052402432e16339d70a8a4f53e1e2c3bfa6bc5d5f08"),
+            ("Mission17", "ebb29b9b0be5527c7a7b2991e7bbe9cbeeb72176068e36aff3babb025637cc98"),
+            ("Tutorial1", "76f713dc6d2a3c59d92d62b5d74ceffd51915182a5a424a1122ab3e471de70bf"),
+        ],
+    }),
 }];
 
 /// Looks an executable hash up in [`KNOWN_EXES`].
@@ -100,16 +139,7 @@ pub struct SourceFile {
     pub kind: FileKind,
 }
 
-/// What a copied file is, recorded in the manifest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileKind {
-    Archive,
-    Music,
-    Speech,
-    Movie,
-    Config,
-}
+pub use hwc_formats::manifest::FileKind;
 
 /// A recognised install.
 #[derive(Debug, Clone)]
@@ -120,6 +150,8 @@ pub struct Install {
     pub exe_path: PathBuf,
     /// Files to copy, in import order (archive first, movies last).
     pub files: Vec<SourceFile>,
+    /// `binkw32.dll`, when present: the source of the Bink codec tables.
+    pub binkw32: Option<SourceFile>,
     /// Non-fatal observations (unknown exe, extra movies, ...).
     pub warnings: Vec<String>,
 }
@@ -272,8 +304,21 @@ pub fn detect(dir: &Path) -> Result<Install, ImportError> {
         }
     }
 
+    let binkw32 = match find_ci(dir, BINKW32) {
+        Some(on_disk) => Some(SourceFile {
+            path: dir.join(&on_disk),
+            rel: on_disk,
+            dest: hwc_video::TABLES_FILE_NAME.to_owned(),
+            kind: FileKind::CodecTables,
+        }),
+        None => {
+            warnings.push(format!("{BINKW32} is missing: the Bink codec tables cannot be imported, so movies will be unavailable"));
+            None
+        }
+    };
+
     match (problems.is_empty(), exe, exe_path) {
-        (true, Some(exe), Some(exe_path)) => Ok(Install { dir: dir.to_path_buf(), exe, exe_path, files, warnings }),
+        (true, Some(exe), Some(exe_path)) => Ok(Install { dir: dir.to_path_buf(), exe, exe_path, files, binkw32, warnings }),
         _ => Err(ImportError::NotAnInstall { dir: dir.to_path_buf(), problems }),
     }
 }
@@ -287,6 +332,17 @@ mod tests {
         let k = identify_exe("B4BA4B044FCDAD04FBBE0445DCF806FCA3F03BFAAAF86978EDA29BAAF5128DA1").unwrap();
         assert_eq!(k.id, "retail-2000-08-25");
         assert!(identify_exe("00").is_none());
+    }
+
+    /// A change to the extractor id means the IR may have changed: re-take the reference
+    /// digests (import the known build and copy `missions[].sha256` from the manifest).
+    #[test]
+    fn reference_digests_match_current_extractor() {
+        for k in KNOWN_EXES {
+            let d = k.missions.expect("known build without reference digests");
+            assert_eq!(d.extractor, crate::missions::EXTRACTOR, "{}: reference digests are stale", k.id);
+            assert_eq!(d.missions.len(), 18);
+        }
     }
 
     #[test]
