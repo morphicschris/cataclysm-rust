@@ -251,6 +251,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cataclysm"
+version = "0.1.0"
+dependencies = [
+ "hwc-formats",
+ "hwc-ui",
+ "pollster",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "cc"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -781,6 +792,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hwc-replay"
+version = "0.1.0"
+dependencies = [
+ "hwc-formats",
+ "hwc-math",
+]
+
+[[package]]
 name = "hwc-sim"
 version = "0.1.0"
 dependencies = [
@@ -804,6 +823,7 @@ dependencies = [
  "hwc-formats",
  "jpeg-decoder",
  "png",
+ "pollster",
  "wgpu",
 ]
 

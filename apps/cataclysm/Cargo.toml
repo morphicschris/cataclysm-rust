@@ -1,0 +1,14 @@
+[package]
+name = "cataclysm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Homeworld: Cataclysm recreation: the game executable (front end for now)"
+
+[dependencies]
+hwc-formats = { path = "../../crates/hwc-formats" }
+hwc-ui = { path = "../../crates/hwc-ui" }
+wgpu = "30"
+winit = "0.30"
+pollster = "0.4"

@@ -1,0 +1,183 @@
+# Front end (menu system)
+
+`crates/hwc-ui` recreates the engine's front-end manager — `FEFlow.c`, `FEReg.c`, `UIControls.c`,
+`Region.c`, `FontReg.c`, `ColPick.c`, `PlugScreen.c` and the font/2D primitives — with
+Cataclysm's changes (pull-down menus removed, slightly different control draws), checked against
+the retail executable. `apps/cataclysm` is the game executable; for now it runs the front end.
+
+```
+cataclysm [data] [--scale original|fit|integer|stretch] [--filter nearest|linear]
+          [--size WxH] [--config file] [--tour outdir] [--exit-after s]
+```
+
+`data` is the directory written by `hwc-import` (default `$HWC_DATA_DIR`, then `$HWC_GAME_DIR`);
+for development an install directory or a bare `cataclysm.big` also works (`GameData::open`).
+F11 toggles fullscreen, F10 cycles the scaling modes. `--tour` renders a scripted walk through
+the menus to PNG files (see `screenshots/ui/`); `HWC_UI_DEBUG=1` prints the diagnostics the
+engine only printed in debug builds (callbacks not found, links missing).
+
+## Modules
+
+| Module | Original | What |
+| --- | --- | --- |
+| `fe` | FEFlow.c, UIControls.c (logic), Region.c | screens, stack, regions, events, focus, links, callbacks |
+| `region` | Region.c | region tree, handles, `regRegionInside` |
+| `controls` | UIControls.c | slider, scroll bar, list window, text entry state |
+| `fer` | FEReg.c | textured drawing: boxes and cut-outs, buttons, marks, sliders, scroll bars, lists, decorations |
+| `text` | font.c, FontReg.c | `.hff` printing, hot-key letters, drop shadows |
+| `canvas` | prim2d.c | RGBA8 framebuffer, alpha-tested blits, rectangles, lines |
+| `cataclysm` | utility.c, Options.c, KeyBindings | the game's callbacks for the main menu, single player, options |
+| `colpick` | ColPick.c | team colour picker |
+| `credits` | PlugScreen.c | credits slide show |
+| `options` | Cataclysm.cfg / registry | option store and file |
+| `known` | — | every callback name the shipped `.fib` files use |
+| `scale`, `present` | feResReposition* | window placement; wgpu presenter |
+| `session` | main.c (FE part) | ready-to-run front end used by the app, the tour and the tests |
+
+### Drawing
+
+The engine draws its menus with OpenGL in 2D mode: blending off, an alpha test on each bitmap,
+nearest sampling at 1:1. That is reproduced exactly on the CPU into an RGBA framebuffer, which
+the window shows as one texture (`present::Presenter`, wgpu). Rules that matter:
+
+* `ferDraw(x, y, tex)` anchors a bitmap by its **bottom**-left corner (`y - height .. y`).
+* Frame pieces, buttons, check boxes, radios and sliders use `alpha > 0`; decorations up to 256
+  pixels use `alpha > 1/255`; bigger decorations and bitmap buttons are copied whole.
+* Corner pieces are stored for the top-left, sides for the left; other orientations are
+  quarter turns clockwise of those (`ferFlipBitmap90` on the vertically mirrored data).
+* Box frames (`ferDrawBoxRegion`) choose corner/side textures from the atom's two draw-style
+  words (out-of-range values give medium textures with an external glow); cut-out regions bite
+  notches into the frames of the base region and of earlier regions they overlap.
+* Text: 4-bit glyph coverage becomes alpha `value * 16`; `&` marks the hot-key letter, printed
+  with each channel times 350/256; the shadow is printed first, offset one pixel.
+* Buttons and other controls choose their textures from the region status: disabled, pressed
+  (with/without mouse inside), keyboard focus, mouse over, normal; controls of a screen other than
+  the top one draw "off".
+
+### Screens and regions
+
+* Loading (`feScreensLoad`): labels (kind 0 with text) become static text; list windows lose the
+  18 pixels of their scroll bar; every label keeps all its language strings (English, French,
+  German are shipped) and the current language is drawn.
+* Positioning: layouts are 640x480. On a bigger screen every atom is offset by half the extra
+  size; atoms with the *background* flag are stretched to each screen edge they touch; atoms with
+  no corner on the 640x480 layout are hidden (they keep their regions, so hidden hot-key buttons
+  such as `Quit_game`'s Escape button still work). Screens with menu items keep 640x480
+  coordinates.
+* Regions are created last atom first and appended, so file order is drawn back to front and the
+  last atom gets the mouse first. Afterwards `feFindChildren` makes regions lying on a "stackable"
+  region (label on a button) its children. Cataclysm indexes the stackable table with a
+  decorative region's *name* (the region ID is the bitmap path), reading past the table; the
+  reimplementation reproduces the outcome with a 256-bit mask of the bytes found there.
+* Events: children first, then the region (enter/exit, press/hold/release, wheel, double click,
+  hot keys by "stuck" key state, key capture for focused text entries and lists). A modal
+  screen's base region stops events for everything processed after it (the screen below).
+* Screen stack (`feScreenStart`): a non-popup screen replaces the top screen when it has the same
+  parent; popups become children of the current base region. Starting the screen already on top
+  does nothing. Call-on-create callbacks run last atom first, after which every screen with tab
+  stops gets the Tab/arrow/Space/Return/Escape/Home/End handlers (no tab stops: no handlers).
+* Links: a link button follows the link of the same name of the *current* screen; a missing link
+  does nothing (the unused `Effects` screen).
+
+### Callbacks
+
+`FrontEnd::callback_add(name, fn)` binds a function to an atom name like `feCallbackAdd`;
+`draw_callback_add` binds user-region drawing. A user region without a registered draw callback
+gets no region at all, as in the engine. `cataclysm::register` installs the game's functions and
+then a logging stub for every remaining name in `known::FUNCTIONS` / `known::DRAW_FUNCTIONS`
+(353 function and 87 draw names over the 21 shipped `.fib` files); every name used by
+`front_end.fib` has a real implementation.
+
+Implemented: main menu (training, single player, multiplayer entry, options, credits, quit,
+version string), training selection and the training alert, single-player setup with difficulty,
+team colour picker and race preview, load-game screens (lists stay empty: no saved games yet),
+all option screens (audio, advanced audio, equaliser, video, custom effects, texture info,
+gameplay, key bindings from `default_keys.cfg`), presets (effects High/Low/Custom, Homeworld
+classic / Cataclysm default, fastest / default frame rate), language radio buttons, credits slide
+show, multiplayer connection screen with Back. Starting a mission, sounds, opening the support
+web page and changing the display device are reported to the application as `Request`s.
+
+## Options
+
+### The original
+
+Cataclysm keeps player settings in two places:
+
+* `Cataclysm.cfg` in the game folder, written at exit by `utyOptionsFileWrite` from one table of
+  tweakable variables as `name value` lines (`%s %d`, strings `%s %s`) and read back at start-up
+  with the tweak-script parser (`scriptSetFileSystem`). The retail install ships it with only
+  `language=0`.
+* The registry key `HKEY_LOCAL_MACHINE\SOFTWARE\Sierra On-Line\Cataclysm` for the display:
+  `deviceCRC`, `deviceCaps`, `deviceCaps2`, `deviceIndex`, `deviceToSelect`, `glToSelect`,
+  `d3dToSelect`, `screenWidth`, `screenHeight`, `screenDepth`, `HW_Language` (DWORDs and
+  strings).
+
+The options screens edit the variables directly; entering them takes a snapshot
+(`opOptionsSaveSettings`) that Cancel restores, and the Advanced, Equaliser and Custom Effects
+sub-screens keep their own restore points. Accepting the custom effects screen always selects the
+"Custom" effects level (its toggles mark it changed as soon as the screen opens).
+
+### Our file
+
+`hwc-options.cfg` (in `<data>/config/`, or the current folder when running from an install or
+archive, or `--config`) keeps every value under its original name, one per line:
+
+```text
+# hwc options v1
+MusicVolume = 60
+PlayerName = "Fleet Commander"
+```
+
+Integers or double-quoted strings (`\"`, `\\` escapes), `#` comments; unknown keys are kept. When
+the file does not exist yet the install's `Cataclysm.cfg` is imported. It is written when the
+options are accepted (atomically: temporary file, then rename). Colours are stored packed like
+the engine's `colRGB` (`0xAABBGGRR` as a signed integer).
+
+| Option (default) | Control |
+| --- | --- |
+| `SpeechVolume` (75), `SFXVolume` (75), `MusicVolume` (60) | audio sliders, 0-100 |
+| `NumChannels` (8), `AutoChannel` (0) | channels slider (shown + 8, voices 8-32), Auto |
+| `SoundQuality` (0), `speakerSetting` (1), `Equalizer0-7` (0) | Advanced: quality, speakers (presets fill the equaliser), equaliser bands (value x 1.025) |
+| `VoiceCommands`, `VoiceStatus`, `VoiceChatter` (1), `opBattleChatter` (50) | Advanced: speech check boxes, chatter slider |
+| `screenWidth`/`screenHeight` (640x480) | resolution list (applied to the window on accept) |
+| `brightnessVal` (30, 0-70), `TextureDetail` (50) | brightness and texture memory sliders |
+| `DetailQuality` (0 high, 1 medium, 2 low), `detailThreshold` (10; slider shows 30 - value), `noLOD` (0) | model quality / detail / full detail |
+| `effectsLevel` (0 high, 1 low, 2 custom), `etgHistoryScalar` (256; slider 64-256) | effects radio, number of effects |
+| `texLinearFiltering`, `showBackgrounds`, `InstantTransition`, `enableStipple`, `fuzzyBlobs`, `etg{Damage,Bullet,Fire,Hit}EffectsEnabled`, `enableCPV`, `enableLensFlare`, `enableRepairbots`, `enableSmoothing`, `enableTrails` | custom effects (check box and picture button pairs) |
+| `opMouseSens` (50), `GameFramerateOption` (1) | gameplay: mouse sensitivity, frame rate |
+| `HomeworldTaskbar`, `ShowTaskbarButtons`, `ShowTaskbarBackdrop`, `ExperienceMessages`, `LargePopupMenuFonts` (inverted), `AutoFocusOnWaypoints`, `Homeworld_CSA` / `RightClick_CSA` (exclusive) | gameplay check boxes |
+| `ShowAreaVisited`, `ShowFOWBlobs`, `ShowAreaOccupied`, `ShowResources`+`ShowMeteors`, `ShowAsteriod0`, `ShowBackground`, `ShowCompass`, `ShowObjectivesPointer`, `ShowSlipgatePaths`, `ShowIcons` | sensors manager check boxes |
+| `DifficultySetting` (2), `TutorialNeeded` (1), `PlayerRace`, `PlayerBaseColor`, `PlayerStripeColor`, `ColorsPicked`, `PrevColor0-4.base/detail` | single player setup and colour picker |
+| `language` (0 English, 1 French, 2 German) | language radio buttons (fonts, labels, hot keys) |
+
+The other table entries (`InfoOverlay`, `FirewallDetect`, `MPGameFlags`, ...) are carried
+unchanged.
+
+## Scaling
+
+| Mode | Behaviour |
+| --- | --- |
+| `original` (default) | the engine's: layout at native pixels, centred, background atoms stretched to the edges (`feResRepositionX/Y`, `feResRescaleBackground`); the canvas is the window size |
+| `fit` | the 640x480 canvas scaled uniformly to fit, letter- or pillar-boxed |
+| `integer` | the 640x480 canvas scaled by the largest whole factor that fits |
+| `stretch` | the 640x480 canvas stretched to the window |
+
+Mouse positions are mapped back into canvas pixels (`scale::Placement::to_canvas`); while a
+slider or the colour picker holds the mouse, positions are clamped to it like `mouseClipToRect`.
+
+## Known differences
+
+* No sound (UI clicks, volume tests, music), no movies, no game behind the menus: starting a
+  mission or loading a game reports the request and returns to the main menu.
+* The mouse pointer is the system cursor, not the engine's bitmap cursor.
+* Display mode: the renderer and resolution lists show the wgpu presenter and common window sizes;
+  accepting changes the window size instead of the screen mode (no "countdown" confirmation box).
+* Changing the window size in `original` mode keeps the open screens (their create callbacks run
+  again); the engine dropped back to the main menu after a resolution change.
+* Key bindings are shown read-only; saved-game lists are empty; multiplayer stops at the
+  connection-method screen; in-game screens (taskbar, managers) load and draw but their
+  callbacks are stubs.
+* Spanish and Italian labels are not in the shipped files; only English, French and German can be
+  selected.
+* The colour picker colours the race preview with the plain team-colour blend (the engine also
+  applied per-race brightness curves from `colpick.script`).
