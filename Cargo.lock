@@ -50,10 +50,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "hwc-audio"
+version = "0.1.0"
+dependencies = [
+ "hwc-formats",
+]
+
+[[package]]
 name = "hwc-formats"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "hwc-math"
+version = "0.1.0"
+
+[[package]]
+name = "hwc-render"
+version = "0.1.0"
+dependencies = [
+ "hwc-formats",
+]
+
+[[package]]
+name = "hwc-sim"
+version = "0.1.0"
+dependencies = [
+ "hwc-formats",
+ "hwc-math",
 ]
 
 [[package]]
@@ -62,6 +88,15 @@ version = "0.1.0"
 dependencies = [
  "hwc-formats",
  "png",
+]
+
+[[package]]
+name = "hwc-viewer"
+version = "0.1.0"
+dependencies = [
+ "hwc-audio",
+ "hwc-formats",
+ "hwc-render",
 ]
 
 [[package]]
