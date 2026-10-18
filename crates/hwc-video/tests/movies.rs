@@ -1,11 +1,13 @@
-//! Tests over the shipped movies. Needs `HWC_GAME_DIR` (the Cataclysm install); skips cleanly
-//! when it is unset. Set `HWC_FFMPEG` to an ffmpeg executable to also compare decoded pictures
+//! Tests over the shipped movies. Needs `HWC_GAME_DIR` (the Cataclysm install, for the movies
+//! and the codec tables in `binkw32.dll`); skips cleanly when it is unset. Set `HWC_FFMPEG` to an ffmpeg executable to also compare decoded pictures
 //! bit for bit against ffmpeg's Bink decoder.
 
 use std::io::Read;
 use std::path::PathBuf;
 
-use hwc_video::{BinkFile, VideoDecoder};
+use std::sync::OnceLock;
+
+use hwc_video::{import_tables, BinkFile, BinkTables, VideoDecoder};
 
 const MOVIES: [(&str, u32); 20] = [
     ("Animatic01", 3689),
@@ -30,12 +32,56 @@ const MOVIES: [(&str, u32); 20] = [
     ("sierra", 240),
 ];
 
-fn movies_dir() -> Option<PathBuf> {
+fn game_dir() -> Option<PathBuf> {
     let Some(game) = std::env::var_os("HWC_GAME_DIR") else {
         eprintln!("HWC_GAME_DIR not set; skipping");
         return None;
     };
-    Some(PathBuf::from(game).join("Movies"))
+    Some(PathBuf::from(game))
+}
+
+fn movies_dir() -> Option<PathBuf> {
+    game_dir().map(|g| g.join("Movies"))
+}
+
+fn tables() -> &'static BinkTables {
+    static TABLES: OnceLock<BinkTables> = OnceLock::new();
+    TABLES.get_or_init(|| {
+        BinkTables::from_install(game_dir().expect("HWC_GAME_DIR"))
+            .expect("tables from binkw32.dll")
+    })
+}
+
+#[test]
+fn tables_extract_and_round_trip() {
+    let Some(game) = game_dir() else { return };
+    let dll = std::fs::read(game.join("binkw32.dll")).unwrap();
+    let file = import_tables(&dll).unwrap();
+    let loaded = BinkTables::from_serialized(&file).unwrap();
+    assert_eq!(loaded.serialize(), file);
+    assert_eq!(tables().serialize(), file);
+    // Any damage is caught.
+    let mut bad = file.clone();
+    bad[40] ^= 0x10;
+    assert!(BinkTables::from_serialized(&bad).is_err());
+    // A DLL with one table damaged is rejected rather than silently decoding wrong.
+    let mut broken = dll.clone();
+    let mut perms = 0;
+    for p in 0..broken.len() - 64 {
+        let mut seen = 0u64;
+        if broken[p..p + 64].iter().all(|&b| {
+            b < 64 && {
+                seen |= 1 << b;
+                true
+            }
+        }) && seen == u64::MAX
+        {
+            perms += 1;
+            broken.swap(p, p + 1);
+        }
+    }
+    assert!(perms > 0);
+    assert!(BinkTables::from_binkw32(&broken).is_err());
 }
 
 #[test]
@@ -64,7 +110,7 @@ fn every_frame_of_every_movie_decodes() {
     let mut total = 0u64;
     for (name, frames) in MOVIES {
         let movie = BinkFile::open(dir.join(format!("{name}.bik"))).unwrap();
-        let mut dec = movie.video_decoder().unwrap();
+        let mut dec = movie.video_decoder(tables()).unwrap();
         for i in 0..movie.frame_count() {
             let packet = movie.packet(i).unwrap();
             dec.decode(packet.video)
@@ -80,7 +126,11 @@ fn every_frame_of_every_movie_decodes() {
 fn rgba_iterator_yields_timestamps_and_sane_pictures() {
     let Some(dir) = movies_dir() else { return };
     let movie = BinkFile::open(dir.join("sierra.bik")).unwrap();
-    let frames: Vec<_> = movie.frames().unwrap().map(|f| f.unwrap()).collect();
+    let frames: Vec<_> = movie
+        .frames(tables())
+        .unwrap()
+        .map(|f| f.unwrap())
+        .collect();
     assert_eq!(frames.len(), 240);
     let last = frames.last().unwrap();
     assert!((last.time - 239.0 * 0.066667).abs() < 1e-9);
@@ -117,7 +167,7 @@ fn matches_ffmpeg_bit_for_bit() {
             .expect("run ffmpeg");
         let mut out = child.stdout.take().unwrap();
         let movie = BinkFile::open(&path).unwrap();
-        let mut dec = VideoDecoder::new(movie.header()).unwrap();
+        let mut dec = VideoDecoder::new(movie.header(), tables()).unwrap();
         let (w, h) = (640usize, 480usize);
         let mut buf = vec![0u8; w * h * 3 / 2];
         for i in 0..movie.frame_count() {

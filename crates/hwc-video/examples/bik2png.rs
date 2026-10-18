@@ -6,6 +6,8 @@
 //!   --every N            write every Nth frame instead
 //!   --out DIR            output directory (default: screenshots/video/<movie name>)
 //!   --strip A..B         also write frames A..B (exclusive) side by side in one contact sheet
+//!   --tables FILE        codec tables: a binkw32.dll or a file written by import_tables
+//!                        (default: binkw32.dll in the install the movie belongs to)
 //! ```
 //!
 //! None of the Cataclysm movies has an audio track; when a movie does, its track layout is
@@ -14,7 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use hwc_video::{BinkFile, VideoDecoder};
+use hwc_video::{BinkFile, BinkTables, VideoDecoder};
 
 fn write_png(path: &Path, width: usize, height: usize, rgba: &[u8]) {
     let file = std::fs::File::create(path).expect("create png");
@@ -33,6 +35,7 @@ fn main() {
     let mut every: Option<u32> = None;
     let mut out: Option<PathBuf> = None;
     let mut strip: Option<(u32, u32)> = None;
+    let mut tables_path: Option<PathBuf> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--frames" => {
@@ -45,6 +48,7 @@ fn main() {
                 )
             }
             "--every" => every = Some(args.next().expect("--every N").parse().expect("number")),
+            "--tables" => tables_path = Some(args.next().expect("--tables FILE").into()),
             "--out" => out = Some(args.next().expect("--out DIR").into()),
             "--strip" => {
                 let s = args.next().expect("--strip A..B");
@@ -62,6 +66,19 @@ fn main() {
     };
 
     let movie = BinkFile::open(&movie_path).expect("open movie");
+    // Movies live in <install>\Movies; the DLL sits in <install>.
+    let tables_path = tables_path.unwrap_or_else(|| {
+        let movies = movie_path.parent().unwrap_or(Path::new("."));
+        movies
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("binkw32.dll")
+    });
+    let table_bytes = std::fs::read(&tables_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", tables_path.display()));
+    let tables = BinkTables::from_serialized(&table_bytes)
+        .or_else(|_| BinkTables::from_binkw32(&table_bytes))
+        .expect("codec tables");
     let h = movie.header();
     let stem = movie_path
         .file_stem()
@@ -115,7 +132,7 @@ fn main() {
     };
 
     let (w, hgt) = (h.width as usize, h.height as usize);
-    let mut decoder = VideoDecoder::new(h).expect("decoder");
+    let mut decoder = VideoDecoder::new(h, &tables).expect("decoder");
     let mut rgba = vec![0u8; w * hgt * 4];
     let mut sheet: Vec<Vec<u8>> = Vec::new();
     let mut decode_secs = 0.0f64;

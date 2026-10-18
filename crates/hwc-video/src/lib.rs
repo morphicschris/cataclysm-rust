@@ -5,9 +5,14 @@
 //! track (the animatic soundtracks are speech events driven by the matching `.script` files).
 //! See `docs/formats/bink.md` for the format notes and how the original game plays the movies.
 //!
+//! The codec's constant tables are not part of this crate: they are read from the player's own
+//! `binkw32.dll` ([`BinkTables::from_binkw32`]), or from the file the importer made of them
+//! ([`import_tables`], [`BinkTables::load`]).
+//!
 //! ```no_run
+//! let tables = hwc_video::BinkTables::from_install("C:/Games/Cataclysm")?;
 //! let movie = hwc_video::BinkFile::open("Animatic01.bik")?;
-//! for frame in movie.frames()? {
+//! for frame in movie.frames(&tables)? {
 //!     let frame = frame?;
 //!     // frame.rgba is width * height * 4 bytes, frame.time is in seconds
 //! }
@@ -16,10 +21,11 @@
 
 mod bits;
 pub mod container;
-mod tables;
+pub mod tables;
 pub mod video;
 
 pub use container::{AudioTrack, BinkFile, FrameEntry, FramePacket, Header};
+pub use tables::{import_tables, BinkTables, TABLES_FILE_NAME};
 pub use video::{yuv_to_rgba, Frame, Frames, VideoDecoder, YuvFrame};
 
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +38,10 @@ pub enum Error {
     Truncated,
     #[error("invalid data: {0}")]
     Invalid(&'static str),
+    #[error("Bink table not found in binkw32.dll: {0}")]
+    TablesNotFound(&'static str),
+    #[error("Bink table does not match the expected checksum: {0}")]
+    TablesMismatch(&'static str),
     #[error("unsupported: {0}")]
     Unsupported(&'static str),
 }

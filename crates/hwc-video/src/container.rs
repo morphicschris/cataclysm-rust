@@ -276,13 +276,13 @@ impl BinkFile {
     }
 
     /// A video decoder configured for this file.
-    pub fn video_decoder(&self) -> Result<crate::VideoDecoder> {
-        crate::VideoDecoder::new(&self.header)
+    pub fn video_decoder(&self, tables: &crate::BinkTables) -> Result<crate::VideoDecoder> {
+        crate::VideoDecoder::new(&self.header, tables)
     }
 
     /// Decodes every frame in order, yielding RGBA images.
-    pub fn frames(&self) -> Result<crate::Frames<'_>> {
-        crate::Frames::new(self)
+    pub fn frames(&self, tables: &crate::BinkTables) -> Result<crate::Frames<'_>> {
+        crate::Frames::new(self, tables)
     }
 }
 

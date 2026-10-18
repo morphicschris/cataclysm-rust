@@ -7,11 +7,9 @@
 //! coefficients and residues) are read inline as the blocks are reconstructed. Each plane ends
 //! on a 32-bit boundary.
 
-use std::sync::OnceLock;
-
 use crate::bits::BitReader;
 use crate::container::{BinkFile, Header};
-use crate::tables::{DCT_SCAN, HUFF_TREES, INTER_QUANT, INTRA_QUANT, RUN_SCANS};
+use crate::tables::{BinkTables, HUFF_PEEK};
 use crate::{Error, Result};
 
 // Block types.
@@ -43,26 +41,8 @@ const DC_START_BITS: u32 = 11;
 /// Run lengths for block-type symbols 12..=15.
 const BLOCK_TYPE_RUNS: [usize; 4] = [4, 8, 12, 32];
 
-const HUFF_PEEK: u32 = 7;
-
-/// Per-codebook lookup: indexed by the next 7 bits, gives (symbol slot, code length).
-fn huff_lookup() -> &'static [[(u8, u8); 1 << HUFF_PEEK]; 16] {
-    static TABLES: OnceLock<[[(u8, u8); 1 << HUFF_PEEK]; 16]> = OnceLock::new();
-    TABLES.get_or_init(|| {
-        let mut out = [[(0u8, 0u8); 1 << HUFF_PEEK]; 16];
-        for (table, codes) in out.iter_mut().zip(HUFF_TREES.iter()) {
-            for (slot, &(code, len)) in codes.iter().enumerate() {
-                let step = 1usize << len;
-                let mut i = code as usize;
-                while i < table.len() {
-                    table[i] = (slot as u8, len);
-                    i += step;
-                }
-            }
-        }
-        out
-    })
-}
+/// Per-codebook decode lookup (see [`BinkTables`]).
+type Lookup = [[(u8, u8); 1 << HUFF_PEEK]; 16];
 
 /// A codebook choice plus the symbol permutation sent with it.
 #[derive(Clone, Copy)]
@@ -133,8 +113,8 @@ impl Tree {
     }
 
     #[inline(always)]
-    fn decode(&self, br: &mut BitReader) -> u8 {
-        let (slot, len) = huff_lookup()[self.codebook as usize][br.peek(HUFF_PEEK) as usize];
+    fn decode(&self, br: &mut BitReader, lut: &Lookup) -> u8 {
+        let (slot, len) = lut[self.codebook as usize][br.peek(HUFF_PEEK) as usize];
         br.skip(len as usize);
         self.symbols[slot as usize]
     }
@@ -273,10 +253,12 @@ pub struct VideoDecoder {
     color_high: [Tree; 16],
     color_last: usize,
     frames_decoded: u64,
+    tables: Box<BinkTables>,
 }
 
 impl VideoDecoder {
-    pub fn new(header: &Header) -> Result<Self> {
+    /// A decoder for the movie described by `header`, using `tables` (copied into the decoder).
+    pub fn new(header: &Header, tables: &BinkTables) -> Result<Self> {
         let revision = header.revision;
         if revision == b'b' {
             return Err(Error::Unsupported("Bink revision b"));
@@ -301,6 +283,7 @@ impl VideoDecoder {
             color_high: [Tree::default(); 16],
             color_last: 0,
             frames_decoded: 0,
+            tables: Box::new(tables.clone()),
         })
     }
 
@@ -502,8 +485,18 @@ impl VideoDecoder {
                             INTRA => {
                                 coeffs.fill(0);
                                 coeffs[0] = self.bundles[B_INTRA_DC].next()?;
-                                let (n, q) = read_dct_coeffs(br, &mut coeffs, &mut coef_order);
-                                dequantize(&mut coeffs, &INTRA_QUANT[q], &coef_order[..n]);
+                                let (n, q) = read_dct_coeffs(
+                                    br,
+                                    &mut coeffs,
+                                    &mut coef_order,
+                                    &self.tables.dct_scan,
+                                );
+                                dequantize(
+                                    &mut coeffs,
+                                    &self.tables.intra_quant[q],
+                                    &self.tables.dct_scan,
+                                    &coef_order[..n],
+                                );
                                 let out = idct(&coeffs);
                                 for (d, s) in small.iter_mut().zip(out.iter()) {
                                     *d = *s as u8;
@@ -539,14 +532,24 @@ impl VideoDecoder {
                         copy_block(&mut cur.data, at, prev, src, stride);
                         coeffs.fill(0);
                         let masks = br.read(7) as i32;
-                        read_residue(br, &mut coeffs, masks);
+                        read_residue(br, &mut coeffs, masks, &self.tables.dct_scan);
                         add_block(&mut cur.data, at, stride, &coeffs);
                     }
                     INTRA => {
                         coeffs.fill(0);
                         coeffs[0] = self.bundles[B_INTRA_DC].next()?;
-                        let (n, q) = read_dct_coeffs(br, &mut coeffs, &mut coef_order);
-                        dequantize(&mut coeffs, &INTRA_QUANT[q], &coef_order[..n]);
+                        let (n, q) = read_dct_coeffs(
+                            br,
+                            &mut coeffs,
+                            &mut coef_order,
+                            &self.tables.dct_scan,
+                        );
+                        dequantize(
+                            &mut coeffs,
+                            &self.tables.intra_quant[q],
+                            &self.tables.dct_scan,
+                            &coef_order[..n],
+                        );
                         let out = idct(&coeffs);
                         for y in 0..8 {
                             for x in 0..8 {
@@ -565,8 +568,18 @@ impl VideoDecoder {
                         copy_block(&mut cur.data, at, prev, src, stride);
                         coeffs.fill(0);
                         coeffs[0] = self.bundles[B_INTER_DC].next()?;
-                        let (n, q) = read_dct_coeffs(br, &mut coeffs, &mut coef_order);
-                        dequantize(&mut coeffs, &INTER_QUANT[q], &coef_order[..n]);
+                        let (n, q) = read_dct_coeffs(
+                            br,
+                            &mut coeffs,
+                            &mut coef_order,
+                            &self.tables.dct_scan,
+                        );
+                        dequantize(
+                            &mut coeffs,
+                            &self.tables.inter_quant[q],
+                            &self.tables.dct_scan,
+                            &coef_order[..n],
+                        );
                         let out = idct(&coeffs);
                         add_block(&mut cur.data, at, stride, &out);
                     }
@@ -605,7 +618,7 @@ impl VideoDecoder {
         at: usize,
         stride: usize,
     ) -> Result<()> {
-        let scan = &RUN_SCANS[br.read(4) as usize];
+        let scan = &self.tables.run_scans[br.read(4) as usize];
         let mut pos = 0usize;
         let put = |dst: &mut [u8], pos: usize, v: u8| {
             let p = scan[pos] as usize;
@@ -674,7 +687,7 @@ impl VideoDecoder {
         } else {
             let mut last = 0i16;
             while b.write < end {
-                let v = b.tree.decode(br);
+                let v = b.tree.decode(br, &self.tables.lookup);
                 if v < 12 {
                     last = v as i16;
                     b.push(last);
@@ -693,13 +706,14 @@ impl VideoDecoder {
     }
 
     fn fill_colors(&mut self, br: &mut BitReader, new_colors: bool) -> Result<()> {
+        let lut = &self.tables.lookup;
         let b = &mut self.bundles[B_COLORS];
         let Some(count) = b.begin(br)? else {
             return Ok(());
         };
         let next_color = |br: &mut BitReader, last: &mut usize, tree: &Tree| -> i16 {
-            *last = self.color_high[*last].decode(br) as usize;
-            let v = ((*last as u8) << 4) | tree.decode(br);
+            *last = self.color_high[*last].decode(br, lut) as usize;
+            let v = ((*last as u8) << 4) | tree.decode(br, lut);
             if new_colors {
                 v as i16
             } else {
@@ -732,8 +746,8 @@ impl VideoDecoder {
             return Ok(());
         };
         for _ in 0..count {
-            let lo = b.tree.decode(br) as i16;
-            let hi = b.tree.decode(br) as i16;
+            let lo = b.tree.decode(br, &self.tables.lookup) as i16;
+            let hi = b.tree.decode(br, &self.tables.lookup) as i16;
             b.push(lo | (hi << 4));
         }
         Ok(())
@@ -753,7 +767,7 @@ impl VideoDecoder {
             }
         } else {
             for _ in 0..count {
-                let v = b.tree.decode(br) as i16;
+                let v = b.tree.decode(br, &self.tables.lookup) as i16;
                 let v = signed(br, v);
                 b.push(v);
             }
@@ -810,7 +824,7 @@ impl VideoDecoder {
             }
         } else {
             for _ in 0..count {
-                let v = b.tree.decode(br) as i16;
+                let v = b.tree.decode(br, &self.tables.lookup) as i16;
                 b.push(v);
             }
         }
@@ -850,6 +864,7 @@ fn read_dct_coeffs(
     br: &mut BitReader,
     block: &mut [i32; 64],
     order: &mut [usize; 64],
+    scan: &[u8; 64],
 ) -> (usize, usize) {
     let mut coef = [0u8; 128];
     let mut mode = [0u8; 128];
@@ -896,7 +911,7 @@ fn read_dct_coeffs(
                             mode[start] = LIST_SINGLE;
                         } else {
                             let idx = (c & 63) as usize;
-                            block[DCT_SCAN[idx] as usize] = read_coeff(br, bits);
+                            block[scan[idx] as usize] = read_coeff(br, bits);
                             order[count & 63] = idx;
                             count += 1;
                         }
@@ -914,7 +929,7 @@ fn read_dct_coeffs(
                 }
                 _ => {
                     let idx = (c & 63) as usize;
-                    block[DCT_SCAN[idx] as usize] = read_coeff(br, bits);
+                    block[scan[idx] as usize] = read_coeff(br, bits);
                     order[count & 63] = idx;
                     count += 1;
                     coef[pos] = 0;
@@ -928,17 +943,17 @@ fn read_dct_coeffs(
     (count.min(64), quant)
 }
 
-fn dequantize(block: &mut [i32; 64], quant: &[i32; 64], order: &[usize]) {
+fn dequantize(block: &mut [i32; 64], quant: &[i32; 64], scan: &[u8; 64], order: &[usize]) {
     block[0] = block[0].wrapping_mul(quant[0]) >> 11;
     for &idx in order {
-        let p = DCT_SCAN[idx] as usize;
+        let p = scan[idx] as usize;
         block[p] = block[p].wrapping_mul(quant[p]) >> 11;
     }
 }
 
 /// Reads a residue block: like the DCT coder's group list, but each bit plane first refines the
 /// coefficients already found. At most `masks + 1` refinements/coefficients are read.
-fn read_residue(br: &mut BitReader, block: &mut [i32; 64], mut masks: i32) {
+fn read_residue(br: &mut BitReader, block: &mut [i32; 64], mut masks: i32, scan: &[u8; 64]) {
     let mut coef = [0u8; 128];
     let mut mode = [0u8; 128];
     let mut start = 64usize;
@@ -995,7 +1010,7 @@ fn read_residue(br: &mut BitReader, block: &mut [i32; 64], mut masks: i32) {
                             coef[start] = c;
                             mode[start] = LIST_SINGLE;
                         } else {
-                            let p = DCT_SCAN[(c & 63) as usize] as usize;
+                            let p = scan[(c & 63) as usize] as usize;
                             nonzero[nz & 63] = p;
                             nz = (nz + 1).min(64);
                             block[p] = if br.bit() { -mask } else { mask };
@@ -1017,7 +1032,7 @@ fn read_residue(br: &mut BitReader, block: &mut [i32; 64], mut masks: i32) {
                     }
                 }
                 _ => {
-                    let p = DCT_SCAN[(c & 63) as usize] as usize;
+                    let p = scan[(c & 63) as usize] as usize;
                     nonzero[nz & 63] = p;
                     nz = (nz + 1).min(64);
                     block[p] = if br.bit() { -mask } else { mask };
@@ -1174,10 +1189,10 @@ pub struct Frames<'a> {
 }
 
 impl<'a> Frames<'a> {
-    pub(crate) fn new(file: &'a BinkFile) -> Result<Self> {
+    pub(crate) fn new(file: &'a BinkFile, tables: &BinkTables) -> Result<Self> {
         Ok(Self {
             file,
-            decoder: VideoDecoder::new(file.header())?,
+            decoder: VideoDecoder::new(file.header(), tables)?,
             next: 0,
             failed: false,
         })
@@ -1227,29 +1242,6 @@ impl Iterator for Frames<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn huffman_tables_are_prefix_free_and_complete() {
-        for (t, codes) in HUFF_TREES.iter().enumerate() {
-            let kraft: f64 = codes.iter().map(|&(_, l)| 0.5f64.powi(l as i32)).sum();
-            assert!((kraft - 1.0).abs() < 1e-12, "tree {t}");
-            let table = &huff_lookup()[t];
-            for (slot, &(code, len)) in codes.iter().enumerate() {
-                assert_eq!(table[code as usize], (slot as u8, len));
-            }
-        }
-    }
-
-    #[test]
-    fn scans_are_permutations() {
-        for scan in RUN_SCANS.iter().chain(std::iter::once(&DCT_SCAN)) {
-            let mut seen = [false; 64];
-            for &p in scan {
-                assert!(!seen[p as usize]);
-                seen[p as usize] = true;
-            }
-        }
-    }
 
     #[test]
     fn dc_only_idct_is_flat() {

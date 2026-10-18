@@ -1,6 +1,18 @@
 # Bink movies (`Movies\*.bik`)
 
-Decoder: `crates/hwc-video` (pure Rust, no `binkw32.dll`).
+Decoder: `crates/hwc-video` (pure Rust; it never runs `binkw32.dll`).
+
+The codec's constant tables (Huffman codebooks, scan orders, quantiser tables) are **not shipped**.
+`BinkTables::from_binkw32` finds them in the player's own `binkw32.dll` by their structure, not by
+address:
+
+* the codebooks are a run of 16 complete direct-lookup prefix tables;
+* the scans are 64-byte permutations of 0..63;
+* the quantiser tables are 16×64 runs of positive 32-bit values.
+
+A table is accepted only if its FNV-1a checksum matches the expected one. The importer stores the
+result with `import_tables` as `bink_tables.bin` (magic `HWCBINKT`, about 9.8 KB), and
+`BinkTables::load` reads it back.
 
 ## What ships
 
@@ -80,7 +92,7 @@ bytes. The rest of the packet is video data.
   * Dequantisation multiplies each coefficient by a value from a per-quantiser table indexed by
     **raster position**, with 11 fractional bits.
   * The quantiser tables, Huffman codebooks and scan orders were read from the data section of
-    the game's own `binkw32.dll`.
+    the game's own `binkw32.dll` at import time (see above).
   * The inverse transform is an integer AAN-style 8-point IDCT, applied to columns and then rows,
     with a final `(x + 127) >> 8`.
 * **Output** is BT.601 limited-range YUV. `hwc_video::yuv_to_rgba` converts it to RGBA, using
