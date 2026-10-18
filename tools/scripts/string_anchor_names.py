@@ -10,11 +10,12 @@ Does not rename anything. Usage: string_anchor_names.py <hw1 src dir> <out.tsv>
 import collections, json, os, re, sys, urllib.parse, urllib.request
 
 B = 'http://127.0.0.1:8089'
+PROG = 'cataclysm.exe'
 srcdir, out = sys.argv[1], sys.argv[2]
 
 
 def get(path, **q):
-    with urllib.request.urlopen(B + path + '?' + urllib.parse.urlencode(q), timeout=300) as r:
+    with urllib.request.urlopen(B + path + '?' + urllib.parse.urlencode(dict(q, program=PROG)), timeout=300) as r:
         return json.load(r)
 
 

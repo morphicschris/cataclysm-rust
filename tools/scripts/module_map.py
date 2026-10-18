@@ -12,6 +12,7 @@ import bisect, collections, json, os, sys, urllib.request
 
 anchors_tsv, srcdir, out = sys.argv[1:4]
 B = 'http://127.0.0.1:8089'
+PROG = 'cataclysm.exe'
 
 # file rank = position in link order: Game, SDL(win32), Ships, Generated, then anything else
 order = []
@@ -20,12 +21,20 @@ for sub in ('Game', 'SDL', 'Ships', 'Generated'):
     order += sorted((f for f in os.listdir(d) if f.lower().endswith(('.c', '.cpp'))), key=str.lower)
 rank = {f: i for i, f in enumerate(order)}
 
-pts = []
-for l in list(open(anchors_tsv))[1:]:
-    fn, _, f, n, conf = l.rstrip('\n').split('\t')
-    if fn.startswith('FUN_') and f in rank:
-        pts.append((int(fn[4:], 16), rank[f], f))
-pts.sort()
+rows = [l.rstrip('\n').split('\t') for l in list(open(anchors_tsv))[1:]]
+
+# all functions
+funcs, off = [], 0
+while True:
+    with urllib.request.urlopen(f'{B}/find_functions?limit=5000&offset={off}&program={PROG}', timeout=300) as r:
+        page = json.load(r)
+    items = page.get('functions', [])
+    funcs += items
+    if len(items) < 5000: break
+    off += 5000
+print('functions', len(funcs))
+addr_of = {f['name']: int(f['address'], 16) for f in funcs}
+pts = sorted((addr_of[fn], rank[f], f) for fn, _, f, n, conf in rows if fn in addr_of and f in rank)
 
 # longest non-decreasing subsequence on rank (patience sorting with predecessor links)
 tails, tails_idx, prev = [], [], [None] * len(pts)
@@ -38,17 +47,6 @@ keep, i = [], tails_idx[-1]
 while i is not None: keep.append(pts[i]); i = prev[i]
 keep.reverse()
 print('anchors', len(pts), 'consistent with link order', len(keep))
-
-# all functions
-funcs, off = [], 0
-while True:
-    with urllib.request.urlopen(f'{B}/find_functions?limit=5000&offset={off}', timeout=300) as r:
-        page = json.load(r)
-    items = page.get('functions', [])
-    funcs += items
-    if len(items) < 5000: break
-    off += 5000
-print('functions', len(funcs))
 
 addrs = [a for a, _, _ in keep]
 per_file = collections.Counter()
