@@ -6,7 +6,9 @@ use hwc_formats::script::ScriptFile;
 
 use super::cscan::{decomma, scan, scan_i32, Scanned};
 use super::enums::NavLightType;
-use super::math::Vec3;
+use hwc_math::Vector;
+
+use super::v3;
 
 /// `NAVLightStatic` (0x48 bytes).
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -14,7 +16,7 @@ pub struct NavLightStatic {
     /// +0x00. `None` when the type name was not recognised.
     pub light_type: Option<NavLightType>,
     /// +0x04. From the mex.
-    pub position: Vec3,
+    pub position: Vector,
     /// +0x10. RGBA from the mex (alpha 255).
     pub color: [u8; 4],
     /// +0x14..+0x20: `flashrateon`, `flashrateoff`, `startdelay` (seconds), `size` (metres).
@@ -98,7 +100,7 @@ pub(crate) fn apply_mex(lights: &mut [NavLightStatic], mex: &Mex, warnings: &mut
         });
         match found {
             Some((position, [r, g, b], attached)) => {
-                l.position = position;
+                l.position = v3(position);
                 l.color = [r, g, b, 255];
                 l.attached_to = attached.filter(|a| !a.is_empty());
                 l.mex_point_found = true;

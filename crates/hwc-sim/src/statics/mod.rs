@@ -13,7 +13,6 @@ pub mod enums;
 pub mod gun;
 pub mod header;
 pub mod lod;
-pub mod math;
 pub mod missile;
 pub mod navlight;
 pub mod research;
@@ -47,6 +46,11 @@ pub use teams::TeamColors;
 pub use tweaks::Tweaks;
 
 use header::StaticHeader as Header;
+
+/// A mesh-extension point (`[x, y, z]`) as a vector.
+pub(crate) fn v3(a: [f32; 3]) -> hwc_math::Vector {
+    hwc_math::Vector::new(a[0], a[1], a[2])
+}
 
 /// Choices the original makes from game state while loading.
 #[derive(Debug, Clone, PartialEq)]

@@ -6,7 +6,8 @@ use hwc_formats::script::ScriptFile;
 use super::cscan::{decomma, parse_bool, scan, scan_f32, scan_i32, Scanned};
 use super::enums::{AsteroidType, DustCloudType, NebulaType};
 use super::header::{zero_rect_info, HeaderKeys, HealthInfo, StaticHeader};
-use super::math::{cos_sin, mul, rot_about_x, rot_about_y, Mat3, Vec3};
+use hwc_math::trig::{fcos_f32, fsin_f32};
+use hwc_math::{Matrix, Vector};
 use super::Loader;
 
 /// Fields common to the resource kinds (`ResourceStaticInfo`).
@@ -49,14 +50,14 @@ pub struct AsteroidBreakInfo {
     /// Asteroid type of the fragment (raw value; normally an [`AsteroidType`] index).
     pub asteroid_type: i32,
     /// Offset from the parent.
-    pub position: Vec3,
+    pub position: Vector,
     /// Orientation: rotation about x by `rotX`, then about y by `rotY` twice. The original
     /// applies the y rotation twice and ignores `rotZ`; reproduced as is.
-    pub coord_sys: Mat3,
+    pub coord_sys: Matrix,
     /// Separation speed.
     pub speed: f32,
     /// Spin about x, y, z.
-    pub rot_speed: Vec3,
+    pub rot_speed: Vector,
 }
 
 /// An asteroid (`AsteroidStaticInfo`, 200 bytes).
@@ -164,17 +165,17 @@ fn read_break_info(script: &ScriptFile) -> Vec<AsteroidBreakInfo> {
                 let v = scan(&decomma(&e.raw), "%d %f %f %f %f %f %f %f %f %f %f");
                 let fl = |i: usize| v.get(i).and_then(Scanned::float).unwrap_or(0.0);
                 let (rx, ry) = (fl(4), fl(5));
-                let (cx, sx) = cos_sin(rx);
-                let (cy, sy) = cos_sin(ry);
-                let mut m = rot_about_x(cx, sx);
-                m = mul(&m, &rot_about_y(cy, sy));
-                m = mul(&m, &rot_about_y(cy, sy));
+                // The CRT's cos/sin compile to FCOS/FSIN on the loaded float.
+                let (cx, sx) = (fcos_f32(rx) as f32, fsin_f32(rx) as f32);
+                let (cy, sy) = (fcos_f32(ry) as f32, fsin_f32(ry) as f32);
+                let roty = Matrix::rot_about_y(cy, sy);
+                let m = Matrix::rot_about_x(cx, sx).mul_mat(&roty).mul_mat(&roty);
                 pieces.push(AsteroidBreakInfo {
                     asteroid_type: v.first().and_then(Scanned::int).unwrap_or(0),
-                    position: [fl(1), fl(2), fl(3)],
+                    position: Vector::new(fl(1), fl(2), fl(3)),
                     coord_sys: m,
                     speed: fl(7),
-                    rot_speed: [fl(8), fl(9), fl(10)],
+                    rot_speed: Vector::new(fl(8), fl(9), fl(10)),
                 });
                 if pieces.len() == n {
                     break;

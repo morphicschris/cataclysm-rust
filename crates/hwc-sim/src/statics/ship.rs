@@ -10,7 +10,9 @@ use super::dock::DockStaticInfo;
 use super::enums::{ShipClass, ShipRace, ShipType};
 use super::gun::{self, GunStatic};
 use super::header::{GuidanceInfo, HeaderKeys, HealthInfo, StaticHeader};
-use super::math::Vec3;
+use hwc_math::Vector;
+
+use super::v3;
 use super::navlight::{self, NavLightStatic};
 use super::Loader;
 
@@ -51,9 +53,9 @@ impl Default for TrailSettings {
 /// A resource-collection or repair nozzle (`Gun0` / `Rep0` mex chunk).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Nozzle {
-    pub position: Vec3,
+    pub position: Vector,
     /// Normalised direction; `None` for the repair nozzle, which has none.
-    pub normal: Option<Vec3>,
+    pub normal: Option<Vector>,
 }
 
 /// Static information for one ship type.
@@ -184,7 +186,7 @@ pub struct ShipStaticInfo {
     /// +0x2ac `cantMoveAndAttack`.
     pub cant_move_and_attack: bool,
     /// +0x2b0. Engine nozzle positions from the `EngN` mex chunks (zero when absent).
-    pub engine_nozzle_offset: [Vec3; 4],
+    pub engine_nozzle_offset: [Vector; 4],
     /// Mesh object each nozzle follows (`EngN` chunk, Cataclysm).
     pub engine_nozzle_attached_to: [Option<String>; 4],
     /// +0x308. True when the mex has an `Eng1` chunk.
@@ -255,7 +257,7 @@ pub struct ShipStaticInfo {
     /// +0x43c `UpgradeByDocking`.
     pub upgrade_by_docking: bool,
     /// +0x440 `pilotViewOffsetX/Y/Z`.
-    pub pilot_view_offset: Vec3,
+    pub pilot_view_offset: Vector,
     /// +0x44c. Health after `GLOBAL_SHIP_HEALTH_MODIFIER`, before the single-player factor.
     pub base_max_health: f32,
     /// +0x454 `RKOGetsMissiles`.
@@ -271,7 +273,7 @@ pub struct ShipStaticInfo {
 }
 
 impl ShipStaticInfo {
-    fn new(ship_type: ShipType, file: String) -> Self {
+    pub(crate) fn new(ship_type: ShipType, file: String) -> Self {
         Self {
             header: StaticHeader::default(),
             health: HealthInfo::default(),
@@ -345,7 +347,7 @@ impl ShipStaticInfo {
             cannot_force_attack_if_own_ship: false,
             is_capital_ship: false,
             cant_move_and_attack: false,
-            engine_nozzle_offset: [[0.0; 3]; 4],
+            engine_nozzle_offset: [Vector::ZERO; 4],
             engine_nozzle_attached_to: Default::default(),
             multiple_engines: false,
             scale_cap: 0.0,
@@ -384,7 +386,7 @@ impl ShipStaticInfo {
             emp_range: 0.0,
             emp_max_combine_distance: 0.0,
             upgrade_by_docking: false,
-            pilot_view_offset: [0.0; 3],
+            pilot_view_offset: Vector::ZERO,
             base_max_health: 0.0,
             rko_gets_missiles: 0,
             file,
@@ -506,9 +508,9 @@ impl ShipStaticInfo {
             "RamPushTime" => f(&mut self.ram_push_time),
             "RamWaitAfterPushTime" => f(&mut self.ram_wait_after_push_time),
             "UpgradeByDocking" => b(&mut self.upgrade_by_docking),
-            "pilotViewOffsetX" => f(&mut self.pilot_view_offset[0]),
-            "pilotViewOffsetY" => f(&mut self.pilot_view_offset[1]),
-            "pilotViewOffsetZ" => f(&mut self.pilot_view_offset[2]),
+            "pilotViewOffsetX" => f(&mut self.pilot_view_offset.x),
+            "pilotViewOffsetY" => f(&mut self.pilot_view_offset.y),
+            "pilotViewOffsetZ" => f(&mut self.pilot_view_offset.z),
             "RKOGetsMissiles" => i(&mut self.rko_gets_missiles),
             "buildTime" => {
                 if let Some(v) = scan_i32(raw) {
@@ -736,8 +738,8 @@ pub(crate) fn load_ship(ld: &mut Loader, ship_type: ShipType) -> Option<ShipStat
     s.header.precalc(&tw);
     if ship_type == ShipType::trMiningBase {
         let c = &mut s.header.coll;
-        c.coll_sphere_offset[0] += tw.mining_base_vertical_dist_hack;
-        c.coll_rect_offset[0] += tw.mining_base_vertical_dist_hack;
+        c.coll_sphere_offset.x += tw.mining_base_vertical_dist_hack;
+        c.coll_rect_offset.x += tw.mining_base_vertical_dist_hack;
     }
     s.health.precalc(&tw);
     s.guidance.precalc(&mut s.header, &tw);
@@ -748,7 +750,7 @@ pub(crate) fn load_ship(ld: &mut Loader, ship_type: ShipType) -> Option<ShipStat
             let name = format!("Eng{i}");
             if let Some(c) = mex.find("Eng", &name) {
                 if let hwc_formats::mex::ChunkData::Engine { point, attached_to } = &c.data {
-                    s.engine_nozzle_offset[i] = point.position;
+                    s.engine_nozzle_offset[i] = v3(point.position);
                     s.engine_nozzle_attached_to[i] = attached_to.clone().filter(|a| !a.is_empty());
                 }
             }
@@ -816,15 +818,15 @@ fn nozzle(mex: &hwc_formats::mex::Mex, name: &str, with_normal: bool) -> Option<
     let c = mex.find("Gun", name)?;
     let hwc_formats::mex::ChunkData::Gun(p) = &c.data else { return None };
     let normal = with_normal.then(|| {
-        let mut n = p.normal;
-        if n == [0.0; 3] {
-            n[0] = 1.0;
+        let mut n = v3(p.normal);
+        if n.is_zero() {
+            n.x = 1.0;
         } else {
-            super::math::normalize(&mut n);
+            n.normalize();
         }
         n
     });
-    Some(Nozzle { position: p.position, normal })
+    Some(Nozzle { position: v3(p.position), normal })
 }
 
 /// `aishipPrecalcInfo`: banking sine and pitch angles by class; class-less special cases use

@@ -6,7 +6,9 @@ use hwc_formats::script::ScriptFile;
 
 use super::cscan::{decomma, scan, scan_i32, Scanned};
 use super::enums::DockPointType;
-use super::math::{normalize, Vec3};
+use hwc_math::Vector;
+
+use super::v3;
 use super::tweaks::DEG_TO_RAD;
 
 /// `DockStaticPoint` (0x4c bytes).
@@ -17,9 +19,9 @@ pub struct DockStaticPoint {
     /// +0x04. Index of the point within the ship.
     pub dock_index: usize,
     /// +0x08. Position from the mex.
-    pub position: Vec3,
+    pub position: Vector,
     /// +0x14. Normalised cone direction; (1, 0, 0) when missing or zero.
-    pub cone_normal: Vec3,
+    pub cone_normal: Vector,
     /// +0x20. Cosine of (cone + edge angle) of the mex point; cos(90 degrees) when the chunk is
     /// missing.
     pub cone_angle: f32,
@@ -142,19 +144,19 @@ impl DockStaticInfo {
             match find_dock_point(mex, &p.name) {
                 Some(m) => {
                     p.mex_point_found = true;
-                    p.position = m.position;
-                    p.cone_normal = m.normal;
-                    if p.cone_normal == [0.0; 3] {
-                        p.cone_normal[0] = 1.0;
+                    p.position = v3(m.position);
+                    p.cone_normal = v3(m.normal);
+                    if p.cone_normal.is_zero() {
+                        p.cone_normal.x = 1.0;
                     } else {
-                        normalize(&mut p.cone_normal);
+                        p.cone_normal.normalize();
                     }
                     let a = |x: Option<f32>| f64::from(x.unwrap_or(f32::from_bits(UNSET_PATTERN)));
                     p.cone_angle = ((a(m.edge_angle) + a(m.cone_angle)) * f64::from(DEG_TO_RAD)).cos() as f32;
                 }
                 None => {
-                    p.position = [0.0; 3];
-                    p.cone_normal = [1.0, 0.0, 0.0];
+                    p.position = Vector::ZERO;
+                    p.cone_normal = Vector::new(1.0, 0.0, 0.0);
                     p.cone_angle = f64::from(std::f32::consts::FRAC_PI_2).cos() as f32;
                     warnings.push(format!("dock point {} not in mex", p.name));
                 }

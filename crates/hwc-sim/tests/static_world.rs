@@ -93,7 +93,7 @@ fn loads_everything() {
                 check!(problems, g.start_upgrade_level <= g.end_upgrade_level || g.end_upgrade_level == WeaponType::Projectile,
                     "{name}: gun {} upgrade levels", g.gun_index);
                 check!(problems, g.obsolete_keywords.is_empty(), "{name}: obsolete gun keywords");
-                check!(problems, (g.gun_normal.iter().map(|c| c * c).sum::<f32>() - 1.0).abs() < 1e-4, "{name}");
+                check!(problems, (g.gun_normal.mag_sq() - 1.0).abs() < 1e-4, "{name}");
                 let mut lr = g.bullet_range;
                 lr *= lr;
                 check!(problems, s.bullet_range_squared[0] >= lr * 0.999, "{name}: range squared");

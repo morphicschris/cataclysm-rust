@@ -8,7 +8,9 @@ use hwc_formats::mex::{ChunkData, Mex};
 
 use super::cscan::{parse_bool, scan_f32, scan_i32};
 use super::lod::LodInfo;
-use super::math::Vec3;
+use hwc_math::Vector;
+
+use super::v3;
 use super::tweaks::Tweaks;
 
 /// Collision geometry (`StaticCollInfo`, header offset 0x34). Cataclysm inserts
@@ -32,12 +34,12 @@ pub struct StaticCollInfo {
     /// +0x50.
     pub coll_sphere_size_sqr: f32,
     /// +0x54. Sphere centre in object coordinates.
-    pub coll_sphere_offset: Vec3,
+    pub coll_sphere_offset: Vector,
     /// +0x60. Minimum corner of the collision box (x = up, y = right, z = forward).
-    pub coll_rect_offset: Vec3,
+    pub coll_rect_offset: Vector,
     /// +0x6c (Cataclysm). Computed as `(corner + length) / 2` per axis, exactly as the original
     /// does (this is not the geometric centre unless the corner is at the origin).
-    pub coll_rect_centre: Vec3,
+    pub coll_rect_centre: Vector,
     /// +0x78.
     pub up_length: f32,
     /// +0x7c.
@@ -55,7 +57,7 @@ pub struct StaticCollInfo {
     /// +0x94 `collBoxScaleRight`.
     pub coll_box_scale_right: f32,
     /// +0x98..+0xa0 `collBoxOffsetX/Y/Z`.
-    pub coll_box_offset: Vec3,
+    pub coll_box_offset: Vector,
 }
 
 /// `StaticHeader`.
@@ -74,11 +76,11 @@ pub struct StaticHeader {
     /// +0x08 `mass`.
     pub mass: f32,
     /// +0x0c..+0x14 `momentOfInertiaX/Y/Z`.
-    pub moment_of_inertia: Vec3,
+    pub moment_of_inertia: Vector,
     /// +0x18 `1 / mass` (infinite for massless objects, as in the original).
     pub one_over_mass: f32,
     /// +0x1c..+0x24.
-    pub one_over_moment_of_inertia: Vec3,
+    pub one_over_moment_of_inertia: Vector,
     /// +0x28 `maxvelocity` (times `GLOBAL_SHIP_SPEED_MODIFIER` for guided objects).
     pub max_velocity: f32,
     /// +0x2c `maxrot`.
@@ -170,15 +172,15 @@ impl StaticHeader {
         let c = &mut self.coll;
         match key {
             "mass" => set_f32(&mut self.mass, raw),
-            "momentOfInertiaX" => set_f32(&mut self.moment_of_inertia[0], raw),
-            "momentOfInertiaY" => set_f32(&mut self.moment_of_inertia[1], raw),
-            "momentOfInertiaZ" => set_f32(&mut self.moment_of_inertia[2], raw),
+            "momentOfInertiaX" => set_f32(&mut self.moment_of_inertia.x, raw),
+            "momentOfInertiaY" => set_f32(&mut self.moment_of_inertia.y, raw),
+            "momentOfInertiaZ" => set_f32(&mut self.moment_of_inertia.z, raw),
             "collBoxScaleRight" if keys.coll_box_scale => set_f32(&mut c.coll_box_scale_right, raw),
             "collBoxScaleUp" if keys.coll_box_scale => set_f32(&mut c.coll_box_scale_up, raw),
             "collBoxScaleForward" if keys.coll_box_scale => set_f32(&mut c.coll_box_scale_forward, raw),
-            "collBoxOffsetX" => set_f32(&mut c.coll_box_offset[0], raw),
-            "collBoxOffsetY" => set_f32(&mut c.coll_box_offset[1], raw),
-            "collBoxOffsetZ" => set_f32(&mut c.coll_box_offset[2], raw),
+            "collBoxOffsetX" => set_f32(&mut c.coll_box_offset.x, raw),
+            "collBoxOffsetY" => set_f32(&mut c.coll_box_offset.y, raw),
+            "collBoxOffsetZ" => set_f32(&mut c.coll_box_offset.z, raw),
             "immobile" if keys.immobile => self.immobile = parse_bool(raw),
             "rightOfWay" if keys.right_of_way => {
                 if let Some(v) = scan_i32(raw) {
@@ -220,9 +222,8 @@ impl StaticHeader {
         };
         c.avoid_coll_sphere_pad = pad * c.avoid_coll_sphere_size;
         self.one_over_mass = 1.0 / self.mass;
-        for i in 0..3 {
-            self.one_over_moment_of_inertia[i] = 1.0 / self.moment_of_inertia[i];
-        }
+        let moi = self.moment_of_inertia;
+        self.one_over_moment_of_inertia = Vector::new(1.0 / moi.x, 1.0 / moi.y, 1.0 / moi.z);
     }
 }
 
@@ -251,9 +252,7 @@ pub(crate) fn set_collision_info(c: &mut StaticCollInfo, mex: &Mex) {
         c.coll_sphere_size = r;
         c.approx_coll_sphere_size = r;
         c.avoid_coll_sphere_size = (f64::from(max_scale) * f64::from(radius) + 3.0) as f32;
-        for ((o, ce), off) in c.coll_sphere_offset.iter_mut().zip(centre).zip(c.coll_box_offset) {
-            *o = ce + off;
-        }
+        c.coll_sphere_offset = v3(centre) + c.coll_box_offset;
         c.coll_sphere_size_sqr = c.coll_sphere_size * c.coll_sphere_size;
     }
 
@@ -267,16 +266,17 @@ pub(crate) fn set_collision_info(c: &mut StaticCollInfo, mex: &Mex) {
     });
     match rect {
         Some((corner, extent)) => {
-            c.coll_rect_offset = corner;
+            let mut offset = corner;
             let mut len = extent;
             for (axis, scale) in [(0, scale_up), (1, scale_right), (2, scale_forward)] {
                 if scale != 1.0 {
                     let old = len[axis];
                     let new = scale * old;
                     len[axis] = new;
-                    c.coll_rect_offset[axis] -= ((f64::from(new) - f64::from(old)) * 0.5) as f32;
+                    offset[axis] -= ((f64::from(new) - f64::from(old)) * 0.5) as f32;
                 }
             }
+            c.coll_rect_offset = v3(offset);
             c.up_length = len[0];
             c.right_length = len[1];
             c.forward_length = len[2];
@@ -293,9 +293,8 @@ pub(crate) fn set_collision_info(c: &mut StaticCollInfo, mex: &Mex) {
         }
         None => {
             let half = c.coll_sphere_size * 0.5;
-            for i in 0..3 {
-                c.coll_rect_offset[i] = c.coll_sphere_offset[i] - half;
-            }
+            let o = c.coll_sphere_offset;
+            c.coll_rect_offset = Vector::new(o.x - half, o.y - half, o.z - half);
             c.up_length = scale_up * c.coll_sphere_size;
             c.right_length = scale_right * c.coll_sphere_size;
             c.forward_length = scale_forward * c.coll_sphere_size;
@@ -304,15 +303,15 @@ pub(crate) fn set_collision_info(c: &mut StaticCollInfo, mex: &Mex) {
     let l = [c.up_length, c.right_length, c.forward_length].map(f64::from);
     c.diagonal_length = (l[0] * l[0] + (l[1] * l[1] + l[2] * l[2])).sqrt() as f32;
     let lens = [c.up_length, c.right_length, c.forward_length];
-    for ((centre, len), corner) in c.coll_rect_centre.iter_mut().zip(lens).zip(c.coll_rect_offset) {
-        *centre = ((f64::from(len) + f64::from(corner)) * 0.5) as f32;
-    }
+    let o = c.coll_rect_offset;
+    let mid = |len: f32, corner: f32| ((f64::from(len) + f64::from(corner)) * 0.5) as f32;
+    c.coll_rect_centre = Vector::new(mid(lens[0], o.x), mid(lens[1], o.y), mid(lens[2], o.z));
 }
 
 /// `collZeroRectInfo`: clears the box corner and lengths (used for asteroid 0, dust clouds and
 /// nebulae).
 pub(crate) fn zero_rect_info(c: &mut StaticCollInfo) {
-    c.coll_rect_offset = [0.0; 3];
+    c.coll_rect_offset = Vector::ZERO;
     c.up_length = 0.0;
     c.right_length = 0.0;
     c.forward_length = 0.0;
@@ -363,8 +362,9 @@ impl GuidanceInfo {
             *t = (speed * f64::from(*t) * f64::from(header.mass)) as f32;
         }
         header.max_velocity = (speed * f64::from(header.max_velocity)) as f32;
+        let moi = header.moment_of_inertia;
         for (i, r) in self.rot_strength.iter_mut().enumerate() {
-            *r *= header.moment_of_inertia[i / 2];
+            *r *= [moi.x, moi.y, moi.z][i / 2];
         }
     }
 }

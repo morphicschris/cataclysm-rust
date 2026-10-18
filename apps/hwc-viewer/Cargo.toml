@@ -8,6 +8,9 @@ publish.workspace = true
 [dependencies]
 hwc-formats = { path = "../../crates/hwc-formats" }
 hwc-render = { path = "../../crates/hwc-render" }
+hwc-sim = { path = "../../crates/hwc-sim" }
+hwc-math = { path = "../../crates/hwc-math" }
+glam = "0.30"
 winit = "0.30"
 pollster = "0.4"
 png = "0.18"

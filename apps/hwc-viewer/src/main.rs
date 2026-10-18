@@ -4,9 +4,14 @@
 //! hwc-viewer <cataclysm.big> [ship-name] [--background btg] [--lighting hsf]
 //!            [--screenshot out.png [--size WxH] [--angle deg] [--declination deg]
 //!             [--distance d] [--time s] [--team n|off]]
+//! hwc-viewer <cataclysm.big> --sandbox [scenario] [--interpolate] [--screenshot out.png
+//!            --ticks 0,80,240 [--select 1,2,3] [--plate x,y]] [--exit-after s]
 //! ```
 
 mod app;
+mod overlay;
+mod sandbox;
+mod sandbox_app;
 mod viewer;
 
 use std::path::Path;
@@ -32,6 +37,17 @@ options:
     --fov <deg>           vertical field of view (default from camera.script)
     --time <s>            seconds since the ship appeared (nav light phase, default 0.75)
 
+sandbox mode (--sandbox [fleet|idle|patrol]):
+  --interpolate           blend rendering between 16 Hz updates (default: show the latest)
+  --ticks <n,n,..>        with --screenshot: save one image per universe tick count
+  --select <i,i,..>       pre-select ships by creation index
+  --plate <x,y>           show the move plate as if the cursor were at pixel x,y
+  --exit-after <s>        close the window after s seconds
+  --follow                camera follows the selection (or the whole fleet)
+  sandbox controls: left click / drag select (shift adds), M then click moves the selection
+  on the plane through its centre, F cycles formations, H halts, C focuses the camera,
+  Space pauses (. steps), I toggles interpolation, right-drag rotates, wheel zooms
+
 controls:
   right-drag (or left-drag) rotate, both buttons drag or wheel zoom, +/- zoom
   Left/Right previous/next ship, PageUp/PageDown previous/next race
@@ -53,6 +69,13 @@ struct Options {
     distance: Option<f32>,
     fov: Option<f32>,
     time: f32,
+    sandbox: Option<String>,
+    interpolate: bool,
+    ticks: Vec<u32>,
+    select: Vec<usize>,
+    plate: Option<[f32; 2]>,
+    exit_after: Option<f32>,
+    follow: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<Options, String> {
@@ -100,6 +123,51 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             "--distance" => o.distance = Some(num(value()?)?),
             "--time" => o.time = num(value()?)?,
             "--fov" => o.fov = Some(num(value()?)?),
+            "--sandbox" => {
+                let next = it
+                    .clone()
+                    .next()
+                    .filter(|n| !n.starts_with("--") && hwc_sim::harness::scenario(n).is_some());
+                o.sandbox = Some(match next {
+                    Some(n) => {
+                        it.next();
+                        n.clone()
+                    }
+                    None => "fleet".into(),
+                });
+            }
+            "--interpolate" => o.interpolate = true,
+            "--follow" => o.follow = true,
+            "--ticks" => {
+                let v = value()?;
+                o.ticks = v
+                    .split(',')
+                    .map(|t| {
+                        t.trim()
+                            .parse()
+                            .map_err(|_| format!("--ticks: bad value {t:?}"))
+                    })
+                    .collect::<Result<_, _>>()?;
+            }
+            "--select" => {
+                let v = value()?;
+                o.select = v
+                    .split(',')
+                    .map(|t| {
+                        t.trim()
+                            .parse()
+                            .map_err(|_| format!("--select: bad value {t:?}"))
+                    })
+                    .collect::<Result<_, _>>()?;
+            }
+            "--plate" => {
+                let v = value()?;
+                let (x, y) = v
+                    .split_once(',')
+                    .ok_or(format!("--plate: bad value {v:?}"))?;
+                o.plate = Some([num(x.to_owned())?, num(y.to_owned())?]);
+            }
+            "--exit-after" => o.exit_after = Some(num(value()?)?),
             flag if flag.starts_with("--") => {
                 return Err(format!("unknown option {flag}\n\n{USAGE}"))
             }
@@ -108,6 +176,10 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     }
     match positional.as_slice() {
         [big] => o.big = big.clone(),
+        [big, scenario] if o.sandbox.is_some() => {
+            o.big = big.clone();
+            o.sandbox = Some(scenario.clone());
+        }
         [big, ship] => {
             o.big = big.clone();
             o.ship = Some(ship.clone());
@@ -197,9 +269,108 @@ fn save_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), Str
     w.finish().map_err(|e| e.to_string())
 }
 
+fn setup_sandbox(o: &Options) -> Result<sandbox::Sandbox, String> {
+    let name = o.sandbox.as_deref().unwrap_or("fleet");
+    let scenario = hwc_sim::harness::scenario(name).ok_or_else(|| {
+        format!(
+            "unknown scenario {name:?} (try {:?})",
+            hwc_sim::harness::SCENARIOS
+        )
+    })?;
+    let big = BigArchive::open(&o.big).map_err(|e| format!("{}: {e}", o.big))?;
+    let mut sb = sandbox::Sandbox::new(big, scenario, o.interpolate)?;
+    if let Some(bg) = &o.background {
+        sb.set_background(Some(viewer::normalize_asset(bg, "btg", "btg")));
+    }
+    for &i in &o.select {
+        let id = *sb.run.ids.get(i).ok_or(format!("--select: no ship {i}"))?;
+        sb.selection.push(id);
+    }
+    if let Some(a) = o.angle {
+        sb.camera.angle = a.to_radians();
+        sb.camera.rotate_angle(0.0);
+    }
+    if let Some(d) = o.declination {
+        sb.camera.declination = d.to_radians();
+        sb.camera.rotate_declination(0.0);
+    }
+    if let Some(d) = o.distance {
+        sb.camera.distance = d;
+    }
+    if o.follow {
+        sb.focus = if sb.selection.is_empty() {
+            sb.run.universe.ship_list.clone()
+        } else {
+            sb.selection.clone()
+        };
+        sb.update_focus();
+    }
+    if o.plate.is_some() && !sb.selection.is_empty() {
+        sb.mode = sandbox::Mode::Move;
+    }
+    Ok(sb)
+}
+
+/// Offscreen frames of the sandbox at the requested tick counts.
+fn sandbox_screenshots(mut sb: sandbox::Sandbox, o: &Options, out: &str) -> Result<(), String> {
+    let (device, queue) = headless_device()?;
+    let mut renderer = Renderer::new(&device, &queue, OFFSCREEN_FORMAT);
+    sb.prepare(&renderer);
+    let target = OffscreenTarget::new(&renderer, o.size.0, o.size.1);
+    let mut ticks = if o.ticks.is_empty() {
+        vec![0]
+    } else {
+        o.ticks.clone()
+    };
+    ticks.sort_unstable();
+    let path = Path::new(out);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("sandbox")
+        .to_owned();
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("png")
+        .to_owned();
+    for t in ticks {
+        while sb.run.universe.update_counter < t {
+            sb.step();
+        }
+        let instances = sb.instances();
+        let mut rgba = target.render(&mut renderer, &sb.scene(&instances))?;
+        drop(instances);
+        sb.overlay(o.size, o.plate, None)
+            .rasterize(&mut rgba, o.size.0, o.size.1);
+        let file = if o.ticks.len() > 1 {
+            path.with_file_name(format!("{stem}_t{t:04}.{ext}"))
+        } else {
+            path.to_path_buf()
+        };
+        save_png(&file, o.size.0, o.size.1, &rgba)?;
+        eprintln!("{} -> {}", sb.title(), file.display());
+    }
+    drop(sb);
+    drop(target);
+    drop(renderer);
+    let _ = device.poll(hwc_render::wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = parse_args(&args).and_then(|o| {
+        if o.sandbox.is_some() {
+            let sb = setup_sandbox(&o)?;
+            return match &o.screenshot {
+                Some(out) => sandbox_screenshots(sb, &o, out),
+                None => sandbox_app::run(sb, o.exit_after),
+            };
+        }
         let v = setup(&o)?;
         match &o.screenshot {
             Some(out) => screenshot(v, &o, out),

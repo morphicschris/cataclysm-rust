@@ -737,8 +737,11 @@ dependencies = [
 name = "hwc-viewer"
 version = "0.1.0"
 dependencies = [
+ "glam",
  "hwc-formats",
+ "hwc-math",
  "hwc-render",
+ "hwc-sim",
  "png",
  "pollster",
  "winit",

@@ -6,7 +6,9 @@ use hwc_formats::script::ScriptFile;
 
 use super::cscan::{scan_f32, scan_i32};
 use super::enums::{GunSize, GunType, WeaponType};
-use super::math::{normalize, Mat3, Vec3, IDENTITY};
+use hwc_math::{Matrix, Vector};
+
+use super::v3;
 use super::tweaks::{deg_to_rad, DEG_TO_RAD};
 
 /// `GunStatic` (0x11c bytes each in Cataclysm). Offsets are within the gun record.
@@ -27,17 +29,17 @@ pub struct GunStatic {
     /// +0x20. Index of the gun within the ship.
     pub gun_index: usize,
     /// +0x24. Muzzle position (object coordinates) from the `GunN` mex chunk.
-    pub position: Vec3,
+    pub position: Vector,
     /// +0x30. Normalised muzzle direction; (1, 0, 0) when the mex gives a zero vector.
-    pub gun_normal: Vec3,
+    pub gun_normal: Vector,
     /// +0x3c `MinAngle` as a cosine, or from the mex cone when neither angle is given.
     pub cos_min_angle_from_norm: f32,
     /// +0x40 `MaxAngle` as a cosine.
     pub cos_max_angle_from_norm: f32,
     /// +0x44 / +0x68. Default barrel orientation, filled from the mesh hierarchy for
     /// `GUN_NewGimble` guns (not computed here; identity).
-    pub default_gun_orientation: Mat3,
-    pub default_gun_orientation_non_concat: Mat3,
+    pub default_gun_orientation: Matrix,
+    pub default_gun_orientation_non_concat: Matrix,
     /// +0x8c..+0xa0 `minturnangle`, `maxturnangle`, `mindeclination`, `maxdeclination`,
     /// `maxanglespeed`, `maxdeclinationspeed` (radians; degrees in the file).
     pub min_turn_angle: f32,
@@ -90,7 +92,7 @@ pub struct GunStatic {
     /// +0x108 `RecoilLength`.
     pub recoil_length: f32,
     /// +0x10c `OffsetX/Y/Z`: pivot offset for slaved barrels.
-    pub offset: Vec3,
+    pub offset: Vector,
     /// +0x118 `SlaveDriver` (-1 when the gun drives itself).
     pub slave_driver: i32,
     /// Obsolete HW1 keywords present in the block (the original only prints a warning).
@@ -109,12 +111,12 @@ impl Default for GunStatic {
             damage_mult: 0.0,
             flags: 0,
             gun_index: 0,
-            position: [0.0; 3],
-            gun_normal: [0.0; 3],
+            position: Vector::ZERO,
+            gun_normal: Vector::ZERO,
             cos_min_angle_from_norm: 0.0,
             cos_max_angle_from_norm: 0.0,
-            default_gun_orientation: IDENTITY,
-            default_gun_orientation_non_concat: IDENTITY,
+            default_gun_orientation: Matrix::IDENTITY,
+            default_gun_orientation_non_concat: Matrix::IDENTITY,
             min_turn_angle: 0.0,
             max_turn_angle: 0.0,
             min_declination: 0.0,
@@ -143,7 +145,7 @@ impl Default for GunStatic {
             fire_time2: 0.0,
             barrel_length: 0.0,
             recoil_length: 0.0,
-            offset: [0.0; 3],
+            offset: Vector::ZERO,
             slave_driver: -1,
             obsolete_keywords: Vec::new(),
             mex_point_found: false,
@@ -226,9 +228,9 @@ impl GunStatic {
             "declinationtracking" => f(&mut self.declination_tracking),
             "BarrelLength" => f(&mut self.barrel_length),
             "RecoilLength" => f(&mut self.recoil_length),
-            "OffsetX" => f(&mut self.offset[0]),
-            "OffsetY" => f(&mut self.offset[1]),
-            "OffsetZ" => f(&mut self.offset[2]),
+            "OffsetX" => f(&mut self.offset.x),
+            "OffsetY" => f(&mut self.offset.y),
+            "OffsetZ" => f(&mut self.offset.z),
             "SlaveDriver" => {
                 if let Some(v) = scan_i32(raw) {
                     self.slave_driver = v;
@@ -364,12 +366,12 @@ pub(crate) fn apply_mex(guns: &mut [GunStatic], mex: &Mex) {
         });
         let Some(p) = point else { continue };
         g.mex_point_found = true;
-        g.position = p.position;
-        g.gun_normal = p.normal;
-        if g.gun_normal == [0.0; 3] {
-            g.gun_normal[0] = 1.0;
+        g.position = v3(p.position);
+        g.gun_normal = v3(p.normal);
+        if g.gun_normal.is_zero() {
+            g.gun_normal.x = 1.0;
         } else {
-            normalize(&mut g.gun_normal);
+            g.gun_normal.normalize();
         }
         if g.cos_min_angle_from_norm == 0.0 && g.cos_max_angle_from_norm == 0.0 {
             let cone = f64::from(raw_angle(p.cone_angle));

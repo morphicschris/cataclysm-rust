@@ -123,7 +123,7 @@ fn hyperspace_gate(ld: &Loader) -> DerelictStaticInfo {
     c.up_length = tw.hyperspace_gate_height;
     c.right_length = tw.hyperspace_gate_width;
     c.forward_length = 50.0;
-    c.coll_rect_offset = [tw.hyperspace_gate_height * -0.5, tw.hyperspace_gate_width * -0.5, -25.0];
+    c.coll_rect_offset = hwc_math::Vector::new(tw.hyperspace_gate_height * -0.5, tw.hyperspace_gate_width * -0.5, -25.0);
     let size = tw.hyperspace_gate_height.max(tw.hyperspace_gate_width);
     c.approx_coll_sphere_size = size;
     c.avoid_coll_sphere_size = size;
@@ -133,6 +133,6 @@ fn hyperspace_gate(ld: &Loader) -> DerelictStaticInfo {
     c.original_coll_sphere_size = size;
     c.coll_sphere_size = size;
     c.coll_sphere_size_sqr = size * size;
-    c.coll_sphere_offset = [0.0; 3];
+    c.coll_sphere_offset = hwc_math::Vector::ZERO;
     d
 }
