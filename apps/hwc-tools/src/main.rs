@@ -5,22 +5,48 @@ use std::process::ExitCode;
 
 use hwc_formats::big::BigArchive;
 
+mod cli;
+mod render;
+
 const USAGE: &str = "\
 usage: hwc-tools <command> ...
 
 commands:
   big-list <archive.big>                         list entries (name, real size, stored size, compressed)
   big-extract <archive.big> <outdir> [filter]    extract entries whose name contains [filter]
-                                                 (case-insensitive, / or \\ accepted)";
+                                                 (case-insensitive, / or \\ accepted)
+  geo-info <archive.big> <mesh.geo>              print a mesh's materials and object hierarchy
+  render-ship <archive.big> <mesh.geo> <out.png> [--team R,G,B R,G,B] [--yaw DEG] [--pitch DEG]
+              [--size WxH]                       software-render a ship mesh with its textures
+  render-background <archive.big> <file.btg> <out.png> [--yaw DEG] [--pitch DEG] [--size WxH]
+                                                 render a sky background from inside its sphere
+  render-screen <archive.big> <file.fib> <screen> <out.png>
+                                                 draw a front-end screen at 640x480
+  screen-info <archive.big> <file.fib> <screen>  list a front-end screen's atoms
+  render-hero <archive.big> <mesh.geo> <file.btg> <out.png> [--team R,G,B R,G,B] [--yaw DEG]
+              [--pitch DEG] [--sky-yaw DEG] [--sky-pitch DEG] [--size WxH]
+                                                 a ship composited over a background
+
+archive paths are names inside the .big, e.g. race_sect\\smothership\\rl0\\lod0\\smothership.geo;
+<mesh.geo> may join several meshes with '+' to draw them in one frame of reference.";
 
 type CmdResult = Result<(), Box<dyn std::error::Error>>;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+    let result = match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         ["big-list", big] => big_list(Path::new(big)),
         ["big-extract", big, out] => big_extract(Path::new(big), Path::new(out), None),
-        ["big-extract", big, out, filter] => big_extract(Path::new(big), Path::new(out), Some(filter)),
+        ["big-extract", big, out, filter] => {
+            big_extract(Path::new(big), Path::new(out), Some(filter))
+        }
+        [cmd @ ("render-ship" | "render-background" | "render-screen" | "render-hero"
+        | "geo-info" | "screen-info"), rest @ ..] => cli::run_render(cmd, rest),
         ["-h" | "--help" | "help"] => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -48,14 +74,23 @@ fn big_list(path: &Path) -> CmdResult {
     for e in big.entries() {
         let flag = if e.compressed { "lzss" } else { "-" };
         // Ignore broken pipes (e.g. piping into `head`).
-        if writeln!(out, "{}\t{}\t{}\t{}", e.name, e.real_len, e.stored_len, flag).is_err() {
+        if writeln!(
+            out,
+            "{}\t{}\t{}\t{}",
+            e.name, e.real_len, e.stored_len, flag
+        )
+        .is_err()
+        {
             return Ok(());
         }
         real += u64::from(e.real_len);
         stored += u64::from(e.stored_len);
     }
     let _ = out.flush();
-    eprintln!("{} entries, {real} bytes real, {stored} bytes stored", big.entries().len());
+    eprintln!(
+        "{} entries, {real} bytes real, {stored} bytes stored",
+        big.entries().len()
+    );
     Ok(())
 }
 
@@ -86,7 +121,10 @@ fn big_extract(path: &Path, out_dir: &Path, filter: Option<&str>) -> CmdResult {
 /// Turns an archive name into a relative path, rejecting absolute paths and `..` components.
 fn safe_relative_path(name: &str) -> Option<PathBuf> {
     let mut path = PathBuf::new();
-    for part in name.split(['\\', '/']).filter(|p| !p.is_empty() && *p != ".") {
+    for part in name
+        .split(['\\', '/'])
+        .filter(|p| !p.is_empty() && *p != ".")
+    {
         let mut comps = Path::new(part).components();
         match (comps.next(), comps.next()) {
             (Some(Component::Normal(c)), None) => path.push(c),
@@ -103,7 +141,10 @@ mod tests {
 
     #[test]
     fn paths() {
-        assert_eq!(safe_relative_path("a\\b/c.txt"), Some(PathBuf::from("a").join("b").join("c.txt")));
+        assert_eq!(
+            safe_relative_path("a\\b/c.txt"),
+            Some(PathBuf::from("a").join("b").join("c.txt"))
+        );
         assert_eq!(safe_relative_path("..\\evil"), None);
         assert_eq!(safe_relative_path("C:\\evil"), None);
         assert_eq!(safe_relative_path(""), None);

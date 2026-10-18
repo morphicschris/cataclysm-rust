@@ -24,3 +24,6 @@
 
 # Extracted original game data (never commit)
 /extracted/
+
+# Renders of original game assets (never commit)
+/screenshots/

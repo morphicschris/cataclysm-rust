@@ -7,3 +7,4 @@ publish.workspace = true
 
 [dependencies]
 hwc-formats = { path = "../../crates/hwc-formats" }
+png = "0.18"
