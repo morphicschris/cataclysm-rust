@@ -2,8 +2,11 @@
 # The bridge (bridge-mcp-ghidra) talks to this; see .mcp.json at the repo root.
 param(
     [int]$Port = 8089,
-    [string]$Heap = "6g"
+    [string]$Heap = "6g",
+    # Enables /run_script_inline and /run_ghidra_script (arbitrary Java in the server); local use only.
+    [switch]$AllowScripts
 )
+if ($AllowScripts) { $env:GHIDRA_MCP_ALLOW_SCRIPTS = "1" }
 $root   = Split-Path -Parent $PSScriptRoot
 $ghidra = Join-Path $PSScriptRoot "ghidra_12.1.4_PUBLIC"
 $jar    = Join-Path $PSScriptRoot "ghidra-mcp\build\libs\GhidraMCP-7.0.0.jar"
