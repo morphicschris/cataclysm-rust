@@ -1,0 +1,19 @@
+# Large third-party tooling and generated state
+/tools/ghidra_12.1.4_PUBLIC/
+/tools/dl/
+/tools/ghidra-mcp/
+/reference/
+/ghidra/*.rep/
+/ghidra/*.gpr
+/ghidra/*.lock*
+/ghidra/*.log
+
+# Never commit original game data or binaries
+*.big
+*.bik
+*.vce
+*.wxd
+*.exe
+*.dll
+
+/target/
