@@ -189,3 +189,10 @@ of it is committed.
 - 2026-10-18 — Stage 3: `hwc-formats` reads every data format in the game with tests over the full data
   (archive/LZSS, LIF, GEO/PEO, MEX, MAD, BTG, HFF fonts, FIB screens, HSF lighting, NIS + NIS scripts, tweak
   files and ship stats, audio banks/LUTs/music/speech incl. the transform codec). Format notes in `docs/formats/`.
+- 2026-10-18 (evening) — naming coverage by region: game code 4,018 / 5,063 functions named (79%), platform layer
+  782 / 1,255 (62%), ship modules 589 / 601 (98%). The full game-code file layout (150 source files incl. 17
+  Cataclysm-only ones such as Beast, Salvage, PopupMenu, MainOverlay, FogOfWar, Shockwave, ShipUpgrade, UserKeys)
+  and the ship module table (21 Cataclysm-only ship modules: Acolyte, ACV, Mimic, Leech, RammingFrigate, Sentinel,
+  Slipgate, Worker, NomadMoon, Dreadnought, ...) are in `recovered/naming/` (private).
+  Remaining stage 1 work: compiled missions (2,256 functions, to be turned back into mission scripts), the
+  library region (CRT, WON/Titan, STL), and the leftover unnamed functions.
