@@ -222,3 +222,14 @@ install, reads everything we need from it — `cataclysm.big`, music/speech bank
 extracted from `cataclysm.exe` — and writes it into the new game's data directory in whatever form the engine
 wants. Nothing from the original game is ever distributed with the project; tests that need game data read the
 player's install and skip when it is absent.
+
+## 8. Before anything is published
+
+The repository is local-only. Before a first public push, audit and rewrite history so it contains only our own
+code and notes:
+- commit `fd0b09b` added Bink codec tables copied from `binkw32.dll` (removed in a later commit; history must go);
+- `docs/inventory/` lists the archive's file names and HW1 string-overlap stats — keep or drop deliberately;
+- `crates/hwc-kas/src/generated/` holds the kas2c runtime function table (names and parameter types read from
+  the exe) — decide whether that interface description is acceptable, or generate it at import time;
+- format/sim docs describe layouts and offsets found by reverse engineering (normal practice; keep);
+- search for any embedded game strings, tables or asset bytes in tests and examples.
