@@ -27,3 +27,4 @@
 
 # Renders of original game assets (never commit)
 /screenshots/
+__pycache__/
