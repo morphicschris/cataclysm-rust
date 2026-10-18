@@ -205,3 +205,8 @@ of it is committed.
   CRT, JPEG load/save and the Titan socket/message layer matter to the port; the rest is dropped.
 - Determinism traps for stage 4: x87 `__ftol` returns 0x80000000 for NaN/out-of-range where Rust `as`
   saturates, and MSVC `qsort` is not stable — both need exact emulation where the simulation depends on them.
+- 2026-10-18 (night) — missions: all 17 single-player missions and the tutorial decompile to KAS-style scripts
+  (private, `recovered/missions/`), with all 2,085 mission functions renamed kas2c-style in Ghidra. KAS labels are
+  a case-insensitive ELF-style hash; 974 of 2,706 label hashes recovered exactly, 369 more as guesses. The exe
+  embeds Cataclysm's own kas2c function table (486 entries), which corrected ~200 runtime (kasf*) names.
+  Open: remaining label names, and a recompile-and-compare check of the translator.
