@@ -836,8 +836,13 @@ impl DecodedAudio {
         self.frames() as f64 / f64::from(self.sample_rate)
     }
 
-    /// Convert to 16-bit, applying the game's soft limiter above half scale.
+    /// Convert to 16-bit the way the game's output stage does: round half to even, then hard-clamp.
     pub fn to_i16(&self) -> Vec<i16> {
+        self.samples.iter().map(|&s| s.round_ties_even().clamp(-32768.0, 32767.0) as i16).collect()
+    }
+
+    /// Convert to 16-bit through [`soft_limit`] instead of a hard clamp (an enhancement, not original).
+    pub fn to_i16_soft(&self) -> Vec<i16> {
         self.samples.iter().map(|&s| soft_limit(s).round().clamp(-32768.0, 32767.0) as i16).collect()
     }
 
@@ -866,7 +871,8 @@ impl DecodedAudio {
     }
 }
 
-/// Logarithmic knee above half of full scale, as the game applies before quantising to 16 bits.
+/// Logarithmic knee above half of full scale. Not in the original mixer (which hard-clamps); offered as an
+/// optional enhancement for loud mixes.
 pub fn soft_limit(x: f32) -> f32 {
     const KNEE: f32 = 0.5 * 32767.0;
     let over = x.abs() - KNEE;

@@ -129,16 +129,17 @@ capped at 260 bytes):
 
 Synthesis: IMDCT of each frame (computed with an n/4-point complex FFT and pre/post rotation;
 unit tests check it against a direct IMDCT), sine window, 50 % overlap-add, one hop of latency.
-Output is on a 16-bit scale; the game then applies a log soft-knee above half scale before
-clamping (`soft_limit`, used by `DecodedAudio::to_i16`/`to_wav`).
+Output is on a 16-bit scale; the game's output stage (`fqWriteTBlock`) rounds half to even and
+hard-clamps to 16 bits, which `DecodedAudio::to_i16`/`to_wav` reproduce. A log soft knee
+(`soft_limit`, `to_i16_soft`) is available as an optional enhancement; the original has none.
 
-Differences from the game's synthesis, both deliberate and selectable:
+Selectable differences from the game's synthesis:
 
 * Window: the game uses `sin(pi*i/n)`, half a sample off the symmetric `sin(pi*(i+0.5)/n)`, so
   aliasing does not fully cancel. On loud low-frequency patches this leaves a click at each hop
   boundary (second-difference energy up to 8x the median at those positions, vs 3x with the
-  symmetric window and ~1.1x on normal material). `SynthesisWindow::Symmetric` is the default;
-  `SynthesisWindow::Game` reproduces the original. A unit test confirms the symmetric path
+  symmetric window and ~1.1x on normal material). `SynthesisWindow::Game` (the original) is the
+  default; `SynthesisWindow::Symmetric` is the opt-in enhancement. A unit test confirms the symmetric path
   reconstructs a forward-MDCT'd signal exactly.
 * Gain: the game scales by `8/sqrt(n)`, which is right at its 22 050 Hz mixing size but makes
   11 025 / 44 100 Hz renderings 3 dB louder / quieter. The reader uses the 22 050 Hz gain for all
@@ -146,7 +147,7 @@ Differences from the game's synthesis, both deliberate and selectable:
 
 Verified on all data: all 391 patches, sampled speech (~80 fragments) and the first 15 s of five
 music tracks decode with finite samples, lengths exactly `blocks x samples_per_block` matching the
-header sizes, peaks ~20-25k before the soft knee, no near-silent patches, plausible spectra (speech
+header sizes, peaks ~20-25k, no near-silent patches, plausible spectra (speech
 centroid ~370-1200 Hz, music L/R correlation 0.5-0.7). Release build: every bank patch (1359 s of
 audio, incl. 44.1 kHz re-renders) decodes in ~1 s; 75 s of music in 28 ms.
 
