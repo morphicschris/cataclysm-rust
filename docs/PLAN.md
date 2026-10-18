@@ -147,6 +147,13 @@ of it is committed.
 
 - Whether to build the original Relic HW1 source release with MSVC 6 / a close compiler to get the best
   BSim matches (recommended; the HomeworldSDL fork has drifted from the 1999 code).
-- Licensing: the HW1 source release is under Relic's source licence; recovered code derived from it
-  inherits those terms. Worth settling before anything is published.
+- Licensing (owner intends to publish, 2026-10-18). Constraints found, not legal advice:
+  - The HW1 source EULA (`reference/HomeworldSDL/LICENSE.txt`) allows use and modification for
+    non-commercial purposes only, formally limits distribution to RDN members (defunct; HomeworldSDL
+    publishes openly anyway), assigns ownership of modifications to Relic, and grants no trademark rights.
+  - Cataclysm's own code (Barking Dog/Sierra) has no source licence at all. Homeworld rights now sit with
+    Gearbox, which Take-Two owns; Take-Two DMCA'd the re3/reVC GTA decompilation projects in 2021.
+  - Lowest-risk publishing shape: publish the Rust engine as a reimplementation that needs the player's own
+    copy of the game, ship no game data, stay non-commercial, avoid "Homeworld" in the project name, and
+    keep the raw decompiled/recovered C tree (`recovered/`) private as a research artifact.
 - Repository hosting: `D:\Git\HWC_Modern` is not a git repo yet.
