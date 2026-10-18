@@ -153,6 +153,7 @@ of it is committed.
     publishes openly anyway), assigns ownership of modifications to Relic, and grants no trademark rights.
   - Cataclysm's own code (Barking Dog/Sierra) has no source licence at all. Homeworld rights now sit with
     Gearbox, which Take-Two owns; Take-Two DMCA'd the re3/reVC GTA decompilation projects in 2021.
+  - **Decided 2026-10-18: Rust only.** Publish the Rust engine; `recovered/` and `ghidra/` stay private.
   - Lowest-risk publishing shape: publish the Rust engine as a reimplementation that needs the player's own
     copy of the game, ship no game data, stay non-commercial, avoid "Homeworld" in the project name, and
     keep the raw decompiled/recovered C tree (`recovered/`) private as a research artifact.

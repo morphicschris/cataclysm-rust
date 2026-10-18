@@ -17,3 +17,7 @@
 *.dll
 
 /target/
+
+# Private research artifacts (publishing decision: Rust only)
+/recovered/
+/ghidra/
