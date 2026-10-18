@@ -33,14 +33,39 @@ ref.sort(key=lambda r: int(r['addr'], 16))
 cat_by_name = {r['name']: r for r in cat}
 ref_names = {r['name'] for r in ref}
 
-bounds = {}
+import bisect
+# string anchors: functions module_map.tsv placed in a single file
+string_anchors = {}
 for l in list(open(mapfile))[1:]:
     a, _, f = l.rstrip('\n').split('\t')
-    if f.startswith('gap:'):
-        lo, hi = f[4:].split('|')
-        bounds[a] = (rank.get(lo, -1), rank.get(hi, 10 ** 6))
-    else:
-        bounds[a] = (rank[f], rank[f]) if f in rank else (-1, 10 ** 6)
+    if not f.startswith('gap:') and f in rank: string_anchors[a] = f
+
+
+def compute_bounds(anchors):
+    """Keep the anchors consistent with link order (longest non-decreasing run of file ranks), then give
+    every cataclysm function the (lo, hi) file-rank window between its neighbouring anchors."""
+    pts = sorted((int(a, 16), rank[f]) for a, f in anchors.items())
+    tails, tidx, prev = [], [], [None] * len(pts)
+    for i, (_, r) in enumerate(pts):
+        k = bisect.bisect_right(tails, r)
+        if k == len(tails): tails.append(r); tidx.append(i)
+        else: tails[k] = r; tidx[k] = i
+        prev[i] = tidx[k - 1] if k else None
+    keep, i = [], (tidx[-1] if tidx else None)
+    while i is not None: keep.append(pts[i]); i = prev[i]
+    keep.reverse()
+    addrs = [a for a, _ in keep]
+    b = {}
+    for c in cat:
+        a = int(c['addr'], 16)
+        j = bisect.bisect_right(addrs, a)
+        if j and addrs[j - 1] == a:
+            b[c['addr']] = (keep[j - 1][1], keep[j - 1][1]); continue
+        b[c['addr']] = (keep[j - 1][1] if j else -1, keep[j][1] if j < len(keep) else 10 ** 6)
+    return b, len(keep)
+
+
+bounds, _ = compute_bounds(string_anchors)
 
 
 def feat(r):
@@ -100,13 +125,15 @@ for r in ref:
     f = hw1_file.get(r['name'])
     if f: ref_by_file[f].append(r)
 
+prev_n = 0
 results = {}
-for pas in range(2):
+CAP = 6_000_000
+for pas in range(12):
     results = {}
     for f, R in ref_by_file.items():
         rf = rank[f]
         C = [c for c in cat if bounds.get(c['addr'], (-1, 10 ** 6))[0] <= rf <= bounds.get(c['addr'], (-1, 10 ** 6))[1]]
-        if not C or len(C) * len(R) > 4_000_000: continue
+        if not C or len(C) * len(R) > CAP: continue
         for c, h, s in nw(C, R):
             if s >= THRESH and (c['addr'] not in results or results[c['addr']][2] < s):
                 results[c['addr']] = (c['name'], h['name'], s, f)
@@ -116,10 +143,26 @@ for pas in range(2):
         if hn not in best_for_ref or best_for_ref[hn][1] < s: best_for_ref[hn] = (a, s)
     results = {a: v for a, v in results.items() if best_for_ref[v[1]][0] == a}
     mapping = {v[0]: v[1] for v in results.values()}
-    print('pass', pas, 'matches', len(results), 'of which already named', sum(1 for v in results.values() if v[0] == v[1]))
+    anchors = dict(string_anchors)
+    anchors.update({a: v[3] for a, v in results.items() if v[2] >= 4.0})
+    bounds, nkeep = compute_bounds(anchors)
+    print('pass', pas, 'matches', len(results), 'anchors kept', nkeep, flush=True)
+    if pas and len(results) <= prev_n: break
+    prev_n = len(results)
 
 with open(out, 'w') as o:
     o.write('address\tcurrent\tproposed\tscore\tfile\n')
     for a in sorted(results):
         cn, hn, s, f = results[a]
         o.write('%s\t%s\t%s\t%.2f\t%s\n' % (a, cn, hn, s, f))
+
+if '--diag' in sys.argv:
+    got = collections.Counter(v[3] for v in results.values())
+    rows = []
+    for f, R in ref_by_file.items():
+        rf = rank[f]
+        C = [c for c in cat if bounds[c['addr']][0] <= rf <= bounds[c['addr']][1]]
+        rows.append((f, len(C), len(R), got[f]))
+    rows.sort(key=lambda r: -r[2])
+    print('skipped (too big):', sum(1 for r in rows if r[1] * r[2] > CAP), 'no candidates:', sum(1 for r in rows if not r[1]))
+    for r in rows[:40]: print('%-28s cat=%5d ref=%4d matched=%4d' % r)

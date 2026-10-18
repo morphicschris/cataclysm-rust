@@ -21,3 +21,6 @@
 # Private research artifacts (publishing decision: Rust only)
 /recovered/
 /ghidra/
+
+# Extracted original game data (never commit)
+/extracted/

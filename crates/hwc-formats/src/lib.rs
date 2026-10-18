@@ -1,0 +1,15 @@
+//! Readers for the original game's data formats. Game data is never bundled: tests that need it read
+//! the user's install from the `HWC_GAME_DIR` environment variable and skip when it is unset.
+
+pub mod big;
+pub mod lzss;
+pub mod lif;
+pub mod geo;
+pub mod script;
+
+use std::path::PathBuf;
+
+/// Location of the original game install, for integration tests and tools.
+pub fn game_dir() -> Option<PathBuf> {
+    std::env::var_os("HWC_GAME_DIR").map(PathBuf::from)
+}

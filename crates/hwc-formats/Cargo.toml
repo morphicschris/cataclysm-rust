@@ -1,0 +1,12 @@
+[package]
+name = "hwc-formats"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Readers for Homeworld: Cataclysm data formats (big archives, LZSS, textures, meshes, scripts)"
+
+[dependencies]
+thiserror = "1"
+
+[dev-dependencies]
