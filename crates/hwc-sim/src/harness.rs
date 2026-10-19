@@ -99,6 +99,7 @@ pub fn world_hash(u: &Universe) -> u64 {
         h.u32(b.target.map_or(u32::MAX, |o| u32::from(o.0)));
     }
     hash_base(&mut h, u);
+    hash_specials(&mut h, u);
     h.u32(u.randy.number_get(hwc_math::random::RAN_GAME));
     for c in u.commands.iter() {
         h.u32(c.id.0);
@@ -110,6 +111,41 @@ pub fn world_hash(u: &Universe) -> u64 {
         h.f32(c.formation.travel_vel);
     }
     h.finish()
+}
+
+/// Missiles, mines and the special-ability state (only what exists is hashed, so scenarios
+/// without them hash as before).
+fn hash_specials(h: &mut Fnv64, u: &Universe) {
+    for &mid in &u.missile_list {
+        let m = u.missiles.missile(mid);
+        h.u32(mid.0 | m.kind << 31);
+        h.u32(m.flags);
+        h.vector(m.posinfo.position);
+        h.vector(m.posinfo.velocity);
+        h.f32(m.time_lived);
+        h.f32(m.total_lifetime);
+        h.f32(m.health);
+        h.u32(m.target.map_or(u32::MAX, |t| u32::from(t.0)) | m.mine_state << 16);
+    }
+    for s in u.ships.iter() {
+        let vis = s.visible_to.iter().enumerate().fold(0u32, |a, (i, &v)| a | (u32::from(!v) << i));
+        let generic = s.disable.disabled || s.disable.slowed || s.disable.emp_count != 0 || vis != 0 || s.beast.timer != 0.0 || s.queued_attack.is_some() || s.flicker.state != 0;
+        if generic {
+            h.u32(u32::from(s.id.0));
+            h.u32(u32::from(s.disable.disabled) | u32::from(s.disable.slowed) << 1 | vis << 8);
+            h.f32(s.disable.timer.duration);
+            h.f32(s.beast.timer);
+        }
+        if s.spec != crate::ships::ShipSpec::None {
+            h.u32(u32::from(s.id.0));
+            h.bytes(format!("{:?}", s.spec).as_bytes());
+        }
+    }
+    for g in u.fog.grids.iter().flatten() {
+        for c in &g.cells {
+            h.u32(c.viewers as u32 | u32::from(c.explored) << 31);
+        }
+    }
 }
 
 /// The base layer's state: docking, clamping, cargo and construction per ship, players'
@@ -188,6 +224,14 @@ pub enum Order {
     Salvage { ships: Vec<usize>, targets: Vec<usize> },
     /// The ships dock (with a given ship, or the nearest) for a purpose (`dock::purpose`).
     Dock { ships: Vec<usize>, purpose: i32, with: Option<usize> },
+    /// The ships use their special ability (`clWrapSpecial`), on the targets if any.
+    Special { ships: Vec<usize>, targets: Vec<usize> },
+    /// A level mine (`Mine` keyword) at a position.
+    Mine { position: Vector },
+    /// Make a player a computer player (auto behaviour), with a difficulty and primary enemy.
+    ComputerPlayer { player: usize, difficulty: i32, primary_enemy: Option<usize> },
+    /// Turn on fog of war for a (local) player.
+    FogOfWar { player: usize },
 }
 
 /// A resource object to place.
@@ -312,6 +356,23 @@ impl Run {
                 let s = sel(ships);
                 let w = with.and_then(|w| sel(&[w]).first().copied());
                 crate::dock::cl_dock(&mut self.universe, &s, *purpose, w);
+            }
+            Order::Special { ships, targets } => {
+                let (s, t) = (sel(ships), sel(targets));
+                crate::ships::cl_special(&mut self.universe, &s, &t);
+            }
+            Order::Mine { position } => {
+                crate::missile::add_level_mine(&mut self.universe, *position);
+            }
+            Order::ComputerPlayer { player, difficulty, primary_enemy } => {
+                if let Some(p) = self.universe.base.players.get_mut(*player) {
+                    p.ai = true;
+                    p.ai_difficulty = *difficulty;
+                    p.ai_primary_enemy = *primary_enemy;
+                }
+            }
+            Order::FogOfWar { player } => {
+                crate::fow::create_for_local_player(&mut self.universe, *player);
             }
         }
     }

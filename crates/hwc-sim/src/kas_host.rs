@@ -814,7 +814,8 @@ impl KasRuntime for SimHost<'_> {
     fn speech_event(&mut self, _cx: &Cx, event: i32, variable: i32) {
         self.g.intel_ended = false;
         self.g.speech_end = self.g.config.speech_seconds.map(|s| st(ld(self.u.total_time_elapsed) + ld(s)));
-        let _ = variable;
+        let time = self.u.total_time_elapsed;
+        self.g.presentation.push(crate::mission::Presentation::Speech { event, variable, time });
         if !self.g.config.log_calls {
             self.log(LogKind::Flow, format!("SpeechEvent {event:#x}"));
         }
@@ -851,12 +852,15 @@ impl KasRuntime for SimHost<'_> {
     }
 
     fn location_card(&mut self, _cx: &Cx, milliseconds: i32, location: Str<'_>) {
-        let _ = (milliseconds, location);
+        let time = self.u.total_time_elapsed;
+        self.g.presentation.push(crate::mission::Presentation::LocationCard { text: location.text().unwrap_or("").to_string(), milliseconds, time });
         self.g.intel_ended = false;
     }
 
     fn music_play(&mut self, _cx: &Cx, track_num: i32) {
         self.g.music = Some(track_num);
+        let time = self.u.total_time_elapsed;
+        self.g.presentation.push(crate::mission::Presentation::Music { track: track_num, time });
     }
 
     fn open_sensors(&mut self, _cx: &Cx, flags: i32) {

@@ -222,31 +222,51 @@ pub fn heading_with_bank_pitch(
 
 /// `aitrackVelocityVectorGuidance` (0x419470): thrust towards a desired velocity.
 pub fn velocity_vector(ship: &mut Ship, stat: &ShipStaticInfo, tw: &SimTweaks, dt: f32, desired: Vector) {
-    let v = ship.posinfo.velocity;
+    let enabled = ship.dont_apply_force_ever == 0 && ship.flags & sof::CRAZY == 0;
+    let (v, cs, caps) = (ship.posinfo.velocity, ship.rotinfo.coordsys, ship.nonstat.thrust_strength);
+    velocity_vector_on(&mut ship.posinfo.force, &cs, v, stat.header.mass, &caps, enabled, tw, dt, desired);
+}
+
+/// The arithmetic of `aitrackVelocityVectorGuidance` on any object: its force accumulator,
+/// orientation, velocity, mass and thrust limits (`enabled` is the force-application gate).
+#[allow(clippy::too_many_arguments)]
+pub fn velocity_vector_on(
+    force: &mut Vector,
+    cs: &hwc_math::Matrix,
+    v: Vector,
+    mass: f32,
+    caps: &[f32; 6],
+    enabled: bool,
+    tw: &SimTweaks,
+    dt: f32,
+    desired: Vector,
+) {
     let ex = ld(desired.x) - ld(v.x);
     let ey = ld(desired.y) - ld(v.y);
     let ez = ld(desired.z) - ld(v.z);
     if lt_or_unordered((ez * ez + ey * ey) + ex * ex, ld(tw.error_velocity_squared)) {
         return;
     }
-    let cs = ship.rotinfo.coordsys;
     let d = cs.vec_mul(desired);
     let s = cs.vec_mul(v);
-    let mot = ld(st(ld(stat.header.mass) / ld(dt)));
-    let caps = ship.nonstat.thrust_strength;
-    let axis = |ship: &mut Ship, sv: f32, dv: f32, pos: u16, neg: u16| {
+    let mot = ld(st(ld(mass) / ld(dt)));
+    let mut axis = |sv: f32, dv: f32, pos: u16, neg: u16| {
         let (sv, dv) = (ld(sv), ld(dv));
         if sv < dv {
             let f = cap((dv - sv) * mot, caps[pos as usize]);
-            apply_force(ship, f, pos);
+            if enabled {
+                crate::physics::apply_force_to(force, cs, f, pos);
+            }
         } else if sv > dv {
             let f = cap((sv - dv) * mot, caps[neg as usize]);
-            apply_force(ship, f, neg);
+            if enabled {
+                crate::physics::apply_force_to(force, cs, f, neg);
+            }
         }
     };
-    axis(ship, s.x, d.x, trans::UP, trans::DOWN);
-    axis(ship, s.y, d.y, trans::RIGHT, trans::LEFT);
-    axis(ship, s.z, d.z, trans::FORWARD, trans::BACK);
+    axis(s.x, d.x, trans::UP, trans::DOWN);
+    axis(s.y, d.y, trans::RIGHT, trans::LEFT);
+    axis(s.z, d.z, trans::FORWARD, trans::BACK);
 }
 
 /// `aitrackIsZeroVelocity`.
@@ -528,7 +548,11 @@ pub fn within_distance(ship: &Ship, point: Vector, dist: f32) -> bool {
 
 /// `MoveReachedDestinationVariable` (0x419d60): within `bounds` on every axis (exclusive).
 pub fn move_reached_destination(ship: &Ship, dest: Vector, bounds: f32) -> bool {
-    let p = ship.posinfo.position;
+    reached_destination_at(ship.posinfo.position, dest, bounds)
+}
+
+/// [`move_reached_destination`] for any object's position.
+pub fn reached_destination_at(p: Vector, dest: Vector, bounds: f32) -> bool {
     let neg = ld(-bounds);
     let dx = ld(dest.x) - ld(p.x);
     let dy = ld(st(ld(dest.y) - ld(p.y)));

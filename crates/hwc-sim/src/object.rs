@@ -32,18 +32,31 @@ pub struct ShipId(pub u16);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BulletId(pub u32);
 
+/// A missile's or mine's identity (`missileID`, handed out in creation order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MissileId(pub u32);
+
 /// A reference to any object in the universe lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ObjRef {
     Ship(ShipId),
     Bullet(BulletId),
+    /// A missile or a mine (`OBJ_MissileType`).
+    Missile(MissileId),
 }
 
 impl ObjRef {
     pub fn ship(self) -> Option<ShipId> {
         match self {
             ObjRef::Ship(id) => Some(id),
-            ObjRef::Bullet(_) => None,
+            _ => None,
+        }
+    }
+
+    pub fn missile(self) -> Option<MissileId> {
+        match self {
+            ObjRef::Missile(id) => Some(id),
+            _ => None,
         }
     }
 }
@@ -168,6 +181,23 @@ pub mod sof {
     pub const DISABLED: u32 = 0x0080_0000;
     pub const CLAMPED: u32 = 0x0100_0000;
     pub const HYPERSPACE: u32 = 0x0200_0000;
+}
+
+/// `SpaceObj.flags2` (+0x18) bits.
+pub mod flags2 {
+    /// Forces the impactable update.
+    pub const FORCE_IMPACTABLE: u32 = 0x0000_0002;
+    /// Takes no damage (`ApplyDamageToTarget` returns at once).
+    pub const INVULNERABLE: u32 = 0x0000_0004;
+    /// A Mimic in disguise.
+    pub const DISGUISED: u32 = 0x0000_0008;
+    /// Disabled for good (multiplayer derelicts).
+    pub const PERMANENTLY_DISABLED: u32 = 0x0000_0010;
+    /// Mines and enemy targeting ignore the ship.
+    pub const IGNORED_BY_MINES: u32 = 0x0000_0020;
+    /// Set while a ship's references are being removed from every ship after it docked
+    /// (`univShipThink`'s dock notification).
+    pub const DOCK_NOTIFY: u32 = 0x0000_0100;
 }
 
 /// `Ship.specialFlags` (+0x1c8) bits used by the movement code.
@@ -403,6 +433,19 @@ pub struct Ship {
     pub side_step: SideStepSpec,
     /// Docking, clamping, construction, resourcing and salvage state (see [`crate::base`]).
     pub base: crate::base::ShipBase,
+    /// The type's own state (`ShipSpecifics`, +0x638 onwards), see [`crate::ships`].
+    pub spec: crate::ships::ShipSpec,
+    /// Per-player visibility of stealthy types (cloakers +0x650, Leech +0x654, cloaked
+    /// fighter +0x668, Mimics +0x6e4): `univShipVisibleToPlayer`.
+    pub visible_to: [bool; 8],
+    /// Disabling (EMP, timed disable, field slow-down), +0x528..+0x570.
+    pub disable: crate::disable::DisableState,
+    /// A target to attack at the next think (+0x4b0, set by retaliation code).
+    pub queued_attack: Option<ShipId>,
+    /// The flicker effect after an EMP on a KAS-flagged ship (+0x4d0..+0x4dc).
+    pub flicker: crate::disable::Flicker,
+    /// Beast infection of this ship (+0x4e4 and around), see [`crate::ships::beast`].
+    pub beast: crate::ships::beast::Infection,
 }
 
 impl Ship {
@@ -487,6 +530,12 @@ impl Ship {
             interceptor: InterceptorSpec::default(),
             side_step: SideStepSpec::default(),
             base: crate::base::ShipBase::default(),
+            spec: crate::ships::ShipSpec::None,
+            visible_to: [true; 8],
+            disable: crate::disable::DisableState::default(),
+            queued_attack: None,
+            flicker: crate::disable::Flicker::default(),
+            beast: crate::ships::beast::Infection::default(),
         }
     }
 

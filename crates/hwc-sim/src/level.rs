@@ -613,7 +613,15 @@ fn mission_sphere(u: &mut Universe, src: &dyn DataSource, dir: &str, field: &str
             "aisphere" => ai_sphere(&value, state),
             "resources" => resources_line(u, src, dir, &value, info, ctx, state),
             "derelict" => derelict_line(&value, info, state),
-            "meteorstorm" | "mine" | "slipgate" => state.unmodelled.push((k.clone(), value.clone())),
+            "mine" => {
+                // `scriptSetMineCB`: x, y, z and an angle (commas allowed); the mine goes at
+                // the raw coordinates.
+                let v: Vec<f32> = crate::statics::cscan::decomma(&value).split_whitespace().filter_map(crate::statics::cscan::scan_f32).collect();
+                if v.len() >= 3 {
+                    crate::missile::add_level_mine(u, Vector::new(v[0], v[1], v[2]));
+                }
+            }
+            "meteorstorm" | "slipgate" => state.unmodelled.push((k.clone(), value.clone())),
             _ => {}
         }
     }

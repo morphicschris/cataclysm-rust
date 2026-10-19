@@ -56,6 +56,12 @@ pub mod special {
 
 /// `Ship.specialFlags2` (+0x1cc) bits used by docking and building.
 pub mod special2 {
+    /// KAS flagged the ship to flicker when hit by an EMP (`+0x1cc & 0x4000`).
+    pub const KAS_EMP_FLICKER: u32 = 0x0000_4000;
+    /// Materialising: health grows while the ship appears (`+0x1cc & 0x80000`).
+    pub const MATERIALISING: u32 = 0x0008_0000;
+    /// The ship's own special is busy (sentinels, processors: `+0x1cc & 0x800000`).
+    pub const SPECIAL_BUSY: u32 = 0x0080_0000;
     /// External construction in progress: the hull is being built.
     pub const UNDER_CONSTRUCTION: u32 = 0x0000_0008;
     /// The ship is docking (no bump collisions with its dock).
@@ -256,6 +262,13 @@ pub struct PlayerBase {
     pub gun_types: [i32; 9],
     /// +0x652c: researched upgrade bits.
     pub upgrade_bits: u32,
+    /// The computer player's difficulty (aiplayer +4: 0 easy, 1 medium, 2 hard).
+    pub ai_difficulty: i32,
+    /// The computer player's bigotry (how readily it attacks players other than its primary
+    /// enemy, 0..100).
+    pub ai_bigotry: u8,
+    /// The computer player's primary enemy (aiplayer +0x20).
+    pub ai_primary_enemy: Option<usize>,
 }
 
 impl PlayerBase {
@@ -284,6 +297,9 @@ impl PlayerBase {
             max_tech_level: 0,
             gun_types: [0; 9],
             upgrade_bits: 0,
+            ai_difficulty: 0,
+            ai_bigotry: 50,
+            ai_primary_enemy: None,
         };
         // suPlayerInit: the first gun type is always available.
         p.gun_types[0] = 1;
@@ -543,6 +559,10 @@ pub struct ShipBase {
     pub mad_paused: bool,
     /// Mothership repair priorities per module slot (+0x6a0.., stride 8).
     pub repair_priority: [i32; 7],
+    /// +0x3e8: how far a materialising ship has appeared (0 = not started).
+    pub materialise_fraction: f32,
+    /// +0x5b4: the materialising stopwatch.
+    pub materialise_timer: crate::disable::Stopwatch,
     /// Salvage depot slots (carriers, processors, motherships).
     pub depot: Option<Vec<crate::salvage::DepotSlot>>,
 }
@@ -588,6 +608,8 @@ impl Default for ShipBase {
             mad_done: false,
             mad_paused: false,
             repair_priority: [0; 7],
+            materialise_fraction: 0.0,
+            materialise_timer: crate::disable::Stopwatch::default(),
             depot: None,
         }
     }
@@ -767,19 +789,27 @@ pub fn create_ship(
         crate::construction::add_factory(u, id, stat.can_build_big_ships);
     }
     crate::modules::custom_init(u, id);
+    crate::ships::init(u, id);
     crate::salvage::depot_init(u, id);
     crate::construction::add_ship_support_units(u, id);
     if opts.flags & create_flags::NOT_IN_LISTS == 0 {
-        let mut objs = crate::blobs::Objects { ships: &mut u.ships, bullets: &mut u.bullets };
+        let mut objs = crate::blobs::Objects { ships: &mut u.ships, bullets: &mut u.bullets, missiles: &mut u.missiles };
         u.blobs.add_to_nearest(ObjRef::Ship(id), &mut objs, &statics);
         u.space_obj_list.push(ObjRef::Ship(id));
         u.ship_list.push(id);
         u.impactable_list.push(ObjRef::Ship(id));
+        crate::fow::add_viewer(u, id);
     }
     if ship_type != ShipType::sMothership || !opts.no_modules || u.base.options.mission == 1 {
         crate::modules::create_mothership_modules(u, id, position, player, opts);
     }
     u.ships.ship_mut(id).base.builder = opts.builder;
+    crate::visibility::init(u, id);
+    // Multiplayer: derelict-race ships (other than crystals) are disabled for good.
+    if u.multiplayer_game && stat.ship_race == ShipRace::Derelict && !matches!(ship_type, ShipType::dCrystal0 | ShipType::dCrystal1) {
+        u.ships.ship_mut(id).flags2 |= crate::object::flags2::PERMANENTLY_DISABLED;
+        crate::disable::disable_for_time(u, id, f32::from_bits(0x6258_d727));
+    }
     Ok(id)
 }
 
@@ -825,7 +855,7 @@ pub fn remove_ship_from_outside(u: &mut Universe, id: ShipId) {
 pub fn add_ship_to_outside(u: &mut Universe, id: ShipId, near: ShipId) {
     let statics = u.statics.clone();
     let blob = u.ships.get(near).and_then(|n| n.coll_my_blob);
-    let mut objs = crate::blobs::Objects { ships: &mut u.ships, bullets: &mut u.bullets };
+    let mut objs = crate::blobs::Objects { ships: &mut u.ships, bullets: &mut u.bullets, missiles: &mut u.missiles };
     match blob {
         Some(b) if u.blobs.get(b).is_some() => u.blobs.add_to_specific(b, ObjRef::Ship(id), &mut objs, &statics),
         _ => u.blobs.add_to_nearest(ObjRef::Ship(id), &mut objs, &statics),

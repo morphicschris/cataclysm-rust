@@ -296,6 +296,11 @@ pub fn remove_ships_from_doing_stuff(u: &mut Universe, ships: &[ShipId]) {
     for &id in ships {
         aiship::row_remove_ship(u.ships.ship_mut(id));
     }
+    for &id in ships {
+        if u.ships.get(id).is_some_and(|s| s.command.is_some()) {
+            crate::ships::order_changed(u, id);
+        }
+    }
     let todo = u.commands.todo.clone();
     for cid in todo {
         for &id in ships {
@@ -939,7 +944,7 @@ pub fn cl_process(u: &mut Universe) {
                 }
             }
             order::SPECIAL => {
-                if crate::salvage::process_special_to_do(u, cid) {
+                if crate::ships::process_special_to_do(u, cid) {
                     delete_command(u, cid);
                 }
             }
@@ -1045,6 +1050,11 @@ fn clear_passive_attacking(u: &mut Universe, cid: CommandId) {
 /// `FreeLastOrder` for the orders this layer has.
 fn free_last_order(u: &mut Universe, cid: CommandId) {
     let Some(cmd) = u.commands.get(cid).cloned() else { return };
+    for &id in &cmd.selection {
+        if u.ships.get(id).is_some() {
+            crate::ships::order_changed(u, id);
+        }
+    }
     match cmd.order {
         order::MOVE => {
             for &id in &cmd.selection {
@@ -1954,6 +1964,41 @@ pub(crate) fn remove_ship_from_being_targeted(u: &mut Universe, dead: ShipId) {
             }
         }
     }
+}
+
+/// `RemoveShipFromBeingTargeted` with the cloaking flag (`shipHasJustCloaked`): commands of
+/// players that no longer see the ship drop it as a target.
+pub fn remove_invisible_target(u: &mut Universe, gone: ShipId) {
+    let todo = u.commands.todo.clone();
+    for cid in todo {
+        let Some(c) = u.commands.get(cid) else { continue };
+        let Some(&first) = c.selection.first() else { continue };
+        let Some(player) = u.ships.get(first).map(|s| s.player) else { continue };
+        if crate::visibility::visible_to_player(u, gone, player) {
+            continue;
+        }
+        let c = u.commands.get_mut(cid).expect("command");
+        if (c.attributes & attr::PASSIVE_ATTACKING != 0 || c.order == order::ATTACK) && remove_from_selection(&mut c.attack_targets, gone) {
+            let sel = c.selection.clone();
+            for id in sel {
+                let s = u.ships.ship_mut(id);
+                if s.attack.target == Some(gone) {
+                    s.attack.events |= crate::object::attack_event::ENEMY_TARGET_DIED;
+                    s.attack.target = None;
+                }
+            }
+        }
+        let c = u.commands.get_mut(cid).expect("command");
+        if c.order == order::SPECIAL {
+            remove_from_selection(&mut c.special_targets, gone);
+        }
+    }
+}
+
+/// `clMissileDied`: commands drop a dead missile from their target lists (commands never aim
+/// at missiles in this simulation).
+pub fn cl_missile_died(u: &mut Universe, missile: crate::object::MissileId) {
+    let _ = (u, missile);
 }
 
 /// `clShipDied`: a dead ship leaves its command and every target list.

@@ -21,12 +21,19 @@ const REALLY_BIG: f32 = f32::from_bits(0x6258_d727);
 /// the ship's position, in world orientation. Corner 0 is the box's minimum corner; corner 6
 /// is the opposite one.
 pub fn update_coll_rect(ship: &mut Ship, stat: &ShipStaticInfo) {
-    let c = &stat.header.coll;
-    if c.up_length == 0.0 {
-        return;
+    if let Some(rect) = coll_rect_corners(&ship.rotinfo.coordsys, &stat.header.coll) {
+        ship.coll.rect = rect;
     }
-    let m = ship.rotinfo.coordsys.m;
-    let c0 = ship.rotinfo.coordsys.mul_vec(c.coll_rect_offset);
+}
+
+/// The box corners `collUpdateCollRectangle` computes for any object with collision statics
+/// (`None` when the statics have no box).
+pub fn coll_rect_corners(coordsys: &hwc_math::Matrix, c: &crate::statics::header::StaticCollInfo) -> Option<[Vector; 8]> {
+    if c.up_length == 0.0 {
+        return None;
+    }
+    let m = coordsys.m;
+    let c0 = coordsys.mul_vec(c.coll_rect_offset);
     let (up, right, fwd) = (ld(c.up_length), ld(c.right_length), ld(c.forward_length));
     // Up along column 0 (x stays in a register), right along column 1 (x in a register),
     // forward along column 2 (all stored).
@@ -48,7 +55,7 @@ pub fn update_coll_rect(ship: &mut Ship, stat: &ShipStaticInfo) {
     let rect5 = Vector::new(st(p1x + a0), st(ld(rect1.y) + ld(u1)), st(ld(rect1.z) + ld(u2)));
     let rect6 = Vector::new(st(ld(rect2.x) + a0), st(ld(rect2.y) + ld(u1)), st(ld(rect2.z) + ld(u2)));
     let rect7 = Vector::new(st(ld(rect3.x) + a0), st(ld(rect3.y) + ld(u1)), st(ld(rect3.z) + ld(u2)));
-    ship.coll.rect = [c0, rect1, rect2, rect3, rect4, rect5, rect6, rect7];
+    Some([c0, rect1, rect2, rect3, rect4, rect5, rect6, rect7])
 }
 
 /// `collCheckRectLine` (0x4359e0): where the ray `point + t * dir` (`dir` normalised) enters
@@ -56,7 +63,18 @@ pub fn update_coll_rect(ship: &mut Ship, stat: &ShipStaticInfo) {
 /// -1 when the ray misses it within `length`; `side` is the face (`TRANS_*` numbering: 0/1 up
 /// and down, 2/3 right and left, 4/5 forward and back) or -1.
 pub fn rect_line(ship: &Ship, stat: &ShipStaticInfo, point: Vector, dir: Vector, length: f32) -> (f32, i32) {
-    let c = &stat.header.coll;
+    rect_line_at(&stat.header.coll, ship.posinfo.position, &ship.rotinfo.coordsys, point, dir, length)
+}
+
+/// [`rect_line`] for any object: its collision statics, position and orientation.
+pub fn rect_line_at(
+    c: &crate::statics::header::StaticCollInfo,
+    position: Vector,
+    coordsys: &hwc_math::Matrix,
+    point: Vector,
+    dir: Vector,
+    length: f32,
+) -> (f32, i32) {
     if c.up_length == 0.0 {
         return (-1.0, -1);
     }
@@ -66,9 +84,9 @@ pub fn rect_line(ship: &Ship, stat: &ShipStaticInfo, point: Vector, dir: Vector,
         st(ld(lo[1]) + ld(c.right_length)),
         st(ld(lo[2]) + ld(c.forward_length)),
     ];
-    let p = ship.posinfo.position;
+    let p = position;
     let d = Vector::new(st(ld(point.x) - ld(p.x)), st(ld(point.y) - ld(p.y)), st(ld(point.z) - ld(p.z)));
-    let lp = ship.rotinfo.coordsys.vec_mul(d);
+    let lp = coordsys.vec_mul(d);
     let lp = [lp.x, lp.y, lp.z];
     let mut side = [0i32; 3];
     let mut plane = [0f32; 3];
@@ -89,7 +107,7 @@ pub fn rect_line(ship: &Ship, stat: &ShipStaticInfo, point: Vector, dir: Vector,
     if inside {
         return (0.0, -1);
     }
-    let ld_ = ship.rotinfo.coordsys.vec_mul(dir);
+    let ld_ = coordsys.vec_mul(dir);
     let ldir = [ld_.x, ld_.y, ld_.z];
     let mut t = [0f32; 3];
     for i in 0..3 {
@@ -251,6 +269,7 @@ fn bullet_sphere_test(t: &Ship, tstat: &ShipStaticInfo, b: &Bullet) -> bool {
 pub fn check_all_bullet_collisions(u: &mut Universe) {
     for bi in 0..u.blobs.blobs.len() {
         check_bullets_in_blob(u, bi);
+        crate::missile::check_blob(u, bi);
     }
 }
 

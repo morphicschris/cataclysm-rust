@@ -124,7 +124,7 @@ pub fn create(u: &mut Universe, id: ShipId, gi: usize, source: Option<ShipId>, t
     let _ = speed;
     let bid = u.bullets.insert(bullet);
     let target_blob = target.and_then(|t| u.ships.get(t)).and_then(|t| t.coll_my_blob);
-    let mut objs = Objects { ships: &mut u.ships, bullets: &mut u.bullets };
+    let mut objs = Objects { ships: &mut u.ships, bullets: &mut u.bullets, missiles: &mut u.missiles };
     match target_blob {
         Some(b) => u.blobs.add_to_specific(b, ObjRef::Bullet(bid), &mut objs, &statics),
         None => u.blobs.add_to_nearest(ObjRef::Bullet(bid), &mut objs, &statics),

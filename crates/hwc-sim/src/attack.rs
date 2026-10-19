@@ -75,7 +75,10 @@ pub fn ship_attack(u: &mut Universe, id: ShipId, target: ShipId) {
         }
         AttackKind::SideStep => attack_side_step(u, id, target, &c),
         AttackKind::MultiBeam => multibeam_attack(u, id, target, &c),
-        AttackKind::Unsupported | AttackKind::None => {}
+        AttackKind::Unsupported => {
+            crate::ships::attack(u, id, target);
+        }
+        AttackKind::None => {}
     }
 }
 
@@ -98,7 +101,10 @@ pub fn ship_attack_passive(u: &mut Universe, id: ShipId, target: ShipId, rotate:
             }
         }
         PassiveKind::MultiBeam => ship_fire(u, id, target),
-        PassiveKind::Unsupported | PassiveKind::None => {}
+        PassiveKind::Unsupported => {
+            crate::ships::attack_passive(u, id, target);
+        }
+        PassiveKind::None => {}
     }
 }
 
@@ -115,7 +121,10 @@ pub fn ship_fire(u: &mut Universe, id: ShipId, target: ShipId) {
         FireKind::Default => gun::default_fire(u, id, target),
         FireKind::GenericCapital => generic_capital_fire(u, id, target),
         FireKind::MultiBeam => multibeam_fire(u, id, target, &c),
-        FireKind::Unsupported | FireKind::None => {}
+        FireKind::Unsupported => {
+            crate::ships::fire(u, id, target);
+        }
+        FireKind::None => {}
     }
 }
 
@@ -126,10 +135,12 @@ fn generic_capital_fire(u: &mut Universe, id: ShipId, target: ShipId) {
         if !gun::ready(u, id, gi) {
             continue;
         }
-        if matches!(u.ships.ship(id).guns[gi].level, 0 | 1 | 2 | 7) {
+        let level = u.ships.ship(id).guns[gi].level;
+        if matches!(level, 0 | 1 | 2 | 7) {
             gun::shoot(u, id, gi, Some(target));
+        } else if matches!(level, 5 | 6) && u.ships.ship(id).guns[gi].num_missiles > 0 {
+            gun::shoot_missile(u, id, gi, Some(target));
         }
-        // (Missile launchers: not modelled.)
     }
 }
 

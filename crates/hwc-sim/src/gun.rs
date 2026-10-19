@@ -476,7 +476,8 @@ pub fn shoot_guns_at_target(u: &mut Universe, id: ShipId, target: ShipId, range:
                 let dot = (ld(h.x) * ld(trajectory.x) + ld(h.y) * ld(trajectory.y)) + ld(h.z) * ld(trajectory.z);
                 let acolyte = gs.gun_type == Some(GunType::MissileLauncher) && is_acolyte(s.ship_type);
                 if s.guns[gi].num_missiles > 0 && ld(trigger) <= dot && !acolyte {
-                    // (Missiles and mines are not modelled yet; the launcher holds fire.)
+                    shoot_missile(u, id, gi, Some(target));
+                    shot = true;
                 }
             }
             Some(GunType::Fixed | GunType::Gimble | GunType::NewGimble) => {}
@@ -546,9 +547,20 @@ pub fn default_fire(u: &mut Universe, id: ShipId, target: ShipId) {
             Some(GunType::Fixed) | Some(GunType::Gimble) | Some(GunType::NewGimble) => {
                 shoot(u, id, gi, Some(target));
             }
-            _ => {}
+            Some(GunType::MissileLauncher) | Some(GunType::MineLauncher) => {
+                if u.ships.ship(id).guns[gi].num_missiles > 0 {
+                    shoot_missile(u, id, gi, Some(target));
+                }
+            }
+            None => {}
         }
     }
+}
+
+/// `missileShoot` for a launcher (a wall-laying minelayer drops its mine into the wall).
+pub fn shoot_missile(u: &mut Universe, id: ShipId, gi: usize, target: Option<ShipId>) -> bool {
+    let forced = crate::ships::minelayer::forced_drop(u, id);
+    crate::missile::shoot(u, id, gi, target, forced).is_some()
 }
 
 #[cfg(test)]

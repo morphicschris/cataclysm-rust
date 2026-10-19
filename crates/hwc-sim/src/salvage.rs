@@ -746,3 +746,14 @@ pub fn depot_died(u: &mut Universe, id: ShipId) {
 pub fn class_limit(u: &Universe, c: ShipClass) -> f32 {
     u.tweaks.base.salvage_damage_limit[c.index()]
 }
+
+/// Whether the ship is held in a salvage depot (ship +0x3ec): it neither fires nor can be
+/// fired at with missiles.
+pub fn is_in_depot(u: &Universe, id: ShipId) -> bool {
+    u.ships.iter().any(|d| d.base.depot.as_ref().is_some_and(|slots| slots.iter().any(|s| s.ship == Some(id))))
+}
+
+/// The salvagers' special-target routine for the ship-module dispatch.
+pub fn special_target_pub(u: &mut Universe, ship: ShipId, cid: CommandId, targets: &[ShipId]) -> bool {
+    special_target(u, ship, cid, targets)
+}

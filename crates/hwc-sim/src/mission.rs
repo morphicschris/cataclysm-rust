@@ -274,6 +274,9 @@ pub struct CameraState {
 /// Game-side state of a running mission (everything but the universe and the interpreter).
 #[derive(Debug, Clone)]
 pub struct Game {
+    /// Presentation calls KAS made (speech, location cards, music), in order, for the game's
+    /// front end to play; the simulation never reads them (drain it after each step).
+    pub presentation: Vec<Presentation>,
     pub config: MissionConfig,
     pub sp_tweaks: SpTweaks,
     pub level: LevelState,
@@ -506,6 +509,7 @@ impl MissionRun {
             sensors_look_at: Vector::ZERO,
             wide_screen: false,
             camera: CameraState::default(),
+            presentation: Vec::new(),
             music: None,
             techs: Vec::new(),
             research_allowed: Vec::new(),
@@ -956,6 +960,17 @@ impl DataSource for GameDataSource<'_> {
     fn exists(&self, path: &str) -> bool {
         self.0.contains(path)
     }
+}
+
+/// A presentation call made by KAS, recorded as data.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Presentation {
+    /// `SpeechEvent(event, variable)` at game time `time`.
+    Speech { event: i32, variable: i32, time: f32 },
+    /// `LocationCard(milliseconds, text)`.
+    LocationCard { text: String, milliseconds: i32, time: f32 },
+    /// `MusicPlay(track)`.
+    Music { track: i32, time: f32 },
 }
 
 /// The KAS script of a mission (`"Mission01"`, `"Tutorial1"`): the imported `.kasb` of a data

@@ -915,6 +915,8 @@ mod tests {
                 max_small_ship_size: 0.0,
                 max_big_ship_size: 0.0,
                 bullets: Vec::new(),
+                missiles: Vec::new(),
+                mines: Vec::new(),
             });
             blob.big_targets = vec![idb];
             blob.small_targets = Vec::new();

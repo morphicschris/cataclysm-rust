@@ -32,6 +32,8 @@ Ghidra p-code emulation of the original functions on constructed inputs, compare
 | `dockGetDockPointType` | 0x45f310 | 672 (every class and purpose, sample types, hosts with and without small-in points and the slipgate flag, single-player mission 16) |
 | `dockReserveDockPoint` | 0x45fc00 | 10 (nearest free point among 2..7 with reservations, rotated hosts; point and cone distance) |
 | `cmBuildTaskFunction` | 0x450160 | 6 jobs over 5..25 frames each (multiplayer and single-player cost shift, cost divisors 1 and 2, external hulls: fraction, cost so far, RUs, hull health and `1 - left/total` progress) |
+| `aishipGuideMissile` (+ `aishipFlyMissileToTarget`, `vecCapMinMaxVector`, `aitrackVelocityVectorGuidance`) | 0x415e70 | 12 (force, orientation, rotation, life counter, result; leading and non-leading paths) |
+| `ShipApplyEMP` then `ShipDisableUpdate` | 0x5ae410, 0x5ae850 | 10 (flags, shock, charge count, disable stopwatch, velocity damping, re-enable; random spin and leech/ram/salvage helpers stubbed) |
 | `univBulletCollidedWithTarget` + `ApplyDamageToTarget` | 0x541ac0, 0x5412f0 | 12 hits (knock-back force, spin, health, chatter bits; weapon/armour table, side modifiers, friendly fire, heavy-defender armour piercing). Speech, alliance, crystal and dock helpers were stubbed with `RET` in the emulator and the rock ranges collapsed so the random numbers do not matter. |
 
 The emulator needs the `fmathSqrtDouble` table (built by the game at start-up) written to
@@ -214,7 +216,11 @@ two Acolytes linking into an ACV, two workers salvaging a damaged derelict ion a
 - Only the parts listed in the table above are verified bit for bit against the binary; the
   AI routines follow the decompiled code with the original operation order.
 
-- Missiles, derelicts and effects have lists but no objects. No sensors.
+- Derelicts and effects have lists but no objects. Missiles do not collide with resources or
+  derelicts (they are not blob objects here); the mesh ray refinement of missile hits is skipped.
+- Fog of war: the discovery message interval uses game time instead of real time; the red/blue
+  message distinction (`FUN_00525100`) is not made.
+- Auto behaviour: the periodic "go and get upgraded" decision is not modelled.
 - Not modelled in the fly-to code: salvager, clamped, cloaked and slaved-ship exceptions; the
   Sentinel force field; the docking dock-point lists; military parades.
 - Formations: sphere and the Sentinel force-field walls are not implemented; per-type formation
@@ -228,6 +234,77 @@ two Acolytes linking into an ACV, two workers salvaging a damaged derelict ion a
 - The Beast mothership damage modifier and the Ramming Frigate ram bonus/push state are 0.
 - Blob itemising for the sensors manager and the attack flags of blobs are not computed.
 - The render list is a simple distance filter (`Universe::update_render_list`).
+
+## Missiles and mines
+
+Code: `missile.rs`. A missile and a mine are one object kind (`ObjRef::Missile`, `Universe::missiles`,
+`missile_list`), kept in `SpaceObjList`, `ImpactableList` and the blobs (flying missiles join their
+target's blob after each rebuild like bullets; mines get blobs of their own with mass 0.1; each blob
+lists its missiles and mines).
+
+* Launching (`missileShoot` 0x4860f0) from missile and mine launchers in `DefaultShipFire`,
+  `GenericCapitalFire` and `gunShootGunsAtTarget` (launchers within the heading cone; Acolytes excluded):
+  line-of-sight check for missiles, targets held in a salvage depot are skipped, one missile used,
+  muzzle + barrel position, gun speed added to the ship's velocity, damage = weapon table (by the
+  target's armour at launch) x veterancy x `DamageMult` (x KAS modifier), lifetime = `BulletLifeTime`;
+  mines leave sideways (two launchers point opposite ways); wall mines take the minelayer's forced
+  ranges, damage and lifetime (`ships::minelayer::forced_drop`).
+* Guidance per frame (outside the universe pause, after bullets): `aishipGuideMissile` (fly at the
+  target's collision centre at full speed, leading it inside 250 m above 200 m/s; drop a cloaked target;
+  near small ships a chance per tactics, plus dodging/manoeuvring bonuses, to lose the target
+  (`tweak*` entries of Tweak.script); point along the velocity), `aishipGuideMine` (states: leave the
+  layer, drift to a stop with `MINE_STOP_FRICTION`, acquire the heaviest visible enemy in
+  `MINE_RANGESQR` every 16 frames, chase it (moving into its blob) while it stays within the forced
+  range, is not cloaked or disabled and not faster while running away, fly to the wall point),
+  `physUpdateObjPosVelMissile`.
+* Collisions per blob after its bullets: missiles then mines against the blob's small and big ships
+  (binary search on blob distance, owner skipped, sentinel fields, sphere then box), missiles against
+  mines (`mine_max_diameter`). A hit pushes and spins the target with the missile's mass, applies side,
+  friendly-fire and "under attack" rules, then `ApplyDamageToTarget` (missiles and mines take damage
+  too). Missiles that lose their target (target died) live at most 5 more seconds.
+* Level mines (`Mine` keyword, `scriptSetMineCB`): derelict-race mine statics, player 1 in single
+  player (7 otherwise), 5000 damage, endless life, at the raw coordinates (the original computes a
+  sphere-relative position but does not use it).
+* Removal at the end of the update (`DeleteDeadMissile`): blobs, formations, lists; events
+  `SpecialEvent::MissileFired/MissileHit/MissileDied` for presentation (`Missile::trail_position` is the
+  trail head).
+
+## Ship modules (`CustShipHeader`)
+
+Code: `ships/` (dispatch in `ships/mod.rs`, one file per module). `module_of(type)` gives the header;
+`Ship::spec` (`ShipSpec`) holds the per-ship state, `TypeStatics` (built with the combat statics from the
+ship files' custom keywords) the per-type statics. Slots called: init (`univCreateShip`), close and died
+(`univDeleteDeadShip`), fire / passive attack / attack (types marked `Unsupported` in
+`combat_statics::routines`), special activate/target (`clSpecial` = `ships::cl_special`,
+`processSpecialToDo`), order changed (`FreeLastOrder`, `RemoveShipsFromDoingStuff`), housekeeping
+(after every ship moved), remove ship references (every live ship when one is deleted, also for
+docking ships via the `univShipThink` dock notification), target/effect and cascade references,
+cancel, formation changed, plus `emp_shocked`.
+
+Generic Cataclysm machinery the modules share:
+
+* `disable.rs`: `ShipApplyEMP` (charges x `TimeShockedByEMP`, extends a running disable, Beast-infected
+  ships immune, KAS-flagged ships flicker), `ShipDisableForTime`, `ShipApplyFieldSlowdown`,
+  `ShipReEnable`, `ShipDisableUpdate` (EMP-shocked ships damped x0.9 per frame), stopwatches, the
+  `*CRAZY*` careen spin.
+* `cloak.rs`: `cloakInit/Toggle/IsCloaked/Update/GetFadeLevel/GetPowerFraction` (power 0..1000,
+  recharge/drain per frame, 20-frame fades after a random delay from the effects stream; cloaking ends
+  attack targets of players who cannot see the ship (`shipHasJustCloaked`).
+* `visibility.rs`: per-player visibility of Mimics/MCV/P1 standard corvette, the Leech and the
+  cloakers (`univShipVisibleToPlayer`, `SetVisibleToPlayer`, `InitVisibility`, `UpdateVisibility` every
+  16 frames: allies see, detectors with the sensors upgrade see within their vision range;
+  `suGetShipVisionRange` with the x1.3 sensors technology).
+* `fow.rs`: the fog-of-war grid (10 km cells over the world, viewer counts and explored flags), only
+  for the local player as in the original (`levelFogOfWarCreate`, `harness::Order::FogOfWar`); ships
+  are viewers (components and swarmers excepted), moved by the physics step; discovering an enemy in
+  unexplored space gives `SpecialEvent::EnemyDiscovered` (at most every 10 s); `fowShipVisibleToPlayer`.
+* `autobehaviour.rs`: `univShipAutoBehaviourUpdate` (materialising ships; computer players' ships use
+  specials against enemies in vision range by difficulty, and in multiplayer pick fights with the
+  primary enemy / attackers / anyone by bigotry).
+* `think.rs`: `univShipThink` in the original order (dock notification, Beast infection check, queued
+  attack, sentinel field timer, EMP flicker, regeneration, bursts, upgrade end, `ShipDisableUpdate`,
+  visibility, auto behaviour).
+* `present.rs`: render flags (cloak, infection, EMP, field) for the viewer.
 
 ## Determinism harness
 

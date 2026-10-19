@@ -18,7 +18,7 @@ use crate::blobs::{BlobList, Objects};
 use crate::combat_statics::CombatStatics;
 use crate::command::{self, CommandLayer};
 use crate::formation;
-use crate::object::{sof, BulletId, BulletTable, ObjRef, Player, Ship, ShipId, ShipTable};
+use crate::object::{sof, BulletId, BulletTable, MissileId, ObjRef, Player, Ship, ShipId, ShipTable};
 use crate::physics::{self, PhysContext};
 use crate::statics::{ShipRace, ShipType, StaticWorld};
 use crate::tactics::MaxVelocityContext;
@@ -56,11 +56,33 @@ pub enum SimEvent {
     /// A gun fired a bullet or beam.
     GunFired { ship: ShipId, gun: usize, bullet: BulletId },
     /// A bullet or beam hit a ship at `position` (a beam hits every frame it touches).
-    BulletHit { bullet: BulletId, ship: ShipId, position: Vector, beam: bool },
+    BulletHit { bullet: BulletId, ship: ShipId, position: Vector, beam: bool, bullet_type: u32 },
     /// A ship died (its explosion; it is removed at the end of the update).
-    ShipDied { ship: ShipId, ship_type: ShipType, position: Vector, radius: f32 },
+    ShipDied { ship: ShipId, ship_type: ShipType, position: Vector, radius: f32, explosion_type: Option<String> },
     /// A ship gained a veterancy level.
     Upgraded { ship: ShipId, level: u32 },
+
+}
+
+/// Events of the missile, special-ability, cloak and fog code (kept apart from [`SimEvent`] so
+/// presentation code that matches every `SimEvent` keeps compiling); cleared every update.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpecialEvent {
+    /// A launcher fired a missile or dropped a mine.
+    MissileFired { ship: ShipId, gun: usize, missile: MissileId },
+    /// A missile hit a ship or a mine at `position`.
+    MissileHit { missile: MissileId, target: ObjRef, position: Vector },
+    /// A missile or mine is gone (`exploded`: it blew up rather than running out of life).
+    MissileDied { missile: MissileId, position: Vector, exploded: bool, mine: bool },
+    /// A cloaker finished cloaking or decloaking.
+    Cloaked { ship: ShipId },
+    Decloaked { ship: ShipId },
+    /// A stealthy ship became visible to a player ("enemy ship sighted").
+    EnemyShipSighted { ship: ShipId, player: usize },
+    /// The local player's ship `by` discovered an enemy in unexplored space.
+    EnemyDiscovered { by: ShipId, ship: ShipId },
+    /// A ship-module event for presentation (`ships::Effect`: EMP blasts, field hits, beams...).
+    Special { ship: ShipId, effect: crate::ships::Effect },
 }
 
 /// Game-mode work that runs inside [`Universe::update_with`] (`singlePlayerGameUpdate` and the
@@ -98,8 +120,18 @@ pub struct Universe {
     pub bullet_list: Vec<BulletId>,
     /// `universe.ImpactableList`.
     pub impactable_list: Vec<ObjRef>,
-    /// `universe.MissileList`, `ResourceList`, `DerelictList` (no such objects yet).
-    pub missile_list: Vec<ObjRef>,
+    /// The missiles and mines.
+    pub missiles: crate::missile::MissileTable,
+    /// `universe.MissileList`.
+    pub missile_list: Vec<MissileId>,
+    /// `universe.missileNumber`: the next missile's number.
+    pub missile_number: u16,
+    /// Slots handed out in the missile table.
+    pub missile_slots: u32,
+    /// Missiles that died this update (`deleteMissiles`), with the bullet type of what killed
+    /// them (-1: no explosion).
+    pub dead_missiles: Vec<(MissileId, i32)>,
+    /// `universe.ResourceList`, `DerelictList` (resources live in the base layer).
     pub resource_list: Vec<ObjRef>,
     pub derelict_list: Vec<ObjRef>,
     /// `universe.RenderList`, rebuilt by [`Universe::update_render_list`].
@@ -128,11 +160,21 @@ pub struct Universe {
     pub temp_disable_avoiding: bool,
     /// What happened during the last update.
     pub events: Vec<SimEvent>,
+    /// What the missiles and ship modules did during the last update.
+    pub special_events: Vec<SpecialEvent>,
     /// KAS `PauseUniverse` (0x8f1fc0): orders and ship movement stop, time goes on.
     pub universe_paused: bool,
     /// The base-building layer: players' resources, research and construction, resources,
     /// factories (see [`crate::base`]).
     pub base: crate::base::BaseState,
+    /// Fog of war (only the local player has a grid; empty when off).
+    pub fog: crate::fow::FogOfWar,
+    /// A networked multiplayer game (`multiPlayerGame`, 0x8e9b44).
+    pub multiplayer_game: bool,
+    /// The KAS variable `G_NaggarokEMP` (EMP hits a flagged ship needs), when a mission set it.
+    pub kas_naggarok_emp: Option<i32>,
+    /// The mine formations of minelayers (see [`crate::ships::minelayer`]).
+    pub mine_formations: Vec<crate::ships::minelayer::MineFormation>,
 }
 
 impl Universe {
@@ -149,7 +191,11 @@ impl Universe {
             ship_list: Vec::new(),
             bullet_list: Vec::new(),
             impactable_list: Vec::new(),
+            missiles: Default::default(),
             missile_list: Vec::new(),
+            missile_number: 0,
+            missile_slots: 0,
+            dead_missiles: Vec::new(),
             resource_list: Vec::new(),
             derelict_list: Vec::new(),
             render_list: Vec::new(),
@@ -167,8 +213,13 @@ impl Universe {
             sp_difficulty: 1,
             temp_disable_avoiding: false,
             events: Vec::new(),
+            special_events: Vec::new(),
             universe_paused: false,
             base: crate::base::BaseState::new(players),
+            fog: Default::default(),
+            multiplayer_game: false,
+            kas_naggarok_emp: None,
+            mine_formations: Vec::new(),
         };
         crate::base::init(&mut u);
         u
@@ -203,6 +254,7 @@ impl Universe {
     pub fn update_with(&mut self, hooks: &mut dyn UpdateHooks) {
         let dt = UNIVERSE_UPDATE_PERIOD;
         self.events.clear();
+        self.special_events.clear();
         self.total_time_elapsed = st(ld(self.total_time_elapsed) + ld(dt));
         self.update_counter = self.update_counter.wrapping_add(1);
         self.phys_time_elapsed = dt;
@@ -213,13 +265,14 @@ impl Universe {
         let statics = self.statics.clone();
         let props = self.tweaks.blob;
         {
-            let mut objs = Objects { ships: &mut self.ships, bullets: &mut self.bullets };
+            let mut objs = Objects { ships: &mut self.ships, bullets: &mut self.bullets, missiles: &mut self.missiles };
             if self.update_counter == 1
                 || (self.tweaks.refresh_collblob_rate & self.update_counter) == self.tweaks.refresh_collblob_frame
             {
                 let order = self.space_obj_list.clone();
                 let bullets = self.bullet_list.clone();
-                self.blobs.rebuild(&order, &bullets, &mut objs, &statics, &props);
+                let missiles = self.missile_list.clone();
+                self.blobs.rebuild(&order, &bullets, &missiles, &mut objs, &statics, &props);
             } else {
                 self.blobs.update_objects(&mut objs, &statics);
             }
@@ -234,9 +287,11 @@ impl Universe {
             command::cl_process(self);
         }
         // (clPostProcess handles guard/protect retaliation; not modelled.)
+        crate::ships::minelayer::update_mine_wall_formations(self);
         crate::collision::check_all_bump_collisions(self);
         crate::bullet::update_all(self);
-        // (Missiles and derelicts would move here.)
+        crate::missile::update_all(self);
+        // (Derelicts would move here.)
         if !self.universe_paused {
             crate::resource::update_all_pos_vel(self);
             self.update_all_pos_vel_ships();
@@ -244,6 +299,7 @@ impl Universe {
         // (Effects update here.)
         crate::damage::delete_dead_ships(self);
         crate::resource::delete_dead_resources(self);
+        crate::missile::delete_dead(self);
         // (Resource regrowth and bounties follow.)
     }
 
@@ -278,7 +334,12 @@ impl Universe {
                 max_vel: self.max_velocity_context(ship),
             };
             let tw = &self.tweaks;
+            let old = ship.posinfo.position;
             physics::update_ship(self.ships.ship_mut(id), stat, tw, &ctx);
+            if !self.fog.grids.is_empty() {
+                let new = self.ships.ship(id).posinfo.position;
+                crate::fow::move_viewer(self, id, old, new);
+            }
             self.housekeep(id);
         }
         for host in hosts {
@@ -293,7 +354,7 @@ impl Universe {
         }
         for &id in &list {
             if self.ships.get(id).is_some_and(|s| s.flags & sof::DEAD == 0) {
-                crate::think::housekeep(self, id);
+                crate::ships::housekeep(self, id);
             }
         }
     }
@@ -424,8 +485,11 @@ impl Universe {
         // (Damage effects and engine trails are updated here.)
     }
 
-    /// Per-ship upkeep after all ships moved (0x53f850): the end of a burst.
+    /// Per-ship upkeep after all ships moved (`univShipThink` 0x53f850).
     fn upkeep(&mut self, id: ShipId) {
+        if !crate::think::before_regeneration(self, id) {
+            return;
+        }
         crate::think::ship_think(self, id);
         let now = self.total_time_elapsed;
         let s = self.ships.ship_mut(id);
@@ -441,6 +505,7 @@ impl Universe {
                 }
             }
         }
+        crate::think::after_bursts(self, id);
     }
 
     /// `univUpdateRenderList` simplified: every visible ship within `max_dist` of `eye`, in

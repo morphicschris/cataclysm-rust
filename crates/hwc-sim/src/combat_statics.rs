@@ -124,6 +124,8 @@ pub struct TypeCombat {
     pub side_step: SideStepStatics,
     /// `MultiBeamRangeRatio`.
     pub multi_beam_range_ratio: f32,
+    /// The ship module's own statics (`CustShipStaticInit`).
+    pub module: crate::ships::TypeStatics,
 }
 
 /// Combat data of every ship type.
@@ -208,7 +210,8 @@ impl TypeCombat {
                 _ => {}
             }
         }
-        Self { attack, passive, fire, interceptor, capital_range, capital_min_range, side_step, multi_beam_range_ratio }
+        let module = crate::ships::parse_statics(stat);
+        Self { attack, passive, fire, interceptor, capital_range, capital_min_range, side_step, multi_beam_range_ratio, module }
     }
 }
 

@@ -41,18 +41,22 @@ pub fn apply_force(ship: &mut Ship, force: f32, direction: u16) {
     if ship.dont_apply_force_ever != 0 || ship.flags & sof::CRAZY != 0 {
         return;
     }
+    apply_force_to(&mut ship.posinfo.force, &ship.rotinfo.coordsys, force, direction);
+}
+
+/// The arithmetic of `physApplyForceToObj` on any object (missiles take it unconditionally).
+pub fn apply_force_to(f: &mut Vector, coordsys: &Matrix, force: f32, direction: u16) {
     let col = match direction {
         0 | 1 => 0,
         2 | 3 => 1,
         4 | 5 => 2,
         _ => return,
     };
-    let axis = ship.rotinfo.coordsys.col(col);
+    let axis = coordsys.col(col);
     let s = if direction & 1 != 0 { -ld(force) } else { ld(force) };
     // x and y products are stored to float locals; z stays in a register.
     let fx = st(ld(axis.x) * s);
     let fy = st(ld(axis.y) * s);
-    let f = &mut ship.posinfo.force;
     f.x = st(ld(fx) + ld(f.x));
     f.y = st(ld(fy) + ld(f.y));
     f.z = st(ld(axis.z) * s + ld(f.z));
@@ -94,7 +98,7 @@ pub fn clamp_to_world_bounds(ship: &mut Ship, bounds: Vector) {
 }
 
 /// Multiplies the coordinate system by a rotation of `rotspeed * dt` about one axis.
-fn rotate(coordsys: &mut Matrix, rotspeed: f32, dt: f32, make: fn(f32, f32) -> Matrix) {
+pub(crate) fn rotate(coordsys: &mut Matrix, rotspeed: f32, dt: f32, make: fn(f32, f32) -> Matrix) {
     let angle = ld(dt) * ld(rotspeed);
     let (s, c) = (st(fsin(angle)), st(fcos(angle)));
     *coordsys = coordsys.mul_mat(&make(c, s));

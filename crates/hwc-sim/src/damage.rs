@@ -99,7 +99,7 @@ pub fn bullet_collided_with_target(u: &mut Universe, apply: bool, tid: ShipId, b
         damage = st(ld(damage) * ld(stat.coll_side_modifiers[side as usize]));
     }
     let hit_pos = b.posinfo.position.add_scaled(b.heading, t);
-    u.events.push(SimEvent::BulletHit { bullet: bid, ship: tid, position: hit_pos, beam: crate::bullet::is_beam(b.weapon) });
+    u.events.push(SimEvent::BulletHit { bullet: bid, ship: tid, position: hit_pos, beam: crate::bullet::is_beam(b.weapon), bullet_type: b.bullet_type });
     let owner = b.owner.and_then(|o| u.ships.get(o)).map(|o| (o.id, o.ship_type, o.player));
     match owner {
         Some((oid, otype, oplayer)) => {
@@ -211,7 +211,8 @@ pub fn add_ship_to_delete_list(u: &mut Universe, id: ShipId, bullet_type: i32) {
         s.rotinfo.torque.z = st(r2 + ld(s.rotinfo.torque.z));
     }
     let s = u.ships.ship(id);
-    u.events.push(SimEvent::ShipDied { ship: id, ship_type: s.ship_type, position: s.posinfo.position, radius: stat.header.coll.coll_sphere_size });
+    let explosion_type = stat.custom_entries.iter().find(|(k, _)| k == "explosionType").map(|(_, v)| v.split_whitespace().next().unwrap_or("").to_string());
+    u.events.push(SimEvent::ShipDied { ship: id, ship_type: s.ship_type, position: s.posinfo.position, radius: stat.header.coll.coll_sphere_size, explosion_type });
     shockwave(u, id, bullet_type == -1);
     u.dead_ships.push(id);
 }
@@ -324,6 +325,33 @@ fn delete_dead_ship(u: &mut Universe, id: ShipId) {
             b.target = None;
         }
     }
+    // The ship's module: its died and close callbacks; then every ship drops its references.
+    crate::ships::died(u, id);
+    crate::ships::close(u, id);
+    let others = u.ship_list.clone();
+    for o in others {
+        if o == id || u.ships.get(o).is_none() {
+            continue;
+        }
+        let s = u.ships.ship_mut(o);
+        if s.recent_attacker == Some(id) {
+            s.recently_attacked = 0;
+            s.recent_attacker = None;
+        }
+        if s.firing_at_us == Some(id) {
+            s.recently_fired_upon = 0;
+            s.firing_at_us = None;
+        }
+        if s.getting_rocked == Some(id) {
+            s.getting_rocked = None;
+        }
+        if s.queued_attack == Some(id) {
+            s.queued_attack = None;
+        }
+        crate::ships::remove_ship_refs(u, o, id);
+    }
+    crate::missile::remove_ship_references(u, id);
+    crate::fow::remove_viewer(u, id);
     // The base layer lets go (factories, docking, clamping, labs, support units...).
     crate::base::ship_died(u, id);
     u.blobs.object_died(ObjRef::Ship(id));

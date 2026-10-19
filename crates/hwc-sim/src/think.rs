@@ -9,6 +9,49 @@ use crate::object::ShipId;
 use crate::statics::{ShipRace, ShipType};
 use crate::universe::Universe;
 
+/// The first steps of `univShipThink` (0x53f850): the dock notification (every ship drops its
+/// references to a ship that docked), the Beast infection check (a converted ship stops
+/// here: returns false), the queued attack, the sentinels' field timer and the EMP flicker.
+pub fn before_regeneration(u: &mut Universe, id: ShipId) -> bool {
+    if u.ships.ship(id).flags2 & crate::object::flags2::DOCK_NOTIFY != 0 {
+        let others = u.ship_list.clone();
+        for o in others {
+            if u.ships.get(o).is_some() {
+                crate::ships::remove_ship_refs_docked(u, o, id);
+            }
+        }
+        if let Some(s) = u.ships.get_mut(id) {
+            s.flags2 &= !crate::object::flags2::DOCK_NOTIFY;
+        }
+    }
+    if crate::ships::beast::check_infection_complete(u, id) {
+        return false;
+    }
+    let Some(s) = u.ships.get_mut(id) else { return false };
+    if let Some(t) = s.queued_attack.take() {
+        if u.ships.get(t).is_some() {
+            crate::command::cl_attack(u, &[id], &[t]);
+        }
+    }
+    crate::ships::sentinel::think(u, id);
+    crate::disable::flicker_update(u, id);
+    true
+}
+
+/// The steps of `univShipThink` after the gun bursts: disabling, the per-player visibility of
+/// stealthy types (every 16 frames) and the automatic behaviour.
+pub fn after_bursts(u: &mut Universe, id: ShipId) {
+    crate::disable::update(u, id);
+    let Some(s) = u.ships.get(id) else { return };
+    let caps = u.statics.ship(s.ship_type).map_or(0, |st| st.capability_flags);
+    if caps & crate::visibility::CAP_PER_PLAYER_VISIBILITY != 0 && u.update_counter & 15 == u32::from(s.id.0) & 15 {
+        crate::visibility::update(u, id);
+    }
+    if u.ships.get(id).is_some_and(|s| s.flags & crate::object::sof::DEAD == 0) {
+        crate::autobehaviour::update(u, id);
+    }
+}
+
 /// The base-layer steps of `univShipThink` for one ship, in the original's order (after the
 /// retaliation queue and before the gun-burst bookkeeping).
 pub fn ship_think(u: &mut Universe, id: ShipId) {
@@ -19,18 +62,6 @@ pub fn ship_think(u: &mut Universe, id: ShipId) {
         s.base.upgrading = false;
         crate::base::set_disable_reason(s, false, 0);
         crate::upgrade::apply_upgrades(u, id);
-    }
-}
-
-/// The custom housekeeping (`CustShipHeader.CustShipHousekeep`, run from
-/// `univUpdateAllPosVelShips`) of the base-layer types.
-pub fn housekeep(u: &mut Universe, id: ShipId) {
-    let Some(t) = u.ships.get(id).map(|s| s.ship_type) else { return };
-    if crate::modules::is_module(t) {
-        crate::modules::housekeep(u, id);
-    }
-    if u.ships.get(id).is_some_and(|s| s.base.depot.is_some()) {
-        crate::salvage::depot_housekeep(u, id);
     }
 }
 

@@ -15,7 +15,8 @@ use hwc_math::fastmath::fsqrt;
 use hwc_math::fpu::{ld, st, Ext};
 use hwc_math::Vector;
 
-use crate::object::{sof, BlobId, BulletId, BulletTable, ObjRef, Ship, ShipId, ShipTable};
+use crate::missile::MissileTable;
+use crate::object::{sof, BlobId, BulletId, BulletTable, MissileId, ObjRef, Ship, ShipId, ShipTable};
 use crate::statics::StaticWorld;
 use crate::tunables::BlobProperties;
 
@@ -66,12 +67,16 @@ pub struct Blob {
     pub max_big_ship_size: f32,
     /// Bullets and beams (`blobBullets`).
     pub bullets: Vec<BulletId>,
+    /// Missiles (`blobMissiles`) and mines (`blobMines`).
+    pub missiles: Vec<MissileId>,
+    pub mines: Vec<MissileId>,
 }
 
 /// The objects the blobs refer to.
 pub struct Objects<'a> {
     pub ships: &'a mut ShipTable,
     pub bullets: &'a mut BulletTable,
+    pub missiles: &'a mut MissileTable,
 }
 
 impl Objects<'_> {
@@ -79,6 +84,7 @@ impl Objects<'_> {
         match r {
             ObjRef::Ship(id) => self.ships.ship(id).posinfo.position,
             ObjRef::Bullet(id) => self.bullets.bullet(id).posinfo.position,
+            ObjRef::Missile(id) => self.missiles.missile(id).posinfo.position,
         }
     }
 
@@ -87,6 +93,7 @@ impl Objects<'_> {
         match r {
             ObjRef::Ship(id) => self.ships.ship(id).coll.coll_position,
             ObjRef::Bullet(id) => self.bullets.bullet(id).posinfo.position,
+            ObjRef::Missile(id) => self.missiles.missile(id).posinfo.position,
         }
     }
 
@@ -94,6 +101,7 @@ impl Objects<'_> {
         match r {
             ObjRef::Ship(id) => self.ships.ship(id).flags,
             ObjRef::Bullet(id) => self.bullets.bullet(id).flags,
+            ObjRef::Missile(id) => self.missiles.missile(id).flags,
         }
     }
 
@@ -107,6 +115,10 @@ impl Objects<'_> {
                 let b = self.bullets.bullet_mut(id);
                 b.flags = f(b.flags);
             }
+            ObjRef::Missile(id) => {
+                let m = self.missiles.missile_mut(id);
+                m.flags = f(m.flags);
+            }
         }
     }
 
@@ -114,6 +126,7 @@ impl Objects<'_> {
         match r {
             ObjRef::Ship(id) => self.ships.ship(id).coll_optimize_dist,
             ObjRef::Bullet(id) => self.bullets.bullet(id).coll_optimize_dist,
+            ObjRef::Missile(id) => self.missiles.missile(id).coll_optimize_dist,
         }
     }
 
@@ -132,6 +145,26 @@ impl Objects<'_> {
                 if blob.is_some() {
                     b.coll_my_blob = blob;
                 }
+            }
+            ObjRef::Missile(id) => {
+                let m = self.missiles.missile_mut(id);
+                m.coll_optimize_dist = d;
+                if blob.is_some() {
+                    m.coll_my_blob = blob;
+                }
+            }
+        }
+    }
+
+    /// The collision size and mass of an object (statics +0x48 and +8).
+    fn size_and_mass(&self, r: ObjRef, statics: &StaticWorld) -> (f32, f32) {
+        match r {
+            ObjRef::Ship(id) => statics.ship(self.ships.ship(id).ship_type).map_or((0.0, 0.0), |st| (st.header.coll.coll_sphere_size, st.header.mass)),
+            ObjRef::Bullet(_) => (0.0, 0.0),
+            ObjRef::Missile(id) => {
+                let m = self.missiles.missile(id);
+                let table = if m.kind == crate::missile::kind::MINE { &statics.mines } else { &statics.missiles };
+                table.get(m.race.index()).and_then(Option::as_ref).map_or((0.0, 0.0), |st| (st.header.coll.coll_sphere_size, st.header.mass))
             }
         }
     }
@@ -159,18 +192,18 @@ fn dist_sq_ext(a: Vector, b: Vector) -> Ext {
 }
 
 impl Blob {
-    fn single(ship: &Ship, mass: f32, props: &BlobProperties) -> Self {
+    fn single(r: ObjRef, position: Vector, mass: f32, props: &BlobProperties) -> Self {
         let (volume, one_over_volume) = volume_and_reciprocal(props.start_sphere_size);
         Blob {
-            centre: ship.posinfo.position,
+            centre: position,
             radius: props.start_sphere_size,
             volume,
             one_over_volume,
             total_mass: mass,
-            sort_distance: sort_distance(ship.posinfo.position),
+            sort_distance: sort_distance(position),
             sqrt_sort_distance: 0.0,
             flags: 0,
-            objects: vec![ObjRef::Ship(ship.id)],
+            objects: vec![r],
             small_targets: Vec::new(),
             big_targets: Vec::new(),
             max_small_target_size: 0.0,
@@ -182,6 +215,8 @@ impl Blob {
             max_small_ship_size: 0.0,
             max_big_ship_size: 0.0,
             bullets: Vec::new(),
+            missiles: Vec::new(),
+            mines: Vec::new(),
         }
     }
 }
@@ -196,8 +231,7 @@ fn object_list_median(objects: &[ObjRef], objs: &Objects, statics: &StaticWorld,
     for &o in objects {
         let p = objs.position(o);
         if objs.flags(o) & sof::IMPACTABLE != 0 {
-            let ship_type = o.ship().map(|id| objs.ships.ship(id).ship_type);
-            let r = ld(ship_type.and_then(|t| statics.ship(t)).map_or(0.0, |st| st.header.coll.coll_sphere_size));
+            let r = ld(objs.size_and_mass(o, statics).0);
             for (m, c) in min.iter_mut().zip([p.x, p.y, p.z]) {
                 let v = ld(c) - r;
                 if !(ld(*m) < v) {
@@ -279,7 +313,8 @@ impl BlobList {
         let mut i = 0;
         while i < blob.objects.len() {
             let r = blob.objects[i];
-            if matches!(r, ObjRef::Bullet(_)) {
+            let flying_missile = matches!(r, ObjRef::Missile(m) if objs.missiles.missile(m).kind != crate::missile::kind::MINE);
+            if matches!(r, ObjRef::Bullet(_)) || flying_missile {
                 blob.objects.swap_remove(i);
                 continue;
             }
@@ -288,6 +323,7 @@ impl BlobList {
         }
         blob.sqrt_sort_distance = 0.0;
         blob.bullets.clear();
+        blob.missiles.clear();
         blob.flags |= btf::DONT_UPDATE | btf::CLEAR_OBJECT_FLAGS;
     }
 
@@ -297,6 +333,7 @@ impl BlobList {
         &mut self,
         order: &[ObjRef],
         bullet_list: &[BulletId],
+        missile_list: &[MissileId],
         objs: &mut Objects,
         statics: &StaticWorld,
         props: &BlobProperties,
@@ -331,7 +368,17 @@ impl BlobList {
                         continue;
                     }
                     let mass = statics.ship(s.ship_type).map_or(0.0, |st| st.header.mass);
-                    self.blobs.push(Blob::single(s, mass, props));
+                    let p = s.posinfo.position;
+                    self.blobs.push(Blob::single(r, p, mass, props));
+                }
+                ObjRef::Missile(id) => {
+                    let m = objs.missiles.missile_mut(id);
+                    if m.flags & (sof::DEAD | sof::DONT_CREATE_BLOB) != 0 || m.kind != crate::missile::kind::MINE {
+                        m.coll_my_blob = None;
+                        continue;
+                    }
+                    let p = m.posinfo.position;
+                    self.blobs.push(Blob::single(r, p, f32::from_bits(0x3dcc_cccd), props));
                 }
             }
         }
@@ -349,6 +396,18 @@ impl BlobList {
             match target_blob {
                 Some(b) => self.add_to_specific(b, ObjRef::Bullet(bid), objs, statics),
                 None => self.add_to_nearest(ObjRef::Bullet(bid), objs, statics),
+            }
+        }
+        // Then the flying missiles (mines have blobs of their own).
+        for &mid in missile_list {
+            let m = objs.missiles.missile(mid);
+            if m.flags & sof::DEAD != 0 || m.kind == crate::missile::kind::MINE {
+                continue;
+            }
+            let target_blob = m.target.and_then(|t| objs.ships.get(t)).and_then(|t| t.coll_my_blob);
+            match target_blob {
+                Some(b) => self.add_to_specific(b, ObjRef::Missile(mid), objs, statics),
+                None => self.add_to_nearest(ObjRef::Missile(mid), objs, statics),
             }
         }
     }
@@ -548,6 +607,10 @@ impl BlobList {
             ObjRef::Bullet(bid) => {
                 insert_preserve_order(&mut blob.bullets, bid, &|x: &BulletId| dist(ObjRef::Bullet(*x)));
             }
+            ObjRef::Missile(mid) => {
+                let list = if objs.missiles.missile(mid).kind == crate::missile::kind::MINE { &mut blob.mines } else { &mut blob.missiles };
+                insert_preserve_order(list, mid, &|x: &MissileId| dist(ObjRef::Missile(*x)));
+            }
         }
         insert_preserve_order(&mut blob.objects, r, &|x: &ObjRef| dist(*x));
     }
@@ -570,6 +633,13 @@ impl BlobList {
                 ObjRef::Bullet(id) => {
                     if let Some(k) = blob.bullets.iter().position(|&b| b == id) {
                         blob.bullets.remove(k);
+                    }
+                }
+                ObjRef::Missile(id) => {
+                    for list in [&mut blob.missiles, &mut blob.mines] {
+                        if let Some(k) = list.iter().position(|&m| m == id) {
+                            list.remove(k);
+                        }
                     }
                 }
             }
@@ -621,6 +691,8 @@ fn fill_specific_lists(blob: &mut Blob, objs: &Objects, statics: &StaticWorld) {
     blob.small_ships.clear();
     blob.big_ships.clear();
     blob.bullets.clear();
+    blob.missiles.clear();
+    blob.mines.clear();
     blob.max_small_target_size = 0.0;
     blob.max_big_target_size = 0.0;
     blob.max_ship_size = 0.0;
@@ -631,6 +703,14 @@ fn fill_specific_lists(blob: &mut Blob, objs: &Objects, statics: &StaticWorld) {
             ObjRef::Ship(id) => id,
             ObjRef::Bullet(b) => {
                 blob.bullets.push(b);
+                continue;
+            }
+            ObjRef::Missile(m) => {
+                if objs.missiles.missile(m).kind == crate::missile::kind::MINE {
+                    blob.mines.push(m);
+                } else {
+                    blob.missiles.push(m);
+                }
                 continue;
             }
         };
