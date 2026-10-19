@@ -16,9 +16,17 @@
 
 pub mod aiship;
 pub mod aitrack;
+pub mod attack;
 pub mod blobs;
+pub mod bullet;
+pub mod collision;
+pub mod combat_statics;
+pub mod combat_tweaks;
 pub mod command;
+pub mod damage;
+pub mod flightman;
 pub mod formation;
+pub mod gun;
 pub mod harness;
 pub mod object;
 pub mod physics;

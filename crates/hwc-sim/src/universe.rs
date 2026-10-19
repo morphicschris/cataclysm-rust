@@ -2,9 +2,10 @@
 //! them in, players, and the fixed-rate update `univUpdate`.
 //!
 //! One call to [`Universe::update`] is one `univUpdate(1/16 s)`. The order of work follows
-//! Cataclysm's `univUpdate` (0x547410); parts of it that have no counterpart yet (building,
-//! research, bullets, missiles, collisions, effects, damage) are skipped and listed in
-//! `docs/sim/runtime.md`.
+//! Cataclysm's `univUpdate` (0x547410): collision blobs, bullet collisions, the command layer,
+//! bump collisions, bullets, ships (state checks, physics, housekeeping), then the dead ships
+//! are removed. Parts without a counterpart yet (building, research, missiles, effects) are
+//! listed in `docs/sim/runtime.md`.
 
 use std::sync::Arc;
 
@@ -13,10 +14,11 @@ use hwc_math::timing::UNIVERSE_UPDATE_PERIOD;
 use hwc_math::{Matrix, Randy, Vector};
 
 use crate::aitrack;
-use crate::blobs::BlobList;
+use crate::blobs::{BlobList, Objects};
+use crate::combat_statics::CombatStatics;
 use crate::command::{self, CommandLayer};
 use crate::formation;
-use crate::object::{sof, NonStats, ObjRef, Player, PosInfo, RotInfo, Ship, ShipId, ShipTable};
+use crate::object::{sof, BulletId, BulletTable, NonStats, ObjRef, Player, PosInfo, RotInfo, Ship, ShipId, ShipTable};
 use crate::physics::{self, PhysContext};
 use crate::statics::{ShipRace, ShipType, StaticWorld};
 use crate::tactics::MaxVelocityContext;
@@ -47,16 +49,35 @@ impl std::fmt::Display for CreateError {
 
 impl std::error::Error for CreateError {}
 
+/// Things that happened during an update, for presentation (effects, sounds). The simulation
+/// itself never reads them; they are cleared at the start of every update.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SimEvent {
+    /// A gun fired a bullet or beam.
+    GunFired { ship: ShipId, gun: usize, bullet: BulletId },
+    /// A bullet or beam hit a ship at `position` (a beam hits every frame it touches).
+    BulletHit { bullet: BulletId, ship: ShipId, position: Vector, beam: bool },
+    /// A ship died (its explosion; it is removed at the end of the update).
+    ShipDied { ship: ShipId, ship_type: ShipType, position: Vector, radius: f32 },
+    /// A ship gained a veterancy level.
+    Upgraded { ship: ShipId, level: u32 },
+}
+
 /// The simulation state.
 #[derive(Debug, Clone)]
 pub struct Universe {
     pub statics: Arc<StaticWorld>,
+    /// Per-type combat routines and their statics (built once from `statics`).
+    pub combat: Arc<CombatStatics>,
     pub tweaks: SimTweaks,
     pub ships: ShipTable,
+    pub bullets: BulletTable,
     /// `universe.SpaceObjList` (every object, creation order).
     pub space_obj_list: Vec<ObjRef>,
     /// `universe.ShipList`.
     pub ship_list: Vec<ShipId>,
+    /// `universe.BulletList`.
+    pub bullet_list: Vec<BulletId>,
     /// `universe.ImpactableList`.
     pub impactable_list: Vec<ObjRef>,
     /// `universe.MissileList`, `ResourceList`, `DerelictList` (no such objects yet).
@@ -65,6 +86,8 @@ pub struct Universe {
     pub derelict_list: Vec<ObjRef>,
     /// `universe.RenderList`, rebuilt by [`Universe::update_render_list`].
     pub render_list: Vec<ObjRef>,
+    /// The ships that died this update (`ShipsToDeleteList`), removed at its end.
+    pub dead_ships: Vec<ShipId>,
     pub players: Vec<Player>,
     /// `universe.shipNumber`: the next ship id.
     pub ship_number: u16,
@@ -80,24 +103,34 @@ pub struct Universe {
     pub world_bounds: Vector,
     /// Single-player games skip the world-bounds velocity clamp.
     pub single_player: bool,
+    /// The single-player difficulty switch the damage factor reads (0x88a0d8): 0 doubles all
+    /// weapon damage in single-player games.
+    pub sp_difficulty: u32,
     /// `aishipTempDisableAvoiding`.
     pub temp_disable_avoiding: bool,
+    /// What happened during the last update.
+    pub events: Vec<SimEvent>,
 }
 
 impl Universe {
     /// An empty universe with `players` players.
     pub fn new(statics: Arc<StaticWorld>, tweaks: SimTweaks, players: &[ShipRace]) -> Self {
+        let combat = Arc::new(CombatStatics::build(&statics));
         Self {
             statics,
+            combat,
             tweaks,
             ships: ShipTable::default(),
+            bullets: BulletTable::default(),
             space_obj_list: Vec::new(),
             ship_list: Vec::new(),
+            bullet_list: Vec::new(),
             impactable_list: Vec::new(),
             missile_list: Vec::new(),
             resource_list: Vec::new(),
             derelict_list: Vec::new(),
             render_list: Vec::new(),
+            dead_ships: Vec::new(),
             players: players.iter().enumerate().map(|(i, &r)| Player::new(i, r)).collect(),
             ship_number: 0,
             update_counter: 0,
@@ -108,7 +141,9 @@ impl Universe {
             randy: Randy::default(),
             world_bounds: DEFAULT_WORLD_BOUNDS,
             single_player: false,
+            sp_difficulty: 1,
             temp_disable_avoiding: false,
+            events: Vec::new(),
         }
     }
 
@@ -153,9 +188,12 @@ impl Universe {
         ship.max_velocity_copy = stat.header.max_velocity;
         ship.time_created = self.total_time_elapsed;
         ship.color_scheme = self.players[player].color_scheme;
+        ship.guns = crate::gun::init_guns(stat);
         physics::update_obj_rot_info(&mut ship, stat);
-        self.blobs.add_to_nearest(&mut ship, &self.statics);
         self.ships.insert(ship);
+        let statics = self.statics.clone();
+        let mut objs = Objects { ships: &mut self.ships, bullets: &mut self.bullets };
+        self.blobs.add_to_nearest(ObjRef::Ship(id), &mut objs, &statics);
         self.space_obj_list.push(ObjRef::Ship(id));
         self.ship_list.push(id);
         self.impactable_list.push(ObjRef::Ship(id));
@@ -165,6 +203,7 @@ impl Universe {
     /// `univUpdate` (0x547410): one fixed step of `phys_time_elapsed` (1/16 s).
     pub fn update(&mut self) {
         let dt = UNIVERSE_UPDATE_PERIOD;
+        self.events.clear();
         self.total_time_elapsed = st(ld(self.total_time_elapsed) + ld(dt));
         self.update_counter = self.update_counter.wrapping_add(1);
         self.phys_time_elapsed = dt;
@@ -172,59 +211,77 @@ impl Universe {
         // Collision blobs: rebuilt on the first frame and every eighth, refreshed otherwise.
         let statics = self.statics.clone();
         let props = self.tweaks.blob;
-        if self.update_counter == 1
-            || (self.tweaks.refresh_collblob_rate & self.update_counter) == self.tweaks.refresh_collblob_frame
         {
-            let order: Vec<ShipId> = self.space_obj_list.iter().map(|ObjRef::Ship(id)| *id).collect();
-            self.blobs.rebuild(&order, &mut self.ships, &statics, &props);
-        } else {
-            self.blobs.update_objects(&mut self.ships, &statics);
+            let mut objs = Objects { ships: &mut self.ships, bullets: &mut self.bullets };
+            if self.update_counter == 1
+                || (self.tweaks.refresh_collblob_rate & self.update_counter) == self.tweaks.refresh_collblob_frame
+            {
+                let order = self.space_obj_list.clone();
+                let bullets = self.bullet_list.clone();
+                self.blobs.rebuild(&order, &bullets, &mut objs, &statics, &props);
+            } else {
+                self.blobs.update_objects(&mut objs, &statics);
+            }
         }
 
-        // (Build manager, research, resource injection, bullets/missiles, crates and the
-        // computer players run here in the original.)
+        // (Build manager, research, resource injection, crates and the computer players run
+        // around here in the original.)
+        crate::collision::check_all_bullet_collisions(self);
         command::cl_process(self);
-        // (clPostProcess handles guard/protect retaliation; collision bumps follow.)
-
+        // (clPostProcess handles guard/protect retaliation; not modelled.)
+        crate::collision::check_all_bump_collisions(self);
+        crate::bullet::update_all(self);
+        // (Missiles, derelicts and asteroids would move here.)
         self.update_all_pos_vel_ships();
-        // (Effects, dead-object deletion, resource regrowth and bounties follow.)
+        // (Effects update here.)
+        crate::damage::delete_dead_ships(self);
+        // (Resource regrowth and bounties follow.)
     }
 
     /// `univUpdateAllPosVelShips` (0x53ffe0): per ship, the state checks, the physics step and
-    /// the post-physics housekeeping (`0x545250`).
+    /// the post-physics housekeeping (`0x545250`); then the per-ship upkeep (`0x53f850`).
     fn update_all_pos_vel_ships(&mut self) {
         let statics = self.statics.clone();
         let list = self.ship_list.clone();
-        for id in list {
+        for &id in &list {
             let Some(ship) = self.ships.get(id) else { continue };
             if ship.flags & sof::DONT_APPLY_PHYSICS != 0 {
                 continue;
             }
             let Some(stat) = statics.ship(ship.ship_type) else { continue };
             self.check_ship_state(id);
+            let Some(ship) = self.ships.get(id) else { continue };
             let ctx = PhysContext {
                 dt: self.phys_time_elapsed,
                 update_counter: self.update_counter,
                 single_player: self.single_player,
                 world_bounds: self.world_bounds,
-                max_vel: self.max_velocity_context(self.ships.ship(id)),
+                max_vel: self.max_velocity_context(ship),
             };
             let tw = &self.tweaks;
             physics::update_ship(self.ships.ship_mut(id), stat, tw, &ctx);
             self.housekeep(id);
         }
+        for &id in &list {
+            if self.ships.get(id).is_some_and(|s| s.flags & sof::DEAD == 0) {
+                self.upkeep(id);
+            }
+        }
     }
 
-    /// The autostabilisation part of `univCheckShipState` (0x545670): ships with nothing to
-    /// do level out and stop after `AUTOSTABILIZE_FRAME_KICK_IN` frames.
+    /// `univCheckShipState` (0x545670): right-of-way manoeuvres, autostabilisation of ships
+    /// with nothing to do, and the tactics reaction to attackers and nearby enemies.
     fn check_ship_state(&mut self, id: ShipId) {
         let statics = self.statics.clone();
         let tw = self.tweaks.clone();
         let dt = self.phys_time_elapsed;
-        let s = self.ships.ship_mut(id);
-        if s.flags & sof::DEAD != 0 {
+        if self.ships.ship(id).flags & sof::DEAD != 0 {
             return;
         }
+        if self.ships.ship(id).special_flags & crate::object::special::ROW_GETTING_OUT_OF_WAY != 0 {
+            crate::aiship::row_fly_out_of_way(self, id);
+        }
+        let s = self.ships.ship_mut(id);
         let Some(stat) = statics.ship(s.ship_type) else { return };
         if s.autostabilize_ship
             && s.flags & (sof::HIDE | sof::CRAZY | sof::DISABLED | sof::HYPERSPACE) == 0
@@ -262,21 +319,98 @@ impl Universe {
                 }
             }
         }
-        // (The world-limits recall, proximity retaliation and the death timer are not
-        // modelled.)
+        // (The world-limits recall is not modelled.)
+        self.check_retaliation(id);
     }
 
-    /// Post-physics housekeeping (0x545250).
+    /// The reaction part of `univCheckShipState`.
+    fn check_retaliation(&mut self, id: ShipId) {
+        let tw = self.tweaks.combat.clone();
+        let s = self.ships.ship(id);
+        if s.flags & sof::DISABLED != 0 {
+            return;
+        }
+        let Some(stat) = self.statics.ship(s.ship_type) else { return };
+        let zone = stat.passive_retaliate_zone;
+        let num = u32::from(id.0);
+        let counter = self.update_counter;
+        let cmd = s.command.and_then(|c| self.commands.get(c));
+        if !s.ship_idle {
+            let moving = cmd.is_some_and(|c| matches!(c.order, command::order::MOVE | command::order::DOCK));
+            let rate = tw.check_passive_attack_whilemoving_rate;
+            if counter & rate == num & rate && zone != 0.0 && stat.is_capital_ship && moving {
+                let enemies = crate::tactics::enemies_within_proximity(self, id, zone);
+                crate::tactics::retaliate(self, id, enemies);
+            }
+            return;
+        }
+        // (Resource collectors retreat instead; collecting is not modelled.)
+        if let Some(att) = s.getting_rocked.filter(|a| self.ships.get(*a).is_some()) {
+            let ally = self.players.get(s.player).is_some_and(|p| p.is_ally(self.ships.ship(att).player));
+            if !ally {
+                let enemies = crate::tactics::ship_and_its_formation(self, att);
+                crate::tactics::retaliate(self, id, enemies);
+                return;
+            }
+        }
+        let rate = tw.check_passive_attack_rate;
+        if counter & rate == num & rate && zone != 0.0 && s.flags & sof::SELECTABLE != 0 {
+            let enemies = crate::tactics::enemies_within_proximity(self, id, zone);
+            crate::tactics::retaliate(self, id, enemies);
+        }
+    }
+
+    /// Post-physics housekeeping (0x545250): per-frame flags and the "recently attacked"
+    /// counters.
     fn housekeep(&mut self, id: ShipId) {
         let s = self.ships.ship_mut(id);
+        s.getting_rocked = None;
         if s.flags & sof::DEAD != 0 {
             return;
         }
         s.ship_idle = true;
         s.autostabilize_ship = true;
         s.special_flags &= !crate::object::special::TRANSIENT_8000000;
+        if s.recently_attacked != 0 {
+            if s.recent_attacker.is_none() {
+                s.recently_attacked = 0;
+            } else {
+                s.recently_attacked -= 1;
+                if s.recently_attacked == 0 {
+                    s.recent_attacker = None;
+                }
+            }
+        }
+        if s.recently_fired_upon != 0 {
+            if s.firing_at_us.is_none() {
+                s.recently_fired_upon = 0;
+            } else {
+                s.recently_fired_upon -= 1;
+                if s.recently_fired_upon == 0 {
+                    s.firing_at_us = None;
+                }
+            }
+        }
         s.flags &= !sof::FORMATION_SETTLED;
-        // (Recent-attack counters, damage effects and engine trails are updated here.)
+        // (Damage effects and engine trails are updated here.)
+    }
+
+    /// Per-ship upkeep after all ships moved (0x53f850): the end of a burst.
+    fn upkeep(&mut self, id: ShipId) {
+        let now = self.total_time_elapsed;
+        let s = self.ships.ship_mut(id);
+        if s.burst_firing {
+            for g in s.guns.iter_mut() {
+                if g.level != crate::bullet::weapon::ION
+                    && g.burst_state == 1
+                    && ld(g.use_burst_fire_time) + ld(0.1f32) < ld(now) - ld(g.burst_start_time)
+                {
+                    g.burst_state = 2;
+                    s.burst_firing = false;
+                    g.burst_start_time = now;
+                }
+            }
+        }
     }
 
     /// `univUpdateRenderList` simplified: every visible ship within `max_dist` of `eye`, in

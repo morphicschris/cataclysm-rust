@@ -719,6 +719,9 @@ mod tests {
                 waypoints: Vec::new(),
                 waypoint_index: 0,
                 formation: FormationInfo::default(),
+                attack_targets: Vec::new(),
+                attack_in_range: false,
+                resume_move: None,
             };
             cmd.formation.formation_type = *ftype;
             cmd.formation.flip_state = *flip;

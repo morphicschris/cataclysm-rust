@@ -180,7 +180,7 @@ impl App {
         let sb = &mut self.sandbox;
         match key {
             Key::Named(NamedKey::Escape) => {
-                if sb.mode == Mode::Move {
+                if sb.mode != Mode::Select {
                     sb.mode = Mode::Select;
                 } else {
                     event_loop.exit();
@@ -193,6 +193,13 @@ impl App {
                         Mode::Select
                     } else {
                         Mode::Move
+                    };
+                }
+                "a" => {
+                    sb.mode = if sb.mode == Mode::Attack || sb.selection.is_empty() {
+                        Mode::Select
+                    } else {
+                        Mode::Attack
                     };
                 }
                 "f" => sb.cycle_formation(),
@@ -292,6 +299,10 @@ impl ApplicationHandler for App {
                         let sb = &mut self.sandbox;
                         if sb.mode == Mode::Move {
                             if sb.move_to_cursor(size, b) {
+                                sb.mode = Mode::Select;
+                            }
+                        } else if sb.mode == Mode::Attack {
+                            if sb.attack_clicked(size, b) {
                                 sb.mode = Mode::Select;
                             }
                         } else if (a[0] - b[0]).abs() <= CLICK_SLOP

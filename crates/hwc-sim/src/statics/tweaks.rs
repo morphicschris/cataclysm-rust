@@ -76,6 +76,9 @@ pub struct Tweaks {
     pub hyperspace_gate_health: f32,
     pub hyperspace_gate_width: f32,
     pub hyperspace_gate_height: f32,
+    /// Default `rightOfWay` per ship type (table at 0x8a7a80), overwritten by the
+    /// `rowDetails <type> <rightOfWay>, <avoidBy>` lines of AIShip.script.
+    pub right_of_way: [i8; super::ShipType::COUNT],
 }
 
 impl Default for Tweaks {
@@ -114,6 +117,7 @@ impl Default for Tweaks {
             hyperspace_gate_health: 20000.0,
             hyperspace_gate_width: 1000.0,
             hyperspace_gate_height: 1000.0,
+            right_of_way: super::ship::RIGHT_OF_WAY,
         }
     }
 }
@@ -192,6 +196,12 @@ impl Tweaks {
     /// Applies the lines of one tweak file.
     pub fn apply(&mut self, file: &str, script: &ScriptFile) {
         for e in script.entries() {
+            if file == "AIShip.script" && e.key == "rowDetails" {
+                if let Some((t, row, _)) = parse_row_details(&e.raw) {
+                    self.right_of_way[t.index()] = row as i8;
+                }
+                continue;
+            }
             for &(_, _, conv, field) in BINDINGS.iter().filter(|b| b.0 == file && b.1 == e.key) {
                 if let Some(v) = scan_f32(&e.raw) {
                     *field(self) = match conv {
@@ -203,6 +213,26 @@ impl Tweaks {
             }
         }
     }
+}
+
+/// `rowSetDetails` (0x4140a0): `"%s %d %f"` after the commas are blanked. Returns the ship
+/// type, its right of way and the distance other ships keep out of its way.
+pub fn parse_row_details(raw: &str) -> Option<(super::ShipType, i32, f32)> {
+    use super::cscan::{decomma, scan, Scanned};
+    let v = scan(&decomma(raw), "%s %d %f");
+    let t = match v.first() {
+        Some(Scanned::Str(n)) => super::ShipType::from_name(n)?,
+        _ => return None,
+    };
+    let row = match v.get(1) {
+        Some(Scanned::Int(i)) => *i,
+        _ => 0,
+    };
+    let avoid = match v.get(2) {
+        Some(Scanned::Float(f)) => *f,
+        _ => 0.0,
+    };
+    Some((t, row, avoid))
 }
 
 #[cfg(test)]

@@ -72,7 +72,32 @@ pub fn world_hash(u: &Universe) -> u64 {
         h.vector(s.move_to);
         h.vector(s.formation_offset);
         h.u32(s.command.map_or(u32::MAX, |c| c.0));
+        // Combat state.
+        h.f32(s.health);
+        h.vector(s.rotinfo.torque);
+        h.u32(u32::from(s.ai_state_attack) | (s.tactics as u32) << 8 | s.flightman << 16);
+        h.u32(s.attack.target.map_or(u32::MAX, |t| u32::from(t.0)));
+        h.u32(s.attack.leader.map_or(u32::MAX, |t| u32::from(t.0)) | s.attack.wingman.map_or(0xffff, |t| u32::from(t.0)) << 16);
+        h.u32(u32::from(s.attack.flightmans_left) | u32::from(s.attack.situation) << 16);
+        h.u32(s.speed_upgrade_level | u32::from(s.recently_attacked) << 8 | u32::from(s.row_state) << 16);
+        h.vector(s.interceptor.ai_vec);
+        h.u32(u32::from(s.interceptor.active_gun));
+        for g in &s.guns {
+            h.f32(g.last_time_fired);
+            h.vector(g.heading);
+        }
     }
+    for &b in &u.bullet_list {
+        let b = u.bullets.bullet(b);
+        h.u32(b.id.0);
+        h.vector(b.posinfo.position);
+        h.vector(b.heading);
+        h.f32(b.time_lived);
+        h.f32(b.beam_travel_dist);
+        h.u32(b.owner.map_or(u32::MAX, |o| u32::from(o.0)));
+        h.u32(b.target.map_or(u32::MAX, |o| u32::from(o.0)));
+    }
+    h.u32(u.randy.number_get(hwc_math::random::RAN_GAME));
     for c in u.commands.iter() {
         h.u32(c.id.0);
         h.u32(u32::from(c.order) | u32::from(c.attributes) << 16);
@@ -101,6 +126,10 @@ pub enum Order {
     Move { ships: Vec<usize>, mode: u32, waypoints: Vec<Vector> },
     Formation { ships: Vec<usize>, formation_type: u32 },
     Halt { ships: Vec<usize> },
+    /// The ships attack the targets (all by spawn index).
+    Attack { ships: Vec<usize>, targets: Vec<usize> },
+    /// Set the tactics (`object::tactics`) of the ships.
+    Tactics { ships: Vec<usize>, tactics: usize },
 }
 
 /// A scenario: the races of the players, the ships and the orders by tick.
@@ -157,7 +186,8 @@ impl Run {
     }
 
     pub fn issue(&mut self, order: &Order) {
-        let sel = |v: &[usize]| v.iter().map(|&i| self.ids[i]).collect::<Vec<_>>();
+        // Ships that have died are left out.
+        let sel = |v: &[usize]| v.iter().map(|&i| self.ids[i]).filter(|&id| self.universe.ships.get(id).is_some()).collect::<Vec<_>>();
         match order {
             Order::Move { ships, mode, waypoints } => {
                 let s = sel(ships);
@@ -171,6 +201,14 @@ impl Run {
             Order::Halt { ships } => {
                 let s = sel(ships);
                 command::cl_halt(&mut self.universe, &s);
+            }
+            Order::Attack { ships, targets } => {
+                let (s, t) = (sel(ships), sel(targets));
+                command::cl_attack(&mut self.universe, &s, &t);
+            }
+            Order::Tactics { ships, tactics } => {
+                let s = sel(ships);
+                command::cl_set_tactics(&mut self.universe, &s, *tactics);
             }
         }
     }
@@ -222,9 +260,50 @@ pub fn scenario(name: &str) -> Option<Scenario> {
             })],
             "patrol",
         )),
+        // Six Acolytes attack six Taiidan heavy interceptors, which fight back (aggressive).
+        "dogfight" => {
+            let mut spawns = Vec::new();
+            for i in 0..6 {
+                let (row, col) = ((i / 3) as f32, (i % 3) as f32 - 1.0);
+                spawns.push(Spawn { ship_type: sAcolyte, player: 0, position: v(-2500.0 - row * 150.0, col * 200.0, 100.0) });
+            }
+            for i in 0..6 {
+                let (row, col) = ((i / 3) as f32, (i % 3) as f32 - 1.0);
+                spawns.push(Spawn { ship_type: tHeavyInterceptor, player: 1, position: v(2500.0 + row * 150.0, col * 200.0, -100.0) });
+            }
+            let ours: Vec<usize> = (0..6).collect();
+            let theirs: Vec<usize> = (6..12).collect();
+            Some(Scenario {
+                name: "dogfight",
+                players: vec![ShipRace::Somtaaw, ShipRace::Taiidan],
+                spawns,
+                orders: vec![
+                    (0, Order::Tactics { ships: theirs.clone(), tactics: crate::object::tactics::AGGRESSIVE }),
+                    (0, Order::Tactics { ships: ours.clone(), tactics: crate::object::tactics::AGGRESSIVE }),
+                    (1, Order::Attack { ships: ours, targets: theirs }),
+                ],
+            })
+        }
+        // Three multi-beam frigates attack a Taiidan destroyer, which fires back (neutral).
+        "frigates" => {
+            let mut spawns = Vec::new();
+            for i in 0..3 {
+                spawns.push(Spawn { ship_type: sMultiBeamFrigate, player: 0, position: v(-3500.0, (i as f32 - 1.0) * 600.0, 0.0) });
+            }
+            spawns.push(Spawn { ship_type: tStandardDestroyer, player: 1, position: v(2000.0, 0.0, 0.0) });
+            Some(Scenario {
+                name: "frigates",
+                players: vec![ShipRace::Somtaaw, ShipRace::Taiidan],
+                spawns,
+                orders: vec![
+                    (0, Order::Tactics { ships: vec![3], tactics: crate::object::tactics::NEUTRAL }),
+                    (1, Order::Attack { ships: vec![0, 1, 2], targets: vec![3] }),
+                ],
+            })
+        }
         _ => None,
     }
 }
 
 /// Names of the built-in scenarios.
-pub const SCENARIOS: [&str; 3] = ["fleet", "idle", "patrol"];
+pub const SCENARIOS: [&str; 5] = ["fleet", "idle", "patrol", "dogfight", "frigates"];

@@ -295,3 +295,32 @@ fn finish_ship_health(s: &mut ShipStaticInfo, tw: &Tweaks, opts: &LoadOptions) {
     };
     h.one_over_max_health = 1.0 / h.max_health;
 }
+
+/// A world holding just `ships` (for unit tests that build their own statics).
+#[cfg(test)]
+pub(crate) fn test_world(list: Vec<ShipStaticInfo>) -> StaticWorld {
+    let mut ships: Vec<Option<ShipStaticInfo>> = vec![None; ShipType::COUNT];
+    for s in list {
+        let i = s.ship_type.index();
+        ships[i] = Some(s);
+    }
+    StaticWorld {
+        options: Default::default(),
+        tweaks: Tweaks::default(),
+        ships,
+        missiles: Vec::new(),
+        mines: Vec::new(),
+        mine_max_diameter: 0.0,
+        asteroids: Vec::new(),
+        dust_clouds: Vec::new(),
+        nebulae: Vec::new(),
+        derelicts: Vec::new(),
+        research: Default::default(),
+        unit_caps: Default::default(),
+        unit_cap_presets: std::collections::BTreeMap::new(),
+        team_colors: Default::default(),
+        default_lod: None,
+        default_mex: None,
+        warnings: Vec::new(),
+    }
+}

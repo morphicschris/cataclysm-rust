@@ -60,7 +60,8 @@ fn cloned_universe_continues_identically() {
 }
 
 /// Bit patterns of a few ships after N ticks of the built-in scenarios. These pin the current
-/// implementation (regression goldens); they were not produced by the original game.
+/// implementation (regression goldens); they were not produced by the original game. (The
+/// combat slice changed the fleet values: the Acolytes of the delta formation now bump.)
 #[test]
 fn golden_trajectories() {
     let Some((hashes, run)) = run("fleet", 400) else { return };
@@ -89,12 +90,12 @@ fn run_named(name: &str, ticks: u32) -> (Vec<u64>, Run) {
 }
 
 const GOLDEN_FLEET_400: [[u32; 3]; 4] = [
-    [0x44f3e7b0, 0xc48c3a07, 0x431e834c],
-    [0x44dec3c3, 0xc471b4b6, 0x431e761a],
+    [0x44f3f212, 0xc48c31b0, 0x431e8a67],
+    [0x44dece52, 0xc471a3ae, 0x431e7d34],
     [0xc52d9442, 0xc542142a, 0xc3c4f850],
     [0xc521f9a3, 0xc4d40108, 0xc3e3cd02],
 ];
-const GOLDEN_FLEET_HASH_400: u64 = 0x6997_a949_d4e7_c002;
+const GOLDEN_FLEET_HASH_400: u64 = 0x2e81_a5dc_157d_efff;
 const GOLDEN_PATROL_800: [u32; 3] = [0x45488e56, 0x44e72b24, 0x431f1d85];
 
 #[test]

@@ -1,6 +1,8 @@
 //! Sandbox mode: a live `hwc-sim` universe rendered with the game camera. Ships can be
 //! selected (click or drag a box), ordered to move on the movement plane (`M` then click; a
-//! simple version of the game's move pie plate is drawn) and put into formation (`F` cycles).
+//! simple version of the game's move pie plate is drawn), put into formation (`F` cycles) and
+//! ordered to attack (`A` then click an enemy). Bullets and beams are drawn as lines, hits as
+//! sparks, deaths as an expanding flash, and every ship has a health bar.
 //!
 //! The simulation runs at the original's 16 Hz through the task scheduler model of
 //! `hwc_math::timing` (240 Hz ticks, the universe task every 15). Rendering shows the latest
@@ -28,6 +30,34 @@ const SELECT_COLOR: [f32; 4] = [0.2, 1.0, 0.3, 0.9];
 const BOX_COLOR: [f32; 4] = [0.4, 0.9, 1.0, 0.8];
 const PLATE_COLOR: [f32; 4] = [0.3, 0.6, 1.0, 0.55];
 const DEST_COLOR: [f32; 4] = [1.0, 0.85, 0.2, 0.9];
+const ATTACK_COLOR: [f32; 4] = [1.0, 0.25, 0.2, 0.9];
+/// Bullet colours by weapon technology (projectile, energy, ion, plasma, laser, -, -, big gun,
+/// beast infection). The original takes them from the gun events; these are stand-ins.
+const WEAPON_COLORS: [[f32; 4]; 9] = [
+    [1.0, 0.9, 0.4, 1.0],
+    [0.4, 1.0, 0.5, 1.0],
+    [0.5, 0.95, 1.0, 1.0],
+    [1.0, 0.5, 0.2, 1.0],
+    [1.0, 0.3, 0.3, 1.0],
+    [1.0, 1.0, 1.0, 1.0],
+    [1.0, 1.0, 1.0, 1.0],
+    [1.0, 0.8, 0.6, 1.0],
+    [0.7, 1.0, 0.3, 0.9],
+];
+const HIT_COLOR: [f32; 4] = [1.0, 1.0, 0.7, 0.9];
+const EXPLOSION_COLOR: [f32; 4] = [1.0, 0.6, 0.2, 1.0];
+/// How long hit sparks and explosion flashes stay (seconds of game time).
+const HIT_TIME: f32 = 0.25;
+const EXPLOSION_TIME: f32 = 1.5;
+
+/// A short-lived effect drawn in the overlay.
+#[derive(Debug, Clone, Copy)]
+struct Effect {
+    position: Vec3,
+    radius: f32,
+    start: f32,
+    explosion: bool,
+}
 
 /// A ship type ready to draw.
 struct ShipArt {
@@ -41,6 +71,8 @@ pub enum Mode {
     Select,
     /// Choosing a destination on the movement plane.
     Move,
+    /// Choosing a ship to attack.
+    Attack,
 }
 
 pub struct Sandbox {
@@ -66,6 +98,7 @@ pub struct Sandbox {
     pub status: String,
     /// The camera keeps looking at these ships (the game's camera focus).
     pub focus: Vec<ShipId>,
+    effects: Vec<Effect>,
 }
 
 /// Engine vector to render vector.
@@ -114,6 +147,7 @@ impl Sandbox {
             nav_lights: true,
             status: String::new(),
             focus: Vec::new(),
+            effects: Vec::new(),
         };
         sb.load_art()?;
         sb.camera.look_at = sb.fleet_centre();
@@ -159,8 +193,10 @@ impl Sandbox {
 
     /// Uploads models and the background (call before drawing).
     pub fn prepare(&mut self, renderer: &Renderer) {
-        let scheme = self.team_colors.schemes.first().copied();
-        for art in self.art.values_mut() {
+        let owners: BTreeMap<ShipType, usize> = self.run.universe.ships.iter().map(|s| (s.ship_type, s.player)).collect();
+        for (t, art) in self.art.iter_mut() {
+            let player = owners.get(t).copied().unwrap_or(0);
+            let scheme = self.team_colors.schemes.get(player).or(self.team_colors.schemes.first()).copied();
             if art.gpu.is_none() {
                 let paint = match scheme {
                     Some(s) => TeamPaint::Scheme(&self.team_colors, s),
@@ -213,6 +249,22 @@ impl Sandbox {
     pub fn step(&mut self) {
         self.snapshot();
         self.run.step();
+        let now = self.run.universe.total_time_elapsed;
+        self.effects.retain(|e| now - e.start < if e.explosion { EXPLOSION_TIME } else { HIT_TIME });
+        for e in &self.run.universe.events {
+            match e {
+                hwc_sim::universe::SimEvent::BulletHit { position, .. } => {
+                    self.effects.push(Effect { position: v3(*position), radius: 0.0, start: now, explosion: false })
+                }
+                hwc_sim::universe::SimEvent::ShipDied { position, radius, .. } => {
+                    self.effects.push(Effect { position: v3(*position), radius: *radius, start: now, explosion: true })
+                }
+                _ => {}
+            }
+        }
+        let u = &self.run.universe;
+        self.selection.retain(|id| u.ship(*id).is_some());
+        self.focus.retain(|id| u.ship(*id).is_some());
         self.update_focus();
         let u = &self.run.universe;
         let busy = self.selection.iter().any(|id| {
@@ -464,6 +516,29 @@ impl Sandbox {
         self.status = format!("formation: {}", formation::name(t));
     }
 
+    /// `A` then click: the selection attacks the clicked ship.
+    pub fn attack_clicked(&mut self, size: (u32, u32), px: [f32; 2]) -> bool {
+        let mut best: Option<(f32, ShipId)> = None;
+        for s in self.run.universe.ships.iter() {
+            if let Some((lo, hi)) = self.screen_box(size, s) {
+                if px[0] >= lo[0] && px[0] <= hi[0] && px[1] >= lo[1] && px[1] <= hi[1] {
+                    let d = (v3(s.posinfo.position) - self.camera.eye()).length();
+                    if best.is_none_or(|b| d < b.0) {
+                        best = Some((d, s.id));
+                    }
+                }
+            }
+        }
+        let Some((_, target)) = best else {
+            return false;
+        };
+        let sel: Vec<ShipId> = self.selection.iter().copied().filter(|&id| id != target).collect();
+        command::cl_attack(&mut self.run.universe, &sel, &[target]);
+        let t = self.run.universe.ship(target).map(|s| s.ship_type);
+        self.status = format!("{} ships attack {:?}", sel.len(), t);
+        true
+    }
+
     pub fn halt(&mut self) {
         let sel = self.selection.clone();
         command::cl_halt(&mut self.run.universe, &sel);
@@ -480,6 +555,7 @@ impl Sandbox {
     ) -> Overlay {
         let mut o = Overlay::default();
         let transforms = self.render_transforms();
+        self.combat_overlay(&mut o, size);
         for id in &self.selection {
             let Some(s) = self.run.universe.ship(*id) else {
                 continue;
@@ -526,6 +602,76 @@ impl Sandbox {
         o
     }
 
+    /// Bullets, beams, hit sparks, explosion flashes and health bars.
+    fn combat_overlay(&self, o: &mut Overlay, size: (u32, u32)) {
+        let u = &self.run.universe;
+        for &bid in &u.bullet_list {
+            let b = u.bullets.bullet(bid);
+            let p = v3(b.posinfo.position);
+            let tail = if hwc_sim::bullet::is_beam(b.weapon) {
+                p + v3(b.heading) * b.beam_travel_dist
+            } else {
+                p - v3(b.heading) * b.length_mag.max(30.0)
+            };
+            let c = WEAPON_COLORS[(b.weapon as usize).min(WEAPON_COLORS.len() - 1)];
+            if let (Some(a), Some(z)) = (self.project(size, p), self.project(size, tail)) {
+                o.line(a, z, c);
+            }
+        }
+        let now = u.total_time_elapsed;
+        for e in &self.effects {
+            let Some(c) = self.project(size, e.position) else { continue };
+            if e.explosion {
+                let k = ((now - e.start) / EXPLOSION_TIME).clamp(0.0, 1.0);
+                let r_world = e.radius.max(40.0) * (0.5 + 2.5 * k);
+                let right = self.camera.view().row(0).truncate();
+                let r = self.project(size, e.position + right * r_world).map_or(10.0, |q| ((q[0] - c[0]).powi(2) + (q[1] - c[1]).powi(2)).sqrt());
+                let mut col = EXPLOSION_COLOR;
+                col[3] = 1.0 - k;
+                for ring in [1.0, 0.6] {
+                    let pts: Vec<[f32; 2]> = (0..24)
+                        .map(|i| {
+                            let a = i as f32 / 24.0 * std::f32::consts::TAU;
+                            [c[0] + a.cos() * r * ring, c[1] + a.sin() * r * ring]
+                        })
+                        .collect();
+                    o.polygon(&pts, col);
+                }
+                for i in 0..8 {
+                    let a = i as f32 / 8.0 * std::f32::consts::TAU + k;
+                    o.line([c[0] + a.cos() * r * 0.3, c[1] + a.sin() * r * 0.3], [c[0] + a.cos() * r * 1.2, c[1] + a.sin() * r * 1.2], col);
+                }
+            } else {
+                o.line([c[0] - 4.0, c[1] - 4.0], [c[0] + 4.0, c[1] + 4.0], HIT_COLOR);
+                o.line([c[0] - 4.0, c[1] + 4.0], [c[0] + 4.0, c[1] - 4.0], HIT_COLOR);
+            }
+        }
+        for s in u.ships.iter() {
+            let Some(max) = u.statics.ship(s.ship_type).map(|st| st.health.max_health) else { continue };
+            let Some((lo, hi)) = self.screen_box(size, s) else { continue };
+            let frac = (s.health / max).clamp(0.0, 1.0);
+            let w = (hi[0] - lo[0]).max(16.0);
+            let (x0, y) = (lo[0], lo[1] - 6.0);
+            let col = if frac > 0.6 {
+                [0.2, 1.0, 0.2, 0.9]
+            } else if frac > 0.3 {
+                [1.0, 0.9, 0.2, 0.9]
+            } else {
+                [1.0, 0.2, 0.2, 0.9]
+            };
+            o.line([x0, y], [x0 + w, y], [0.2, 0.2, 0.2, 0.8]);
+            o.line([x0, y], [x0 + w * frac, y], col);
+            o.line([x0, y + 1.0], [x0 + w * frac, y + 1.0], col);
+            if let Some(t) = s.attack.target.and_then(|t| u.ship(t)) {
+                if self.selection.contains(&s.id) {
+                    if let (Some(a), Some(b)) = (self.project(size, v3(s.posinfo.position)), self.project(size, v3(t.posinfo.position))) {
+                        o.line(a, b, [ATTACK_COLOR[0], ATTACK_COLOR[1], ATTACK_COLOR[2], 0.35]);
+                    }
+                }
+            }
+        }
+    }
+
     /// The move pie plate: concentric rings and spokes on the movement plane.
     fn plate(&self, o: &mut Overlay, size: (u32, u32), c: Vec3, radius: f32) {
         for k in 1..=3 {
@@ -559,10 +705,10 @@ impl Sandbox {
             u.total_time_elapsed,
             u.ship_list.len(),
             self.selection.len(),
-            if self.mode == Mode::Move {
-                "MOVE: click a point - "
-            } else {
-                ""
+            match self.mode {
+                Mode::Move => "MOVE: click a point - ",
+                Mode::Attack => "ATTACK: click a ship - ",
+                Mode::Select => "",
             },
             if self.paused { "PAUSED - " } else { "" },
             self.status

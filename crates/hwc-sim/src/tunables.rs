@@ -121,6 +121,10 @@ pub struct SimTweaks {
     pub refresh_collblob_frame: u32,
     pub refresh_collblob_battleping_frame: u32,
     pub blob: BlobProperties,
+
+    /// Combat tunables (Tactics, CommandLayer, FlightMan and the combat parts of Tweak and
+    /// AIShip).
+    pub combat: crate::combat_tweaks::CombatTweaks,
 }
 
 impl Default for SimTweaks {
@@ -207,6 +211,7 @@ impl Default for SimTweaks {
                 overlap_factor: 0.0,
                 sqrt_overlap_factor: 0.0,
             },
+            combat: crate::combat_tweaks::CombatTweaks::default(),
         }
     }
 }
@@ -330,6 +335,7 @@ impl SimTweaks {
             t.apply(file, &script);
         }
         t.precalculate();
+        t.combat = crate::combat_tweaks::CombatTweaks::load(src);
         t
     }
 

@@ -58,6 +58,13 @@ pub struct CommandToDo {
     /// Index of the waypoint being flown to (+0x11c).
     pub waypoint_index: i32,
     pub formation: FormationInfo,
+    /// Targets of an attack or passive attack (+0x22c).
+    pub attack_targets: Vec<ShipId>,
+    /// +0x27a: a formation's attack has reached its targets (until then it flies to them).
+    pub attack_in_range: bool,
+    /// The move a command was carrying out when it was ordered to attack (+0x120, +0x124):
+    /// waypoint mode, waypoints and index, resumed afterwards.
+    pub resume_move: Option<(u32, Vec<Vector>, i32)>,
 }
 
 /// `CommandLayer`: the to-do list in order, over a store indexed by [`CommandId`].
@@ -113,6 +120,9 @@ fn new_command(selection: Vec<ShipId>) -> CommandToDo {
         waypoints: Vec::new(),
         waypoint_index: 0,
         formation: FormationInfo::default(),
+        attack_targets: Vec::new(),
+        attack_in_range: false,
+        resume_move: None,
     }
 }
 
@@ -208,7 +218,7 @@ fn prepare_ships(u: &mut Universe, cid: CommandId) {
     for id in sel {
         let s = u.ships.ship_mut(id);
         s.command = Some(cid);
-        s.special_flags &= !special::ROW_GETTING_OUT_OF_WAY;
+        aiship::row_remove_ship(s);
     }
 }
 
@@ -216,15 +226,26 @@ fn prepare_ships(u: &mut Universe, cid: CommandId) {
 /// formations).
 pub fn remove_ships_from_doing_stuff(u: &mut Universe, ships: &[ShipId]) {
     for &id in ships {
-        u.ships.ship_mut(id).special_flags &= !special::ROW_GETTING_OUT_OF_WAY;
+        aiship::row_remove_ship(u.ships.ship_mut(id));
     }
     let todo = u.commands.todo.clone();
     for cid in todo {
         for &id in ships {
             let Some(cmd) = u.commands.get_mut(cid) else { break };
+            let attacking = cmd.order == order::ATTACK || cmd.attributes & attr::PASSIVE_ATTACKING != 0;
+            let moving = cmd.order == order::MOVE;
             if cmd.attributes & attr::FORMATION != 0 {
                 let Some(index) = remove_from_formation(cmd, id) else { continue };
                 u.ships.ship_mut(id).command = None;
+                let sel = u.commands.get(cid).expect("command").selection.clone();
+                if attacking {
+                    unpair(u, &sel, id);
+                }
+                if moving {
+                    let s = u.ships.ship_mut(id);
+                    s.move_to = Vector::ZERO;
+                    s.move_from = Vector::ZERO;
+                }
                 let cmd = u.commands.get(cid).expect("command");
                 if cmd.selection.len() < 2 {
                     for &s in &cmd.selection.clone() {
@@ -244,6 +265,15 @@ pub fn remove_ships_from_doing_stuff(u: &mut Universe, ships: &[ShipId]) {
                 }
             } else if remove_from_selection(&mut cmd.selection, id) {
                 u.ships.ship_mut(id).command = None;
+                let sel = cmd.selection.clone();
+                if attacking {
+                    unpair(u, &sel, id);
+                }
+                if moving {
+                    let s = u.ships.ship_mut(id);
+                    s.move_to = Vector::ZERO;
+                    s.move_from = Vector::ZERO;
+                }
                 if u.commands.get(cid).expect("command").selection.is_empty() {
                     u.commands.delete(cid);
                     break;
@@ -369,6 +399,14 @@ pub fn cl_move_these(u: &mut Universe, selection: &[ShipId], mode: u32, from: Ve
 
 /// `ChangeOrderToMove` (0x441ba0).
 pub fn change_order_to_move(u: &mut Universe, cid: CommandId, mode: u32, from: Vector, waypoints: &[Vector]) {
+    let Some(cmd) = u.commands.get(cid) else { return };
+    let (was_attack, was_passive) = (cmd.order == order::ATTACK, cmd.attributes & attr::PASSIVE_ATTACKING != 0);
+    if was_passive {
+        clear_passive_attacking(u, cid);
+    }
+    if was_attack {
+        free_last_order(u, cid);
+    }
     let Some(cmd) = u.commands.get_mut(cid) else { return };
     cmd.attributes &= !(attr::PROTECTING | attr::PASSIVE_ATTACKING);
     let is_formation = cmd.attributes & attr::FORMATION != 0;
@@ -632,6 +670,27 @@ pub fn cl_halt(u: &mut Universe, selection: &[ShipId]) {
     prepare_ships(u, cid);
 }
 
+/// The end of an attack order: a command that was moving resumes its waypoints, the rest
+/// fall idle.
+fn finish_attack(u: &mut Universe, cid: CommandId) {
+    let resume = u.commands.get_mut(cid).and_then(|c| c.resume_move.take());
+    match resume {
+        Some((mode, wps, index)) if !wps.is_empty() => {
+            let lead = u.commands.get(cid).expect("command").selection[0];
+            let from = u.ships.ship(lead).posinfo.position;
+            let i = (index.max(0) as usize).min(wps.len() - 1);
+            free_last_order(u, cid);
+            change_order_to_move(u, cid, mode, from, &wps[i..]);
+        }
+        _ => {
+            free_last_order(u, cid);
+            if let Some(c) = u.commands.get_mut(cid) {
+                c.order = order::NULL;
+            }
+        }
+    }
+}
+
 /// `clProcess` (0x447400) for the orders of this slice.
 pub fn cl_process(u: &mut Universe) {
     let todo = u.commands.todo.clone();
@@ -651,31 +710,56 @@ pub fn cl_process(u: &mut Universe) {
             if !formation::is_supported(&cmd) {
                 continue;
             }
+            let passive = cmd.attributes & attr::PASSIVE_ATTACKING != 0;
             match cmd.order {
                 order::NULL => {
                     if cmd.attributes & attr::PROTECTING == 0 {
-                        if cmd.attributes & attr::HOLDING_PATTERN == 0 {
+                        run_passive_attack(u, cid);
+                        let attrs = u.commands.get(cid).map_or(0, |c| c.attributes);
+                        if attrs & attr::HOLDING_PATTERN == 0 {
                             let leader = cmd.selection[0];
                             let stat = statics.ship(u.ships.ship(leader).ship_type).expect("statics");
-                            aitrack::steady_ship(u.ships.ship_mut(leader), stat, &tw, dt);
+                            if passive && stat.rotate_to_retaliate {
+                                aitrack::steady_ship_drift_only(u.ships.ship_mut(leader), stat, &tw, dt);
+                            } else {
+                                aitrack::steady_ship(u.ships.ship_mut(leader), stat, &tw, dt);
+                            }
                         }
-                        let steady_formation = cmd.attributes & attr::HOLDING_PATTERN == 0;
-                        formation::process(u, cid, steady_formation, false);
+                        if passive {
+                            formation::process(u, cid, false, true);
+                        } else {
+                            formation::process(u, cid, attrs & attr::HOLDING_PATTERN == 0, false);
+                        }
                     }
                 }
                 order::MOVE => {
+                    run_passive_attack(u, cid);
                     if process_move_to_do(u, cid, false, 0, true) {
+                        free_last_order(u, cid);
                         let c = u.commands.get_mut(cid).expect("command");
                         c.order = order::NULL;
                     }
                     formation::process(u, cid, false, false);
                 }
+                order::ATTACK => {
+                    // (Formations attack ship by ship here; the in-formation attack of
+                    // holdFormationDuringBattle is not modelled.)
+                    if process_attack_to_do(u, cid) {
+                        finish_attack(u, cid);
+                    }
+                }
                 order::HALT => {
+                    run_passive_attack(u, cid);
                     let leader = cmd.selection[0];
                     let stat = statics.ship(u.ships.ship(leader).ship_type).expect("statics");
-                    let done = aitrack::steady_ship(u.ships.ship_mut(leader), stat, &tw, dt);
-                    formation::process(u, cid, true, false);
+                    let done = if passive && stat.rotate_to_retaliate {
+                        aitrack::steady_ship_drift_only(u.ships.ship_mut(leader), stat, &tw, dt)
+                    } else {
+                        aitrack::steady_ship(u.ships.ship_mut(leader), stat, &tw, dt)
+                    };
+                    formation::process(u, cid, true, passive);
                     if done {
+                        free_last_order(u, cid);
                         u.commands.get_mut(cid).expect("command").order = order::NULL;
                     }
                 }
@@ -685,14 +769,35 @@ pub fn cl_process(u: &mut Universe) {
         }
         match cmd.order {
             order::NULL => {
-                if cmd.attributes == 0 {
+                if cmd.attributes & attr::HOLDING_PATTERN != 0 {
+                    // (clHoldingPattern is not modelled: the ships just stop.)
+                    u.commands.get_mut(cid).expect("command").attributes &= !attr::HOLDING_PATTERN;
+                }
+                let attrs = u.commands.get(cid).map_or(0, |c| c.attributes);
+                if attrs == 0 {
                     for &id in &cmd.selection {
                         u.ships.ship_mut(id).command = None;
                     }
                     u.commands.delete(cid);
+                } else if attrs & attr::PROTECTING == 0 && attrs & attr::PASSIVE_ATTACKING != 0 {
+                    run_passive_attack(u, cid);
+                    let leader = cmd.selection[0];
+                    let stat = statics.ship(u.ships.ship(leader).ship_type).expect("statics");
+                    if !stat.rotate_to_retaliate {
+                        aitrack::steady_ship(u.ships.ship_mut(leader), stat, &tw, dt);
+                    } else if u.ships.ship(leader).tactics != crate::object::tactics::EVASIVE {
+                        aitrack::steady_ship_drift_only(u.ships.ship_mut(leader), stat, &tw, dt);
+                    }
+                }
+            }
+            order::ATTACK => {
+                if process_attack_to_do(u, cid) {
+                    finish_attack(u, cid);
                 }
             }
             order::MOVE => {
+                run_passive_attack(u, cid);
+                let cmd = u.commands.get(cid).expect("command").clone();
                 let mut all_done = true;
                 for i in 0..cmd.selection.len() {
                     all_done &= process_move_to_do(u, cid, false, i, false);
@@ -709,6 +814,8 @@ pub fn cl_process(u: &mut Universe) {
                 }
             }
             order::HALT => {
+                run_passive_attack(u, cid);
+                let cmd = u.commands.get(cid).expect("command").clone();
                 let mut all = true;
                 for &id in &cmd.selection {
                     let stat = statics.ship(u.ships.ship(id).ship_type).expect("statics");
@@ -726,6 +833,891 @@ pub fn cl_process(u: &mut Universe) {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+// --- attack orders
+
+/// `RemoveShipFromAttacking`: the ship drops its targets, pairing and manoeuvre.
+pub fn remove_ship_from_attacking(u: &mut Universe, id: ShipId) {
+    let Some(s) = u.ships.get_mut(id) else { return };
+    s.attack.multiple_targets = None;
+    s.attack.target = None;
+    s.attack.leader = None;
+    s.attack.wingman = None;
+    s.ship_is_attacking = false;
+    s.ship_is_attacking2 = false;
+    s.special_flags &= !(special::ATTACKING_FROM_ABOVE | special::KAMIKAZE | special::ATTACK_SIDESTEP);
+    if s.flightman != 0 {
+        crate::flightman::close(u, id);
+    }
+}
+
+/// The pairing bookkeeping when `gone` leaves an attacking command: its leader and wingman
+/// learn about it.
+fn unpair(u: &mut Universe, sel: &[ShipId], gone: ShipId) {
+    remove_ship_from_attacking(u, gone);
+    for &o in sel {
+        if o == gone {
+            continue;
+        }
+        let s = u.ships.ship_mut(o);
+        if s.attack.leader == Some(gone) {
+            s.attack.events |= crate::object::attack_event::LEADER_DIED;
+            s.attack.leader = None;
+        }
+        if s.attack.wingman == Some(gone) {
+            s.attack.events |= crate::object::attack_event::WINGMAN_DIED;
+            s.attack.wingman = None;
+        }
+    }
+}
+
+/// `AttackCleanup`.
+fn attack_cleanup(u: &mut Universe, cid: CommandId) {
+    let Some(cmd) = u.commands.get(cid).cloned() else { return };
+    if let Some(c) = u.commands.get_mut(cid) {
+        c.attributes &= !attr::ATTACKING_AND_MOVING;
+    }
+    for &id in &cmd.selection {
+        remove_ship_from_attacking(u, id);
+        let s = u.ships.ship_mut(id);
+        if cmd.order != order::MOVE {
+            s.move_to = Vector::ZERO;
+            s.move_from = Vector::ZERO;
+        }
+        s.special_flags &= !special::ATTACK_SIDESTEP;
+    }
+}
+
+/// `ClearPassiveAttacking`.
+fn clear_passive_attacking(u: &mut Universe, cid: CommandId) {
+    if let Some(c) = u.commands.get_mut(cid) {
+        c.attributes &= !attr::PASSIVE_ATTACKING;
+    }
+    attack_cleanup(u, cid);
+    if let Some(c) = u.commands.get_mut(cid) {
+        c.attack_targets.clear();
+    }
+}
+
+/// `FreeLastOrder` for the orders this layer has.
+fn free_last_order(u: &mut Universe, cid: CommandId) {
+    let Some(cmd) = u.commands.get(cid).cloned() else { return };
+    match cmd.order {
+        order::MOVE => {
+            for &id in &cmd.selection {
+                let s = u.ships.ship_mut(id);
+                s.move_to = Vector::ZERO;
+                s.move_from = Vector::ZERO;
+            }
+        }
+        order::ATTACK => {
+            attack_cleanup(u, cid);
+            if let Some(c) = u.commands.get_mut(cid) {
+                c.attack_targets.clear();
+            }
+        }
+        _ => {}
+    }
+    if let Some(c) = u.commands.get_mut(cid) {
+        c.attributes &= !attr::HOLDING_PATTERN;
+    }
+}
+
+/// `BreakupIntoLeaderWingman` (0x43c8b0): fighters are paired with the nearest unpaired
+/// fighter within `wingmanJoinMaxDist`, at random by `FIGHTER_PAIRUP_PROB`.
+fn breakup_into_leader_wingman(u: &mut Universe, sel: &[ShipId]) {
+    let n = sel.len();
+    let pairup = u.tweaks.combat.fighter_pairup_prob;
+    let max = u.tweaks.combat.wingman_join_max_dist;
+    let mut state = vec![2u32; n];
+    for (i, &id) in sel.iter().enumerate() {
+        let interceptor = u.combat.get(u.ships.ship(id).ship_type).is_some_and(|c| matches!(c.attack, crate::combat_statics::AttackKind::Interceptor));
+        // (Ships in the "special" order class 4 are not paired either.)
+        if interceptor && (u.randy.random(hwc_math::random::RAN_GAME) & 0xff) <= pairup {
+            state[i] = 0;
+        }
+    }
+    for i in 0..n {
+        if state[i] != 0 {
+            continue;
+        }
+        let a = u.ships.ship(sel[i]).posinfo.position;
+        let mut best = f32::from_bits(0x6258_d727);
+        let mut pick = 0usize;
+        for j in i + 1..n {
+            if state[j] != 0 {
+                continue;
+            }
+            let b = u.ships.ship(sel[j]).posinfo.position;
+            let d = Vector::new(st(ld(a.x) - ld(b.x)), st(ld(a.y) - ld(b.y)), st(ld(a.z) - ld(b.z)));
+            let dsq = st((ld(d.x) * ld(d.x) + ld(d.y) * ld(d.y)) + ld(d.z) * ld(d.z));
+            if dsq < max && dsq < best {
+                pick = j;
+                best = dsq;
+            }
+        }
+        if pick != 0 {
+            state[pick] |= 1;
+            let (leader, wing) = (sel[i], sel[pick]);
+            let l = u.ships.ship_mut(leader);
+            l.attack.leader = None;
+            l.attack.wingman = Some(wing);
+            let w = u.ships.ship_mut(wing);
+            w.attack.leader = Some(leader);
+            w.attack.wingman = None;
+        }
+    }
+}
+
+/// `InitExtraAttackInfo` (0x43cad0): clears the ships' attack state, decides whether the group
+/// attacks from above, pairs fighters (`pair_up`) and hands out first targets (nearest
+/// unclaimed target per ship, round-robin; aggressive groups share the first ship's target).
+fn init_extra_attack_info(u: &mut Universe, sel: &[ShipId], targets: &[ShipId], pair_up: bool) {
+    let n = sel.len();
+    let nt = targets.len();
+    if n == 0 || nt == 0 {
+        return;
+    }
+    let (mut sx, mut sy, mut sz) = (0f32, 0f32, 0f32);
+    for &id in sel {
+        let s = u.ships.ship_mut(id);
+        let p = s.posinfo.position;
+        sx = st(ld(sx) + ld(p.x));
+        sy = st(ld(sy) + ld(p.y));
+        sz = st(ld(sz) + ld(p.z));
+        s.special_flags &= !(special::ATTACKING_FROM_ABOVE | special::KAMIKAZE | special::ATTACK_SIDESTEP);
+        s.attack.multiple_targets = None;
+        s.attack.target = None;
+        s.attack.leader = None;
+        s.attack.wingman = None;
+        s.attack.flightmans_left = 0;
+        s.attack.situation = 0;
+        s.attack.events = 0;
+        s.tactics_need_to_flightman = 0;
+        s.tactics_talk = 0;
+    }
+    let (mut tx, mut ty, mut tz) = (0f32, 0f32, 0f32);
+    for &t in targets {
+        let p = u.ships.ship(t).posinfo.position;
+        tx = st(ld(tx) + ld(p.x));
+        ty = st(ld(ty) + ld(p.y));
+        tz = st(ld(tz) + ld(p.z));
+    }
+    let a = st(1.0 / ld(n as i32 as f32));
+    let b = st(1.0 / ld(nt as i32 as f32));
+    let dx = st(ld(a) * ld(sx) - ld(b) * ld(tx));
+    let dy = st(ld(a) * ld(sy) - ld(b) * ld(ty));
+    let mut dz = st(ld(a) * ld(sz) - ld(b) * ld(tz));
+    if dz < 0.0 {
+        dz = -dz;
+    }
+    let tw = &u.tweaks.combat;
+    if ld(tw.attacking_from_above_min_dist) <= ld(dz) && fsqrt(ld(dx) * ld(dx) + ld(dy) * ld(dy)) * ld(tw.attacking_from_above_min_ratio) <= ld(dz) {
+        for &id in sel {
+            u.ships.ship_mut(id).special_flags |= special::ATTACKING_FROM_ABOVE;
+        }
+    }
+    if pair_up {
+        breakup_into_leader_wingman(u, sel);
+    }
+    if nt == 1 {
+        for &id in sel {
+            let s = u.ships.ship_mut(id);
+            if s.attack.leader.is_none() {
+                s.attack.target = Some(targets[0]);
+            }
+        }
+        return;
+    }
+    let first = sel[0];
+    let aggressive = u.ships.ship(first).tactics == crate::object::tactics::AGGRESSIVE;
+    let mut claimed = vec![false; nt];
+    let mut count = 0;
+    for (i, &id) in sel.iter().enumerate() {
+        if u.ships.ship(id).attack.leader.is_some() {
+            continue;
+        }
+        let p = u.ships.ship(id).posinfo.position;
+        let mut best = f32::from_bits(0x6258_d727);
+        let mut pick: i32 = -1;
+        for (k, &t) in targets.iter().enumerate() {
+            if claimed[k] {
+                continue;
+            }
+            let q = u.ships.ship(t).posinfo.position;
+            let d = Vector::new(st(ld(p.x) - ld(q.x)), st(ld(p.y) - ld(q.y)), st(ld(p.z) - ld(q.z)));
+            let dsq = st((ld(d.x) * ld(d.x) + ld(d.y) * ld(d.y)) + ld(d.z) * ld(d.z));
+            if dsq < best {
+                pick = k as i32;
+                best = dsq;
+            }
+        }
+        let pick = pick.max(0) as usize;
+        claimed[pick] = true;
+        count += 1;
+        if count == nt {
+            claimed.iter_mut().for_each(|c| *c = false);
+            count = 0;
+        }
+        u.ships.ship_mut(id).attack.target = Some(targets[pick]);
+        if aggressive && i > 0 {
+            if let Some(t) = u.ships.ship(first).attack.target {
+                u.ships.ship_mut(id).attack.target = Some(t);
+            }
+        }
+        let stat = u.statics.ship(u.ships.ship(id).ship_type).expect("statics");
+        if stat.can_target_multiple_targets {
+            let guns = u.ships.ship(id).guns.len();
+            u.ships.ship_mut(id).attack.multiple_targets = Some(vec![None; guns]);
+            pick_multiple_attack_targets(u, id, targets);
+        }
+    }
+}
+
+/// `pickMultipleAttackTargets` (0x443400): each gun takes the target in its range that needs
+/// the least turning (spread out: a picked target counts 1.2 times further for the next gun).
+fn pick_multiple_attack_targets(u: &mut Universe, id: ShipId, targets: &[ShipId]) {
+    let statics = u.statics.clone();
+    let s = u.ships.ship(id).clone();
+    let Some(stat) = statics.ship(s.ship_type) else { return };
+    let Some(guns) = stat.guns.as_ref() else { return };
+    let mut local: Vec<(Vector, f32)> = targets
+        .iter()
+        .map(|&t| (s.rotinfo.coordsys.vec_mul(aiship::trajectory(&s, u.ships.ship(t))), 1.0f32))
+        .collect();
+    let mut picks = vec![None; guns.len()];
+    for (gi, gs) in guns.iter().enumerate() {
+        let mut best = f32::from_bits(0x6258_d727);
+        let mut pick: Option<usize> = None;
+        for (k, &t) in targets.iter().enumerate() {
+            let (lv, weight) = local[k];
+            let d = Vector::new(st(ld(lv.x) - ld(gs.position.x)), st(ld(lv.y) - ld(gs.position.y)), st(ld(lv.z) - ld(gs.position.z)));
+            let dist = st(fsqrt((ld(d.x) * ld(d.x) + ld(d.y) * ld(d.y)) + ld(d.z) * ld(d.z)));
+            let tstat = statics.ship(u.ships.ship(t).ship_type).expect("statics");
+            if aiship::range_given_dist(tstat, ld(dist)) < ld(gs.bullet_range) {
+                let inv = 1.0 / ld(dist);
+                let n = gs.gun_normal;
+                let cos = (inv * ld(d.x) * ld(n.x) + inv * ld(d.y) * ld(n.y)) + inv * ld(d.z) * ld(n.z);
+                let score = st((2.0 - cos) * ld(dist) * ld(weight));
+                if score < best {
+                    pick = Some(k);
+                    best = score;
+                }
+            }
+        }
+        if let Some(k) = pick {
+            picks[gi] = Some(targets[k]);
+            local[k].1 = st(ld(local[k].1) * ld(1.2f32));
+        }
+    }
+    // (Frigates attacking a corvette also consider a second target; not modelled.)
+    u.ships.ship_mut(id).attack.multiple_targets = Some(picks);
+}
+
+/// The target filter of the attack orders (0x443dc0): ships pass, motherships stand for their
+/// attached components (none exist in this slice).
+fn attack_target_list(targets: &[ShipId]) -> Vec<ShipId> {
+    targets.to_vec()
+}
+
+/// Ships in `sel` that have an attack routine (`MakeShipsAttackCapable`).
+pub fn attack_capable(u: &Universe, sel: &[ShipId]) -> Vec<ShipId> {
+    sel.iter().copied().filter(|&id| crate::attack::can_attack(u, id)).collect()
+}
+
+/// `clAttack` (0x4444b0): order `selection` to attack `targets`. Commands covered by the
+/// selection change their order (a moving command remembers its waypoints and resumes them
+/// afterwards); the rest get a new command.
+pub fn cl_attack(u: &mut Universe, selection: &[ShipId], targets: &[ShipId]) {
+    let mut sel: Vec<ShipId> = selection.iter().copied().filter(|&id| u.ships.get(id).is_some_and(|s| s.coll_my_blob.is_some() && s.flags & sof::HIDE == 0)).collect();
+    sel = attack_capable(u, &sel);
+    if targets.is_empty() || sel.is_empty() {
+        return;
+    }
+    let todo = u.commands.todo.clone();
+    for cid in todo {
+        let Some(cmd) = u.commands.get(cid) else { continue };
+        let csel = cmd.selection.clone();
+        if !csel.is_empty() && csel.iter().all(|s| sel.contains(s)) {
+            for s in &csel {
+                remove_from_selection(&mut sel, *s);
+            }
+            let c = u.commands.get_mut(cid).expect("command");
+            c.attributes &= !attr::PROTECTING;
+            if c.order == order::MOVE && !c.waypoints.is_empty() {
+                c.resume_move = Some((c.waypoint_mode, c.waypoints.clone(), c.waypoint_index));
+            }
+            change_order_to_attack(u, cid, targets);
+        }
+        if sel.is_empty() {
+            break;
+        }
+    }
+    if !sel.is_empty() {
+        cl_attack_these(u, &sel, targets);
+    }
+}
+
+/// `clAttackThese` (0x444110).
+fn cl_attack_these(u: &mut Universe, sel: &[ShipId], targets: &[ShipId]) {
+    let found = u.commands.iter().find(|c| selections_equivalent(sel, &c.selection)).map(|c| c.id);
+    if let Some(cid) = found {
+        let c = u.commands.get_mut(cid).expect("command");
+        c.attributes &= !attr::PROTECTING;
+        change_order_to_attack(u, cid, targets);
+        return;
+    }
+    remove_ships_from_doing_stuff(u, sel);
+    let list = attack_target_list(targets);
+    init_extra_attack_info(u, sel, &list, true);
+    let mut cmd = new_command(sel.to_vec());
+    cmd.order = order::ATTACK;
+    cmd.attack_targets = list;
+    for &id in sel {
+        let s = u.ships.ship_mut(id);
+        s.ai_state = 0;
+        s.ai_state_attack = 0;
+        s.ai_state_command = 0;
+    }
+    let cid = u.commands.add(cmd);
+    prepare_ships(u, cid);
+}
+
+/// `ChangeOrderToAttack` (0x443f60).
+fn change_order_to_attack(u: &mut Universe, cid: CommandId, targets: &[ShipId]) {
+    let cmd = u.commands.get(cid).expect("command").clone();
+    if cmd.attributes & attr::PASSIVE_ATTACKING != 0 {
+        clear_passive_attacking(u, cid);
+    }
+    let cmd = u.commands.get(cid).expect("command").clone();
+    let mut was_attacking = false;
+    if cmd.order == order::ATTACK {
+        if cmd.attack_targets.len() == targets.len() && cmd.attack_targets.iter().zip(targets).all(|(a, b)| a == b) {
+            if let Some(c) = u.commands.get_mut(cid) {
+                c.attributes &= !attr::ATTACKING_AND_MOVING;
+            }
+            return;
+        }
+        was_attacking = true;
+    }
+    free_last_order(u, cid);
+    let list = attack_target_list(targets);
+    init_extra_attack_info(u, &cmd.selection, &list, true);
+    let c = u.commands.get_mut(cid).expect("command");
+    c.order = order::ATTACK;
+    c.attack_targets = list;
+    if c.attributes & attr::FORMATION != 0 {
+        c.attack_in_range = false;
+    }
+    prepare_ships(u, cid);
+    for &id in &cmd.selection {
+        let s = u.ships.ship_mut(id);
+        s.ai_state = 0;
+        if !was_attacking {
+            s.ai_state_attack = 0;
+        }
+        s.ai_state_command = 0;
+    }
+}
+
+/// `AttackClosestOpponent`: the nearest target.
+fn attack_closest_opponent(u: &Universe, id: ShipId, targets: &[ShipId]) -> Option<ShipId> {
+    let p = u.ships.ship(id).posinfo.position;
+    let mut best = f32::from_bits(0x6258_d727);
+    let mut pick = None;
+    for &t in targets {
+        let Some(ts) = u.ships.get(t) else { continue };
+        let q = ts.posinfo.position;
+        let d = Vector::new(st(ld(p.x) - ld(q.x)), st(ld(p.y) - ld(q.y)), st(ld(p.z) - ld(q.z)));
+        let dsq = st((ld(d.x) * ld(d.x) + ld(d.y) * ld(d.y)) + ld(d.z) * ld(d.z));
+        if dsq < best {
+            pick = Some(t);
+            best = dsq;
+        }
+    }
+    pick
+}
+
+/// `isThisShipThreateningMe`: `other` (or its pair) is attacking `me` and is not manoeuvring.
+fn is_threatening(u: &Universe, other: ShipId, me: ShipId) -> bool {
+    let o = u.ships.ship(other);
+    let quiet = o.attack.situation == 0;
+    if o.attack.target == Some(me) {
+        return quiet;
+    }
+    match o.attack.leader {
+        None => {
+            if let Some(w) = o.attack.wingman.and_then(|w| u.ships.get(w)) {
+                if w.attack.target == Some(me) {
+                    return quiet;
+                }
+            }
+        }
+        Some(l) => {
+            if u.ships.get(l).is_some_and(|l| l.attack.target == Some(me)) {
+                return quiet;
+            }
+        }
+    }
+    false
+}
+
+/// `FindNewThreateningTarget`: the nearest target within `FIGHTER_MAX_THREAT_DIST` that is
+/// attacking us.
+fn find_new_threatening_target(u: &Universe, id: ShipId, targets: &[ShipId], except: Option<ShipId>) -> Option<ShipId> {
+    let me = u.ships.ship(id);
+    let max = u.tweaks.combat.fighter_max_threat_dist[me.tactics];
+    let mut best = f32::from_bits(0x6258_d727);
+    let mut pick = None;
+    for &t in targets {
+        if Some(t) == except || u.ships.get(t).is_none() {
+            continue;
+        }
+        if !is_threatening(u, t, id) {
+            continue;
+        }
+        let q = u.ships.ship(t).posinfo.position;
+        let p = me.posinfo.position;
+        let d = Vector::new(st(ld(q.x) - ld(p.x)), st(ld(q.y) - ld(p.y)), st(ld(q.z) - ld(p.z)));
+        let dsq = st((ld(d.x) * ld(d.x) + ld(d.y) * ld(d.y)) + ld(d.z) * ld(d.z));
+        if dsq < max && dsq < best {
+            best = dsq;
+            pick = Some(t);
+        }
+    }
+    pick
+}
+
+/// The flight-manoeuvre probabilities of an interceptor against `target`.
+fn flightman_prob(u: &Universe, id: ShipId, target: Option<ShipId>) -> Option<crate::combat_statics::FlightManProb> {
+    let s = u.ships.ship(id);
+    let ic = u.combat.get(s.ship_type)?.interceptor.as_ref()?;
+    let class = target
+        .and_then(|t| u.ships.get(t))
+        .map_or(crate::combat_statics::DEFAULT_CLASS, |t| crate::combat_statics::class_index(u.statics.ship(t.ship_type).and_then(|st| st.ship_class)));
+    Some(ic.flightman_prob[s.tactics][class.min(crate::combat_statics::CLASS_COLUMNS - 1)])
+}
+
+/// The evasive manoeuvre a fighter picks against `threat`: a run of pure evasive manoeuvres
+/// (`evasivePureProb`), or one manoeuvre chosen by whether the threat is in front or behind.
+fn evasive_manoeuvre(u: &mut Universe, id: ShipId, threat: ShipId) -> u32 {
+    use crate::flightman::{family, get_random};
+    let tac = u.ships.ship(id).tactics;
+    let prob = flightman_prob(u, id, Some(threat)).unwrap_or_default();
+    let ev = u.tweaks.combat.flightman.evasivepure_prob[tac];
+    if (u.randy.random(hwc_math::random::RAN_GAME) & 0xff) < ev {
+        let fm = get_random(u, &prob, family::EVASIVE_PURE);
+        let s = u.ships.ship_mut(id);
+        s.attack.flightmans_left = u.tweaks.combat.flightman.num_evasivepure_maneuvers[tac];
+        s.attack.situation = crate::object::attack_situation::JUST_EVADING;
+        fm
+    } else {
+        let s = u.ships.ship(id);
+        let t = u.ships.ship(threat);
+        let h = s.heading();
+        let d = [
+            ld(s.posinfo.position.x) - ld(t.posinfo.position.x),
+            ld(s.posinfo.position.y) - ld(t.posinfo.position.y),
+            ld(s.posinfo.position.z) - ld(t.posinfo.position.z),
+        ];
+        let fam = if (d[0] * ld(h.x) + d[1] * ld(h.y)) + d[2] * ld(h.z) <= 0.0 { family::EVASIVE_FRONT } else { family::EVASIVE_BEHIND };
+        let fm = get_random(u, &prob, fam);
+        let s = u.ships.ship_mut(id);
+        s.attack.flightmans_left = 1;
+        s.attack.situation = crate::object::attack_situation::EVADING_REPOS;
+        fm
+    }
+}
+
+fn set_target(u: &mut Universe, id: ShipId, t: Option<ShipId>) {
+    let s = u.ships.ship_mut(id);
+    s.attack.target = t;
+    s.ai_state = 0;
+    s.ai_state_attack = 0;
+}
+
+/// `formationWingmanTrackLeader` (0x47de00): a wingman keeps station behind and to the side
+/// of its leader.
+fn wingman_track_leader(u: &mut Universe, id: ShipId, leader: ShipId, turn: bool) {
+    let statics = u.statics.clone();
+    let l = u.ships.ship(leader).clone();
+    let s = u.ships.ship(id);
+    let (Some(ls), Some(ss)) = (statics.ship(l.ship_type), statics.ship(s.ship_type)) else { return };
+    let mut head = l.heading();
+    let right = l.rotinfo.coordsys.col(1);
+    let k = (ld(ls.header.coll.coll_sphere_size) + ld(ss.header.coll.coll_sphere_size)) * ld(1.5f32);
+    let p = l.posinfo.position;
+    let dest = Vector::new(
+        st((ld(right.x) - ld(head.x)) * k + ld(p.x)),
+        st((ld(right.y) - ld(head.y)) * k + ld(p.y)),
+        st((ld(right.z) - ld(head.z)) * k + ld(p.z)),
+    );
+    if !turn {
+        if !aitrack::move_reached_destination(s, dest, 10.0) {
+            aiship::fly_to_point_avoiding_objs(u, id, Some(dest), fly::FAST_AS_POSSIBLE, 0.0, Some(l.posinfo.velocity));
+        }
+        return;
+    }
+    let left = st(aitrack::move_left_to_go(s, dest));
+    let mut flags = fly::POINT_IN_DIRECTION_FLYING | fly::FAST_AS_POSSIBLE;
+    if left <= 100.0 {
+        let tw = u.tweaks.clone();
+        let dt = u.phys_time_elapsed;
+        let sm = u.ships.ship_mut(id);
+        aitrack::heading(sm, ss, &tw, dt, &mut head, crate::attack::HEADING_ACCURACY, crate::attack::HEADING_ACCURACY, ss.sinbank, 0);
+        flags = fly::FAST_AS_POSSIBLE;
+    }
+    if 10.0 <= left {
+        aiship::fly_to_point_avoiding_objs(u, id, Some(dest), flags, 0.0, Some(l.posinfo.velocity));
+    }
+}
+
+/// `processAttackToDo` (0x43d6d0) for a command that is not a formation. Returns true when
+/// the attack is over (no targets left).
+fn process_attack_to_do(u: &mut Universe, cid: CommandId) -> bool {
+    use crate::flightman::{execute, get_random, init, kind};
+    use crate::object::{attack_event, attack_situation, tactics};
+    let cmd = u.commands.get(cid).expect("command").clone();
+    // (Fog of war: every target counts as visible.)
+    if cmd.attack_targets.is_empty() {
+        for &id in &cmd.selection {
+            let s = u.ships.ship_mut(id);
+            s.holding_pattern_pos = s.posinfo.position;
+        }
+        let all_small = cmd.selection.iter().all(|&id| {
+            let c = u.statics.ship(u.ships.ship(id).ship_type).and_then(|s| s.ship_class);
+            matches!(c, Some(crate::statics::ShipClass::Fighter) | Some(crate::statics::ShipClass::Corvette))
+        });
+        if !all_small && cmd.attributes == 0 {
+            let statics = u.statics.clone();
+            let tw = u.tweaks.clone();
+            let dt = u.phys_time_elapsed;
+            let mut all = true;
+            for &id in &cmd.selection {
+                let s = u.ships.ship_mut(id);
+                all &= aitrack::steady_ship(s, statics.ship(s.ship_type).expect("statics"), &tw, dt);
+            }
+            return all;
+        }
+        // (Strike craft go into the holding pattern here; it is not modelled, they stop.)
+        return true;
+    }
+    // (Guard conditions during an attack and attacking while moving are not modelled.)
+    let tw = u.tweaks.combat.clone();
+    let counter = u.update_counter;
+    let rnd = |u: &mut Universe| u.randy.random(hwc_math::random::RAN_GAME) & 0xff;
+    for &id in &cmd.selection {
+        if u.ships.ship(id).coll_my_blob.is_none() {
+            return true;
+        }
+        let interceptor = u
+            .combat
+            .get(u.ships.ship(id).ship_type)
+            .is_some_and(|c| matches!(c.attack, crate::combat_statics::AttackKind::Interceptor | crate::combat_statics::AttackKind::Acolyte));
+        let mut target = u.ships.ship(id).attack.target.filter(|t| u.ships.get(*t).is_some());
+        // `attack` = fall through to the ship's attack routine with `target`.
+        let mut attack = true;
+        if !interceptor {
+            if target.is_none() {
+                target = attack_closest_opponent(u, id, &cmd.attack_targets);
+                set_target(u, id, target);
+            }
+            if u.ships.ship(id).attack.multiple_targets.is_some() && counter & tw.multipletargets_retarget_rate == u32::from(id.0) & tw.multipletargets_retarget_rate {
+                pick_multiple_attack_targets(u, id, &cmd.attack_targets);
+            }
+        } else if u.ships.ship(id).attack.flightmans_left != 0 {
+            attack = false;
+            if execute(u, id) {
+                let s = u.ships.ship_mut(id);
+                s.attack.flightmans_left -= 1;
+                if s.attack.flightmans_left == 0 {
+                    s.attack.situation = 0;
+                } else {
+                    let prob = flightman_prob(u, id, target).unwrap_or_default();
+                    let fm = get_random(u, &prob, crate::flightman::family::EVASIVE_PURE);
+                    init(u, id, fm, -1, None);
+                }
+            }
+        } else {
+            let s = u.ships.ship(id);
+            let tac = s.tactics;
+            let (leader, wingman) = (s.attack.leader, s.attack.wingman);
+            if tac == tactics::AGGRESSIVE || leader.is_none() {
+                let single = (leader.is_none() && wingman.is_none()) || tac == tactics::AGGRESSIVE;
+                let rate = if single { tw.fighter_single_check_rate[tac] } else { tw.fighter_pair_check_rate[tac] };
+                let paired = !single;
+                if target.is_none() {
+                    match find_new_threatening_target(u, id, &cmd.attack_targets, None) {
+                        None => {
+                            target = attack_closest_opponent(u, id, &cmd.attack_targets);
+                            set_target(u, id, target);
+                            let lone_target = target.and_then(|t| u.ships.get(t)).is_some_and(|ts| ts.attack.wingman.is_none() && ts.attack.leader.is_none());
+                            if paired && lone_target && rnd(u) < tw.flightman.sandwich_prob[tac] {
+                                let t = target.expect("target");
+                                if let Some(w) = wingman {
+                                    set_target(u, w, Some(t));
+                                    u.ships.ship_mut(w).flightman_state2 = 1;
+                                    init(u, w, kind::SANDWICH, 0, Some(t));
+                                    let ws = u.ships.ship_mut(w);
+                                    ws.attack.flightmans_left = 1;
+                                    ws.attack.situation = attack_situation::SANDWICH;
+                                }
+                                u.ships.ship_mut(id).flightman_state2 = 0;
+                                init(u, id, kind::SANDWICH, 0, Some(t));
+                                let s = u.ships.ship_mut(id);
+                                s.attack.flightmans_left = 1;
+                                s.attack.situation = attack_situation::SANDWICH;
+                                attack = false;
+                            } else if u.ships.ship(id).attack.events & attack_event::ENEMY_TARGET_DIED != 0 {
+                                init(u, id, kind::BARREL_ROLL, -1, None);
+                                u.ships.ship_mut(id).attack.flightmans_left = 1;
+                                attack = false;
+                            }
+                        }
+                        Some(threat) => {
+                            let fm = evasive_manoeuvre(u, id, threat);
+                            init(u, id, fm, -1, None);
+                            set_target(u, id, Some(threat));
+                            attack = false;
+                        }
+                    }
+                } else if let Some(t) = target.filter(|_| counter & rate == tw.checkbogey_frame & rate) {
+                    if !is_threatening(u, t, id) {
+                        if let Some(threat) = find_new_threatening_target(u, id, &cmd.attack_targets, Some(t)) {
+                            let (fm, flag) = if paired && rnd(u) < tw.flightman.split_prob[tac] {
+                                if let Some(w) = wingman {
+                                    let ws = u.ships.ship_mut(w);
+                                    ws.attack.flightmans_left = 1;
+                                    ws.attack.situation = attack_situation::SPLITTING;
+                                    let (wf, wflag) = if u.randy.random(hwc_math::random::RAN_GAME) & 1 == 0 { (kind::HARDBANK, -1) } else { (kind::IMMELMAN, 1) };
+                                    init(u, w, wf, wflag, None);
+                                }
+                                let s = u.ships.ship_mut(id);
+                                s.attack.flightmans_left = 1;
+                                s.attack.situation = attack_situation::SPLITTING;
+                                (kind::IMMELMAN, 0)
+                            } else {
+                                (evasive_manoeuvre(u, id, threat), -1)
+                            };
+                            init(u, id, fm, flag, None);
+                            set_target(u, id, Some(threat));
+                            attack = false;
+                        }
+                    } else if tac == tactics::EVASIVE
+                        && counter & tw.flightman.token_evasivepure_checkrate == tw.flightman.token_evasivepure_checkframe
+                        && rnd(u) < tw.flightman.token_evasivepure_prob
+                    {
+                        let prob = flightman_prob(u, id, Some(t)).unwrap_or_default();
+                        let fm = get_random(u, &prob, crate::flightman::family::EVASIVE_PURE);
+                        let s = u.ships.ship_mut(id);
+                        s.attack.flightmans_left = tw.flightman.num_evasivepure_maneuvers[tac];
+                        s.attack.situation = attack_situation::JUST_EVADING;
+                        init(u, id, fm, -1, None);
+                        attack = false;
+                    }
+                }
+            } else if let (None, Some(l)) = (target, leader) {
+                // A wingman without a target of its own sticks with its leader, firing at the
+                // leader's target when it is ahead of the leader.
+                attack = false;
+                let lt = u.ships.get(l).and_then(|ls| ls.attack.target).filter(|t| u.ships.get(*t).is_some());
+                let mut turn = true;
+                if let Some(t2) = lt {
+                    let ls = u.ships.ship(l);
+                    let h = ls.heading();
+                    let p = u.ships.ship(id).posinfo.position;
+                    let q = u.ships.ship(t2).posinfo.position;
+                    let ahead = (ld(p.x) - ld(q.x)) * ld(h.x) + (ld(p.y) - ld(q.y)) * ld(h.y) + (ld(p.z) - ld(q.z)) * ld(h.z) < 0.0;
+                    if crate::attack::can_attack_passive(u, id) && ahead {
+                        crate::attack::ship_attack_passive(u, id, t2, true);
+                        turn = false;
+                    }
+                }
+                wingman_track_leader(u, id, l, turn);
+            }
+        }
+        if attack {
+            if let Some(t) = target.filter(|t| u.ships.get(*t).is_some()) {
+                // (Kamikaze attacks are not modelled.)
+                crate::attack::ship_attack(u, id, t);
+            }
+        }
+        let s = u.ships.ship_mut(id);
+        s.ship_idle = false;
+        s.attack.events = 0;
+    }
+    false
+}
+
+/// `clPassiveAttack` (0x4447b0): the selection fires at `targets` while it carries on with
+/// what it is doing (a new command when its ships are not exactly one command).
+pub fn cl_passive_attack(u: &mut Universe, selection: &[ShipId], targets: &[ShipId]) {
+    if selection.is_empty() || targets.is_empty() {
+        return;
+    }
+    let found = u.commands.iter().find(|c| selections_equivalent(selection, &c.selection)).map(|c| c.id);
+    if let Some(cid) = found {
+        let c = u.commands.get(cid).expect("command");
+        if c.attributes & attr::HOLDING_PATTERN != 0 {
+            return;
+        }
+        let same = c.attributes & attr::PASSIVE_ATTACKING != 0 && selections_equivalent(&c.attack_targets, targets);
+        if same {
+            return;
+        }
+        if c.attributes & attr::PASSIVE_ATTACKING == 0 && !matches!(c.order, order::NULL | order::MOVE | order::HALT | order::MILITARY_PARADE) {
+            return;
+        }
+        change_order_to_passive_attack(u, cid, targets);
+        return;
+    }
+    remove_ships_from_doing_stuff(u, selection);
+    init_extra_attack_info(u, selection, targets, false);
+    let mut cmd = new_command(selection.to_vec());
+    cmd.order = order::NULL;
+    cmd.attributes = attr::PASSIVE_ATTACKING;
+    cmd.attack_targets = targets.to_vec();
+    for &id in selection {
+        let s = u.ships.ship_mut(id);
+        s.ai_state = 0;
+        s.ai_state_attack = 0;
+    }
+    let cid = u.commands.add(cmd);
+    prepare_ships(u, cid);
+}
+
+/// `ChangeOrderToPassiveAttack` (0x444600).
+fn change_order_to_passive_attack(u: &mut Universe, cid: CommandId, targets: &[ShipId]) {
+    let c = u.commands.get(cid).expect("command").clone();
+    if c.attributes & attr::PASSIVE_ATTACKING != 0 {
+        clear_passive_attacking(u, cid);
+    } else if c.order == order::ATTACK {
+        attack_cleanup(u, cid);
+        u.commands.get_mut(cid).expect("command").attack_targets.clear();
+    }
+    init_extra_attack_info(u, &c.selection, targets, false);
+    let cm = u.commands.get_mut(cid).expect("command");
+    cm.attack_targets = targets.to_vec();
+    cm.attributes = (cm.attributes & !attr::HOLDING_PATTERN) | attr::PASSIVE_ATTACKING;
+    for &id in &c.selection {
+        let s = u.ships.ship_mut(id);
+        s.ai_state = 0;
+        s.ai_state_attack = 0;
+    }
+    prepare_ships(u, cid);
+}
+
+/// `ShipsInPassiveAttackRange`: any ship of `sel` within its `passiveRetaliateZone` box of
+/// the targets' average position.
+pub fn ships_in_passive_attack_range(u: &Universe, sel: &[ShipId], targets: &[ShipId]) -> bool {
+    let live: Vec<_> = targets.iter().filter_map(|&t| u.ships.get(t)).collect();
+    if live.is_empty() {
+        return false;
+    }
+    let (mut x, mut y, mut z) = (0.0f32, 0.0f32, 0.0f32);
+    for t in &live {
+        x = st(ld(x) + ld(t.posinfo.position.x));
+        y = st(ld(y) + ld(t.posinfo.position.y));
+        z = st(ld(z) + ld(t.posinfo.position.z));
+    }
+    let k = ld(st(1.0 / ld(live.len() as i32 as f32)));
+    let mut any = false;
+    for &id in sel {
+        let s = u.ships.ship(id);
+        let zone = ld(u.statics.ship(s.ship_type).map_or(0.0, |st| st.passive_retaliate_zone));
+        let p = s.posinfo.position;
+        let d = [ld(p.x) - k * ld(x), ld(p.y) - k * ld(y), ld(p.z) - k * ld(z)];
+        if d.iter().all(|&c| -zone < c && c < zone) {
+            any = true;
+        }
+    }
+    any
+}
+
+/// `processPassiveAttackToDo` (0x43e180): every ship fires at its target while targets are in
+/// range. Returns true when the passive attack is over.
+fn process_passive_attack_to_do(u: &mut Universe, cid: CommandId) -> bool {
+    let cmd = u.commands.get(cid).expect("command").clone();
+    let targets: Vec<ShipId> = cmd.attack_targets.iter().copied().filter(|t| u.ships.get(*t).is_some()).collect();
+    if targets.is_empty() || !ships_in_passive_attack_range(u, &cmd.selection, &targets) {
+        return true;
+    }
+    let rotate = !matches!(cmd.order, order::MOVE | order::DOCK);
+    let tw = u.tweaks.combat.clone();
+    for &id in &cmd.selection {
+        let mut t = u.ships.ship(id).attack.target.filter(|t| u.ships.get(*t).is_some());
+        if t.is_none() {
+            t = attack_closest_opponent(u, id, &targets);
+            let s = u.ships.ship_mut(id);
+            s.attack.target = t;
+            s.ai_state = 0;
+            s.ai_state_attack = 0;
+        }
+        if u.ships.ship(id).attack.multiple_targets.is_some() && u.update_counter & tw.multipletargets_retarget_rate == u32::from(id.0) & tw.multipletargets_retarget_rate {
+            pick_multiple_attack_targets(u, id, &targets);
+        }
+        if let Some(t) = t {
+            crate::attack::ship_attack_passive(u, id, t, rotate);
+        }
+        u.ships.ship_mut(id).attack.events = 0;
+    }
+    false
+}
+
+/// The passive attack that runs alongside a command's order.
+fn run_passive_attack(u: &mut Universe, cid: CommandId) {
+    let has = u.commands.get(cid).is_some_and(|c| c.attributes & attr::PASSIVE_ATTACKING != 0);
+    if has {
+        if process_passive_attack_to_do(u, cid) {
+            clear_passive_attacking(u, cid);
+        }
+        if let Some(c) = u.commands.get_mut(cid) {
+            c.attributes &= !attr::HOLDING_PATTERN;
+        }
+    }
+}
+
+/// `RemoveShipFromBeingTargeted`: a dead ship leaves every target list.
+fn remove_ship_from_being_targeted(u: &mut Universe, dead: ShipId) {
+    let todo = u.commands.todo.clone();
+    for cid in todo {
+        let Some(c) = u.commands.get_mut(cid) else { continue };
+        if (c.attributes & attr::PASSIVE_ATTACKING != 0 || c.order == order::ATTACK) && remove_from_selection(&mut c.attack_targets, dead) {
+            {
+                let sel = c.selection.clone();
+                for id in sel {
+                    let s = u.ships.ship_mut(id);
+                    if s.attack.target == Some(dead) {
+                        s.attack.events |= crate::object::attack_event::ENEMY_TARGET_DIED;
+                        s.attack.target = None;
+                    }
+                    if let Some(m) = s.attack.multiple_targets.as_mut() {
+                        for t in m.iter_mut() {
+                            if *t == Some(dead) {
+                                *t = None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `clShipDied`: a dead ship leaves its command and every target list.
+pub fn cl_ship_died(u: &mut Universe, dead: ShipId) {
+    remove_ships_from_doing_stuff(u, &[dead]);
+    remove_ship_from_being_targeted(u, dead);
+}
+
+/// `clSetTactics`: set the tactics of the selection (the ships' commands keep running).
+pub fn cl_set_tactics(u: &mut Universe, selection: &[ShipId], tactics: usize) {
+    for &id in selection {
+        if let Some(s) = u.ships.get_mut(id) {
+            s.tactics = tactics.min(2);
         }
     }
 }

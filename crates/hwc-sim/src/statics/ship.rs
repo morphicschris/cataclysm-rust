@@ -676,7 +676,7 @@ pub(crate) fn load_ship(ld: &mut Loader, ship_type: ShipType) -> Option<ShipStat
         s.formation_padding_modifier = tw.strikecraft_padding_modifier;
     }
     s.header.coll.precise_selection = 0xff;
-    s.header.right_of_way = RIGHT_OF_WAY[ship_type.index()];
+    s.header.right_of_way = ld.tweaks.right_of_way[ship_type.index()];
     s.ship_class = Some(ShipClass::Mothership);
 
     // The ship's keyword table, every line in file order (gun-block lines included; the table
@@ -867,7 +867,7 @@ fn set_ai_banking(s: &mut ShipStaticInfo, tw: &super::Tweaks) {
 }
 
 /// Default `rightOfWay` per ship type (table at 0x8a7a80).
-const RIGHT_OF_WAY: [i8; ShipType::COUNT] = [
+pub(crate) const RIGHT_OF_WAY: [i8; ShipType::COUNT] = [
     0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 2, 2, 3, 3, 1, 0, 2, 0, 4, 4, 4, 4, 4, 4, 4, 2, 4, 4, 4, 4, 4, 4, 4, 0, 0, 0,
     0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 2, 3, 1, 1, 0, 2, 0, 4, 4, 4, 4, 4, 0, 0, 1, 0, 3, 1, 1, 0, 2, 0, 0, 1, 0, 0,
     0, 2, 1, 0, 3, 1, 1, 1, 2, 0, 0, 1, 0, 2, 0, 0, 1, 0, 2, 1, 4, 0, 1, 0, 4, 0, 4, 1, 4, 4, 1, 2, 1, 1, 0, 4,

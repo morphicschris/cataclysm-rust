@@ -38,7 +38,7 @@ fn bits_nonzero(v: Vector) -> bool {
 /// are the negative axis). Ignored for ships that never take forces and for crazy ships.
 pub fn apply_force(ship: &mut Ship, force: f32, direction: u16) {
     // (The single-player clamp check on +0x4c4 is not modelled.)
-    if ship.dont_apply_force_ever || ship.flags & sof::CRAZY != 0 {
+    if ship.dont_apply_force_ever != 0 || ship.flags & sof::CRAZY != 0 {
         return;
     }
     let col = match direction {
@@ -197,8 +197,9 @@ pub fn update_ship(ship: &mut Ship, stat: &ShipStaticInfo, tw: &SimTweaks, ctx: 
     if ship.flags & sof::IMPACTABLE != 0 || ship.flags2 & 2 != 0 {
         if changed {
             ship.coll.coll_offset = ship.rotinfo.coordsys.mul_vec(h.coll.coll_sphere_offset);
-            // (collUpdateCollRectangle on every fourth frame: the world-space selection box is
-            // not modelled.)
+            if ctx.update_counter & 3 == 3 {
+                crate::collision::update_coll_rect(ship, stat);
+            }
         }
         ship.coll.coll_position = ship.coll.coll_offset + ship.posinfo.position;
         if changed && !stat.engine_nozzle_offset[0].is_zero_or_unordered() {
@@ -219,6 +220,7 @@ pub fn update_obj_rot_info(ship: &mut Ship, stat: &ShipStaticInfo) {
     }
     ship.coll.coll_offset = ship.rotinfo.coordsys.mul_vec(stat.header.coll.coll_sphere_offset);
     ship.coll.coll_position = ship.posinfo.position + ship.coll.coll_offset;
+    crate::collision::update_coll_rect(ship, stat);
     ship.engine_offset = ship.rotinfo.coordsys.mul_vec(stat.engine_nozzle_offset[0]);
     ship.engine_position = ship.posinfo.position + ship.engine_offset;
 }

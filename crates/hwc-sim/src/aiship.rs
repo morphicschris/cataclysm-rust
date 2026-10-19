@@ -90,7 +90,7 @@ pub fn fly_to_point_avoiding_objs(
     let tw = u.tweaks.clone();
     let ship = u.ships.ship(id).clone();
     let Some(stat) = statics.ship(ship.ship_type) else { return 0 };
-    if ship.dont_apply_force_ever || stat.header.immobile {
+    if ship.dont_apply_force_ever != 0 || stat.header.immobile {
         return 0;
     }
     // (Single-player +0x4c4 check not modelled.)
@@ -292,9 +292,9 @@ pub fn fly_to_point_avoiding_objs(
                         continue;
                     }
                     if stat.header.right_of_way > n.right_of_way {
-                        // We have right of way: ships in our way are asked to move aside instead
-                        // (rowSignalShipToGetOutOfWayOfMe is not modelled), so we do not avoid them,
-                        // except ships of our own command and enemies when told not to plow through.
+                        // We have right of way: friendly ships in our way are asked to move
+                        // aside instead, so we do not avoid them, except ships of our own
+                        // command and enemies when told not to plow through.
                         if n.flags & sof::HIDE != 0 || n.special_flags & special::ROW_GETTING_OUT_OF_WAY != 0 {
                             continue;
                         }
@@ -303,6 +303,7 @@ pub fn fly_to_point_avoiding_objs(
                             if n.command.is_some() && n.command == ship.command {
                                 normal_check = true;
                             } else {
+                                row_maybe_signal(u, &ship, n.id);
                                 continue;
                             }
                         } else if ship.special_flags2 & 1 != 0 {
@@ -455,6 +456,219 @@ pub fn fly_to_point_avoiding_objs(
     }
     aitrack::velocity_vector(s, stat, &tw, dt, desired);
     result
+}
+
+/// `aishipGetTrajectory` (0x413ef0): from the ship's position to the target's collision
+/// centre.
+pub fn trajectory(ship: &Ship, target: &Ship) -> Vector {
+    let t = target.coll.coll_position;
+    let p = ship.posinfo.position;
+    Vector::new(st(ld(t.x) - ld(p.x)), st(ld(t.y) - ld(p.y)), st(ld(t.z) - ld(p.z)))
+}
+
+/// `aishipGetTrajectoryWithVelPrediction` (0x413e20): the trajectory led by where the target
+/// will be when a bullet of `speed` arrives (no lead at or below `below`).
+pub fn trajectory_with_vel_prediction(ship: &Ship, target: &Ship, speed: f32, below: f32) -> Vector {
+    let mut t = trajectory(ship, target);
+    if ld(speed) > ld(below) {
+        let k = fsqrt((ld(t.z) * ld(t.z) + ld(t.y) * ld(t.y)) + ld(t.x) * ld(t.x)) / ld(speed);
+        let v = target.posinfo.velocity;
+        let a = st(k * ld(v.x));
+        let b = st(k * ld(v.y));
+        let c = k * ld(v.z);
+        t.x = st(ld(a) + ld(t.x));
+        t.y = st(ld(b) + ld(t.y));
+        t.z = st(c + ld(t.z));
+    }
+    t
+}
+
+/// `aishipGetTrajectoryWithAngleCorrection` (0x413f20): from where the ship will be in a
+/// quarter of a second.
+pub fn trajectory_with_angle_correction(ship: &Ship, target: &Ship) -> Vector {
+    let p = ship.posinfo.position;
+    let v = ship.posinfo.velocity;
+    let q = ld(0.25f32);
+    let px = ld(v.x) * q + ld(p.x);
+    let py = st(ld(v.y) * q + ld(p.y));
+    let pz = st(ld(v.z) * q + ld(p.z));
+    let t = target.coll.coll_position;
+    Vector::new(st(ld(t.x) - px), st(ld(t.y) - ld(py)), st(ld(t.z) - ld(pz)))
+}
+
+/// The distance `fmathSqrtDouble` gives for a trajectory (register value).
+pub fn traj_dist(traj: Vector) -> Ext {
+    fsqrt((ld(traj.z) * ld(traj.z) + ld(traj.y) * ld(traj.y)) + ld(traj.x) * ld(traj.x))
+}
+
+/// `RangeToTarget` (0x435720): distance to the target's surface (its rough collision sphere),
+/// never negative.
+pub fn range_to_target(target_stat: &ShipStaticInfo, traj: Vector) -> Ext {
+    range_given_dist(target_stat, traj_dist(traj))
+}
+
+/// `RangeToTargetGivenDist` (0x435770) on an already computed distance.
+pub fn range_given_dist(target_stat: &ShipStaticInfo, dist: Ext) -> Ext {
+    let r = dist - ld(target_stat.header.coll.approx_coll_sphere_size);
+    if r <= 0.0 || r.is_nan() {
+        0.0
+    } else {
+        r
+    }
+}
+
+/// `moveTo - moveFrom`, or the velocity when the ship has no move.
+pub fn direction_of_travel(s: &Ship) -> Vector {
+    if s.move_to.x == 0.0 && s.move_to.y == 0.0 && s.move_to.z == 0.0 {
+        s.posinfo.velocity
+    } else {
+        Vector::new(st(ld(s.move_to.x) - ld(s.move_from.x)), st(ld(s.move_to.y) - ld(s.move_from.y)), st(ld(s.move_to.z) - ld(s.move_from.z)))
+    }
+}
+
+/// The right-of-way part of the avoidance walk: a friendly ship in the way of a ship with right
+/// of way is told to move aside when it is idle or halted and ahead of us.
+fn row_maybe_signal(u: &mut Universe, me: &Ship, other: ShipId) {
+    let Some(o) = u.ships.get(other) else { return };
+    let their = o.command.and_then(|c| u.commands.get(c));
+    if let Some(tc) = their {
+        let mine_protecting = me.command.and_then(|c| u.commands.get(c)).is_some_and(|c| c.attributes & attr::PROTECTING != 0);
+        if tc.attributes & attr::PROTECTING != 0 || mine_protecting {
+            return;
+        }
+        if !matches!(tc.order, order::NULL | order::HALT | order::MILITARY_PARADE) {
+            return;
+        }
+    }
+    let dir = direction_of_travel(me);
+    let to = Vector::new(
+        st(ld(o.coll.coll_position.x) - ld(me.coll.coll_position.x)),
+        st(ld(o.coll.coll_position.y) - ld(me.coll.coll_position.y)),
+        st(ld(o.coll.coll_position.z) - ld(me.coll.coll_position.z)),
+    );
+    if !((ld(dir.x) * ld(to.x) + ld(dir.y) * ld(to.y)) + ld(dir.z) * ld(to.z) > 0.0) {
+        return;
+    }
+    let mover = match their {
+        Some(tc) if tc.attributes & attr::FORMATION != 0 => {
+            let leader = tc.selection[0];
+            if u.ships.ship(leader).special_flags & special::ROW_GETTING_OUT_OF_WAY != 0 {
+                return;
+            }
+            leader
+        }
+        _ => other,
+    };
+    row_signal(u, mover, me, to, dir);
+}
+
+/// `rowSignalShipToGetOutOfWayOfMe` (0x414410): `id` will move aside (sideways when `me` flies
+/// mostly up or down, otherwise up or down) and come back afterwards.
+pub fn row_signal(u: &mut Universe, id: ShipId, me: &Ship, me_to_ship: Vector, me_dir: Vector) {
+    let tw = u.tweaks.combat.clone();
+    let mut avoid = tw.row_avoid_by[me.ship_type.index()];
+    if avoid == 0.0 {
+        let size = u.statics.ship(me.ship_type).map_or(0.0, |st| st.header.coll.avoid_coll_sphere_size);
+        avoid = st(ld(tw.avoid_row_ship_by_scale) * ld(size) + ld(tw.avoid_row_ship_by_add));
+    }
+    let s = u.ships.ship_mut(id);
+    s.dont_apply_force_ever |= 2;
+    s.row_original_point = s.posinfo.position;
+    s.special_flags |= special::ROW_GETTING_OUT_OF_WAY;
+    s.row_state = 0;
+    s.row_get_out_of_way = Some(me.id);
+    let dir = me_dir.normalized();
+    let ud = tw.row_going_mostly_updown_angle;
+    let delta = if ud < dir.z || dir.z < -ud {
+        let a = Vector::new(me_to_ship.x, me_to_ship.y, 0.0).normalized();
+        let b = Vector::new(me_dir.x, me_dir.y, 0.0).normalized();
+        let mut part = Vector::new(st(ld(b.y) - 0.0), st(0.0 - ld(b.x)), 0.0);
+        if 0.0 < ld(a.y) * ld(b.x) - ld(a.x) * ld(b.y) {
+            part = Vector::new(-part.x, -part.y, -part.z);
+        }
+        Vector::new(st(ld(part.x) * ld(avoid)), st(ld(part.y) * ld(avoid)), st(ld(part.z) * ld(avoid)))
+    } else if -ld(me_to_ship.z) <= ld(tw.row_go_down_instead_of_up_ratio) * ld(avoid) {
+        Vector::new(0.0, 0.0, avoid)
+    } else {
+        Vector::new(0.0, 0.0, -avoid)
+    };
+    let p = s.posinfo.position;
+    s.row_out_of_way_point = Vector::new(st(ld(delta.x) + ld(p.x)), st(ld(delta.y) + ld(p.y)), st(ld(delta.z) + ld(p.z)));
+}
+
+/// `rowOriginalPointIsClear`: the ship with right of way has passed (it is moving away from us)
+/// and is far enough from our original point.
+fn row_original_point_is_clear(u: &Universe, id: ShipId) -> bool {
+    let s = u.ships.ship(id);
+    let Some(r) = s.row_get_out_of_way.and_then(|r| u.ships.get(r)) else { return true };
+    let dir = direction_of_travel(r);
+    let d = [
+        ld(s.coll.coll_position.x) - ld(r.coll.coll_position.x),
+        ld(s.coll.coll_position.y) - ld(r.coll.coll_position.y),
+        ld(s.coll.coll_position.z) - ld(r.coll.coll_position.z),
+    ];
+    if 0.0 < (ld(dir.x) * d[0] + ld(dir.y) * d[1]) + ld(dir.z) * d[2] {
+        return false;
+    }
+    let size = ld(u.statics.ship(r.ship_type).map_or(0.0, |st| st.header.coll.avoid_coll_sphere_size));
+    let o = s.row_original_point;
+    let e = [
+        ld(r.coll.coll_position.x) - ld(o.x),
+        ld(r.coll.coll_position.y) - ld(o.y),
+        ld(r.coll.coll_position.z) - ld(o.z),
+    ];
+    !((e[0] * e[0] + e[1] * e[1]) + e[2] * e[2] < size * size)
+}
+
+/// `rowFlyShipOutOfWay` (0x414290): fly to the out-of-the-way point, wait there until the ship
+/// with right of way has passed, then return. Meanwhile the ship takes no other forces (bit 1
+/// of `dont_apply_force_ever`, cleared only while this runs).
+pub fn row_fly_out_of_way(u: &mut Universe, id: ShipId) {
+    const REACHED: f32 = 50.0;
+    let state = u.ships.ship(id).row_state;
+    u.ships.ship_mut(id).dont_apply_force_ever &= !2;
+    match state {
+        0 | 1 => {
+            if u.ships.ship(id).row_get_out_of_way.is_none() || row_original_point_is_clear(u, id) {
+                let s = u.ships.ship_mut(id);
+                s.row_state = 2;
+                s.dont_apply_force_ever |= 2;
+                return;
+            }
+            if state == 0 {
+                let p = u.ships.ship(id).row_out_of_way_point;
+                if aitrack::move_reached_destination(u.ships.ship(id), p, REACHED) {
+                    let s = u.ships.ship_mut(id);
+                    s.row_state = 1;
+                    s.dont_apply_force_ever |= 2;
+                    return;
+                }
+                fly_to_point_avoiding_objs(u, id, Some(p), 0, 0.0, None);
+            } else {
+                fly_to_point_avoiding_objs(u, id, None, 0, 0.0, None);
+            }
+        }
+        2 => {
+            let o = u.ships.ship(id).row_original_point;
+            let done = aitrack::move_reached_destination(u.ships.ship(id), o, REACHED)
+                || fly_to_point_avoiding_objs(u, id, Some(o), flags::DONT_FLY_TO_OBSCURED_POINTS | flags::RETURN_IMMED_IF_POINT_OBSCURED, 0.0, None) & FLY_OBJECT_IN_WAY != 0;
+            if done {
+                row_remove_ship(u.ships.ship_mut(id));
+                return;
+            }
+        }
+        _ => {}
+    }
+    u.ships.ship_mut(id).dont_apply_force_ever |= 2;
+}
+
+/// `rowRemoveShipFromGettingOutOfWay`.
+pub fn row_remove_ship(s: &mut Ship) {
+    if s.special_flags & special::ROW_GETTING_OUT_OF_WAY != 0 {
+        s.special_flags &= !special::ROW_GETTING_OUT_OF_WAY;
+        s.dont_apply_force_ever &= !2;
+        s.row_get_out_of_way = None;
+    }
 }
 
 /// `getPitchToDescend` (0x413d00): pitch for the normalised height left to descend.
@@ -691,6 +905,7 @@ mod tests {
                 max_ship_size: 0.0,
                 max_small_ship_size: 0.0,
                 max_big_ship_size: 0.0,
+                bullets: Vec::new(),
             });
             blob.big_targets = vec![idb];
             blob.small_targets = Vec::new();
