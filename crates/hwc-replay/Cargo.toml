@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Parity harness for the Homeworld: Cataclysm recreation: the original's demo and packet recordings, per-tick world-state records and a tick-by-tick comparer"
 
 [dependencies]
+hwc-math = { path = "../hwc-math" }
+
+[dev-dependencies]
 hwc-formats = { path = "../hwc-formats" }
