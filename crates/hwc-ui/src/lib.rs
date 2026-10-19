@@ -16,6 +16,7 @@ pub mod controls;
 pub mod credits;
 pub mod fe;
 pub mod fer;
+pub mod ingame;
 pub mod known;
 pub mod options;
 pub mod present;

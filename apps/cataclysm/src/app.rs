@@ -21,7 +21,10 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::audio::{self, Audio};
 use crate::intro::{Cue, Intro, SEQUENCE};
+use crate::preview::{Outcome, Preview};
 use crate::Args;
+use hwc_ui::ingame::InputEvent;
+use hwc_ui::AssetSource;
 
 /// The display mode the engine switches to for the start-up movies when full screen
 /// (`hwSetRes(640, 480, 32)`, falling back to 16 bits).
@@ -51,6 +54,10 @@ struct App {
     started: Instant,
     exit_after: Option<f32>,
     frames: u64,
+    /// `--ingame-preview`: starting a game opens the in-game interface on a stand-in fleet.
+    ingame_preview: bool,
+    source: Rc<dyn AssetSource>,
+    preview: Option<Preview>,
 }
 
 pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), String> {
@@ -69,6 +76,7 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
             None
         }
     };
+    let source: Rc<dyn AssetSource> = data.clone();
     let intro = if args.intro {
         match Intro::new(data, &SEQUENCE) {
             Ok(i) => Some(i),
@@ -95,6 +103,9 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         started: Instant::now(),
         exit_after: args.exit_after,
         frames: 0,
+        ingame_preview: args.ingame_preview,
+        source,
+        preview: None,
     };
     if app.intro.is_none() {
         app.front_end_start();
@@ -288,7 +299,33 @@ impl App {
                 self.front_end_start();
             }
         }
-        if self.intro.is_none() {
+        if let Some(p) = &mut self.preview {
+            for o in p.update(dt) {
+                match o {
+                    Outcome::Leave => {
+                        self.preview = None;
+                        self.session.fe.all_screens_delete();
+                        self.session.fe.screen_start(hwc_ui::session::MAIN_SCREEN);
+                        break;
+                    }
+                    Outcome::Sound(e) => {
+                        if let Some(a) = &mut self.audio {
+                            a.event(e);
+                        }
+                    }
+                    Outcome::Speech(e) => {
+                        if let Some(a) = &mut self.audio {
+                            a.speech(e);
+                        }
+                    }
+                    Outcome::ApplyOptions => {
+                        if let (Some(a), Some(p)) = (&mut self.audio, &self.preview) {
+                            a.apply_options(&p.ui.fe.game.options);
+                        }
+                    }
+                }
+            }
+        } else if self.intro.is_none() {
             for r in self.session.update(dt) {
                 self.request(event_loop, r);
             }
@@ -308,7 +345,10 @@ impl App {
             }
             None => {
                 let viewport = self.session.placement.viewport;
-                let canvas = self.session.render();
+                let canvas = match &mut self.preview {
+                    Some(p) => p.render(&self.session),
+                    None => self.session.render(),
+                };
                 gpu.present(canvas, viewport);
             }
         }
@@ -358,6 +398,13 @@ impl App {
                 } else {
                     "single-player campaign"
                 };
+                if self.ingame_preview {
+                    match Preview::new(self.source.clone(), &self.session) {
+                        Ok(p) => self.preview = Some(p),
+                        Err(e) => eprintln!("cataclysm: in-game preview: {e}"),
+                    }
+                    return;
+                }
                 eprintln!("cataclysm: the {what} would start here (difficulty {difficulty}); missions are not playable yet");
             }
             Request::LoadGame(name) => eprintln!("cataclysm: would load saved game {name}"),
@@ -461,6 +508,23 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
+                if let Some(p) = &mut self.preview {
+                    if let Some(code) = key_code(&event.logical_key) {
+                        p.input(if down {
+                            InputEvent::KeyDown(code)
+                        } else {
+                            InputEvent::KeyUp(code)
+                        });
+                    }
+                    if down {
+                        if let Some(text) = &event.text {
+                            for c in text.chars() {
+                                p.input(InputEvent::Char(c));
+                            }
+                        }
+                    }
+                    return;
+                }
                 if let Some(code) = key_code(&event.logical_key) {
                     if down {
                         if !event.repeat {
@@ -479,7 +543,11 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.session.mouse_move(position.x, position.y)
+                self.session.mouse_move(position.x, position.y);
+                if let Some(p) = &mut self.preview {
+                    let (x, y) = self.session.placement.to_canvas(position.x, position.y);
+                    p.input(InputEvent::MouseMove { x, y });
+                }
             }
             WindowEvent::CursorEntered { .. } => self.session.cursor_visible = true,
             WindowEvent::CursorLeft { .. } => self.session.cursor_visible = false,
@@ -488,6 +556,15 @@ impl ApplicationHandler for App {
                     return;
                 }
                 let down = state == ElementState::Pressed;
+                if let Some(p) = &mut self.preview {
+                    let left = match button {
+                        MouseButton::Left => true,
+                        MouseButton::Right => false,
+                        _ => return,
+                    };
+                    p.input(InputEvent::MouseButton { left, down });
+                    return;
+                }
                 match button {
                     MouseButton::Left => self.session.mouse_button(true, down),
                     MouseButton::Right => self.session.mouse_button(false, down),
@@ -503,7 +580,10 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => p.y as f32,
                 };
                 if y != 0.0 {
-                    self.session.fe.wheel(y > 0.0);
+                    match &mut self.preview {
+                        Some(p) => p.input(InputEvent::Wheel { up: y > 0.0 }),
+                        None => self.session.fe.wheel(y > 0.0),
+                    }
                 }
             }
             _ => {}

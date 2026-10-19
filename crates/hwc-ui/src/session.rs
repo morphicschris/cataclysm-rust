@@ -28,6 +28,10 @@ pub struct Setup {
     pub original_cfg: Option<String>,
     /// Text of `default_keys.cfg` for the key binding lists.
     pub default_keys: Option<String>,
+    /// Text of the player's `keys.cfg` (used unless older than the defaults).
+    pub keys: Option<String>,
+    /// Where accepted options write `keys.cfg`.
+    pub keys_path: Option<PathBuf>,
     pub scale: ScaleMode,
 }
 
@@ -89,6 +93,17 @@ impl Session {
         if let Some(k) = &setup.default_keys {
             game.load_key_bindings(k);
         }
+        if let Some(k) = &setup.keys {
+            let version = |t: &str| {
+                t.lines()
+                    .find_map(|l| l.trim().strip_prefix("v ")?.trim().parse::<u32>().ok())
+            };
+            if version(k) >= setup.default_keys.as_deref().and_then(version) {
+                game.ig.keys = crate::ingame::keys::KeyBindings::parse(k);
+                game.ig.saved_keys = game.ig.keys.clone();
+            }
+        }
+        game.ig.keys_path = setup.keys_path.clone();
         game.display = options_mode(&game.options);
         let cursor = res.image(CURSOR_BITMAP);
         let mut fe = FrontEnd::new(game, res);
@@ -193,6 +208,14 @@ impl Session {
         }
         self.draw_cursor();
         &self.canvas
+    }
+
+    /// Draws the bitmap pointer at (x, y) on another canvas (the in-game screens).
+    pub fn draw_pointer(&self, canvas: &mut Canvas, x: i32, y: i32) {
+        if let Some(img) = &self.cursor {
+            canvas.set_clip(None);
+            canvas.blit(img, x, y, BlitMode::Blend);
+        }
     }
 
     /// The pointer bitmap, alpha blended with its top-left corner on the mouse position.

@@ -60,6 +60,10 @@ pub struct ListWindow {
     /// Last message for the callback (`CM_*`).
     pub message: u32,
     pub scrollbar: Option<RegionId>,
+    /// The next key pressed goes to the callback (`CM_KEY_PRESSED`, key in
+    /// [`ListWindow::captured_key`]) instead of moving the selection: key rebinding.
+    pub key_capture: bool,
+    pub captured_key: Option<u16>,
 }
 
 impl ListWindow {

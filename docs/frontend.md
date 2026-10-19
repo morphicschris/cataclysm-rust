@@ -9,6 +9,7 @@ the retail executable. `apps/cataclysm` is the game executable; for now it runs 
 cataclysm [data] [--fullscreen | --window] [--skip-intro] [--no-sound]
           [--scale original|fit|integer|stretch] [--filter nearest|linear]
           [--size WxH] [--config file] [--tour outdir] [--exit-after s]
+          [--ingame-preview]
 ```
 
 `data` is the directory written by `hwc-import` (default `$HWC_DATA_DIR`, then `$HWC_GAME_DIR`);
@@ -97,6 +98,7 @@ timeout less two and never counts down.
 | `known` | — | every callback name the shipped `.fib` files use |
 | `scale`, `present` | feResReposition* | window placement; wgpu presenter |
 | `session` | main.c (FE part) | ready-to-run front end used by the app, the tour and the tests |
+| `ingame` | ConsMgr.c, LaunchMgr.c, ResearchGUI.c, Trader.c, MainOverlay.c, ShipPrint.c, PopupMenu.c, UserKeys.c, GamePick.c, Objectives.c | the in-game interface (below) |
 
 ### Drawing
 
@@ -160,6 +162,90 @@ gameplay, key bindings from `default_keys.cfg`), presets (effects High/Low/Custo
 classic / Cataclysm default, fastest / default frame rate), language radio buttons, credits slide
 show, multiplayer connection screen with Back. Starting a mission, sounds, opening the support
 web page and changing the display device are reported to the application as `Request`s.
+
+## In-game interface
+
+`hwc_ui::ingame` recreates the screens of a running game against a host trait, so it does not
+depend on the simulation's internals:
+
+* `GameUiHost` (in `ingame::host`) is what the screens read: player numbers (RUs, support
+  units, race, single/multiplayer, paused), factories and their construction lists
+  (`BuildRow`: class headings and ships with buildable / hidden / greyed status, caps, support
+  units), build jobs (count, batch size, progress, cost paid so far), labs and technologies
+  with the research list rows, launchers with docked ships and slot counts, mothership modules,
+  the Beast power allocation, the selection (`ShipInfo`: health, upgrades, tech level, guns,
+  owner), the commands available to it, objectives, messages, tooltips, and whether Escape has
+  something to cancel in the game. `HostView::capture` copies it every frame.
+* Everything the UI does comes back as `GameRequest`s (build / unqueue / cancel / pause jobs,
+  research / clear lab, launch, auto-launch, repair priority, Beast systems, ship commands, key
+  actions the game handles, pause, save / load / restart / quit, selection changes, sounds and
+  speech). The UI never waits for them: the next frame's copy shows the result.
+* `InGameUi` is the per-frame API: `handle_input(host, InputEvent)` (returns whether the UI
+  used the event), `update(host, dt)` (returns the requests), `draw(canvas)` over a canvas that
+  already holds the 3D view, `open(host, Manager)`, `open_popup`, `game_over`, and
+  `ship_view()` / `set_ship_view_image()` for the build manager's 3D ship picture (rendered by
+  the application). `action_held()` answers the polled actions (pan, zoom, band-box
+  modifiers).
+* `ingame::mock::MockHost` is a Somtaaw (or Beast) fleet that applies the requests the way the
+  game would. The tests drive every screen with it (`tests/ingame.rs`, screenshots in
+  `screenshots/ingame/` when `HWC_SCREENSHOTS` is set), and `cataclysm --ingame-preview` opens
+  it when a game is started from the menu (a starfield stands in for the 3D view).
+
+The managers are the `.fib` screens of `FEMan\` on the same front-end manager as the menus (one
+`FrontEnd<Cataclysm>`), so the in-game option screens reuse the menu's option callbacks.
+
+| Screen | Behaviour |
+| --- | --- |
+| Construction manager (`Construction_manager`, `Beast_Construction_manager`) | Class headings and ships (a heading only above a visible ship). Left click selects (Shift toggles) and, on a selected row, adds one (Ctrl: five); right click removes one. Counts stay in the manager until BUILD, unless the factory already builds that type: then they go straight into its queue. Removing never takes the ship in progress. Held arrows repeat every 0.25 s. Refused rows (caps, support units, greyed) flash red for 0.3 s; cap failures speak `0x2001039` / `0x2001038`. PAUSE BATCH toggles the selected types (pauses unless all are paused); CANCEL BATCH cancels them (the game refunds what was paid). Ship and batch progress bars per row; mothership and two carrier icons (`Build_race{1,2}_icon{1,2}_{disabled,off,on}`) with the connector line; support-units bar from the `b_Build_Support*` textures (used, pending dimmed, free masked); totals; INFO shows the description over the ship view. Sounds `0x12f` + `0x104` on open, `0x130` + `0x100` on close; speech as `cmBuildShips` / `cmPauseJobs` / `cmCancelJobs`. The game keeps running. |
+| Launch manager (`Launch_Manager`, `Beast_Launch_Manager`) | Docked ships in the engine's print order under FIGHTER / CORVETTE headings (" 3 x ACOLYTE"); LAUNCH ONE / LAUNCH GROUP (selected type) / LAUNCH ALL (all but dEcclesiam); auto-launch boxes (checked = stay docked); slot bars (green free, red used, count). Somtaaw module panel: name, health bar, three repair-priority buttons `R1_Sys{1,2,3}_*` (hover taken from the mouse x like the engine). Beast emergency power radio (enabled with a Beast mothership). |
+| Research manager (`Research_Manager`, `Beast_Research_Manager`) | Techs under module headings (those that cannot be researched are hidden), coloured by state and kind (new capability / upgrade), progress bar behind researching techs, green dot on owned ones. RESEARCH (or a double click) starts the tech in its module's lab if that lab is idle; CLEAR LAB stops the selected lab. Five lab buttons with `Research_icon_*` icons, progress bar and scan line; clicking one shows its module picture. Tech picture `ResearchGUI\Race<n>\<TECH>.lif`, description under INFO. The Beast's single lab is the animated blob. |
+| Trader (`Trader_Interface`) | Offers with prices (red when unaffordable), dialogue, picture and description, RUs; ACCEPT OFFER / DONE. |
+| Escape menu (`In_game_esc_menu*`, `SP_Game_Over`, `Quit_game2`, save / load, `Game_options` and its option screens) | Variant by mode (tutorial, campaign, skirmish, multiplayer); pauses except in multiplayer; option Accept / Cancel return to `Game_options`. |
+| Fleet intelligence (`Single_Player_Objective`) | The clicked objective's text (`Arial_b12`, (0,200,200)); pauses. |
+
+Drawn directly over the 3D view:
+
+* **Main overlay**, from `MainOverlay.script` ("shown,backdrop" per panel, per single / multi
+  player and view 1-3; Next_Overlay_View cycles): selected ships top right ("2 x ACOLYTE", grey
+  or blue by owner, hover green; a click narrows the selection; with Multiple_Select held it
+  marks the line and the key release removes the marked types), band-box list, objectives
+  bottom left (a click opens fleet intelligence, the hyperspace objective jumps), tooltip,
+  messages (five lines, older ones dimmer, fading out 8 to 13 s after they were posted, scroll
+  buttons), player names, construction and research progress (`Build_ProgressBar` /
+  `Research_ProgressBar`), SU / RU / game time bottom right (SU pulses red-yellow over the
+  cap), taskbar view buttons and backdrop (gameplay options), sensors pan arrows, "PAUSED".
+  Holding Toggle_Overlay_Options shows the options menu, where 1-9 toggle panels
+  (Change_Overlay_Backdrops_Toggle switches them to the backdrops); Show_Keys_1-3 show the
+  binding pages. `overlay::draw_health_bar` draws a ship's health bar for the game's 3D pass.
+* **Ship info** (Toggle_Ship_Info): type and rank, upgrades (green installed, yellow
+  researched, red possible), class, health, armour level, guns. It is dragged while the
+  options key is held, and has its own 1-8 option menu then.
+* **Right-click menu**: the main menu (Special Action..., Upgrade, Move, Start Waypoints, Dock,
+  Retire, Cancel, and the Tactics, Formations, Focus, View, Sensors submenus) and the
+  special-actions menu, from the commands the host offers. arial_12 (arial_15 with large
+  fonts), `PopupMenu_*` icons; hover opens submenus, Enter and the arrows work, each item runs
+  its key action; the selected ships are outlined while an item is highlighted. The game opens
+  it (`InGameUi::open_popup`) when a right click has no order to give.
+
+### Keys
+
+`ingame::keys` has the 147 actions in the engine's order with their `keys.cfg` names, up to
+three bindings each (`ALT+SHIFT+CTRL+<vk>`). `default_keys.cfg` is read at start; the player's
+`keys.cfg` (beside the options file) is used unless missing or older (its `v` line); accepting
+the options writes it. A key fires every action bound to it with exactly the held modifiers (a
+binding of Shift, Ctrl or Alt itself ignores that modifier). Ship_Special, Enable_Height_Move and
+Multiple_Select also have release handlers; pan, zoom, the band-box modifiers, the overlay
+options and the key pages are polled. UI actions (managers, Escape, overlay, ship info, menu,
+message paging) are handled by the UI; ship commands become `GameRequest::Command`, everything
+else `GameRequest::Action`. Escape closes the menu, else goes to the game when it has something
+to cancel, else opens the escape menu.
+
+The options key list (front end and in game) lists the 147 actions with their group titles.
+Enter or a double click waits for a key ("??????") and binds it with the held modifiers, taking
+the combination from actions that may not share it (only height move / multiple select, sensors
+/ skip sensors and the seven cancel actions share); binding the same combination again clears
+the action; keys without a name open the "invalid key" box. RESET TO DEFAULT goes back to the
+saved `keys.cfg` (the engine reloads it); Cancel restores the bindings.
 
 ## Options
 
@@ -241,9 +327,16 @@ slider or the colour picker holds the mouse, positions are clamped to it like `m
   restored the volumes with the normal fade. Here every audio change applies immediately.
 * Changing the window size in `original` mode keeps the open screens (their create callbacks run
   again); the engine dropped back to the main menu after a resolution change.
-* Key bindings are shown read-only; saved-game lists are empty; multiplayer stops at the
-  connection-method screen; in-game screens (taskbar, managers) load and draw but their
-  callbacks are stubs.
+* Saved-game lists are empty; multiplayer stops at the connection-method screen.
+* In game: the HW1-style taskbar and sensors manager screens are not recreated (the sensors
+  view belongs to the game); the overlay has no taskbar auto-hide, tactical legend icons,
+  multiplayer bounties or "end of recording" text; message time-outs count from the message
+  time rather than from when a line becomes the oldest shown; the right-click menu lacks the
+  waypoint-mode, ship-name, mimic-disguise and alliance submenus and outlines every selected
+  ship rather than only those able to do the item; the ship info panel's upgrade names are
+  matched to bits in order; the key list has no title row, and the key binding pool list stays
+  empty (as in the game, which has no handler for it); the trader's dialogue lines are built in
+  (the game takes them from mission scripts).
 * Spanish and Italian labels are not in the shipped files; only English, French and German can be
   selected.
 * The colour picker colours the race preview with the plain team-colour blend (the engine also

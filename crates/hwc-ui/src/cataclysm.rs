@@ -87,6 +87,8 @@ pub struct Cataclysm {
     pub countdown: Option<Countdown>,
     /// `strOPCountdown0..2`: the confirmation box's three lines.
     pub countdown_text: [String; 3],
+    /// In-game screens' state (managers, overlay, keys); unused by the front end.
+    pub ig: crate::ingame::IgState,
 }
 
 impl Cataclysm {
@@ -123,11 +125,15 @@ impl Cataclysm {
                 "Do you want to keep this setting?".into(),
                 "Original settings will restore in %ds.".into(),
             ],
+            ig: Default::default(),
         }
     }
 
     /// Reads the default key bindings (`default_keys.cfg`: `key <command> [SHIFT+]<code>`).
     pub fn load_key_bindings(&mut self, text: &str) {
+        self.ig.default_keys = crate::ingame::keys::KeyBindings::parse(text);
+        self.ig.keys = self.ig.default_keys.clone();
+        self.ig.saved_keys = self.ig.keys.clone();
         self.key_bindings = text
             .lines()
             .filter_map(|l| {
@@ -156,8 +162,39 @@ impl Cataclysm {
         }
     }
 
+    /// `opOptionsSaveSettings`: the restore point of Cancel (also used by the in-game options).
+    pub fn options_snapshot(&mut self) {
+        self.saved = self.options.clone();
+        self.sub_saved = self.options.clone();
+        self.ig.saved_keys = self.ig.keys.clone();
+    }
+
+    /// Cancel: back to the restore point.
+    pub fn options_restore(&mut self) {
+        self.options = self.saved.clone();
+        self.ig.keys = self.ig.saved_keys.clone();
+        self.ig.binding = None;
+    }
+
+    /// Accept: the current values become the restore point and are saved.
+    pub fn options_commit(&mut self) {
+        self.saved = self.options.clone();
+        self.save_options();
+    }
+
+    /// Writes `keys.cfg` (`kbSaveBindings`) when a path is set.
+    pub fn save_keys(&mut self) {
+        self.ig.saved_keys = self.ig.keys.clone();
+        if let Some(path) = &self.ig.keys_path {
+            if let Err(e) = std::fs::write(path, self.ig.keys.to_config()) {
+                eprintln!("hwc-ui: saving {}: {e}", path.display());
+            }
+        }
+    }
+
     /// Saves the options if a config path is set.
     pub fn save_options(&mut self) {
+        self.save_keys();
         self.colors.store(&mut self.options);
         if let Some(path) = &self.config_path {
             if let Err(e) = self.options.save(path) {
@@ -269,7 +306,7 @@ pub fn register(fe: &mut Fe) {
     // Options: navigation.
     fe.callback_add("OP_Options_Accept", options_accept);
     fe.callback_add("OP_Options_Cancel", |fe, _| {
-        fe.game.options = fe.game.saved.clone();
+        fe.game.options_restore();
         fe.current_screen_delete();
         fe.screen_start("Main_game_screen");
         fe.game.requests.push(Request::AudioSettings);
@@ -380,13 +417,7 @@ pub fn register(fe: &mut Fe) {
     fe.callback_add("OP_CataclysmDefault", |fe, _| gameplay_preset(fe, false));
     fe.callback_add("OP_Render", render_list);
     fe.callback_add("OP_Resolution", resolution_list);
-    fe.callback_add("OP_KeyBindingsList", key_list);
-    fe.callback_add("OP_KeyBindingsPoolList", key_list);
-    fe.list_drawer_add("OP_KeyBindingsList", key_item_draw);
-    fe.list_drawer_add("OP_KeyBindingsPoolList", key_item_draw);
-    fe.callback_add("OP_KeyResetToDefault", |fe, _| {
-        fe.log_once("key bindings are read-only (default_keys.cfg)".into())
-    });
+    crate::ingame::keylist::register(fe);
     fe.callback_add("OP_TroubleShoot", |fe, _| {
         fe.game.requests.push(Request::OpenUrl(
             "http://homeworld.sierra.com/cataclysm/support/".into(),
@@ -487,8 +518,7 @@ fn options_start(fe: &mut Fe, call: &Call) {
     if fe.first_call(call) {
         return;
     }
-    fe.game.saved = fe.game.options.clone();
-    fe.game.sub_saved = fe.game.options.clone();
+    fe.game.options_snapshot();
     fe.current_screen_delete();
     fe.screen_start("Audio_Options");
 }
@@ -1417,51 +1447,6 @@ fn list_row_height(fe: &Fe, font: &str) -> i32 {
 }
 
 /// Key binding lists (read-only).
-fn key_list(fe: &mut Fe, call: &Call) {
-    let Some(a) = call.atom else { return };
-    if !fe.first_call(call) {
-        return;
-    }
-    let height = list_row_height(fe, "Arial_12.hff");
-    fe.list_init(a, "Arial_12.hff", height);
-    let binds = fe.game.key_bindings.clone();
-    if let Some(l) = fe.list_mut(a) {
-        for (i, (cmd, key)) in binds.iter().enumerate() {
-            l.add(format!("{cmd}\t{key}"), i as u32, false);
-        }
-    }
-    if let Some(id) = fe.atom(a).region {
-        fe.list_scroll_adjust(id);
-    }
-}
-
-/// Two columns: command and key.
-fn key_item_draw(fe: &Fe, fer: &mut Fer, row: Rect, item: &crate::controls::ListItem) {
-    let Some(font) = fer.res.font("Arial_12.hff") else {
-        return;
-    };
-    let colour = if item.selected {
-        colour::LIST_ITEM_SELECTED
-    } else {
-        colour::LIST_ITEM_STANDARD
-    };
-    let (cmd, key) = item.text.split_once('\t').unwrap_or((&item.text, ""));
-    let _ = fe;
-    let none = (Shadow::None, BLACK);
-    text::print(
-        fer.canvas,
-        &font,
-        row.x0,
-        row.y0,
-        colour,
-        &text::to_latin1(cmd),
-        none,
-    );
-    let k = text::to_latin1(key);
-    let x = row.x1 - text::width(&font, &k) - 4;
-    text::print(fer.canvas, &font, x, row.y0, colour, &k, none);
-}
-
 /// `opDrawNumChannels`: the channel count on the panel colour.
 fn draw_num_channels(fe: &mut Fe, fer: &mut Fer, _atom: AtomRef, rect: Rect) {
     fer.canvas.fill_rect(rect, [90, 99, 122, 255]);

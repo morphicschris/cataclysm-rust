@@ -5,6 +5,7 @@
 mod app;
 mod audio;
 mod intro;
+mod preview;
 mod tour;
 
 use std::path::{Path, PathBuf};
@@ -38,6 +39,8 @@ options:
   --tour <outdir>       render a scripted walk through the intro and the menus to PNG
                         files and exit
   --exit-after <s>      close the window after s seconds (smoke tests)
+  --ingame-preview      starting a game opens the in-game interface (managers, overlay,
+                        menus, keys) on a stand-in fleet instead of returning to the menu
   -h, --help            this text
 
 The original's switches /window, /fullscreen and /disableAVI are accepted too.
@@ -55,6 +58,7 @@ pub struct Args {
     pub fullscreen: bool,
     pub intro: bool,
     pub sound: bool,
+    pub ingame_preview: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -69,6 +73,7 @@ fn parse_args() -> Result<Args, String> {
         fullscreen: true,
         intro: true,
         sound: true,
+        ingame_preview: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -95,6 +100,7 @@ fn parse_args() -> Result<Args, String> {
             "--fullscreen" => a.fullscreen = true,
             "--skip-intro" => a.intro = false,
             "--no-sound" => a.sound = false,
+            "--ingame-preview" => a.ingame_preview = true,
             "--scale" => {
                 let v = value("--scale")?;
                 a.scale = ScaleMode::parse(&v).ok_or_else(|| format!("unknown scale mode {v}"))?;
@@ -151,6 +157,9 @@ fn open_session(args: &Args, data: Rc<GameData>) -> Result<Session, String> {
             .map(|r| r.join("config").join("hwc-options.cfg")),
         _ => Some(PathBuf::from("hwc-options.cfg")),
     });
+    // The player's key bindings live beside the options file.
+    let keys_path = options_path.as_ref().map(|p| p.with_file_name("keys.cfg"));
+    let keys = read(keys_path.clone());
     let source: Rc<dyn AssetSource> = data;
     Session::new(
         source,
@@ -158,6 +167,8 @@ fn open_session(args: &Args, data: Rc<GameData>) -> Result<Session, String> {
             options_path,
             original_cfg,
             default_keys,
+            keys,
+            keys_path,
             scale: args.scale,
         },
     )

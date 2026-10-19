@@ -656,6 +656,14 @@ impl<G> FrontEnd<G> {
         }
     }
 
+    /// Text of a text entry atom.
+    pub fn text_entry(&self, atom: AtomRef) -> Option<&str> {
+        match &self.regions.get(self.atom(atom).region?)?.control {
+            Control::Text(t) => Some(&t.text),
+            _ => None,
+        }
+    }
+
     pub fn list_mut(&mut self, atom: AtomRef) -> Option<&mut ListWindow> {
         let id = self.atom(atom).region?;
         match &mut self.regions.get_mut(id)?.control {
@@ -693,6 +701,73 @@ impl<G> FrontEnd<G> {
             .map(|r| &mut r.control)
         {
             sb.adjust(upper, visible, total);
+        }
+    }
+
+    /// Gives a stand-alone scroll bar (one not belonging to a list window, like the build
+    /// manager's `CM_Scroller` thumbwheel) an invisible list of rows to scroll; the caller reads
+    /// and sets the position with [`FrontEnd::virtual_scroll`]. Returns the list's region.
+    pub fn scrollbar_virtual(&mut self, scrollbar_atom: &str, visible: usize) -> Option<RegionId> {
+        let a = self.find_atom(scrollbar_atom)?;
+        let bar = self.atom(a).region?;
+        let parent = self.regions.get(bar)?.parent?;
+        let mut r = Region::new(Rect::default(), 0, Role::Static);
+        r.control = Control::List(ListWindow {
+            max_visible: visible,
+            scrollbar: Some(bar),
+            ..Default::default()
+        });
+        let id = self.regions.alloc(r);
+        self.regions.insert_child(id, parent);
+        if let Some(Control::ScrollBar(sb)) = self.regions.get_mut(bar).map(|r| &mut r.control) {
+            sb.list = Some(id);
+        }
+        Some(id)
+    }
+
+    /// Sets the row count of a virtual scroll list and, when `upper` is given, its first
+    /// visible row; returns the first visible row (moved by the scroll bar since last time).
+    pub fn virtual_scroll(&mut self, list: RegionId, total: usize, upper: Option<usize>) -> usize {
+        let pos = match self.regions.get_mut(list).map(|r| &mut r.control) {
+            Some(Control::List(l)) => {
+                l.items.resize(
+                    total,
+                    ListItem {
+                        text: String::new(),
+                        data: 0,
+                        can_select: false,
+                        selected: false,
+                    },
+                );
+                if let Some(u) = upper {
+                    l.upper = u;
+                }
+                let last = total.saturating_sub(l.max_visible);
+                l.upper = l.upper.min(last);
+                l.upper
+            }
+            _ => return 0,
+        };
+        self.list_scroll_adjust(list);
+        pos
+    }
+
+    /// Makes a list window focusable (keyboard goes to it once clicked).
+    pub fn list_focusable(&mut self, atom: AtomRef, focus: bool) {
+        let Some(r) = self
+            .atom(atom)
+            .region
+            .and_then(|id| self.regions.get_mut(id))
+        else {
+            return;
+        };
+        if focus {
+            r.filter |= RPE_KEY_DOWN;
+        } else {
+            r.filter &= !RPE_KEY_DOWN;
+        }
+        if let Control::List(l) = &mut r.control {
+            l.can_have_focus = focus;
         }
     }
 
@@ -1894,6 +1969,8 @@ impl<G> FrontEnd<G> {
             if status & RSF_KEY_CAPTURE != 0 {
                 let typed: Vec<u32> = self.input.typed.drain(..).collect();
                 for k in typed {
+                    // A focused control eats the key: it must not fire a hot key later.
+                    self.input.stuck.remove(&((k & 0xffff) as u16));
                     self.call(id, RPE_KEY_DOWN, k, mask);
                 }
             } else if filter & RPM_KEY_EVENT != 0 && !self.keys_focussed {
@@ -2177,6 +2254,16 @@ impl<G> FrontEnd<G> {
         match event {
             RPE_KEY_DOWN => {
                 let k = (data & 0xffff) as u16;
+                if let Some(Control::List(l)) = self.regions.get_mut(id).map(|r| &mut r.control) {
+                    if l.key_capture {
+                        if !matches!(k, key::SHIFT | key::CONTROL | key::ALT) {
+                            l.key_capture = false;
+                            l.captured_key = Some(k);
+                            notify(self, CM_KEY_PRESSED);
+                        }
+                        return;
+                    }
+                }
                 let step = match k {
                     key::LEFT | key::UP => Some(-1),
                     key::RIGHT | key::DOWN => Some(1),
@@ -2313,6 +2400,11 @@ impl<G> FrontEnd<G> {
     /// is drawn before its children and the head of each list ends up on top.
     pub fn render(&mut self, canvas: &mut Canvas) {
         canvas.clear(crate::canvas::BLACK);
+        self.render_over(canvas);
+    }
+
+    /// Draws the screens over what the canvas already holds (the in-game 3D view).
+    pub fn render_over(&mut self, canvas: &mut Canvas) {
         let mut order = Vec::new();
         self.post_order(self.root, &mut order);
         let res = self.res.clone();
