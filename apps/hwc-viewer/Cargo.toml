@@ -9,6 +9,8 @@ publish.workspace = true
 hwc-formats = { path = "../../crates/hwc-formats" }
 hwc-render = { path = "../../crates/hwc-render" }
 hwc-sim = { path = "../../crates/hwc-sim" }
+hwc-kas = { path = "../../crates/hwc-kas" }
+hwc-audio = { path = "../../crates/hwc-audio" }
 hwc-math = { path = "../../crates/hwc-math" }
 glam = "0.30"
 winit = "0.30"

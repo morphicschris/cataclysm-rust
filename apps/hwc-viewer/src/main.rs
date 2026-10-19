@@ -5,13 +5,20 @@
 //!            [--screenshot out.png [--size WxH] [--angle deg] [--declination deg]
 //!             [--distance d] [--time s] [--team n|off]]
 //! hwc-viewer <cataclysm.big> --sandbox [scenario] [--interpolate] [--screenshot out.png
-//!            --ticks 0,80,240 [--select 1,2,3] [--plate x,y]] [--exit-after s]
+//!            --ticks 0,80,240 [--select 1,2,3] [--plate x,y]] [--exit-after s] [--mute]
+//! hwc-viewer <install or cataclysm.big> --mission 1 [--skill n] [--mute] [--screenshot out.png
+//!            (--ticks 0,300 | --shots arrival,launch,combat,objective)] [--exit-after s]
 //! ```
 
 mod app;
+mod audio;
+mod data;
+mod mission;
 mod overlay;
 mod sandbox;
 mod sandbox_app;
+mod sim;
+mod text;
 mod viewer;
 
 use std::path::Path;
@@ -49,6 +56,16 @@ sandbox mode (--sandbox [fleet|idle|patrol|dogfight|frigates|base]):
   C focuses the camera, B queues a ship at the mothership, L launches the ships inside it,
   U toggles its auto-launch, R starts research, G sends the selection harvesting,
   Space pauses (. steps), I toggles interpolation, right-drag rotates, wheel zooms
+  --mute                  no sound (sound events, music and speech are played otherwise)
+
+mission mode (--mission <n>; the data is a game install, imported data or the cataclysm.big
+of an install, because the mission script comes from cataclysm.exe):
+  the mission runs live with the sandbox controls for the player's ships; objectives,
+  subtitles and skipped NIS sequences are shown as overlay text
+  --skill <0-2>           difficulty (default 2)
+  --shots <names>         with --screenshot: images when these first happen: arrival,
+                          launch, combat, subtitle, objective (within --ticks max,
+                          default 4000)
 
 controls:
   right-drag (or left-drag) rotate, both buttons drag or wheel zoom, +/- zoom
@@ -78,6 +95,10 @@ struct Options {
     plate: Option<[f32; 2]>,
     exit_after: Option<f32>,
     follow: bool,
+    mission: Option<u32>,
+    skill: i32,
+    mute: bool,
+    shots: Vec<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<Options, String> {
@@ -85,6 +106,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         nav_lights: true,
         size: (1280, 960),
         time: 0.75,
+        skill: 2,
         ..Default::default()
     };
     let mut positional = Vec::new();
@@ -138,6 +160,21 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                     None => "fleet".into(),
                 });
             }
+            "--mission" => {
+                let v = value()?;
+                o.mission = Some(v.parse().map_err(|_| format!("--mission: bad value {v:?}"))?);
+            }
+            "--skill" => {
+                let v = value()?;
+                o.skill = v.parse().map_err(|_| format!("--skill: bad value {v:?}"))?;
+            }
+            "--mute" => o.mute = true,
+            "--shots" => {
+                o.shots = value()?
+                    .split(',')
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .collect()
+            }
             "--interpolate" => o.interpolate = true,
             "--follow" => o.follow = true,
             "--ticks" => {
@@ -178,7 +215,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     }
     match positional.as_slice() {
         [big] => o.big = big.clone(),
-        [big, scenario] if o.sandbox.is_some() => {
+        [big, scenario] if o.sandbox.is_some() && o.mission.is_none() => {
             o.big = big.clone();
             o.sandbox = Some(scenario.clone());
         }
@@ -272,20 +309,36 @@ fn save_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), Str
 }
 
 fn setup_sandbox(o: &Options) -> Result<sandbox::Sandbox, String> {
-    let name = o.sandbox.as_deref().unwrap_or("fleet");
-    let scenario = hwc_sim::harness::scenario(name).ok_or_else(|| {
-        format!(
-            "unknown scenario {name:?} (try {:?})",
-            hwc_sim::harness::SCENARIOS
-        )
-    })?;
-    let big = BigArchive::open(&o.big).map_err(|e| format!("{}: {e}", o.big))?;
-    let mut sb = sandbox::Sandbox::new(big, scenario, o.interpolate)?;
+    let assets = data::GameAssets::open(Path::new(&o.big))?;
+    let audio_data = assets.reopen();
+    let mut sb = match o.mission {
+        Some(n) => {
+            let run = mission::start(&assets, n, o.skill)?;
+            sandbox::Sandbox::mission(assets, run, o.interpolate)?
+        }
+        None => {
+            let name = o.sandbox.as_deref().unwrap_or("fleet");
+            let scenario = hwc_sim::harness::scenario(name).ok_or_else(|| {
+                format!(
+                    "unknown scenario {name:?} (try {:?})",
+                    hwc_sim::harness::SCENARIOS
+                )
+            })?;
+            sandbox::Sandbox::new(assets, scenario, o.interpolate)?
+        }
+    };
+    // Offscreen captures never play sound, but the engine still gives speech its subtitles.
+    let mute = o.mute || o.screenshot.is_some();
+    match audio_data.and_then(|gd| audio::Audio::new(gd, mute)) {
+        Ok(a) => sb.audio = Some(a),
+        Err(e) => eprintln!("warning: no sound: {e}"),
+    }
     if let Some(bg) = &o.background {
         sb.set_background(Some(viewer::normalize_asset(bg, "btg", "btg")));
     }
+    let ids = sb.sim.ids();
     for &i in &o.select {
-        let id = *sb.run.ids.get(i).ok_or(format!("--select: no ship {i}"))?;
+        let id = *ids.get(i).ok_or(format!("--select: no ship {i}"))?;
         sb.selection.push(id);
     }
     if let Some(a) = o.angle {
@@ -301,7 +354,7 @@ fn setup_sandbox(o: &Options) -> Result<sandbox::Sandbox, String> {
     }
     if o.follow {
         sb.focus = if sb.selection.is_empty() {
-            sb.run.universe.ship_list.clone()
+            sb.universe().ship_list.clone()
         } else {
             sb.selection.clone()
         };
@@ -313,62 +366,174 @@ fn setup_sandbox(o: &Options) -> Result<sandbox::Sandbox, String> {
     Ok(sb)
 }
 
-/// Offscreen frames of the sandbox at the requested tick counts.
+/// Offscreen GPU context for sandbox and mission captures.
+struct Capture {
+    target: OffscreenTarget,
+    renderer: Renderer,
+    queue: hwc_render::wgpu::Queue,
+    device: hwc_render::wgpu::Device,
+    size: (u32, u32),
+}
+
+impl Capture {
+    fn new(size: (u32, u32)) -> Result<Self, String> {
+        let (device, queue) = headless_device()?;
+        let renderer = Renderer::new(&device, &queue, OFFSCREEN_FORMAT);
+        let target = OffscreenTarget::new(&renderer, size.0, size.1);
+        Ok(Self {
+            target,
+            renderer,
+            queue,
+            device,
+            size,
+        })
+    }
+
+    fn shoot(
+        &mut self,
+        sb: &mut sandbox::Sandbox,
+        plate: Option<[f32; 2]>,
+        file: &Path,
+    ) -> Result<(), String> {
+        sb.prepare(&mut self.renderer);
+        let frame = sb.frame(self.size);
+        let mut rgba = sb.render_offscreen(&mut self.renderer, &self.target, &frame)?;
+        sb.overlay(self.size, plate, None)
+            .rasterize(&mut rgba, self.size.0, self.size.1);
+        save_png(file, self.size.0, self.size.1, &rgba)?;
+        eprintln!("{} -> {}", sb.title(), file.display());
+        Ok(())
+    }
+
+    /// Releases GPU objects before the device, after the GPU has finished with them.
+    fn finish(self) {
+        let Self {
+            target,
+            renderer,
+            queue,
+            device,
+            ..
+        } = self;
+        drop(target);
+        drop(renderer);
+        let _ = device.poll(hwc_render::wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        drop(queue);
+        drop(device);
+    }
+}
+
+fn shot_path(out: &str, tag: &str, many: bool) -> std::path::PathBuf {
+    let path = Path::new(out);
+    if !many {
+        return path.to_path_buf();
+    }
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("shot");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("png");
+    path.with_file_name(format!("{stem}_{tag}.{ext}"))
+}
+
+/// Offscreen frames at the requested tick counts.
 fn sandbox_screenshots(mut sb: sandbox::Sandbox, o: &Options, out: &str) -> Result<(), String> {
-    let (device, queue) = headless_device()?;
-    let mut renderer = Renderer::new(&device, &queue, OFFSCREEN_FORMAT);
-    sb.prepare(&renderer);
-    let target = OffscreenTarget::new(&renderer, o.size.0, o.size.1);
+    let mut cap = Capture::new(o.size)?;
     let mut ticks = if o.ticks.is_empty() {
         vec![0]
     } else {
         o.ticks.clone()
     };
     ticks.sort_unstable();
-    let path = Path::new(out);
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("sandbox")
-        .to_owned();
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("png")
-        .to_owned();
     for t in ticks {
-        while sb.run.universe.update_counter < t {
+        while sb.universe().update_counter < t {
             sb.step();
         }
-        let instances = sb.instances();
-        let mut rgba = target.render(&mut renderer, &sb.scene(&instances))?;
-        drop(instances);
-        sb.overlay(o.size, o.plate, None)
-            .rasterize(&mut rgba, o.size.0, o.size.1);
-        let file = if o.ticks.len() > 1 {
-            path.with_file_name(format!("{stem}_t{t:04}.{ext}"))
-        } else {
-            path.to_path_buf()
-        };
-        save_png(&file, o.size.0, o.size.1, &rgba)?;
-        eprintln!("{} -> {}", sb.title(), file.display());
+        let file = shot_path(out, &format!("t{t:04}"), o.ticks.len() > 1);
+        cap.shoot(&mut sb, o.plate, &file)?;
     }
     drop(sb);
-    drop(target);
-    drop(renderer);
-    let _ = device.poll(hwc_render::wgpu::PollType::Wait {
-        submission_index: None,
-        timeout: None,
-    });
+    cap.finish();
+    Ok(())
+}
+
+/// Mission captures when things first happen: the fleet arriving from hyperspace (the
+/// mothership mid-slice), the docked ships launching, the first hit anywhere (the camera moves
+/// there), the first objective.
+fn mission_shots(mut sb: sandbox::Sandbox, o: &Options, out: &str) -> Result<(), String> {
+    use hwc_sim::mission::hs_effect;
+    let mut cap = Capture::new(o.size)?;
+    let max = o.ticks.iter().copied().max().unwrap_or(4000);
+    let mut wanted: Vec<String> = o.shots.clone();
+    let mut launched_at = None;
+    let mut combat_at: Option<(u32, glam::Vec3)> = None;
+    while !wanted.is_empty() && sb.universe().update_counter < max {
+        sb.step();
+        let tick = sb.universe().update_counter;
+        let Some(run) = sb.sim.mission() else { break };
+        let want = |w: &str| wanted.iter().any(|x| x == w);
+        let mut take = None;
+        if want("arrival")
+            && run.game.arriving.iter().any(|a| {
+                a.mothership && a.hs_state == hs_effect::SLICING_OUTOF && a.clipt < 0.0
+            })
+        {
+            take = Some("arrival");
+        }
+        if want("launch") {
+            if launched_at.is_none() && run.game.ships_have_arrived {
+                launched_at = Some(tick);
+            }
+            if take.is_none() && launched_at.is_some_and(|t| tick >= t + 24) {
+                take = Some("launch");
+            }
+        }
+        if take.is_none() && want("subtitle") && sb.has_subtitle() {
+            take = Some("subtitle");
+        }
+        if take.is_none() && want("objective") && !run.game.objectives.is_empty() {
+            take = Some("objective");
+        }
+        if want("combat") {
+            if combat_at.is_none() {
+                combat_at = sb.universe().events.iter().find_map(|e| match e {
+                    hwc_sim::universe::SimEvent::BulletHit { position, .. } => {
+                        Some((tick, glam::Vec3::new(position.x, position.y, position.z)))
+                    }
+                    _ => None,
+                });
+            }
+            if let Some((t, p)) = combat_at {
+                if tick >= t + 12 {
+                    let saved = (sb.camera.look_at, sb.camera.distance, sb.focus.clone());
+                    sb.focus.clear();
+                    sb.camera.look_at = p;
+                    sb.camera.distance = 2500.0;
+                    cap.shoot(&mut sb, None, &shot_path(out, "combat", true))?;
+                    (sb.camera.look_at, sb.camera.distance, sb.focus) = saved;
+                    wanted.retain(|w| w != "combat");
+                }
+            }
+        }
+        if let Some(tag) = take {
+            cap.shoot(&mut sb, None, &shot_path(out, tag, true))?;
+            wanted.retain(|w| w != tag);
+        }
+    }
+    if !wanted.is_empty() {
+        eprintln!("not reached within {max} updates: {wanted:?}");
+    }
+    drop(sb);
+    cap.finish();
     Ok(())
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = parse_args(&args).and_then(|o| {
-        if o.sandbox.is_some() {
+        if o.sandbox.is_some() || o.mission.is_some() {
             let sb = setup_sandbox(&o)?;
             return match &o.screenshot {
+                Some(out) if !o.shots.is_empty() => mission_shots(sb, &o, out),
                 Some(out) => sandbox_screenshots(sb, &o, out),
                 None => sandbox_app::run(sb, o.exit_after),
             };

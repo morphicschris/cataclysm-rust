@@ -64,7 +64,10 @@ impl Gpu {
             .create_surface(window.clone())
             .map_err(|e| format!("surface: {e}"))?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            // The adapter driving the display (as the game shell does); `WGPU_POWER_PREF=high`
+            // picks the discrete GPU, whose frames may not reach the screen on hybrid systems.
+            power_preference: wgpu::PowerPreference::from_env()
+                .unwrap_or(wgpu::PowerPreference::LowPower),
             compatible_surface: Some(&surface),
             ..Default::default()
         }))

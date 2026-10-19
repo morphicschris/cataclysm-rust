@@ -69,7 +69,10 @@ impl Gpu {
             .create_surface(window.clone())
             .map_err(|e| format!("surface: {e}"))?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            // The adapter driving the display (as the game shell does); `WGPU_POWER_PREF=high`
+            // picks the discrete GPU, whose frames may not reach the screen on hybrid systems.
+            power_preference: wgpu::PowerPreference::from_env()
+                .unwrap_or(wgpu::PowerPreference::LowPower),
             compatible_surface: Some(&surface),
             ..Default::default()
         }))
@@ -137,7 +140,8 @@ impl App {
         let Some(gpu) = self.gpu.as_mut() else {
             return Ok(());
         };
-        self.sandbox.prepare(&gpu.renderer);
+        self.sandbox.prepare(&mut gpu.renderer);
+        let prepared = self.sandbox.frame(size);
         let title = self.sandbox.title();
         if title != self.title {
             gpu.window.set_title(&title);
@@ -146,7 +150,10 @@ impl App {
         let frame = match gpu.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            _ => {
+            other => {
+                if std::env::var_os("HWC_VIEWER_LOG").is_some() {
+                    eprintln!("surface: {other:?}");
+                }
                 let s = gpu.window.inner_size();
                 gpu.resize(s.width, s.height);
                 return Ok(());
@@ -156,12 +163,8 @@ impl App {
         let device = gpu.renderer.device().clone();
         let queue = gpu.renderer.queue().clone();
         let mut encoder = device.create_command_encoder(&Default::default());
-        {
-            let instances = self.sandbox.instances();
-            let scene = self.sandbox.scene(&instances);
-            gpu.renderer
-                .render(&mut encoder, &view, &gpu.depth, size, &scene);
-        }
+        self.sandbox
+            .render(&mut gpu.renderer, &mut encoder, &view, &gpu.depth, size, &prepared);
         gpu.overlay
             .draw(&device, &queue, &mut encoder, &view, size, &overlay);
         queue.submit([encoder.finish()]);
@@ -188,13 +191,7 @@ impl App {
             }
             Key::Named(NamedKey::Space) => sb.paused = !sb.paused,
             Key::Character(c) => match c.to_ascii_lowercase().as_str() {
-                "m" => {
-                    sb.mode = if sb.mode == Mode::Move || sb.selection.is_empty() {
-                        Mode::Select
-                    } else {
-                        Mode::Move
-                    };
-                }
+                "m" => sb.toggle_move(),
                 "a" => {
                     sb.mode = if sb.mode == Mode::Attack || sb.selection.is_empty() {
                         Mode::Select
@@ -219,7 +216,7 @@ impl App {
                 "n" => sb.nav_lights = !sb.nav_lights,
                 "c" => {
                     sb.focus = if sb.selection.is_empty() {
-                        sb.run.universe.ship_list.clone()
+                        sb.universe().ship_list.clone()
                     } else {
                         sb.selection.clone()
                     };
@@ -245,7 +242,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title("hwc-viewer sandbox")
+            .with_title(self.sandbox.title())
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0));
         match event_loop
             .create_window(attrs)

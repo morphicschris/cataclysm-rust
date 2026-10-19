@@ -11,10 +11,19 @@ pub struct Line {
     pub color: [f32; 4],
 }
 
-/// Lines to draw this frame.
+/// A filled axis-aligned rectangle in pixel coordinates with an RGBA colour.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub lo: [f32; 2],
+    pub hi: [f32; 2],
+    pub color: [f32; 4],
+}
+
+/// Lines and filled rectangles to draw this frame (rectangles first, then lines).
 #[derive(Debug, Clone, Default)]
 pub struct Overlay {
     pub lines: Vec<Line>,
+    pub rects: Vec<Rect>,
 }
 
 impl Overlay {
@@ -45,6 +54,13 @@ impl Overlay {
         }
     }
 
+    /// A filled rectangle.
+    pub fn fill(&mut self, lo: [f32; 2], hi: [f32; 2], color: [f32; 4]) {
+        if hi[0] > lo[0] && hi[1] > lo[1] {
+            self.rects.push(Rect { lo, hi, color });
+        }
+    }
+
     /// A closed polyline.
     pub fn polygon(&mut self, points: &[[f32; 2]], color: [f32; 4]) {
         for i in 0..points.len() {
@@ -52,8 +68,19 @@ impl Overlay {
         }
     }
 
-    /// Draws every line into tightly packed RGBA8 rows (alpha-blended).
+    /// Draws every rectangle and line into tightly packed RGBA8 rows (alpha-blended).
     pub fn rasterize(&self, rgba: &mut [u8], width: u32, height: u32) {
+        for r in &self.rects {
+            let x0 = r.lo[0].round().max(0.0) as u32;
+            let y0 = r.lo[1].round().max(0.0) as u32;
+            let x1 = (r.hi[0].round().max(0.0) as u32).min(width);
+            let y1 = (r.hi[1].round().max(0.0) as u32).min(height);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    blend_pixel(rgba, ((y * width + x) * 4) as usize, r.color);
+                }
+            }
+        }
         for l in &self.lines {
             let (dx, dy) = (l.b[0] - l.a[0], l.b[1] - l.a[1]);
             let steps = dx.abs().max(dy.abs()).ceil().max(1.0) as i32;
@@ -64,19 +91,22 @@ impl Overlay {
                 if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
                     continue;
                 }
-                let p = ((y as u32 * width + x as u32) * 4) as usize;
-                let alpha = l.color[3];
-                for c in 0..3 {
-                    let src = l.color[c] * 255.0;
-                    let dst = f32::from(rgba[p + c]);
-                    rgba[p + c] = (src * alpha + dst * (1.0 - alpha))
-                        .round()
-                        .clamp(0.0, 255.0) as u8;
-                }
-                rgba[p + 3] = 255;
+                blend_pixel(rgba, ((y as u32 * width + x as u32) * 4) as usize, l.color);
             }
         }
     }
+}
+
+fn blend_pixel(rgba: &mut [u8], p: usize, color: [f32; 4]) {
+    let alpha = color[3];
+    for c in 0..3 {
+        let src = color[c] * 255.0;
+        let dst = f32::from(rgba[p + c]);
+        rgba[p + c] = (src * alpha + dst * (1.0 - alpha))
+            .round()
+            .clamp(0.0, 255.0) as u8;
+    }
+    rgba[p + 3] = 255;
 }
 
 const SHADER: &str = r"
@@ -90,10 +120,52 @@ struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) color: vec4<f32> 
 @fragment fn fs(i: VsOut) -> @location(0) vec4<f32> { return i.color; }
 ";
 
-/// GPU renderer for [`Overlay`] lines (one pass that loads the existing colour).
+/// GPU renderer for [`Overlay`] rectangles and lines (one pass that loads the existing colour).
 pub struct OverlayRenderer {
-    pipeline: wgpu::RenderPipeline,
+    lines: wgpu::RenderPipeline,
+    triangles: wgpu::RenderPipeline,
     buffer: Option<(wgpu::Buffer, u64)>,
+}
+
+fn pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    topology: wgpu::PrimitiveTopology,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("overlay"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: 24,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
+            })],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 impl OverlayRenderer {
@@ -107,40 +179,15 @@ impl OverlayRenderer {
             bind_group_layouts: &[],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("overlay"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: 24,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
-                })],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
         Self {
-            pipeline,
+            lines: pipeline(device, format, &module, &layout, wgpu::PrimitiveTopology::LineList),
+            triangles: pipeline(
+                device,
+                format,
+                &module,
+                &layout,
+                wgpu::PrimitiveTopology::TriangleList,
+            ),
             buffer: None,
         }
     }
@@ -154,17 +201,28 @@ impl OverlayRenderer {
         size: (u32, u32),
         overlay: &Overlay,
     ) {
-        if overlay.lines.is_empty() {
+        if overlay.lines.is_empty() && overlay.rects.is_empty() {
             return;
         }
         let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
-        let mut data: Vec<f32> = Vec::with_capacity(overlay.lines.len() * 12);
-        for l in &overlay.lines {
-            for p in [l.a, l.b] {
-                data.extend_from_slice(&[p[0] / w * 2.0 - 1.0, 1.0 - p[1] / h * 2.0]);
-                data.extend_from_slice(&l.color);
+        let mut data: Vec<f32> =
+            Vec::with_capacity(overlay.rects.len() * 36 + overlay.lines.len() * 12);
+        let mut push = |p: [f32; 2], c: &[f32; 4]| {
+            data.extend_from_slice(&[p[0] / w * 2.0 - 1.0, 1.0 - p[1] / h * 2.0]);
+            data.extend_from_slice(c);
+        };
+        for r in &overlay.rects {
+            let (a, b) = (r.lo, r.hi);
+            for p in [a, [b[0], a[1]], b, a, b, [a[0], b[1]]] {
+                push(p, &r.color);
             }
         }
+        for l in &overlay.lines {
+            push(l.a, &l.color);
+            push(l.b, &l.color);
+        }
+        let rect_vertices = overlay.rects.len() as u32 * 6;
+        let line_vertices = overlay.lines.len() as u32 * 2;
         let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
         let needed = bytes.len() as u64;
         if self.buffer.as_ref().is_none_or(|(_, cap)| *cap < needed) {
@@ -195,8 +253,14 @@ impl OverlayRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, buf.slice(..needed));
-        pass.draw(0..(overlay.lines.len() as u32 * 2), 0..1);
+        if rect_vertices > 0 {
+            pass.set_pipeline(&self.triangles);
+            pass.draw(0..rect_vertices, 0..1);
+        }
+        if line_vertices > 0 {
+            pass.set_pipeline(&self.lines);
+            pass.draw(rect_vertices..rect_vertices + line_vertices, 0..1);
+        }
     }
 }
