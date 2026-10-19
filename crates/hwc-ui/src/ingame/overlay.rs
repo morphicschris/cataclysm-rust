@@ -207,11 +207,115 @@ pub fn tick(fe: &mut Fe, _dt: f32) {
     let max = fe.game.ig.view.messages.len().saturating_sub(MESSAGE_LINES);
     let o = &mut fe.game.ig.overlay;
     o.message_scroll = o.message_scroll.min(max);
+    layout(fe);
+}
+
+/// Top of the bottom-of-screen area: objectives and player info push it up.
+fn bar_top(st: &State, view: &HostView, h: i32, th: i32) -> i32 {
+    let mut bar = h;
+    if st.shown(view, OBJECTIVES) && !view.objectives.is_empty() {
+        bar = h - (view.objectives.len() as i32 * th + th + 24);
+    }
+    if st.shown(view, PLAYERINFO) {
+        bar = bar.min(h - th - 30) - th;
+    }
+    bar.min(h - 50)
+}
+
+/// `moUpdateMouseOver`: where the clickable lines and buttons are this frame, from the
+/// state alone (clicks must not depend on a frame having been drawn).
+pub fn layout(fe: &mut Fe) {
+    let (w, h) = fe.screen_size();
+    let view = &fe.game.ig.view;
+    let st = &fe.game.ig.overlay;
+    let (Some(tf), Some(lf)) = (font(fe, FONT_TEXT), font(fe, FONT_LIST)) else {
+        return;
+    };
+    let th = crate::text::height(&tf);
+    let lh = crate::text::height(&lf);
+    let bar = bar_top(st, view, h, th);
+    let mut lines = Vec::new();
+    if st.shown(view, SELECTED) {
+        for (i, (t, owner, _, _)) in groups(&view.selection).into_iter().enumerate() {
+            let y = 10 + i as i32 * lh;
+            lines.push((t, owner, Rect::new(w - 150, y, w, y + lh)));
+        }
+    }
+    let mut objective_rects = Vec::new();
+    if st.shown(view, OBJECTIVES) && !view.objectives.is_empty() {
+        let mut y = bar + th + 4;
+        for (i, o) in view.objectives.iter().enumerate() {
+            let state = if o.complete { "COMPLETE" } else { "INCOMPLETE" };
+            let s = format!("{state} - {}", o.text);
+            objective_rects.push((i, Rect::new(10, y, 10 + draw::width(&tf, &s), y + th)));
+            y += th;
+        }
+    }
+    let mut message_rects = Vec::new();
+    if st.shown(view, GAMEMESSAGE) {
+        let base = bar.min(h);
+        let scroll = st.message_scroll;
+        let newest = view.messages.len().saturating_sub(1 + scroll);
+        for k in 0..MESSAGE_LINES {
+            let Some(i) = newest.checked_sub(k) else {
+                break;
+            };
+            let Some(m) = view.messages.get(i) else { break };
+            if scroll == 0 && view.time - m.time >= MESSAGE_HOLD + MESSAGE_FADE {
+                continue;
+            }
+            let y = base - 2 * th - k as i32 * th;
+            message_rects.push((i, Rect::new(17, y, 17 + draw::width(&tf, &m.text), y + th)));
+        }
+    }
+    let view_buttons = view_button_defs(fe, w, bar);
+    let o = &mut fe.game.ig.overlay;
+    o.lines = lines;
+    o.objective_rects = objective_rects;
+    o.message_rects = message_rects;
+    o.view_buttons = view_buttons;
+}
+
+/// The taskbar view buttons (option "Taskbar buttons"): (rect, label, action).
+fn view_button_defs(fe: &Fe, width: i32, bar: i32) -> Vec<(Rect, String, Action)> {
+    let view = &fe.game.ig.view;
+    if !fe.game.options.get_bool("ShowTaskbarButtons") || view.player.tutorial {
+        return Vec::new();
+    }
+    let x0 = (width / 2 - 93).max(0);
+    let sensors = if view.player.in_sensors {
+        "Main"
+    } else {
+        "Sensors"
+    };
+    vec![
+        (
+            Rect::new(x0, bar + 5, x0 + 90, bar + 25),
+            sensors.into(),
+            keys::TOGGLE_SENSORS_MANAGER,
+        ),
+        (
+            Rect::new(x0, bar + 28, x0 + 90, bar + 48),
+            "Build...".into(),
+            keys::OPEN_BUILD_MANAGER,
+        ),
+        (
+            Rect::new(x0 + 96, bar + 5, x0 + 186, bar + 25),
+            "Research...".into(),
+            keys::OPEN_RESEARCH_MANAGER,
+        ),
+        (
+            Rect::new(x0 + 96, bar + 28, x0 + 186, bar + 48),
+            "Systems...".into(),
+            keys::OPEN_LAUNCH_MANAGER,
+        ),
+    ]
 }
 
 /// Mouse clicks on the overlay; returns whether one was used.
 pub fn mouse_button(fe: &mut Fe, left: bool, down: bool, x: i32, y: i32) -> bool {
     fe.game.ig.overlay.mouse = (x, y);
+    layout(fe);
     if !left {
         return false;
     }
@@ -334,15 +438,7 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
         return;
     };
     let th = crate::text::height(&tf);
-    // Top of the bottom area: objectives and player info push it up.
-    let mut bar = h;
-    if st.shown(&view, OBJECTIVES) && !view.objectives.is_empty() {
-        bar = h - (view.objectives.len() as i32 * th + th + 24);
-    }
-    if st.shown(&view, PLAYERINFO) {
-        bar = bar.min(h - th - 30) - th;
-    }
-    bar = bar.min(h - 50);
+    let bar = bar_top(st, &view, h, th);
     let options = fe.game.options.clone();
     if options.get_bool("ShowTaskbarBackdrop") && !view.player.tutorial {
         canvas.blend_rect(Rect::new(0, bar, w, h), BACKDROP);
@@ -356,7 +452,7 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
         let bd = st.backdrop(&view, SELECTING);
         draw_ship_list(fe, canvas, &view.selecting, true, bd, &mut Vec::new());
     }
-    fe.game.ig.overlay.lines = lines;
+    let _ = lines;
     let st = &fe.game.ig.overlay;
     let mut objective_rects = Vec::new();
     if st.shown(&view, OBJECTIVES) && !view.objectives.is_empty() {
@@ -391,7 +487,7 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
             y += th;
         }
     }
-    fe.game.ig.overlay.objective_rects = objective_rects;
+    let _ = objective_rects;
     let st = &fe.game.ig.overlay;
     if st.shown(&view, TOOLTIPS) {
         if let Some(t) = &view.tooltip {
@@ -424,7 +520,7 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
         let bd = !options.get_bool("ShowTaskbarBackdrop");
         draw_player_info(fe, canvas, &view, bar, bd);
     }
-    draw_view_buttons(fe, canvas, &view, bar, &options);
+    draw_view_buttons(fe, canvas, bar);
     if view.player.in_sensors {
         draw_pan_arrows(fe, canvas);
     }
@@ -611,7 +707,7 @@ fn draw_messages(fe: &mut Fe, canvas: &mut Canvas, view: &HostView, base: i32) {
         };
         icons.draw(&res, canvas, name, down.x0 - 10, down.y0 - 9);
     }
-    fe.game.ig.overlay.message_rects = rects;
+    let _ = rects;
 }
 
 /// `moDrawPlayerStats`: colour swatches and names; returns the next free y.
@@ -802,72 +898,33 @@ fn draw_player_info(fe: &Fe, canvas: &mut Canvas, view: &HostView, bar: i32, bd:
 }
 
 /// The taskbar view buttons (option "Taskbar buttons").
-fn draw_view_buttons(
-    fe: &mut Fe,
-    canvas: &mut Canvas,
-    view: &HostView,
-    bar: i32,
-    options: &crate::options::Options,
-) {
-    let mut buttons = Vec::new();
-    if options.get_bool("ShowTaskbarButtons") && !view.player.tutorial {
-        let x0 = (canvas.width / 2 - 93).max(0);
-        let sensors = if view.player.in_sensors {
-            "Main"
-        } else {
-            "Sensors"
-        };
-        let defs = [
-            (
-                Rect::new(x0, bar + 5, x0 + 90, bar + 25),
-                sensors,
-                keys::TOGGLE_SENSORS_MANAGER,
-            ),
-            (
-                Rect::new(x0, bar + 28, x0 + 90, bar + 48),
-                "Build...",
-                keys::OPEN_BUILD_MANAGER,
-            ),
-            (
-                Rect::new(x0 + 96, bar + 5, x0 + 186, bar + 25),
-                "Research...",
-                keys::OPEN_RESEARCH_MANAGER,
-            ),
-            (
-                Rect::new(x0 + 96, bar + 28, x0 + 186, bar + 48),
-                "Systems...",
-                keys::OPEN_LAUNCH_MANAGER,
-            ),
-        ];
-        let res = fe.resources().clone();
-        let f = font(fe, FONT_TEXT);
-        let (mx, my) = fe.game.ig.overlay.mouse;
-        for (r, label, a) in defs {
-            let m = if r.contains(mx, my) { "_Mouse" } else { "" };
-            let icons = &fe.game.ig.overlay.icons;
-            if let (Some(l), Some(mid), Some(rt)) = (
-                icons.image(&res, &format!("Stats_Exit_Button_Left{m}")),
-                icons.image(&res, &format!("Stats_Exit_Button_Mid{m}")),
-                icons.image(&res, &format!("Stats_Exit_Button_Right{m}")),
-            ) {
-                let cap = r.height();
-                draw::textured_rect(canvas, &l, Rect::new(r.x0, r.y0, r.x0 + cap, r.y1), WHITE);
-                draw::textured_rect(
-                    canvas,
-                    &mid,
-                    Rect::new(r.x0 + cap, r.y0, r.x1 - cap, r.y1),
-                    WHITE,
-                );
-                draw::textured_rect(canvas, &rt, Rect::new(r.x1 - cap, r.y0, r.x1, r.y1), WHITE);
-            }
-            if let Some(f) = &f {
-                let y = r.y0 + (r.height() - crate::text::height(f)) / 2;
-                draw::print_centred(canvas, f, (r.x0 + r.x1) / 2, y, WHITE, label);
-            }
-            buttons.push((r, label.to_string(), a));
+fn draw_view_buttons(fe: &mut Fe, canvas: &mut Canvas, bar: i32) {
+    let res = fe.resources().clone();
+    let f = font(fe, FONT_TEXT);
+    let (mx, my) = fe.game.ig.overlay.mouse;
+    for (r, label, _) in view_button_defs(fe, canvas.width, bar) {
+        let m = if r.contains(mx, my) { "_Mouse" } else { "" };
+        let icons = &fe.game.ig.overlay.icons;
+        if let (Some(l), Some(mid), Some(rt)) = (
+            icons.image(&res, &format!("Stats_Exit_Button_Left{m}")),
+            icons.image(&res, &format!("Stats_Exit_Button_Mid{m}")),
+            icons.image(&res, &format!("Stats_Exit_Button_Right{m}")),
+        ) {
+            let cap = r.height();
+            draw::textured_rect(canvas, &l, Rect::new(r.x0, r.y0, r.x0 + cap, r.y1), WHITE);
+            draw::textured_rect(
+                canvas,
+                &mid,
+                Rect::new(r.x0 + cap, r.y0, r.x1 - cap, r.y1),
+                WHITE,
+            );
+            draw::textured_rect(canvas, &rt, Rect::new(r.x1 - cap, r.y0, r.x1, r.y1), WHITE);
+        }
+        if let Some(f) = &f {
+            let y = r.y0 + (r.height() - crate::text::height(f)) / 2;
+            draw::print_centred(canvas, f, (r.x0 + r.x1) / 2, y, WHITE, &label);
         }
     }
-    fe.game.ig.overlay.view_buttons = buttons;
 }
 
 /// Sensors pan arrows: (rect, action).
