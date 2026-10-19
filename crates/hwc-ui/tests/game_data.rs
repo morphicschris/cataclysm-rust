@@ -279,3 +279,63 @@ fn labels_in_every_language() {
     s.render();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Clicks item `n` of the resolution list.
+fn pick_resolution(s: &mut Session, n: usize) {
+    let a = s.fe.find_atom("OP_Resolution").expect("resolution list");
+    let rect = s.fe.atom(a).rect();
+    let l = s.fe.list(a).expect("list");
+    let y = (rect.y0..rect.y1)
+        .find(|&y| l.item_at(rect, y) == Some(n))
+        .expect("visible item");
+    s.fe.mouse_move((rect.x0 + rect.x1) / 2, y + 2);
+    frame(s);
+    s.mouse_button(true, true);
+    frame(s);
+    s.mouse_button(true, false);
+    frame(s);
+}
+
+#[test]
+fn new_display_mode_is_confirmed_or_restored() {
+    let Some(src) = source() else { return };
+    let mut s = session(src, None);
+    click(&mut s, "OP_Options_Start");
+    click(&mut s, "Audio_Options-TO-Video_Options");
+    pick_resolution(&mut s, 1);
+    let out = click(&mut s, "OP_Options_Accept");
+    assert!(out.contains(&Request::DisplayMode {
+        width: 800,
+        height: 600
+    }));
+    assert_eq!(
+        s.fe.stack_names(),
+        ["Main_game_screen", "Countdown_Message_Box"]
+    );
+    // Nobody answers: after 22 seconds the old mode comes back on the main menu.
+    let mut out = Vec::new();
+    for _ in 0..23 {
+        out.extend(s.update(1.0));
+    }
+    assert!(out.contains(&Request::DisplayMode {
+        width: 640,
+        height: 480
+    }));
+    assert_eq!(s.fe.stack_names(), ["Main_game_screen"]);
+    assert_eq!(s.fe.game.options.get("screenWidth"), 640);
+    // "Yes" keeps the new mode.
+    click(&mut s, "OP_Options_Start");
+    click(&mut s, "Audio_Options-TO-Video_Options");
+    pick_resolution(&mut s, 2);
+    click(&mut s, "OP_Options_Accept");
+    let out = click(&mut s, "OP_Countdown_Yes");
+    assert!(!out.iter().any(|r| matches!(r, Request::DisplayMode { .. })));
+    assert_eq!(s.fe.stack_names(), ["Main_game_screen"]);
+    assert_eq!(s.fe.game.display, (1024, 768));
+    // The audio test buttons.
+    click(&mut s, "OP_Options_Start");
+    let out = click(&mut s, "OP_SoundFX_Test");
+    assert!(out.contains(&Request::SoundEvent(hwc_ui::consts::sound::SFX_TEST)));
+    let out = click(&mut s, "OP_Speech_Test");
+    assert!(out.contains(&Request::Speech(hwc_ui::consts::sound::SPEECH_TEST)));
+}

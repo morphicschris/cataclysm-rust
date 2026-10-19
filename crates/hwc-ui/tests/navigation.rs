@@ -487,3 +487,38 @@ fn repositioning_centres_and_keeps_the_stack() {
     let mut canvas = Canvas::new(1024, 768);
     fe.render(&mut canvas);
 }
+
+#[test]
+fn controls_fire_the_engine_ui_sounds() {
+    let mut fe = setup();
+    // A link button sounds on the press, not on the release.
+    fe.mouse_move(200, 116);
+    frame(&mut fe);
+    fe.mouse_button(true, true);
+    frame(&mut fe);
+    assert_eq!(fe.sounds, [sound::CLICK]);
+    fe.mouse_button(true, false);
+    frame(&mut fe);
+    assert_eq!(fe.sounds, [sound::CLICK]);
+    fe.sounds.clear();
+    // Check box: the sound depends on the state when pressed.
+    click(&mut fe, 20, 18);
+    assert_eq!(fe.sounds, [sound::TOGGLE_UNCHECKED]);
+    fe.sounds.clear();
+    click(&mut fe, 20, 18);
+    assert_eq!(fe.sounds, [sound::TOGGLE_CHECKED]);
+    fe.sounds.clear();
+    // Radio buttons, and arrow keys stepping through the group.
+    click(&mut fe, 80, 58);
+    assert_eq!(fe.sounds, [sound::RADIO]);
+    fe.sounds.clear();
+    press_key(&mut fe, key::LEFT);
+    assert_eq!(fe.sounds, [sound::RADIO]);
+    fe.sounds.clear();
+    // Hovering makes no sound.
+    fe.mouse_move(200, 156);
+    frame(&mut fe);
+    fe.mouse_move(500, 400);
+    frame(&mut fe);
+    assert!(fe.sounds.is_empty());
+}

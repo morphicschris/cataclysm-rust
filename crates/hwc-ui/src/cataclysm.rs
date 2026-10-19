@@ -30,10 +30,29 @@ pub enum Request {
     Multiplayer,
     /// Open a web page (troubleshooting link).
     OpenUrl(String),
-    /// A sound effect or speech test.
-    PlaySound(&'static str),
+    /// A UI sound event (`soundEventPlay(NULL, event)`); see [`crate::consts::sound`].
+    SoundEvent(u32),
+    /// A speech event (`speechEventQueue` with no ship, random variable and variation).
+    Speech(u32),
+    /// An audio option changed (volume, channel, quality or equaliser control, or a cancel
+    /// that restored them): apply the audio options now.
+    AudioSettings,
+    /// Switch the display to this resolution (accepting a new mode, or reverting it).
+    DisplayMode { width: i32, height: i32 },
     /// Options were accepted: apply audio/video settings, save the config.
     ApplyOptions,
+}
+
+/// Seconds the "keep this display mode?" box waits before restoring the old mode
+/// (`opTimerExpired`).
+pub const COUNTDOWN_SECONDS: f32 = 22.0;
+
+/// The display-mode confirmation in progress (`opCountdownBoxStart` .. `opCountdownYes/No`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Countdown {
+    pub elapsed: f32,
+    /// The mode to go back to.
+    pub previous: (i32, i32),
 }
 
 /// Front-end state of the game.
@@ -63,6 +82,11 @@ pub struct Cataclysm {
     pub credits: Option<Credits>,
     /// Where the options are saved on accept.
     pub config_path: Option<PathBuf>,
+    /// Display mode in use (what `screenWidth`/`screenHeight` were when last applied).
+    pub display: (i32, i32),
+    pub countdown: Option<Countdown>,
+    /// `strOPCountdown0..2`: the confirmation box's three lines.
+    pub countdown_text: [String; 3],
 }
 
 impl Cataclysm {
@@ -92,6 +116,13 @@ impl Cataclysm {
             colors,
             credits: None,
             config_path: None,
+            display: (0, 0),
+            countdown: None,
+            countdown_text: [
+                "Mode switch successful.".into(),
+                "Do you want to keep this setting?".into(),
+                "Original settings will restore in %ds.".into(),
+            ],
         }
     }
 
@@ -115,6 +146,11 @@ impl Cataclysm {
             .and_then(|s| script_value(s, "strVersion"))
             .unwrap_or_else(|| "Version".into());
         self.version = format!("{word} CataclysmV1.00");
+        for (i, line) in self.countdown_text.iter_mut().enumerate() {
+            if let Some(t) = strings.and_then(|s| script_value(s, &format!("strOPCountdown{i}"))) {
+                *line = t;
+            }
+        }
         if let Some(f) = tweak.and_then(|t| script_value(t, "selFontName2")) {
             self.version_font = f;
         }
@@ -231,18 +267,24 @@ pub fn register(fe: &mut Fe) {
     crate::colpick::register(fe);
 
     // Options: navigation.
-    fe.callback_add("OP_Options_Accept", |fe, _| {
-        fe.current_screen_delete();
-        fe.screen_start("Main_game_screen");
-        fe.game.saved = fe.game.options.clone();
-        fe.game.save_options();
-        fe.game.requests.push(Request::ApplyOptions);
-    });
+    fe.callback_add("OP_Options_Accept", options_accept);
     fe.callback_add("OP_Options_Cancel", |fe, _| {
         fe.game.options = fe.game.saved.clone();
         fe.current_screen_delete();
         fe.screen_start("Main_game_screen");
+        fe.game.requests.push(Request::AudioSettings);
     });
+    fe.callback_add("OP_Countdown_Yes", |fe, _| {
+        fe.game.countdown = None;
+        fe.current_screen_delete();
+    });
+    fe.callback_add("OP_Countdown_No", |fe, _| {
+        if let Some(c) = fe.game.countdown.take() {
+            fe.current_screen_delete();
+            revert_display_mode(fe, c.previous);
+        }
+    });
+    fe.draw_callback_add("OP_DrawCountdownBox", draw_countdown_box);
     fe.callback_add("OP_Advanced_To_Audio_Accept", |fe, _| {
         snapshot(&mut fe.game, ADVANCED_KEYS);
         back_to(fe, "Audio_Options");
@@ -250,6 +292,7 @@ pub fn register(fe: &mut Fe) {
     fe.callback_add("OP_Advanced_To_Audio_Cancel", |fe, _| {
         restore(&mut fe.game, ADVANCED_KEYS);
         back_to(fe, "Audio_Options");
+        fe.game.requests.push(Request::AudioSettings);
     });
     fe.callback_add("OP_Equalizer_To_Audio_Accept", |fe, _| {
         if fe.game.eq_modified {
@@ -261,6 +304,7 @@ pub fn register(fe: &mut Fe) {
     fe.callback_add("OP_Equalizer_To_Audio_Cancel", |fe, _| {
         restore(&mut fe.game, EQ_KEYS);
         back_to(fe, "Audio_Options");
+        fe.game.requests.push(Request::AudioSettings);
     });
     fe.callback_add("OP_Effects_To_Video_Accept", |fe, _| {
         if fe.game.custom_changed {
@@ -348,11 +392,15 @@ pub fn register(fe: &mut Fe) {
             "http://homeworld.sierra.com/cataclysm/support/".into(),
         ))
     });
-    fe.callback_add("OP_Speech_Test", |fe, _| {
-        fe.game.requests.push(Request::PlaySound("speech test"))
+    fe.callback_add("OP_Speech_Test", |fe, call| {
+        if !fe.first_call(call) && !fe.last_call(call) {
+            fe.game.requests.push(Request::Speech(sound::SPEECH_TEST));
+        }
     });
-    fe.callback_add("OP_SoundFX_Test", |fe, _| {
-        fe.game.requests.push(Request::PlaySound("sound fx test"))
+    fe.callback_add("OP_SoundFX_Test", |fe, call| {
+        if !fe.first_call(call) && !fe.last_call(call) {
+            fe.ui_sound(sound::SFX_TEST);
+        }
     });
     fe.draw_callback_add("OP_NumChannels", draw_num_channels);
 
@@ -444,6 +492,109 @@ fn options_start(fe: &mut Fe, call: &Call) {
     fe.current_screen_delete();
     fe.screen_start("Audio_Options");
 }
+
+/// `opOptionsAccept`: back to the main menu; a new resolution is switched to and must be
+/// confirmed in the countdown box, otherwise the old one comes back.
+fn options_accept(fe: &mut Fe, call: &Call) {
+    if fe.first_call(call) || fe.last_call(call) {
+        return;
+    }
+    fe.current_screen_delete();
+    fe.screen_start("Main_game_screen");
+    fe.game.saved = fe.game.options.clone();
+    fe.game.save_options();
+    fe.game.requests.push(Request::ApplyOptions);
+    let mode = (
+        fe.game.options.get("screenWidth"),
+        fe.game.options.get("screenHeight"),
+    );
+    if mode != fe.game.display && fe.game.resolutions.contains(&mode) {
+        let previous = fe.game.display;
+        fe.game.display = mode;
+        fe.game.requests.push(Request::DisplayMode {
+            width: mode.0,
+            height: mode.1,
+        });
+        fe.game.countdown = Some(Countdown {
+            elapsed: 0.0,
+            previous,
+        });
+        fe.screen_start("Countdown_Message_Box");
+    }
+}
+
+/// `opCountdownNo` / `opTimerExpired`: restore the previous display mode.
+fn revert_display_mode(fe: &mut Fe, previous: (i32, i32)) {
+    fe.game.display = previous;
+    fe.game.options.set("screenWidth", previous.0);
+    fe.game.options.set("screenHeight", previous.1);
+    fe.game.saved = fe.game.options.clone();
+    fe.game.save_options();
+    fe.game.requests.push(Request::DisplayMode {
+        width: previous.0,
+        height: previous.1,
+    });
+}
+
+/// Per-frame work of the game's front-end callbacks: the display-mode countdown
+/// (`opTimerExpired` drops every screen and restarts the main menu).
+pub fn tick(fe: &mut Fe, dt: f32) {
+    let Some(c) = &mut fe.game.countdown else {
+        return;
+    };
+    c.elapsed += dt;
+    if c.elapsed > COUNTDOWN_SECONDS {
+        let previous = c.previous;
+        fe.game.countdown = None;
+        fe.all_screens_delete();
+        fe.screen_start("Main_game_screen");
+        revert_display_mode(fe, previous);
+    }
+}
+
+/// `opCountdownBoxDraw`: three centred lines in `default.hff`. The seconds shown are the
+/// timeout less two, a constant (the engine never counts it down).
+fn draw_countdown_box(fe: &mut Fe, fer: &mut Fer, _atom: AtomRef, rect: Rect) {
+    let Some(font) = fer.res.font("default.hff") else {
+        return;
+    };
+    let colour = [255, 200, 0, 255];
+    let h = text::height(&font);
+    let seconds = COUNTDOWN_SECONDS as i32 - 2;
+    for (i, line) in fe.game.countdown_text.iter().enumerate() {
+        let line = line.replace("%d", &seconds.to_string());
+        let t = text::to_latin1(&line);
+        let x = rect.x0 + (rect.width() - text::width(&font, &t)) / 2;
+        let y = rect.y0 + h * (i as i32 + 1);
+        text::print(fer.canvas, &font, x, y, colour, &t, (Shadow::None, BLACK));
+    }
+}
+
+/// An audio option changed: the application applies them right away, like the `op*Process`
+/// handlers that call `soundEvent*Vol`, `soundSetNumVoices`, `soundMixerSetMode` and
+/// `soundEventMasterEQ` as the controls move.
+fn audio_changed(fe: &mut Fe) {
+    fe.game.requests.push(Request::AudioSettings);
+}
+
+/// Option keys whose controls take effect on the sound system immediately.
+const AUDIO_KEYS: &[&str] = &[
+    "SpeechVolume",
+    "SFXVolume",
+    "MusicVolume",
+    "NumChannels",
+    "AutoChannel",
+    "SoundQuality",
+    "speakerSetting",
+    "Equalizer0",
+    "Equalizer1",
+    "Equalizer2",
+    "Equalizer3",
+    "Equalizer4",
+    "Equalizer5",
+    "Equalizer6",
+    "Equalizer7",
+];
 
 fn back_to(fe: &mut Fe, screen: &str) {
     fe.current_screen_delete();
@@ -723,6 +874,9 @@ fn check_option(fe: &mut Fe, call: &Call) {
     }
     let v = fe.atom(a).checked();
     fe.game.options.set_bool(b.key, v);
+    if AUDIO_KEYS.contains(&b.key) {
+        audio_changed(fe);
+    }
     if let Some(p) = b.partner {
         fe.toggle_set(p, v);
     }
@@ -870,6 +1024,9 @@ fn slider_changed(fe: &mut Fe, region: RegionId) {
             fe.game.options.set(b.key, v + HISTORY_MIN);
         }
     }
+    if AUDIO_KEYS.contains(&b.key) {
+        audio_changed(fe);
+    }
 }
 
 /// Radio groups bound to one option.
@@ -891,6 +1048,9 @@ fn radio_option(fe: &mut Fe, call: &Call, key: &str) {
     }
     let v = fe.atom(a).radio_value as i32;
     fe.game.options.set(key, v);
+    if AUDIO_KEYS.contains(&key) {
+        audio_changed(fe);
+    }
 }
 
 /// Equaliser presets of the speaker types (multimedia, stereo/surround, headphones).

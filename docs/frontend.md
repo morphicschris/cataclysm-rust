@@ -6,15 +6,79 @@ Cataclysm's changes (pull-down menus removed, slightly different control draws),
 the retail executable. `apps/cataclysm` is the game executable; for now it runs the front end.
 
 ```
-cataclysm [data] [--scale original|fit|integer|stretch] [--filter nearest|linear]
+cataclysm [data] [--fullscreen | --window] [--skip-intro] [--no-sound]
+          [--scale original|fit|integer|stretch] [--filter nearest|linear]
           [--size WxH] [--config file] [--tour outdir] [--exit-after s]
 ```
 
 `data` is the directory written by `hwc-import` (default `$HWC_DATA_DIR`, then `$HWC_GAME_DIR`);
 for development an install directory or a bare `cataclysm.big` also works (`GameData::open`).
-F11 toggles fullscreen, F10 cycles the scaling modes. `--tour` renders a scripted walk through
-the menus to PNG files (see `screenshots/ui/`); `HWC_UI_DEBUG=1` prints the diagnostics the
-engine only printed in debug builds (callbacks not found, links missing).
+The original's switches `/fullscreen` (the default), `/window` and the hidden `/disableAVI`
+(same as `--skip-intro`) are accepted, ignoring case. F11 toggles borderless full screen, F10
+cycles the scaling modes. `--tour` renders a scripted walk through the intro and the menus to
+PNG files (see `screenshots/shell/`) and prints the sound events and music cues;
+`HWC_UI_DEBUG=1` prints the diagnostics the engine only printed in debug builds (callbacks not
+found, links missing).
+
+## From launch to the main menu
+
+As `WinMain` and `utyGameSystemsInit` do it:
+
+1. Full screen (the default), the display switches to 640x480 for the movies (32 bits, else
+   16); in a window, the window has the configured size from the start.
+2. The sound system starts with the saved volumes.
+3. Unless `/disableAVI`: `Movies\sierra.bik` with music track 60, a two-second pause (the last
+   picture stays up), `Moviesdogintro.bik` with track 61. Before each movie with music the
+   engine waits 150 ms; each track stops (no fade) when its movie ends. The frames are drawn
+   unscaled: centred in a window, at the top-left of the 640x480 mode (no display callback,
+   so `binkPlay` uses its GDI blitter). Only releasing **Escape** does anything: it stops the
+   movie playing (`binkStop` from `WM_KEYUP`); the pause and the next movie still follow. No
+   pointer is drawn (the mouse is started after the movies). `apps/cataclysm/src/intro.rs`
+   plays them with `hwc-video`, tables from `GameData::bink_tables()`; frames are due by
+   wall-clock time and missed frames are decoded but not shown, like `binkUpdateFrame`. The
+   scaling modes other than `original` scale the movies too.
+4. The display goes back to the configured mode, the front end starts on `Main_game_screen`,
+   the bitmap pointer appears, and music track 17 starts (`soundEventPlayMusic(0x11)`).
+
+### Sounds
+
+The controls fire the engine's UI sound events (`hwc_ui::consts::sound`, queued in
+`FrontEnd::sounds`, handed to the application as `Request::SoundEvent`), all on the press, none
+on hover or release:
+
+| Control | Event |
+| --- | --- |
+| button press, button hot key, Space on a button, Escape to the default "back" button | `0x108` |
+| list item clicked, arrow/page keys in a focused list with a selection, scroll-bar track click, text entry clicked | `0x108` |
+| check box / toggle pressed (mouse, hot key or Space) | `0x10c` if it was checked, `0x10d` if not |
+| `CP_RaceOne` / `CP_RaceTwo` pressed with the mouse | `0x13a` / `0x13b` |
+| radio button pressed, hot key, Space, arrow keys | `0x10f` |
+| "Sound test" (`OP_SoundFX_Test`) | `0x1c8` (plays ship event `0x821`) |
+| "Speech test" (`OP_Speech_Test`) | speech event `0x2001024` (`Request::Speech`) |
+
+Sliders make no sound. The volume sliders apply as they move (`normalizeSmoothie`: level =
+value x 1.025 / 100, clamped; music immediately), and so do the channel count, automatic
+channels, sound quality (0 normal, 1 automatic, 2 low), speaker presets and equaliser bands
+(gain 1 - value / 100): the front end sends `Request::AudioSettings` and the application
+reapplies the audio options. Quitting fades the music (0.5 s), pauses the sound and closes
+(`utyGameQuit`). The front-end music level is the in-game curve the engine falls into before a
+game has run (main screen, nothing near, inactive).
+
+### Pointer
+
+`CursorBitmaps\cursor.LiF` (`mouseStartup`) is drawn alpha blended with its top-left pixel on
+the mouse position (no hot-spot offset, as `mouseDraw` places the quad); the system pointer is
+hidden. Front-end screens always use the normal pointer. It is drawn into the front-end canvas,
+so the scaled modes scale it with the menus.
+
+### Display mode changes
+
+Accepting the options with a different resolution switches to it (exclusive full-screen mode of
+that size when full screen and the monitor has one, else the window size) and opens
+`Countdown_Message_Box` over the main menu. "Yes" keeps it; "No" restores the old mode; after
+22 seconds without an answer the old mode comes back and every screen is replaced by the main
+menu (`opTimerExpired`). The box's last line always reads 20 seconds: the engine prints the
+timeout less two and never counts down.
 
 ## Modules
 
@@ -167,11 +231,14 @@ slider or the colour picker holds the mouse, positions are clamped to it like `m
 
 ## Known differences
 
-* No sound (UI clicks, volume tests, music), no movies, no game behind the menus: starting a
-  mission or loading a game reports the request and returns to the main menu.
-* The mouse pointer is the system cursor, not the engine's bitmap cursor.
-* Display mode: the renderer and resolution lists show the wgpu presenter and common window sizes;
-  accepting changes the window size instead of the screen mode (no "countdown" confirmation box).
+* No game behind the menus: starting a mission or loading a game reports the request and
+  returns to the main menu.
+* Display mode: the renderer list shows the wgpu presenter; resolutions are a fixed list of
+  common modes. Full screen uses an exclusive mode when the monitor offers it.
+* The movies do not pause when the window loses focus (`binkPause`), and keys pressed during the
+  movies are not passed on to the front end.
+* The original only applied the music level "now" from the music slider; cancelling the options
+  restored the volumes with the normal fade. Here every audio change applies immediately.
 * Changing the window size in `original` mode keeps the open screens (their create callbacks run
   again); the engine dropped back to the main menu after a resolution change.
 * Key bindings are shown read-only; saved-game lists are empty; multiplayer stops at the

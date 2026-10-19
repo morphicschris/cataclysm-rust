@@ -141,3 +141,24 @@ pub mod colour {
     pub const LIST_ITEM_SELECTED: Color = [70, 190, 220, 255];
     pub const LIST_ITEM_INACTIVE: Color = [50, 100, 140, 255];
 }
+
+/// User-interface sound events the controls fire (`soundEventPlay(NULL, event)`), in the game's
+/// event numbering: category `0x100` plus the index into the UI event table.
+pub mod sound {
+    /// Buttons, list selections, scroll-bar track clicks, Escape to the default "back" button.
+    pub const CLICK: u32 = 0x108;
+    /// Pressing a check box or toggle that is currently checked.
+    pub const TOGGLE_CHECKED: u32 = 0x10c;
+    /// Pressing a check box or toggle that is currently unchecked.
+    pub const TOGGLE_UNCHECKED: u32 = 0x10d;
+    /// Radio buttons.
+    pub const RADIO: u32 = 0x10f;
+    /// The colour picker's first race button (`CP_RaceOne`).
+    pub const RACE_ONE: u32 = 0x13a;
+    /// The colour picker's second race button (`CP_RaceTwo`).
+    pub const RACE_TWO: u32 = 0x13b;
+    /// "Sound effects test" in the audio options (plays ship event 0x21 through the UI path).
+    pub const SFX_TEST: u32 = 0x1c8;
+    /// "Speech test" in the audio options (speech event, sentence 0x24, status flags).
+    pub const SPEECH_TEST: u32 = 0x0200_1024;
+}

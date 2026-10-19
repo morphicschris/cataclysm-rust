@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::assets::{AssetSource, Language, Resources};
-use crate::canvas::Canvas;
+use crate::canvas::{BlitMode, Canvas, Image};
 use crate::cataclysm::{self, Cataclysm, Request};
 use crate::fe::FrontEnd;
 use crate::options::Options;
@@ -16,6 +16,8 @@ use crate::scale::{Placement, ScaleMode};
 pub const FRONT_END_FIB: &str = "FEMan\\Front_End.fib";
 /// The first screen.
 pub const MAIN_SCREEN: &str = "Main_game_screen";
+/// The engine's arrow pointer (`mouseStartup`); its top-left pixel is the hot spot.
+pub const CURSOR_BITMAP: &str = "CursorBitmaps\\cursor.LiF";
 
 /// Inputs to [`Session::new`] besides the game files.
 #[derive(Debug, Default, Clone)]
@@ -38,6 +40,11 @@ pub struct Session {
     /// Requests the application has to act on (quit, apply video options, ...).
     pub pending: Vec<Request>,
     skip_credits: bool,
+    /// The bitmap mouse pointer drawn over the front end (`mouseDraw`).
+    cursor: Option<Rc<Image>>,
+    /// Whether the pointer is drawn (`mouseCursorShow` / `mouseCursorHide`; the application
+    /// also hides it while the system pointer is outside the window).
+    pub cursor_visible: bool,
 }
 
 impl Session {
@@ -82,6 +89,8 @@ impl Session {
         if let Some(k) = &setup.default_keys {
             game.load_key_bindings(k);
         }
+        game.display = options_mode(&game.options);
+        let cursor = res.image(CURSOR_BITMAP);
         let mut fe = FrontEnd::new(game, res);
         cataclysm::register(&mut fe);
         fe.load_fib_data(&fib_data)
@@ -95,6 +104,8 @@ impl Session {
             window: (640, 480),
             pending: Vec::new(),
             skip_credits: false,
+            cursor,
+            cursor_visible: true,
         };
         s.fe.screen_start(MAIN_SCREEN);
         Ok(s)
@@ -149,10 +160,14 @@ impl Session {
                 // The credits run on top of the menu, which stays as it was.
                 self.fe.input.stuck.clear();
             }
-            return std::mem::take(&mut self.pending);
+            let mut out = std::mem::take(&mut self.pending);
+            self.take_sounds(&mut out);
+            return out;
         }
         self.fe.process(dt);
+        cataclysm::tick(&mut self.fe, dt);
         let mut out = std::mem::take(&mut self.pending);
+        self.take_sounds(&mut out);
         for r in std::mem::take(&mut self.fe.game.requests) {
             // No game yet: report, then come back to the main menu like the engine does when a
             // game ends.
@@ -166,11 +181,34 @@ impl Session {
         out
     }
 
+    /// UI sound events fired since the last frame, in order.
+    fn take_sounds(&mut self, out: &mut Vec<Request>) {
+        out.extend(self.fe.sounds.drain(..).map(Request::SoundEvent));
+    }
+
     pub fn render(&mut self) -> &Canvas {
         match &self.fe.game.credits {
             Some(c) => c.render(&mut self.canvas),
             None => self.fe.render(&mut self.canvas),
         }
+        self.draw_cursor();
         &self.canvas
     }
+
+    /// The pointer bitmap, alpha blended with its top-left corner on the mouse position.
+    fn draw_cursor(&mut self) {
+        if !self.cursor_visible {
+            return;
+        }
+        if let Some(img) = &self.cursor {
+            let (x, y) = self.fe.mouse_pos();
+            self.canvas.set_clip(None);
+            self.canvas.blit(img, x, y, BlitMode::Blend);
+        }
+    }
+}
+
+/// The display mode the options ask for.
+pub fn options_mode(o: &Options) -> (i32, i32) {
+    (o.get("screenWidth"), o.get("screenHeight"))
 }

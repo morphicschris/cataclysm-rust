@@ -1,7 +1,10 @@
-//! Homeworld: Cataclysm recreation — the game executable. For now it runs the front end (the
-//! menu system) on the player's imported data.
+//! Homeworld: Cataclysm recreation — the game executable. For now it runs what the original
+//! runs from launch to the main menu: the start-up movies with their music, then the front end
+//! (the menu system) with its music, sounds and bitmap pointer, on the player's imported data.
 
 mod app;
+mod audio;
+mod intro;
 mod tour;
 
 use std::path::{Path, PathBuf};
@@ -20,26 +23,38 @@ data: the data directory made by hwc-import (default: $HWC_DATA_DIR, then $HWC_G
       for development also an original install directory or a cataclysm.big file
 
 options:
+  --fullscreen          full screen in the configured display mode (default, like the
+                        original's /fullscreen; the intro runs in 640x480)
+  --window              in a window of the configured size (the original's /window)
+  --skip-intro          start at the main menu (the original's hidden /disableAVI)
   --scale <mode>        original (default: 1:1 and centred, like the engine), fit
-                        (aspect-correct scaling), integer (whole-number scaling), stretch
-  --filter <f>          nearest (default) or linear, when the front end is scaled
-  --size <WxH>          initial window size (default: the configured resolution)
+                        (aspect-correct scaling), integer (whole-number scaling), stretch;
+                        also applies to the movies
+  --filter <f>          nearest (default) or linear, when the picture is scaled
+  --size <WxH>          window size (default: the configured resolution)
   --config <file>       options file (default: <data>/config/hwc-options.cfg, or
                         ./hwc-options.cfg when running from an install or archive)
-  --tour <outdir>       render a scripted walk through the menus to PNG files and exit
+  --no-sound            do not open an audio device
+  --tour <outdir>       render a scripted walk through the intro and the menus to PNG
+                        files and exit
   --exit-after <s>      close the window after s seconds (smoke tests)
   -h, --help            this text
 
-keys: F11 toggles fullscreen; F10 cycles the scaling mode";
+The original's switches /window, /fullscreen and /disableAVI are accepted too.
+keys: Escape (released) stops the movie playing; F11 toggles borderless full screen;
+      F10 cycles the scaling mode";
 
-struct Args {
-    data: Option<PathBuf>,
-    scale: ScaleMode,
-    linear: bool,
-    size: Option<(u32, u32)>,
-    config: Option<PathBuf>,
-    tour: Option<PathBuf>,
-    exit_after: Option<f32>,
+pub struct Args {
+    pub data: Option<PathBuf>,
+    pub scale: ScaleMode,
+    pub linear: bool,
+    pub size: Option<(u32, u32)>,
+    pub config: Option<PathBuf>,
+    pub tour: Option<PathBuf>,
+    pub exit_after: Option<f32>,
+    pub fullscreen: bool,
+    pub intro: bool,
+    pub sound: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -51,12 +66,35 @@ fn parse_args() -> Result<Args, String> {
         config: None,
         tour: None,
         exit_after: None,
+        fullscreen: true,
+        intro: true,
+        sound: true,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
+        // The original's command-line switches (matched without regard to case).
+        match arg.to_ascii_lowercase().as_str() {
+            "/window" => {
+                a.fullscreen = false;
+                continue;
+            }
+            "/fullscreen" => {
+                a.fullscreen = true;
+                continue;
+            }
+            "/disableavi" => {
+                a.intro = false;
+                continue;
+            }
+            _ => {}
+        }
         match arg.as_str() {
             "-h" | "--help" => return Err(String::new()),
+            "--window" => a.fullscreen = false,
+            "--fullscreen" => a.fullscreen = true,
+            "--skip-intro" => a.intro = false,
+            "--no-sound" => a.sound = false,
             "--scale" => {
                 let v = value("--scale")?;
                 a.scale = ScaleMode::parse(&v).ok_or_else(|| format!("unknown scale mode {v}"))?;
@@ -86,16 +124,20 @@ fn parse_args() -> Result<Args, String> {
     Ok(a)
 }
 
-/// Opens the game files and builds the front-end session.
-fn open_session(args: &Args) -> Result<Session, String> {
-    let data = match &args.data {
-        Some(p) => GameData::open(p).map_err(|e| e.to_string())?,
+/// Opens the game files (the data directory, or for development an install or archive).
+pub fn open_game_data(args: &Args) -> Result<GameData, String> {
+    match &args.data {
+        Some(p) => GameData::open(p).map_err(|e| e.to_string()),
         None => GameData::from_env()
             .ok_or(
                 "no game data: pass the data directory made by hwc-import (or set HWC_DATA_DIR)",
             )?
-            .map_err(|e| e.to_string())?,
-    };
+            .map_err(|e| e.to_string()),
+    }
+}
+
+/// Builds the front-end session on the game files.
+fn open_session(args: &Args, data: Rc<GameData>) -> Result<Session, String> {
     let read = |p: Option<PathBuf>| {
         p.and_then(|p| std::fs::read(p).ok())
             .map(|b| String::from_utf8_lossy(&b).into_owned())
@@ -109,7 +151,7 @@ fn open_session(args: &Args) -> Result<Session, String> {
             .map(|r| r.join("config").join("hwc-options.cfg")),
         _ => Some(PathBuf::from("hwc-options.cfg")),
     });
-    let source: Rc<dyn AssetSource> = Rc::new(data);
+    let source: Rc<dyn AssetSource> = data;
     Session::new(
         source,
         Setup {
@@ -132,7 +174,11 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let session = match open_session(&args) {
+    let opened = open_game_data(&args).map(Rc::new).and_then(|data| {
+        let session = open_session(&args, data.clone())?;
+        Ok((data, session))
+    });
+    let (data, session) = match opened {
         Ok(s) => s,
         Err(e) => {
             eprintln!("cataclysm: {e}");
@@ -140,8 +186,8 @@ fn main() -> ExitCode {
         }
     };
     let result = match &args.tour {
-        Some(dir) => tour::run(session, Path::new(dir)),
-        None => app::run(session, args.size, args.linear, args.exit_after),
+        Some(dir) => tour::run(session, data, &args, Path::new(dir)),
+        None => app::run(session, data, &args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

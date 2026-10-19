@@ -103,8 +103,9 @@ conversion at about 1,200 frames/s. Both are well over 100× real time at 640×4
 
 ## How the original game plays them
 
-`animBinkPlay(index, …)` is the entry point. It is called after a mission is completed, from the
-intro sequence, and from `utyVideoPlay`. In order, it:
+`animBinkPlay(index, …)` is the entry point for animatics. It is called after a mission is completed
+and from `utyVideoPlay`. (The launch intro — sierra then bdogintro, with music tracks 60/61 — calls
+`binkPlay` directly from `utyGameSystemsInit`.) In order, it:
 
 1. Builds the paths `Movies\<name>.bik` and `Movies\<name>.script`, and loads the NIS script.
 2. Stops music and sound effects.
@@ -156,7 +157,8 @@ screen, a black rectangle at least 128 px tall is painted at the bottom before t
 
 ### Skipping and pausing
 
-* While a movie is playing, the window procedure's key-down handling calls `binkStop`. This is
+* While a movie is playing, the window procedure calls `binkStop` when Escape is released (`WM_KEYUP`); other keys and mouse clicks
+  do nothing. This is
   the code path that otherwise forwards ESC. `binkStop` sets the stop flag, and the play loop
   exits on its next iteration.
 * Losing focus pauses playback: `DeactivateMe` calls `binkPause(1)`. On resume, the clock base is

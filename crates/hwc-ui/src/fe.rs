@@ -221,6 +221,9 @@ pub struct FrontEnd<G> {
     /// Time in seconds since start, advanced by [`FrontEnd::process`].
     pub time: f64,
     last_press: Option<(f64, i32, i32)>,
+    /// UI sound events fired by the controls since the application last took them
+    /// ([`crate::consts::sound`]).
+    pub sounds: Vec<u32>,
 }
 
 impl<G> FrontEnd<G> {
@@ -258,6 +261,7 @@ impl<G> FrontEnd<G> {
             logged: HashSet::new(),
             time: 0.0,
             last_press: None,
+            sounds: Vec::new(),
         };
         fe.callback_add("SCREEN_Disappear", |fe, _| fe.current_screen_delete());
         fe
@@ -1322,6 +1326,23 @@ impl<G> FrontEnd<G> {
         }
     }
 
+    /// Queues a UI sound event (`soundEventPlay(NULL, event)`).
+    pub fn ui_sound(&mut self, event: u32) {
+        self.sounds.push(event);
+    }
+
+    /// The sound `uicToggleProcess` plays when a toggle is pressed: by its current state, or
+    /// the race buttons' own sounds when pressed with the mouse.
+    fn toggle_sound(&self, aref: AtomRef, mouse: bool) -> u32 {
+        let atom = self.atom(aref);
+        match atom.name.as_deref() {
+            Some("CP_RaceOne") if mouse => sound::RACE_ONE,
+            Some("CP_RaceTwo") if mouse => sound::RACE_TWO,
+            _ if atom.checked() => sound::TOGGLE_CHECKED,
+            _ => sound::TOGGLE_UNCHECKED,
+        }
+    }
+
     /// The control's "click" (its `processFunction` with `CM_ButtonClick`).
     fn control_click(&mut self, id: RegionId) {
         let Some(r) = self.regions.get(id) else {
@@ -1525,6 +1546,7 @@ impl<G> FrontEnd<G> {
             self.set_current(tid, true);
             if let Some(tid) = tid {
                 self.radio_activate(tid);
+                self.ui_sound(sound::RADIO);
             }
         }
         true
@@ -1599,6 +1621,7 @@ impl<G> FrontEnd<G> {
                     .and_then(|a| self.atom(a).region)
                 {
                     self.control_click(id);
+                    self.ui_sound(sound::CLICK);
                 }
             }
             Home => {
@@ -1625,8 +1648,13 @@ impl<G> FrontEnd<G> {
             return;
         };
         match self.atom(aref).kind {
-            FA_BUTTON => self.control_click(id),
+            FA_BUTTON => {
+                self.ui_sound(sound::CLICK);
+                self.control_click(id);
+            }
             FA_CHECK_BOX | FA_TOGGLE_BUTTON => {
+                let s = self.toggle_sound(aref, false);
+                self.ui_sound(s);
                 self.atom_mut(aref).status ^= FAS_CHECKED;
                 self.control_click(id);
             }
@@ -1652,6 +1680,7 @@ impl<G> FrontEnd<G> {
                     });
                 if let Some(t) = target.and_then(|a| self.atom(a).region) {
                     self.radio_activate(t);
+                    self.ui_sound(sound::RADIO);
                 }
             }
             _ => {}
@@ -1949,21 +1978,35 @@ impl<G> FrontEnd<G> {
             RPE_PRESS_LEFT => {
                 self.clear_current();
                 self.set_current(Some(id), false);
+                self.ui_sound(sound::CLICK);
             }
-            RPE_KEY_DOWN | RPE_RELEASE_LEFT => self.control_click(id),
+            RPE_KEY_DOWN => {
+                self.ui_sound(sound::CLICK);
+                self.control_click(id);
+            }
+            RPE_RELEASE_LEFT => self.control_click(id),
             _ => {}
         }
     }
 
     /// `uicToggleProcess` (check boxes, toggle and bitmap buttons).
     fn toggle_event(&mut self, id: RegionId, event: u32) {
+        let aref = self.regions.get(id).and_then(|r| r.atom);
         match event {
             RPE_PRESS_LEFT => {
                 self.clear_current();
                 self.set_current(Some(id), false);
+                if let Some(a) = aref {
+                    let s = self.toggle_sound(a, true);
+                    self.ui_sound(s);
+                }
             }
             RPE_RELEASE_LEFT | RPE_KEY_DOWN => {
-                if let Some(a) = self.regions.get(id).and_then(|r| r.atom) {
+                if let Some(a) = aref {
+                    if event == RPE_KEY_DOWN {
+                        let s = self.toggle_sound(a, false);
+                        self.ui_sound(s);
+                    }
                     self.atom_mut(a).status ^= FAS_CHECKED;
                 }
                 self.control_click(id);
@@ -1978,8 +2021,13 @@ impl<G> FrontEnd<G> {
             RPE_PRESS_LEFT => {
                 self.clear_current();
                 self.set_current(Some(id), false);
+                self.ui_sound(sound::RADIO);
             }
-            RPE_KEY_DOWN | RPE_RELEASE_LEFT => self.radio_activate(id),
+            RPE_KEY_DOWN => {
+                self.radio_activate(id);
+                self.ui_sound(sound::RADIO);
+            }
+            RPE_RELEASE_LEFT => self.radio_activate(id),
             _ => {}
         }
     }
@@ -2030,6 +2078,7 @@ impl<G> FrontEnd<G> {
                 let drag = if sb.thumb.contains(self.input.mouse_x, my) {
                     Some(my)
                 } else {
+                    self.ui_sound(sound::CLICK);
                     None
                 };
                 if let Some(Control::ScrollBar(s)) =
@@ -2139,6 +2188,13 @@ impl<G> FrontEnd<G> {
                 };
                 if let Some(d) = step {
                     self.list_scroll(id, |l| l.step(d));
+                    let has_selection = matches!(
+                        self.regions.get(id).map(|r| &r.control),
+                        Some(Control::List(l)) if l.selected.is_some()
+                    );
+                    if has_selection {
+                        self.ui_sound(sound::CLICK);
+                    }
                     notify(self, CM_NEW_ITEM_SELECTED);
                 } else if k == key::ESCAPE {
                     self.key_action(KeyAction::Escape, 0);
@@ -2159,6 +2215,7 @@ impl<G> FrontEnd<G> {
                     let msg = if event == RPE_DOUBLE_LEFT {
                         CM_DOUBLE_CLICK
                     } else {
+                        self.ui_sound(sound::CLICK);
                         CM_NEW_ITEM_SELECTED
                     };
                     notify(self, msg);
@@ -2200,6 +2257,7 @@ impl<G> FrontEnd<G> {
                 self.clear_current();
                 self.set_current(Some(id), true);
                 notify(self, CM_GAIN_FOCUS);
+                self.ui_sound(sound::CLICK);
             }
             RPE_KEY_DOWN => {
                 let k = (data & 0xffff) as u16;

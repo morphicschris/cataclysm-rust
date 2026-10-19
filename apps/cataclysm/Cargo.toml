@@ -12,3 +12,5 @@ hwc-ui = { path = "../../crates/hwc-ui" }
 wgpu = "30"
 winit = "0.30"
 pollster = "0.4"
+hwc-audio = { path = "../../crates/hwc-audio" }
+hwc-video = { path = "../../crates/hwc-video" }

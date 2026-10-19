@@ -254,8 +254,10 @@ dependencies = [
 name = "cataclysm"
 version = "0.1.0"
 dependencies = [
+ "hwc-audio",
  "hwc-formats",
  "hwc-ui",
+ "hwc-video",
  "pollster",
  "wgpu",
  "winit",
@@ -757,6 +759,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "hwc-fx"
+version = "0.1.0"
+dependencies = [
+ "hwc-formats",
+ "hwc-math",
 ]
 
 [[package]]
