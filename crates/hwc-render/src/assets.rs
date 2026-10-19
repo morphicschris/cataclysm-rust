@@ -244,6 +244,29 @@ impl ShipDef {
         from_lod.unwrap_or_else(|| format!("{0}\\{1}\\rl0\\lod0\\{1}.geo", self.race, self.name))
     }
 
+    /// The parsed `.lod` table, if the ship names one that loads.
+    pub fn lod_table(&self, src: &dyn AssetSource) -> Option<crate::lod::LodTable> {
+        let lod = self.stats.lod_file.as_deref()?;
+        let script = read_script(src, &format!("{}\\{lod}", self.race)).ok()?;
+        Some(crate::lod::LodTable::from_script(&script))
+    }
+
+    /// Archive path of level `level`'s mesh (`pMeshFileN` of the `.lod` file); level 0 falls
+    /// back to [`mesh_path`](Self::mesh_path).
+    pub fn level_mesh_path(&self, src: &dyn AssetSource, level: usize) -> Option<String> {
+        if level == 0 {
+            return Some(self.mesh_path(src));
+        }
+        let table = self.lod_table(src)?;
+        let mesh = table.levels.get(level)?.mesh_file.as_deref()?;
+        Some(format!("{}\\{mesh}", self.race).to_ascii_lowercase())
+    }
+
+    /// Archive path of the ship's `.mad` animation file (`race\name.mad`).
+    pub fn mad_path(&self) -> String {
+        format!("{}\\{}.mad", self.race, self.name)
+    }
+
     pub fn mex_path(&self) -> Option<String> {
         let mex = self.stats.p_mex_data.as_deref()?;
         Some(format!("{}\\{mex}", self.race).to_ascii_lowercase())
@@ -393,10 +416,74 @@ impl ShipModel {
         Ok(model)
     }
 
+    /// Loads one level of detail (`level` 0 is the same as [`load`](Self::load)).
+    pub fn load_level(src: &dyn AssetSource, def: &ShipDef, level: usize) -> Result<Self> {
+        let mut model = Self::load_empty(src, def);
+        model.add_module_level(src, def, level)?;
+        Ok(model)
+    }
+
+    /// Every level of detail the ship's `.lod` file lists as a mesh, most detailed first, with
+    /// the table. Levels whose mesh fails to load end the list.
+    pub fn load_lods(
+        src: &dyn AssetSource,
+        def: &ShipDef,
+    ) -> Result<(Vec<Self>, Option<crate::lod::LodTable>)> {
+        let table = def.lod_table(src);
+        let mut levels = vec![Self::load(src, def)?];
+        if let Some(t) = &table {
+            for level in 1..t.levels.len() {
+                if t.levels[level].kind != crate::lod::LodKind::Mesh {
+                    break;
+                }
+                match Self::load_level(src, def, level) {
+                    Ok(m) => levels.push(m),
+                    Err(_) => break,
+                }
+            }
+        }
+        Ok((levels, table))
+    }
+
+    fn load_empty(src: &dyn AssetSource, def: &ShipDef) -> Self {
+        let mex = def
+            .mex_path()
+            .and_then(|p| src.read(&p))
+            .and_then(|d| Mex::parse(&d).ok());
+        Self {
+            name: def.name.clone(),
+            parts: Vec::new(),
+            nav_lights: Vec::new(),
+            nav_textures: Vec::new(),
+            collision_sphere: mex
+                .as_ref()
+                .and_then(Mex::collision_sphere)
+                .map(|(c, r)| (Vec3::from_array(c), r)),
+            minimum_zoom_distance: def.stats.minimum_zoom_distance.unwrap_or(0.0),
+        }
+    }
+
+    /// [`add_module`](Self::add_module) for a given level of detail.
+    pub fn add_module_level(
+        &mut self,
+        src: &dyn AssetSource,
+        def: &ShipDef,
+        level: usize,
+    ) -> Result<()> {
+        let path = def
+            .level_mesh_path(src, level)
+            .ok_or_else(|| format!("{}: no level {level}", def.name))?;
+        self.add_mesh(src, def, &path)
+    }
+
     /// Adds another ship type's mesh and nav lights in this ship's frame (mothership modules
     /// are modelled in the mothership's coordinates).
     pub fn add_module(&mut self, src: &dyn AssetSource, def: &ShipDef) -> Result<()> {
-        self.parts.push(MeshPart::load(src, &def.mesh_path(src))?);
+        self.add_mesh(src, def, &def.mesh_path(src))
+    }
+
+    fn add_mesh(&mut self, src: &dyn AssetSource, def: &ShipDef, mesh_path: &str) -> Result<()> {
+        self.parts.push(MeshPart::load(src, mesh_path)?);
         let mex = def
             .mex_path()
             .and_then(|p| src.read(&p))
@@ -469,6 +556,63 @@ impl ShipModel {
     pub fn triangle_count(&self) -> usize {
         self.parts.iter().map(MeshPart::triangle_count).sum()
     }
+}
+
+/// An engine nozzle (`EngN` point of the `.mex` file).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineNozzle {
+    /// N of `EngN`: the trail slot.
+    pub index: usize,
+    /// Mesh-space position.
+    pub position: Vec3,
+    pub normal: Vec3,
+    /// Mesh object the nozzle moves with, if any.
+    pub attached_to: Option<String>,
+}
+
+/// The ship's engine nozzles `Eng0`..`Eng3`, by slot.
+pub fn engine_nozzles(src: &dyn AssetSource, def: &ShipDef) -> Vec<EngineNozzle> {
+    let Some(mex) = def
+        .mex_path()
+        .and_then(|p| src.read(&p))
+        .and_then(|d| Mex::parse(&d).ok())
+    else {
+        return Vec::new();
+    };
+    engine_nozzles_from_mex(&mex)
+}
+
+pub fn engine_nozzles_from_mex(mex: &Mex) -> Vec<EngineNozzle> {
+    let mut out: Vec<EngineNozzle> = mex
+        .chunks
+        .iter()
+        .filter_map(|c| {
+            let ChunkData::Engine { point, attached_to } = &c.data else {
+                return None;
+            };
+            let digit = c
+                .name
+                .strip_prefix("Eng")
+                .or_else(|| c.name.strip_prefix("ENG"))?;
+            let index: usize = digit.trim().parse().ok()?;
+            (index < 4).then(|| EngineNozzle {
+                index,
+                position: Vec3::from_array(point.position),
+                normal: Vec3::from_array(point.normal),
+                attached_to: attached_to.clone().filter(|s| !s.is_empty()),
+            })
+        })
+        .collect();
+    out.sort_by_key(|n| n.index);
+    out.dedup_by_key(|n| n.index);
+    out
+}
+
+/// The ship's `.mad` animation with its `ANIM` remap, if it has one.
+pub fn load_mad_clip(src: &dyn AssetSource, def: &ShipDef) -> Option<crate::anim::MadClip> {
+    let data = src.read(&def.mad_path())?;
+    let mad = hwc_formats::mad::Mad::parse(&data).ok()?;
+    Some(crate::anim::MadClip::with_ship_stats(mad, &def.stats))
 }
 
 /// Ship types whose mesh is modelled in `def`'s frame and is drawn with it: for a mothership,

@@ -142,9 +142,225 @@ pub fn build_geometry(model: &ShipModel) -> ShipGeometry {
     out
 }
 
+/// Per-vertex tint attributes (Cataclysm's per-vertex colour delta and effect flags), kept as a
+/// second vertex stream beside [`ShipVertex`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable, Default)]
+pub struct TintVertex {
+    /// Packed RGBA bytes; R, G and B are signed deltas.
+    pub color: u32,
+    pub flags: u32,
+}
+
+/// One mesh object of a level, in the ship's object hierarchy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkeletonObject {
+    pub name: String,
+    /// Index of the parent object (in the same skeleton).
+    pub parent: Option<usize>,
+    /// The object's matrix relative to its parent when no animation drives it.
+    pub rest: Mat4,
+}
+
+/// The object hierarchy of one level of detail: every part's objects, in part order.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Skeleton {
+    pub objects: Vec<SkeletonObject>,
+}
+
+impl Skeleton {
+    pub fn from_model(model: &ShipModel) -> Self {
+        let mut objects = Vec::new();
+        for part in &model.parts {
+            let base = objects.len();
+            let count = part.geo.objects.len();
+            for o in &part.geo.objects {
+                objects.push(SkeletonObject {
+                    name: o.name.clone(),
+                    parent: o.parent.filter(|&p| p < count).map(|p| base + p),
+                    rest: Mat4::from_cols_array(&o.local_matrix),
+                });
+            }
+        }
+        Self { objects }
+    }
+
+    /// Index of the first object with this name (case-insensitive).
+    pub fn find(&self, name: &str) -> Option<usize> {
+        self.objects
+            .iter()
+            .position(|o| o.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Each object's matrix in ship (mesh) space: the parent chain of local matrices, where
+    /// `local(i)` supplies an object's current local matrix (its rest matrix when not animated).
+    pub fn resolve(&self, local: impl Fn(usize) -> Mat4) -> Vec<Mat4> {
+        let n = self.objects.len();
+        let mut out: Vec<Option<Mat4>> = vec![None; n];
+        for start in 0..n {
+            // Walk up to the first resolved ancestor, then resolve back down.
+            let mut chain = Vec::new();
+            let mut cur = Some(start);
+            while let Some(i) = cur {
+                if out[i].is_some() || chain.len() > n {
+                    break;
+                }
+                chain.push(i);
+                cur = self.objects[i].parent;
+            }
+            for &i in chain.iter().rev() {
+                let parent = self.objects[i]
+                    .parent
+                    .and_then(|p| out[p])
+                    .unwrap_or(Mat4::IDENTITY);
+                out[i] = Some(parent * local(i));
+            }
+        }
+        out.into_iter()
+            .map(|m| m.unwrap_or(Mat4::IDENTITY))
+            .collect()
+    }
+
+    /// Rest-pose matrices in ship space.
+    pub fn rest_matrices(&self) -> Vec<Mat4> {
+        self.resolve(|i| self.objects[i].rest)
+    }
+}
+
+/// A run of vertices sharing one object and one material.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectBatch {
+    /// Index into [`Skeleton::objects`].
+    pub object: usize,
+    pub part: usize,
+    pub material: usize,
+    pub first_vertex: u32,
+    pub vertex_count: u32,
+}
+
+/// A level's triangles in object-local space, so object matrices can change every frame.
+#[derive(Debug, Clone, Default)]
+pub struct LevelGeometry {
+    pub vertices: Vec<ShipVertex>,
+    /// Parallel to `vertices`.
+    pub tints: Vec<TintVertex>,
+    pub batches: Vec<ObjectBatch>,
+    pub materials: Vec<Vec<MaterialInfo>>,
+    pub skeleton: Skeleton,
+    /// Mesh edges (object index, local end points) for effects that crawl over the hull.
+    pub edges: Vec<(usize, Vec3, Vec3)>,
+}
+
+/// Most hull edges kept per level for edge effects.
+const MAX_EDGES: usize = 512;
+
+/// Builds per-object triangle lists in object space (unlike [`build_geometry`], which bakes the
+/// rest pose into the vertices).
+pub fn build_level_geometry(model: &ShipModel) -> LevelGeometry {
+    let mut out = LevelGeometry {
+        skeleton: Skeleton::from_model(model),
+        ..Default::default()
+    };
+    let mut object_base = 0;
+    let mut all_edges = Vec::new();
+    for (part_index, part) in model.parts.iter().enumerate() {
+        let materials = part_materials(part);
+        for (oi, object) in part.geo.objects.iter().enumerate() {
+            let global = object_base + oi;
+            let mut per_material: Vec<Vec<(ShipVertex, TintVertex)>> =
+                vec![Vec::new(); materials.len()];
+            for poly in &object.polygons {
+                let m = poly.material as usize;
+                if m >= materials.len() {
+                    continue;
+                }
+                let smooth = materials[m].flags & geo::MATERIAL_SMOOTHING != 0;
+                let face = object.normals.get(poly.face_normal as usize).copied();
+                let mut corners = Vec::with_capacity(3);
+                for (corner, &vi) in poly.vertices.iter().enumerate() {
+                    let Some(v) = object.vertices.get(vi as usize) else {
+                        continue;
+                    };
+                    let n = if smooth {
+                        object.normals.get(v.normal as usize).copied().or(face)
+                    } else {
+                        face
+                    }
+                    .unwrap_or([0.0, 0.0, 1.0]);
+                    let tint = object
+                        .vertex_attrs
+                        .get(vi as usize)
+                        .map(|a| TintVertex {
+                            color: u32::from_le_bytes(a.color),
+                            flags: a.flags,
+                        })
+                        .unwrap_or_default();
+                    corners.push(Vec3::from_array(v.position));
+                    per_material[m].push((
+                        ShipVertex {
+                            position: v.position,
+                            normal: Vec3::from_array(n).normalize_or_zero().into(),
+                            uv: poly.uvs[corner],
+                        },
+                        tint,
+                    ));
+                }
+                if corners.len() == 3 {
+                    all_edges.push((global, corners[0], corners[1]));
+                }
+            }
+            for (material, verts) in per_material.into_iter().enumerate() {
+                if verts.len() < 3 {
+                    continue;
+                }
+                let count = verts.len() - verts.len() % 3;
+                out.batches.push(ObjectBatch {
+                    object: global,
+                    part: part_index,
+                    material,
+                    first_vertex: out.vertices.len() as u32,
+                    vertex_count: count as u32,
+                });
+                for (v, t) in &verts[..count] {
+                    out.vertices.push(*v);
+                    out.tints.push(*t);
+                }
+            }
+        }
+        object_base += part.geo.objects.len();
+        out.materials.push(materials);
+    }
+    // Keep an evenly spread subset of edges.
+    let step = all_edges.len().div_ceil(MAX_EDGES).max(1);
+    out.edges = all_edges.into_iter().step_by(step).collect();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skeleton_resolves_parent_chains() {
+        let t = |x: f32| Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
+        let sk = Skeleton {
+            objects: vec![
+                SkeletonObject {
+                    name: "child".into(),
+                    parent: Some(1),
+                    rest: t(1.0),
+                },
+                SkeletonObject {
+                    name: "root".into(),
+                    parent: None,
+                    rest: t(10.0),
+                },
+            ],
+        };
+        let m = sk.rest_matrices();
+        assert_eq!(m[0].transform_point3(Vec3::ZERO), Vec3::new(11.0, 0.0, 0.0));
+        assert_eq!(sk.find("ROOT"), Some(1));
+    }
 
     #[test]
     fn mesh_axes_map_to_world() {
