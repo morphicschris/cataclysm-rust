@@ -254,10 +254,16 @@ dependencies = [
 name = "cataclysm"
 version = "0.1.0"
 dependencies = [
+ "glam",
  "hwc-audio",
  "hwc-formats",
+ "hwc-kas",
+ "hwc-math",
+ "hwc-render",
+ "hwc-sim",
  "hwc-ui",
  "hwc-video",
+ "jpeg-decoder",
  "pollster",
  "wgpu",
  "winit",
@@ -853,7 +859,9 @@ name = "hwc-viewer"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "hwc-audio",
  "hwc-formats",
+ "hwc-kas",
  "hwc-math",
  "hwc-render",
  "hwc-sim",
