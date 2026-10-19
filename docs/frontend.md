@@ -3,13 +3,14 @@
 `crates/hwc-ui` recreates the engine's front-end manager — `FEFlow.c`, `FEReg.c`, `UIControls.c`,
 `Region.c`, `FontReg.c`, `ColPick.c`, `PlugScreen.c` and the font/2D primitives — with
 Cataclysm's changes (pull-down menus removed, slightly different control draws), checked against
-the retail executable. `apps/cataclysm` is the game executable; for now it runs the front end.
+the retail executable. `apps/cataclysm` is the game executable: the front end, and from it Mission 1
+on the simulation (see "Playing a mission" below).
 
 ```
 cataclysm [data] [--fullscreen | --window] [--skip-intro] [--no-sound]
           [--scale original|fit|integer|stretch] [--filter nearest|linear]
           [--size WxH] [--config file] [--tour outdir] [--exit-after s]
-          [--ingame-preview]
+          [--ingame-preview] [--mission n]
 ```
 
 `data` is the directory written by `hwc-import` (default `$HWC_DATA_DIR`, then `$HWC_GAME_DIR`);
@@ -247,6 +248,40 @@ the combination from actions that may not share it (only height move / multiple 
 the action; keys without a name open the "invalid key" box. RESET TO DEFAULT goes back to the
 saved `keys.cfg` (the engine reloads it); Cancel restores the bindings.
 
+## Playing a mission
+
+Single Player -> New Game (or `--mission n` straight from the front end) runs
+`apps/cataclysm/src/play.rs`: the menus go and the loading screen comes up (`HorseRace.c`, single
+player): `FEMAN\Horse_Race.fib` screen `Horse_Race_Single` over
+`SinglePlayer\MissionNN\loading.jpg` resampled to 640x480 and drawn unscaled in the middle
+(black around it), a solid 152x3 progress bar at (243, 234) of the layout in the colour of the
+mission's `loading.script` (default 255,63,63), and "Skill Level ..." in white Arial_12 at
+(10, height - 40); no pointer. One piece of loading is done per frame (statics, level and KAS
+script, ship art, interface, GPU upload) and the bar moves on.
+
+In the mission (`game.rs`, `world.rs`, `host.rs`): the 3D view is `hwc-render` with the game
+camera, read back into the interface canvas so the in-game screens (`InGameUi`) blend over it
+exactly as on the CPU; the interface reads the simulation through `SimHost` (`GameUiHost`) and
+its requests go to the command layer (build/unqueue/cancel/pause jobs, research, clear lab,
+launch, auto-launch, dock, retire, harvest, halt, tactics, formations, hot-key groups, focus,
+pause, quit/restart). The main view follows `mainrgn.c`: left click selects (with the ship's
+formation; Multiple_Select toggles), drag band-boxes (Bandbox_Attack attacks, Bandbox_Focus
+focuses, Multiple_Select adds), a click on an enemy with ships selected attacks, Bandbox_Focus +
+click focuses; right drag rotates the camera, both buttons zoom, the wheel and the zoom keys
+zoom; a right click without moving opens the right-click menu; Move (M) brings up the pie plate
+(the destination follows the pointer on the selection's plane, Enable_Height_Move gives height,
+left click moves, right click or Escape cancels); Escape cancels the plate, then the selection,
+then opens the escape menu (which pauses). Music, speech with subtitles (`subtitle.script`
+region 1, Arial_13 with shadow), location cards and the simulation's gun/hit/explosion sounds
+play through `hwc-audio`. `MissionFailed` opens the game-over escape menu; `MissionCompleted`
+shows a note and returns to the menu after 10 s (the next mission cannot start yet).
+
+Known differences of the mission: no opening NIS (and its loading screen); no ship picture in
+the build manager; no selection speech; the overlay's message lines are simple "built" /
+"research complete" notes; KAS `TechSet` / `EnableShipConstruction` are only recorded by the
+simulation, so the build list shows what the research table allows; scuttle, guard, waypoints
+and special actions are not wired; subtitle actor pictures are not drawn.
+
 ## Options
 
 ### The original
@@ -317,8 +352,9 @@ slider or the colour picker holds the mouse, positions are clamped to it like `m
 
 ## Known differences
 
-* No game behind the menus: starting a mission or loading a game reports the request and
-  returns to the main menu.
+* Only Mission 1 can be played (the simulation cannot yet carry a fleet into later missions);
+  the training mission and other missions show "not playable yet" over the loading screen and
+  return to the main menu. Loading a saved game reports the request only.
 * Display mode: the renderer list shows the wgpu presenter; resolutions are a fixed list of
   common modes. Full screen uses an exclusive mode when the monitor offers it.
 * The movies do not pause when the window loses focus (`binkPause`), and keys pressed during the

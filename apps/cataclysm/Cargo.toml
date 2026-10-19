@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Homeworld: Cataclysm recreation: the game executable (front end for now)"
+description = "Homeworld: Cataclysm recreation: the game executable"
 
 [dependencies]
 hwc-formats = { path = "../../crates/hwc-formats" }
@@ -14,3 +14,9 @@ winit = "0.30"
 pollster = "0.4"
 hwc-audio = { path = "../../crates/hwc-audio" }
 hwc-video = { path = "../../crates/hwc-video" }
+hwc-render = { path = "../../crates/hwc-render" }
+hwc-sim = { path = "../../crates/hwc-sim" }
+hwc-kas = { path = "../../crates/hwc-kas" }
+hwc-math = { path = "../../crates/hwc-math" }
+glam = "0.30"
+jpeg-decoder = { version = "0.3", default-features = false }

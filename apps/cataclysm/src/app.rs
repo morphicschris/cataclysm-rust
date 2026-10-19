@@ -1,5 +1,5 @@
-//! The window: start-up movies, then the front end; winit events in, frames out through wgpu,
-//! sound through hwc-audio.
+//! The window: start-up movies, then the front end, then (after the loading screen) a
+//! single-player mission; winit events in, frames out through wgpu, sound through hwc-audio.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -20,7 +20,9 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::audio::{self, Audio};
+use crate::game::{self, Game};
 use crate::intro::{Cue, Intro, SEQUENCE};
+use crate::play::{Loading, Progress};
 use crate::preview::{Outcome, Preview};
 use crate::Args;
 use hwc_ui::ingame::InputEvent;
@@ -58,6 +60,17 @@ struct App {
     ingame_preview: bool,
     source: Rc<dyn AssetSource>,
     preview: Option<Preview>,
+    data: Rc<GameData>,
+    /// The loading screen between the menu and a mission.
+    loading: Option<Box<Loading>>,
+    /// The mission being played.
+    game: Option<Box<Game>>,
+    /// The 3D renderer (created on the window's device when a mission first starts).
+    renderer: Option<hwc_render::Renderer>,
+    /// `--mission`: start this mission as soon as the front end is up.
+    start_mission: Option<u32>,
+    /// Mouse position in canvas pixels.
+    mouse: (i32, i32),
 }
 
 pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), String> {
@@ -78,7 +91,7 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
     };
     let source: Rc<dyn AssetSource> = data.clone();
     let intro = if args.intro {
-        match Intro::new(data, &SEQUENCE) {
+        match Intro::new(data.clone(), &SEQUENCE) {
             Ok(i) => Some(i),
             Err(e) => {
                 eprintln!("cataclysm: intro movies unavailable: {e}");
@@ -106,6 +119,12 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         ingame_preview: args.ingame_preview,
         source,
         preview: None,
+        data,
+        loading: None,
+        game: None,
+        renderer: None,
+        start_mission: args.mission,
+        mouse: (0, 0),
     };
     if app.intro.is_none() {
         app.front_end_start();
@@ -226,16 +245,42 @@ fn key_code(k: &Key) -> Option<u16> {
             NamedKey::Shift => key::SHIFT,
             NamedKey::Control => key::CONTROL,
             NamedKey::Alt => key::ALT,
+            NamedKey::CapsLock => 0x14,
+            NamedKey::Insert => 0x2d,
+            NamedKey::F1 => 0x70,
+            NamedKey::F2 => 0x71,
+            NamedKey::F3 => 0x72,
+            NamedKey::F4 => 0x73,
+            NamedKey::F5 => 0x74,
+            NamedKey::F6 => 0x75,
+            NamedKey::F7 => 0x76,
+            NamedKey::F8 => 0x77,
+            NamedKey::F9 => 0x78,
+            NamedKey::F12 => 0x7b,
             _ => return None,
         },
         Key::Character(s) => {
             let c = s.chars().next()?.to_ascii_uppercase();
             if c.is_ascii_alphanumeric() {
                 c as u16
-            } else if c == ' ' {
-                key::SPACE
             } else {
-                return None;
+                // Windows virtual-key codes of the punctuation keys (US layout).
+                match c {
+                    ' ' => key::SPACE,
+                    '`' | '~' => 0xc0,
+                    '=' => 0xbb,
+                    '+' => 0x6b,
+                    '-' | '_' => 0xbd,
+                    '[' | '{' => 0xdb,
+                    ']' | '}' => 0xdd,
+                    '\\' | '|' => 0xdc,
+                    ';' | ':' => 0xba,
+                    '\'' | '"' => 0xde,
+                    ',' | '<' => 0xbc,
+                    '.' | '>' => 0xbe,
+                    '/' | '?' => 0xbf,
+                    _ => return None,
+                }
             }
         }
         _ => return None,
@@ -251,6 +296,105 @@ impl App {
         if let Some(a) = &mut self.audio {
             a.play_music(audio::FRONT_END_TRACK);
         }
+        if let Some(n) = self.start_mission.take() {
+            let difficulty = self.session.fe.game.options.get("DifficultySetting");
+            self.start_loading(n, difficulty);
+        }
+    }
+
+    /// `singlePlayerStartGame`: the menus go, the loading screen comes up.
+    fn start_loading(&mut self, mission: u32, difficulty: i32) {
+        self.session.fe.all_screens_delete();
+        let size = self.session.placement.canvas;
+        match Loading::new(self.data.clone(), &self.session, mission, difficulty, size) {
+            Ok(l) => self.loading = Some(Box::new(l)),
+            Err(e) => {
+                eprintln!("cataclysm: cannot start mission {mission}: {e}");
+                self.back_to_menu();
+            }
+        }
+    }
+
+    /// Back to the main menu and its music (quitting a game, or a mission that cannot start).
+    fn back_to_menu(&mut self) {
+        self.loading = None;
+        self.game = None;
+        if let Some(a) = &mut self.audio {
+            a.set_in_game(false);
+            a.apply_options(&self.session.fe.game.options);
+            a.play_music(audio::FRONT_END_TRACK);
+        }
+        self.session.fe.all_screens_delete();
+        self.session.fe.screen_start(hwc_ui::session::MAIN_SCREEN);
+    }
+
+    /// One frame of the loading screen or the mission; true when one of them is up.
+    fn game_frame(&mut self, dt: f32) -> Result<bool, String> {
+        let size = self.session.placement.canvas;
+        if let Some(l) = &mut self.loading {
+            let viewport = self.session.placement.viewport;
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.present(l.render(size), viewport);
+                if self.renderer.is_none() {
+                    self.renderer = Some(hwc_render::Renderer::new(
+                        &gpu.device,
+                        &gpu.queue,
+                        hwc_render::OFFSCREEN_FORMAT,
+                    ));
+                }
+            }
+            match l.advance(&self.session, self.renderer.as_mut(), dt) {
+                Progress::Working => {}
+                Progress::Ready(game) => {
+                    self.loading = None;
+                    if let Some(a) = &mut self.audio {
+                        a.stop_music(0.0);
+                        a.set_in_game(true);
+                    }
+                    self.game = Some(game);
+                }
+                Progress::Abandon(why) => {
+                    eprintln!("cataclysm: {why}");
+                    self.back_to_menu();
+                }
+            }
+            return Ok(true);
+        }
+        let Some(g) = self.game.as_mut() else {
+            return Ok(false);
+        };
+        let mut leave = false;
+        let mut restart = false;
+        for o in g.update(dt, &mut self.audio) {
+            match o {
+                game::Outcome::Leave => leave = true,
+                game::Outcome::Restart => restart = true,
+                game::Outcome::ApplyOptions => {
+                    if let Some(a) = &mut self.audio {
+                        a.apply_options(&g.ui.fe.game.options);
+                    }
+                }
+            }
+        }
+        if leave || restart {
+            let (mission, difficulty) = (
+                g.world.run.game.config.mission,
+                g.world.run.game.config.skill,
+            );
+            self.back_to_menu();
+            if restart {
+                self.start_loading(mission, difficulty);
+            }
+            return Ok(true);
+        }
+        let (Some(gpu), Some(r)) = (self.gpu.as_mut(), self.renderer.as_mut()) else {
+            return Ok(true);
+        };
+        g.render(r, size)?;
+        let (mx, my) = g.mouse();
+        self.session.draw_pointer(g.canvas_mut(), mx, my);
+        gpu.present(g.canvas(), self.session.placement.viewport);
+        Ok(true)
     }
 
     /// Full screen: the exclusive mode of that size if the monitor has it (else borderless);
@@ -298,6 +442,18 @@ impl App {
                 self.intro = None;
                 self.front_end_start();
             }
+        }
+        if self.intro.is_none() && (self.loading.is_some() || self.game.is_some()) {
+            self.game_frame(dt)?;
+            self.frames += 1;
+            if self
+                .exit_after
+                .is_some_and(|t| self.started.elapsed().as_secs_f32() >= t)
+            {
+                eprintln!("cataclysm: {} frames presented", self.frames);
+                event_loop.exit();
+            }
+            return Ok(());
         }
         if let Some(p) = &mut self.preview {
             for o in p.update(dt) {
@@ -393,11 +549,6 @@ impl App {
                 tutorial,
                 difficulty,
             } => {
-                let what = if tutorial {
-                    "training mission"
-                } else {
-                    "single-player campaign"
-                };
                 if self.ingame_preview {
                     match Preview::new(self.source.clone(), &self.session) {
                         Ok(p) => self.preview = Some(p),
@@ -405,7 +556,9 @@ impl App {
                     }
                     return;
                 }
-                eprintln!("cataclysm: the {what} would start here (difficulty {difficulty}); missions are not playable yet");
+                // The training mission is not a campaign level the simulation can start yet:
+                // mission 0 shows the "not playable" note.
+                self.start_loading(if tutorial { 0 } else { 1 }, difficulty);
             }
             Request::LoadGame(name) => eprintln!("cataclysm: would load saved game {name}"),
             Request::Multiplayer => eprintln!("cataclysm: multiplayer is not available yet"),
@@ -508,6 +661,29 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
+                if self.loading.is_some() {
+                    return;
+                }
+                if let Some(g) = &mut self.game {
+                    if let Some(code) = key_code(&event.logical_key) {
+                        g.input(
+                            if down {
+                                InputEvent::KeyDown(code)
+                            } else {
+                                InputEvent::KeyUp(code)
+                            },
+                            &mut self.audio,
+                        );
+                    }
+                    if down {
+                        if let Some(text) = &event.text {
+                            for c in text.chars() {
+                                g.input(InputEvent::Char(c), &mut self.audio);
+                            }
+                        }
+                    }
+                    return;
+                }
                 if let Some(p) = &mut self.preview {
                     if let Some(code) = key_code(&event.logical_key) {
                         p.input(if down {
@@ -543,6 +719,12 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                if let Some(g) = &mut self.game {
+                    let (x, y) = self.session.placement.to_canvas(position.x, position.y);
+                    self.mouse = (x, y);
+                    g.input(InputEvent::MouseMove { x, y }, &mut self.audio);
+                    return;
+                }
                 self.session.mouse_move(position.x, position.y);
                 if let Some(p) = &mut self.preview {
                     let (x, y) = self.session.placement.to_canvas(position.x, position.y);
@@ -556,6 +738,18 @@ impl ApplicationHandler for App {
                     return;
                 }
                 let down = state == ElementState::Pressed;
+                if self.loading.is_some() {
+                    return;
+                }
+                if let Some(g) = &mut self.game {
+                    let left = match button {
+                        MouseButton::Left => true,
+                        MouseButton::Right => false,
+                        _ => return,
+                    };
+                    g.input(InputEvent::MouseButton { left, down }, &mut self.audio);
+                    return;
+                }
                 if let Some(p) = &mut self.preview {
                     let left = match button {
                         MouseButton::Left => true,
@@ -580,6 +774,10 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => p.y as f32,
                 };
                 if y != 0.0 {
+                    if let Some(g) = &mut self.game {
+                        g.input(InputEvent::Wheel { up: y > 0.0 }, &mut self.audio);
+                        return;
+                    }
                     match &mut self.preview {
                         Some(p) => p.input(InputEvent::Wheel { up: y > 0.0 }),
                         None => self.session.fe.wheel(y > 0.0),

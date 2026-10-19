@@ -1,0 +1,1129 @@
+//! The 3D view of a running mission: the simulation's universe drawn with the game camera
+//! through `hwc-render` (adapted from the viewer's mission mode, `apps/hwc-viewer`).
+//!
+//! Every ship is drawn with the renderer's per-instance state: a level of detail chosen from its
+//! screen size, engine trails and capital glows updated at each simulation tick, `.mad`
+//! animations started by the simulation's state, the team-colour tint with engine glow and hit
+//! flashes, and the hyperspace clip of ships arriving in a mission. Bullets and beams are drawn
+//! as effect lines, hits as sparks, deaths as an expanding glow.
+//!
+//! The simulation runs at the original's 16 Hz through the task scheduler model of
+//! `hwc_math::timing` (240 Hz ticks, the universe task every 15, at most 8 per frame);
+//! rendering shows the latest update as the original does.
+
+use std::collections::BTreeMap;
+
+use glam::{Mat4, Vec2, Vec3, Vec4};
+use hwc_formats::hsf::Hsf;
+use hwc_math::timing::{TaskTicker, TIMER_RESOLUTION};
+use hwc_render::assets::{load_mad_clip, mothership_modules, read_script, AssetSource};
+use hwc_render::effects::{EffectBatch, Line as FxLine, Sprite, FULL_UV};
+use hwc_render::lod::{screen_radius, LodSelector, LodTable};
+use hwc_render::render_state::{normalized_team_color, ShipTint, TintParams};
+use hwc_render::trails::{
+    ShipTrailDef, ShipTrails, TeamTrailColors, TrailFrame, TrailGate, TrailTick, TrailTweaks,
+};
+use hwc_render::{
+    Background, Blend, CameraTweaks, EffectTexture, EngineEffectAssets, GpuBackground, GpuShip,
+    MadClip, OrbitCamera, Renderer, Scene, SceneExtras, SceneLighting, ShipAnimator, ShipDef,
+    ShipInstance, ShipModel, ShipRenderState, TeamColors, TeamPaint, ANIM_STOP_AT_END,
+};
+use hwc_sim::harness::group_centre;
+use hwc_sim::mission::{hs_effect, MissionRun};
+use hwc_sim::resource::ResourceKind;
+use hwc_sim::statics::ShipType;
+use hwc_sim::universe::SimEvent;
+use hwc_sim::{ShipId, Universe};
+
+use crate::data::{normalize_asset, Assets};
+
+/// Bullet colours by weapon technology (projectile, energy, ion, plasma, laser, -, -, big gun,
+/// beast infection). The original takes them from the gun effects; these are stand-ins until
+/// the effect system drives them.
+const WEAPON_COLORS: [[f32; 4]; 9] = [
+    [1.0, 0.9, 0.4, 1.0],
+    [0.4, 1.0, 0.5, 1.0],
+    [0.5, 0.95, 1.0, 1.0],
+    [1.0, 0.5, 0.2, 1.0],
+    [1.0, 0.3, 0.3, 1.0],
+    [1.0, 1.0, 1.0, 1.0],
+    [1.0, 1.0, 1.0, 1.0],
+    [1.0, 0.8, 0.6, 1.0],
+    [0.7, 1.0, 0.3, 0.9],
+];
+const HIT_COLOR: [f32; 4] = [1.0, 0.95, 0.7, 0.9];
+const EXPLOSION_COLOR: [f32; 4] = [1.0, 0.6, 0.25, 1.0];
+/// How long hit sparks and explosion flashes stay (seconds of game time).
+const HIT_TIME: f32 = 0.25;
+const EXPLOSION_TIME: f32 = 1.5;
+const BEAM_COLOR: [f32; 4] = [0.6, 1.0, 0.9, 0.8];
+/// The hyperspace window (`hsRectangle`: colour 70,90,255 at alpha 90, outline +40).
+const HS_WINDOW: [f32; 4] = [70.0 / 255.0, 90.0 / 255.0, 1.0, 90.0 / 255.0];
+const HS_OUTLINE: [f32; 4] = [110.0 / 255.0, 130.0 / 255.0, 1.0, 90.0 / 255.0];
+/// `HS_DIST / 2`: how far beyond the bounding box the window reaches.
+const HS_DIST_2: f32 = 1.08 / 2.0;
+/// One universe update in seconds.
+const TICK: f32 = 1.0 / 16.0;
+/// A short-lived effect drawn as sprites.
+#[derive(Debug, Clone, Copy)]
+struct Effect {
+    position: Vec3,
+    radius: f32,
+    start: f32,
+    explosion: bool,
+}
+
+/// Named animations of a ship type's `.mad` (ship animation numbers).
+#[derive(Debug, Clone, Copy, Default)]
+struct AnimIds {
+    combat_in: Option<usize>,
+    combat_out: Option<usize>,
+    link: Option<usize>,
+    /// Played continuously (the command module's gravity ring).
+    idle_loop: Option<usize>,
+    /// Played while harvesting (the worker's blades).
+    harvest_loop: Option<usize>,
+}
+
+/// A ship type ready to draw.
+struct ShipArt {
+    levels: Vec<ShipModel>,
+    table: Option<LodTable>,
+    /// Uploaded per colour scheme.
+    gpu: BTreeMap<usize, GpuShip>,
+    trail: ShipTrailDef,
+    clip: Option<MadClip>,
+    anims: AnimIds,
+    /// Per level: which `.mad` path drives each skeleton object.
+    bindings: Vec<Vec<Option<usize>>>,
+}
+
+impl ShipArt {
+    fn any_gpu(&self) -> Option<&GpuShip> {
+        self.gpu.values().next()
+    }
+}
+
+/// An asteroid kind ready to draw (`None` art when its mesh could not be loaded).
+struct ResourceArt {
+    model: ShipModel,
+    gpu: Option<GpuShip>,
+}
+
+/// Per-ship presentation state that lives across frames.
+struct ShipFx {
+    trails: ShipTrails,
+    anim: ShipAnimator,
+    lod: usize,
+    tint: ShipTint,
+    last_mad: i32,
+    attacking: bool,
+    link_state: u32,
+    harvesting: bool,
+}
+
+/// What `Sandbox::frame` prepared for one drawn frame.
+pub struct Frame {
+    items: Vec<Item>,
+    poses: Vec<Option<Vec<Option<Mat4>>>>,
+    pub effects: EffectBatch,
+}
+
+enum ItemKind {
+    Ship(ShipType, usize),
+    Asteroid(u8),
+}
+
+struct Item {
+    kind: ItemKind,
+    transform: Mat4,
+    age: f32,
+    lod: usize,
+    clip: Option<Vec4>,
+    tint: TintParams,
+    time: f32,
+}
+
+/// The mission's universe and everything needed to draw it.
+pub struct World {
+    src: Assets,
+    pub run: MissionRun,
+    previous: BTreeMap<ShipId, (Vec3, Mat4)>,
+    art: BTreeMap<ShipType, ShipArt>,
+    team_colors: TeamColors,
+    team_trails: TeamTrailColors,
+    trail_tweaks: TrailTweaks,
+    engine_fx: Option<EngineEffectAssets>,
+    pub lod: LodSelector,
+    fx: BTreeMap<ShipId, ShipFx>,
+    pub lighting: SceneLighting,
+    background_path: Option<String>,
+    background: Option<GpuBackground>,
+    pub camera: OrbitCamera,
+    /// Blend between the last two updates (off: the original shows the latest update).
+    pub interpolate: bool,
+    /// Game paused: no universe updates.
+    pub paused: bool,
+    ticker: TaskTicker,
+    tick_carry: f64,
+    pub nav_lights: bool,
+    /// The camera keeps looking at these ships (the game's camera focus).
+    pub focus: Vec<ShipId>,
+    effects: Vec<Effect>,
+    resource_art: BTreeMap<u8, Option<ResourceArt>>,
+    /// The camera has not been put on the mothership yet.
+    camera_pending: bool,
+}
+
+/// Engine vector to render vector.
+fn v3(v: hwc_math::Vector) -> Vec3 {
+    Vec3::new(v.x, v.y, v.z)
+}
+
+fn matrix(m: &hwc_math::Matrix, p: Vec3) -> Mat4 {
+    let m = &m.m;
+    Mat4::from_cols(
+        Vec4::new(m[0], m[1], m[2], 0.0),
+        Vec4::new(m[3], m[4], m[5], 0.0),
+        Vec4::new(m[6], m[7], m[8], 0.0),
+        p.extend(1.0),
+    )
+}
+impl World {
+    /// The mission's world: level background and lighting, the camera on the start point
+    /// until the mothership comes out of hyperspace. `player_colors` replaces colour scheme 0
+    /// (the player's) with the colours picked in the front end.
+    pub fn new(
+        src: Assets,
+        run: MissionRun,
+        player_colors: Option<([u8; 3], [u8; 3])>,
+    ) -> Result<Self, String> {
+        let (bg, light) = crate::mission::level_presentation(&run.game.level);
+        let start = run
+            .game
+            .level
+            .point(hwc_kas::kas_hash("StartPointPlayer"))
+            .map_or(Vec3::ZERO, |p| Vec3::new(p[0], p[1], p[2]));
+        let ctweaks = read_script(&src, "camera.script")
+            .map(|s| CameraTweaks::from_script(&s))
+            .unwrap_or_default();
+        let mut team_colors = read_script(&src, "teamcolors.script")
+            .map(|s| TeamColors::from_script(&s))
+            .unwrap_or_default();
+        if let (Some((base, stripe)), Some(s)) = (player_colors, team_colors.schemes.first_mut()) {
+            s.base = base;
+            s.stripe = stripe;
+        }
+        let team_trails = read_script(&src, "teamcolors.script")
+            .map(|s| TeamTrailColors::from_script(&s))
+            .unwrap_or_default();
+        let trail_tweaks = read_script(&src, "trail.script")
+            .map(|s| TrailTweaks::from_script(&s))
+            .unwrap_or_default();
+        let mut camera = OrbitCamera::new(ctweaks, 9000.0);
+        camera.angle = (-150.0f32).to_radians();
+        camera.declination = (-35.0f32).to_radians();
+        camera.rotate_angle(0.0);
+        camera.rotate_declination(0.0);
+        camera.look_at = start;
+        camera.distance = 7000.0;
+        let background_path = Some(bg.map_or_else(
+            || "btg\\mission01.btg".into(),
+            |b| normalize_asset(&b, "btg", "btg"),
+        ));
+        let lighting = light.map_or_else(
+            || "hsf\\default.hsf".into(),
+            |l| normalize_asset(&l, "hsf", "hsf"),
+        );
+        let mut w = Self {
+            src,
+            run,
+            previous: BTreeMap::new(),
+            art: BTreeMap::new(),
+            team_colors,
+            team_trails,
+            trail_tweaks,
+            engine_fx: None,
+            lod: LodSelector::default(),
+            fx: BTreeMap::new(),
+            lighting: SceneLighting::default(),
+            background_path,
+            background: None,
+            camera,
+            interpolate: false,
+            paused: false,
+            ticker: TaskTicker::new(15),
+            tick_carry: 0.0,
+            nav_lights: true,
+            focus: Vec::new(),
+            effects: Vec::new(),
+            resource_art: BTreeMap::new(),
+            camera_pending: true,
+        };
+        w.set_lighting(&lighting);
+        w.load_art()?;
+        w.snapshot();
+        Ok(w)
+    }
+
+    pub fn universe(&self) -> &Universe {
+        &self.run.universe
+    }
+
+    pub fn universe_mut(&mut self) -> &mut Universe {
+        &mut self.run.universe
+    }
+
+    fn set_lighting(&mut self, path: &str) {
+        match AssetSource::read(&self.src, path).and_then(|d| Hsf::parse(&d).ok()) {
+            Some(h) => self.lighting = SceneLighting::from_hsf(&h),
+            None => eprintln!("warning: {path}: no lighting"),
+        }
+    }
+
+    fn load_art(&mut self) -> Result<(), String> {
+        let types: Vec<ShipType> = self.universe().ships.iter().map(|s| s.ship_type).collect();
+        if types.iter().all(|t| self.art.contains_key(t)) && self.resource_kinds_loaded() {
+            return Ok(());
+        }
+        let all = ShipDef::list_all(&self.src);
+        for t in types {
+            if self.art.contains_key(&t) {
+                continue;
+            }
+            let race = t.race().name().to_ascii_lowercase();
+            let name = t.name().to_ascii_lowercase();
+            let def = all
+                .iter()
+                .find(|d| d.race == race && d.name == name)
+                .cloned()
+                .ok_or_else(|| format!("no model for {race}\\{name}"))?;
+            let (mut levels, table) =
+                ShipModel::load_lods(&self.src, &def).map_err(|e| e.to_string())?;
+            // Mothership modules are ships of their own in the simulation (clamped to the hull);
+            // only other ships with module meshes get them added.
+            if !matches!(t, ShipType::sMothership | ShipType::bMothership) {
+                for m in mothership_modules(&def, &all) {
+                    for (l, level) in levels.iter_mut().enumerate() {
+                        let r = if l == 0 {
+                            level.add_module(&self.src, m)
+                        } else {
+                            level.add_module_level(&self.src, m, l)
+                        };
+                        if let Err(e) = r {
+                            eprintln!("warning: module {} level {l}: {e}", m.name);
+                        }
+                    }
+                }
+            }
+            let mut trail = ShipTrailDef::load(&self.src, &def);
+            if let Some(r) = &mut trail.ramp {
+                r.recolorize_all(&self.team_trails);
+            }
+            let clip = load_mad_clip(&self.src, &def);
+            let anims = clip.as_ref().map_or(AnimIds::default(), |c| AnimIds {
+                combat_in: c.find("CombatIn"),
+                combat_out: c.find("CombatOut"),
+                link: c.find("Link"),
+                idle_loop: c.find("GravRotate"),
+                harvest_loop: c.find("BladesSpin"),
+            });
+            self.art.insert(
+                t,
+                ShipArt {
+                    levels,
+                    table,
+                    gpu: BTreeMap::new(),
+                    trail,
+                    clip,
+                    anims,
+                    bindings: Vec::new(),
+                },
+            );
+        }
+        let kinds: Vec<u8> = self
+            .universe()
+            .base
+            .resources
+            .list
+            .iter()
+            .filter_map(|r| match r.kind {
+                ResourceKind::Asteroid(k) => Some(k),
+                ResourceKind::DustCloud(_) => None,
+            })
+            .collect();
+        for k in kinds {
+            if self.resource_art.contains_key(&k) {
+                continue;
+            }
+            let name = format!("asteroid{k}");
+            let art = ShipDef::load(&self.src, "resources\\asteroids", &name)
+                .and_then(|d| ShipModel::load(&self.src, &d))
+                .map_err(|e| eprintln!("warning: {name}: {e}"))
+                .ok()
+                .map(|model| ResourceArt { model, gpu: None });
+            self.resource_art.insert(k, art);
+        }
+        Ok(())
+    }
+
+    fn resource_kinds_loaded(&self) -> bool {
+        self.universe()
+            .base
+            .resources
+            .list
+            .iter()
+            .all(|r| match r.kind {
+                ResourceKind::Asteroid(k) => self.resource_art.contains_key(&k),
+                ResourceKind::DustCloud(_) => true,
+            })
+    }
+
+    /// Uploads models, engine effects and the background (call before drawing).
+    pub fn prepare(&mut self, renderer: &mut Renderer) {
+        if self.engine_fx.is_none() {
+            self.engine_fx = Some(renderer.load_engine_effects(&self.src));
+        }
+        let needed: Vec<(ShipType, usize)> = self
+            .universe()
+            .ships
+            .iter()
+            .map(|s| (s.ship_type, s.color_scheme))
+            .collect();
+        for (t, scheme) in needed {
+            let Some(art) = self.art.get_mut(&t) else {
+                continue;
+            };
+            if art.gpu.contains_key(&scheme) {
+                continue;
+            }
+            let paint = match self
+                .team_colors
+                .schemes
+                .get(scheme)
+                .or(self.team_colors.schemes.first())
+            {
+                Some(s) => TeamPaint::Scheme(&self.team_colors, *s),
+                None => TeamPaint::None,
+            };
+            let gpu = renderer.upload_ship_lods(&art.levels, art.table.clone(), paint);
+            if art.bindings.is_empty() {
+                art.bindings = (0..gpu.level_count())
+                    .map(|l| {
+                        art.clip
+                            .as_ref()
+                            .map_or_else(Vec::new, |c| c.bind(gpu.skeleton(l)))
+                    })
+                    .collect();
+            }
+            art.gpu.insert(scheme, gpu);
+        }
+        for art in self.resource_art.values_mut().flatten() {
+            if art.gpu.is_none() {
+                art.gpu = Some(renderer.upload_ship(&art.model, TeamPaint::None));
+            }
+        }
+        if self.background.is_none() {
+            if let Some(p) = &self.background_path {
+                match Background::load(&self.src, p) {
+                    Ok(bg) => self.background = Some(renderer.upload_background(&bg)),
+                    Err(e) => {
+                        eprintln!("warning: {e}");
+                        self.background_path = None;
+                    }
+                }
+            }
+        }
+    }
+    fn transform_of(s: &hwc_sim::Ship) -> (Vec3, Mat4) {
+        let p = v3(s.posinfo.position);
+        (p, matrix(&s.rotinfo.coordsys, p))
+    }
+
+    fn snapshot(&mut self) {
+        self.previous = self
+            .universe()
+            .ships
+            .iter()
+            .map(|s| (s.id, Self::transform_of(s)))
+            .collect();
+    }
+
+    /// One universe update (keeps the previous state for interpolation) and everything that
+    /// One universe update (keeps the previous state for interpolation) and the presentation
+    /// work that follows it at the simulation rate: effects, animations and trails.
+    pub fn step(&mut self) {
+        self.snapshot();
+        self.run.step();
+        // Ships built or arriving since the last update need their art.
+        if let Err(e) = self.load_art() {
+            eprintln!("cataclysm: {e}");
+        }
+        let now = self.universe().total_time_elapsed;
+        self.effects.retain(|e| {
+            now - e.start
+                < if e.explosion {
+                    EXPLOSION_TIME
+                } else {
+                    HIT_TIME
+                }
+        });
+        let events = self.universe().events.clone();
+        for e in &events {
+            match e {
+                SimEvent::BulletHit { position, ship, .. } => {
+                    self.effects.push(Effect {
+                        position: v3(*position),
+                        radius: 0.0,
+                        start: now,
+                        explosion: false,
+                    });
+                    if let Some(f) = self.fx.get_mut(ship) {
+                        f.tint.flash(0.1);
+                    }
+                }
+                SimEvent::ShipDied {
+                    position, radius, ..
+                } => self.effects.push(Effect {
+                    position: v3(*position),
+                    radius: *radius,
+                    start: now,
+                    explosion: true,
+                }),
+                _ => {}
+            }
+        }
+        self.update_ship_fx();
+        let u = &self.run.universe;
+        self.focus.retain(|id| u.ship(*id).is_some());
+        self.camera_start();
+        self.update_focus();
+    }
+
+    /// The camera goes to the player's mothership once it is out of hyperspace.
+    fn camera_start(&mut self) {
+        if !self.camera_pending {
+            return;
+        }
+        let u = &self.run.universe;
+        let ms = u.base.players.first().and_then(|p| p.mothership);
+        if let Some(s) = ms.and_then(|id| u.ship(id)) {
+            if s.flags & hwc_sim::object::sof::HIDE == 0 {
+                let r = u
+                    .statics
+                    .ship(s.ship_type)
+                    .map_or(800.0, |st| st.header.coll.coll_sphere_size);
+                self.camera.distance = (r * 5.0).max(3000.0);
+                self.focus = vec![s.id];
+                self.camera_pending = false;
+            }
+        }
+    }
+
+    /// Hyperspace effect state of each arriving ship: `(state, clipt)`.
+    fn hyperspace(&self) -> BTreeMap<ShipId, (u32, f32)> {
+        self.run
+            .game
+            .arriving
+            .iter()
+            .filter(|a| a.hs_state != hs_effect::INACTIVE)
+            .filter_map(|a| Some((a.ship?, (a.hs_state, a.clipt))))
+            .collect()
+    }
+
+    /// Animations triggered by the simulation's state, and the trail ring update, once per tick.
+    fn update_ship_fx(&mut self) {
+        let u = &self.run.universe;
+        let live: Vec<ShipId> = u.ship_list.clone();
+        self.fx.retain(|id, _| live.contains(id));
+        for id in live {
+            let Some(s) = u.ship(id) else { continue };
+            let Some(art) = self.art.get(&s.ship_type) else {
+                continue;
+            };
+            let fx = self.fx.entry(id).or_insert_with(|| ShipFx {
+                trails: ShipTrails::new(&art.trail, id.0 as u32 ^ 0x9e37_79b9),
+                anim: ShipAnimator::default(),
+                lod: 0,
+                tint: ShipTint::default(),
+                last_mad: -1,
+                attacking: false,
+                link_state: 0,
+                harvesting: false,
+            });
+            if let Some(clip) = &art.clip {
+                // Dock and harvest animations the simulation asks for (`ship+0x4bc`).
+                let mad = s.base.mad_anim;
+                if mad != fx.last_mad {
+                    fx.last_mad = mad;
+                    if mad >= 0 {
+                        fx.anim.play(clip, mad as usize, 0);
+                    }
+                }
+                // Gun ports open when the ship goes into combat and close after.
+                let attacking = s.attack.target.is_some();
+                if attacking != fx.attacking {
+                    fx.attacking = attacking;
+                    let a = if attacking {
+                        art.anims.combat_in
+                    } else {
+                        art.anims.combat_out
+                    };
+                    if let Some(a) = a {
+                        let flags = if attacking { 0 } else { ANIM_STOP_AT_END };
+                        fx.anim.play(clip, a, flags);
+                    }
+                }
+                if s.base.link.state != fx.link_state {
+                    fx.link_state = s.base.link.state;
+                    if fx.link_state == 4 {
+                        if let Some(a) = art.anims.link {
+                            fx.anim.play(clip, a, 0);
+                        }
+                    }
+                }
+                let harvesting = s.base.harvest_effect;
+                if harvesting != fx.harvesting {
+                    fx.harvesting = harvesting;
+                    match (harvesting, art.anims.harvest_loop) {
+                        (true, Some(a)) => {
+                            fx.anim.play(clip, a, hwc_render::ANIM_LOOP);
+                        }
+                        (false, Some(a)) if fx.anim.current == Some(a) => fx.anim.stop(),
+                        _ => {}
+                    }
+                }
+                if fx.anim.current.is_none() {
+                    if let Some(a) = art.anims.idle_loop {
+                        fx.anim.play(clip, a, hwc_render::ANIM_LOOP);
+                    }
+                }
+                fx.anim.update(clip, TICK);
+                // TODO(render states): carrier doors (DoorsPortOpen/Close) on launch and dock,
+                // Mimic link, Sentinel and hive-frigate animations once the simulation exposes
+                // the states that start them.
+            }
+            let (_, transform) = Self::transform_of(s);
+            let pose = fx_pose(art, fx, 0);
+            let objects = pose.as_ref().and_then(|p| {
+                let sk = art.any_gpu()?.skeleton(0);
+                Some((sk, sk.resolve(|j| p[j].unwrap_or(sk.objects[j].rest))))
+            });
+            fx.trails.update(
+                &art.trail,
+                &self.trail_tweaks,
+                &TrailTick {
+                    transform,
+                    objects: objects.as_ref().map(|(sk, m)| (*sk, m.as_slice())),
+                },
+            );
+            fx.tint.update(u.total_time_elapsed);
+        }
+    }
+
+    /// Keeps the camera on the focused ships.
+    pub fn update_focus(&mut self) {
+        if !self.focus.is_empty() {
+            let c = group_centre(self.universe(), &self.focus);
+            self.camera.look_at = v3(c);
+        }
+    }
+
+    /// Advances real time: the task scheduler hands out 240 Hz ticks and runs the universe
+    /// task once per 15 (at most 8 times per frame, like the original).
+    pub fn due_steps(&mut self, seconds: f64) -> u32 {
+        if self.paused {
+            return 0;
+        }
+        self.tick_carry += seconds * f64::from(TIMER_RESOLUTION);
+        let ticks = self.tick_carry.floor();
+        self.tick_carry -= ticks;
+        self.ticker.advance(ticks as u32)
+    }
+
+    /// Blend factor between the previous and the current update.
+    fn alpha(&self) -> f32 {
+        if !self.interpolate || self.paused {
+            return 1.0;
+        }
+        ((f64::from(self.ticker.carry) + self.tick_carry) / f64::from(self.ticker.ticks_per_call))
+            .clamp(0.0, 1.0) as f32
+    }
+
+    /// Render transform of each visible ship.
+    fn render_transforms(&self) -> Vec<(ShipId, ShipType, Mat4, f32)> {
+        let a = self.alpha();
+        let age = self.universe().total_time_elapsed;
+        self.universe()
+            .ships
+            .iter()
+            .filter(|s| s.flags & hwc_sim::object::sof::HIDE == 0)
+            .map(|s| {
+                let (p, m) = Self::transform_of(s);
+                let m = match (a < 1.0, self.previous.get(&s.id)) {
+                    (true, Some((pp, pm))) => {
+                        let pos = pp.lerp(p, a);
+                        let cols = |m: &Mat4, i: usize| m.col(i).truncate();
+                        let blend = |i: usize| {
+                            cols(pm, i)
+                                .lerp(cols(&m, i), a)
+                                .normalize_or_zero()
+                                .extend(0.0)
+                        };
+                        Mat4::from_cols(blend(0), blend(1), blend(2), pos.extend(1.0))
+                    }
+                    _ => m,
+                };
+                (s.id, s.ship_type, m, age - s.time_created + 0.75)
+            })
+            .collect()
+    }
+
+    /// Prepares one frame: per-instance level of detail, pose, tint and clip, engine trails and
+    /// glows, and the combat effects. Call after [`prepare`](Self::prepare).
+    pub fn frame(&mut self, size: (u32, u32)) -> Frame {
+        let aspect = size.0 as f32 / size.1.max(1) as f32;
+        let view = self.camera.view();
+        let proj = self.camera.projection(aspect);
+        let eye = self.camera.eye();
+        let glow_texture = self
+            .engine_fx
+            .map_or(EffectTexture::WHITE, |e| e.glow_texture);
+        let hyper = self.hyperspace();
+        let now = self.universe().total_time_elapsed;
+        let mut frame = Frame {
+            items: Vec::new(),
+            poses: Vec::new(),
+            effects: EffectBatch::default(),
+        };
+        let transforms = self.render_transforms();
+        let u = &self.run.universe;
+        for (id, t, transform, age) in transforms {
+            let Some(s) = u.ship(id) else { continue };
+            let Some(art) = self.art.get(&t) else {
+                continue;
+            };
+            let Some(gpu) = art.gpu.get(&s.color_scheme) else {
+                continue;
+            };
+            let Some(fx) = self.fx.get_mut(&id) else {
+                continue;
+            };
+            let (centre, radius) = gpu.bounds();
+            let r = screen_radius(view, proj, transform.transform_point3(centre), radius);
+            let d2 = (transform.w_axis.truncate() - eye).length_squared();
+            fx.lod = self
+                .lod
+                .select(gpu.level_count(), fx.lod, r, d2, gpu.lod_table());
+            let lod = fx.lod;
+            let pose = fx_pose(art, fx, lod.min(art.bindings.len().saturating_sub(1)));
+            let st = u.statics.ship(t);
+            let scheme = self
+                .team_colors
+                .schemes
+                .get(s.color_scheme)
+                .or(self.team_colors.schemes.first());
+            let team_color = scheme.map_or([1.0; 3], |c| normalized_team_color(c.base));
+            // Hyperspace: the window cuts the hull along its heading (`hsGetEquation`); ships
+            // clamped to an arriving host (the mothership's modules) take the host's plane.
+            let host = clamp_host(&self.run, s);
+            let hs = hyper.get(&id).copied();
+            let clip = match (hs, host.and_then(|h| Some((h, *hyper.get(&h)?)))) {
+                (Some((state, clipt)), _) => {
+                    let fl = st.map_or(radius, |st| st.header.coll.forward_length);
+                    hs_plane(state, clipt, fl)
+                }
+                (None, Some((h, (state, clipt)))) => u.ship(h).and_then(|hs| {
+                    let fl = u
+                        .statics
+                        .ship(hs.ship_type)
+                        .map_or(radius, |st| st.header.coll.forward_length);
+                    let plane = hs_plane(state, clipt, fl)?;
+                    let (_, host_m) = Self::transform_of(hs);
+                    Some((host_m.inverse() * transform).transpose() * plane)
+                }),
+                _ => None,
+            };
+            if let (Some((state, clipt)), Some(st)) = (hs, st) {
+                hyperspace_window(&mut frame.effects, transform, st, state, clipt);
+            }
+            let max_velocity = if s.max_velocity_copy > 0.0 {
+                s.max_velocity_copy
+            } else {
+                st.map_or(1.0, |st| st.header.max_velocity)
+            };
+            let objects = pose.as_ref().map(|p| {
+                let sk = gpu.skeleton(lod);
+                sk.resolve(|j| p.get(j).copied().flatten().unwrap_or(sk.objects[j].rest))
+            });
+            let gate = TrailGate {
+                moving: s.posinfo.is_moving != 0 || v3(s.posinfo.velocity).length_squared() > 1.0,
+                docked: s.base.dock_state == hwc_sim::dock::state::INSIDE,
+                hyperspacing: hs.is_some(),
+                cloaked: false,
+                suppressed: s.base.clamp.is_some() || s.flags & hwc_sim::base::SOF_MODULE != 0,
+                idle_dodge: s.is_dodging && s.ship_idle,
+            };
+            fx.trails.draw(
+                &art.trail,
+                &self.trail_tweaks,
+                &TrailFrame {
+                    transform,
+                    objects: objects.as_ref().map(|m| (gpu.skeleton(lod), m.as_slice())),
+                    velocity: v3(s.posinfo.velocity),
+                    max_velocity,
+                    gate,
+                    lod,
+                    team: s.color_scheme,
+                    team_color,
+                    eye,
+                    eye_space_z: view.transform_point3(transform.w_axis.truncate()).z,
+                    scale: 1.0,
+                    fade: 1.0,
+                    glow_texture,
+                },
+                &mut frame.effects,
+            );
+            let tint = fx
+                .tint
+                .params(team_color, fx.trails.engine_glow_levels(&self.trail_tweaks));
+            frame.items.push(Item {
+                kind: ItemKind::Ship(t, s.color_scheme),
+                transform,
+                age,
+                lod,
+                clip,
+                tint,
+                time: now,
+            });
+            frame.poses.push(pose);
+            // TODO(render states): cloak fade/wipe, phase blend, Beast infection and EMP
+            // lightning once the simulation exposes cloaking, phasing, infection and the
+            // Naggarok's EMP.
+        }
+        for r in &u.base.resources.list {
+            let ResourceKind::Asteroid(k) = r.kind else {
+                continue;
+            };
+            if !self
+                .resource_art
+                .get(&k)
+                .is_some_and(|a| a.as_ref().is_some_and(|a| a.gpu.is_some()))
+            {
+                continue;
+            }
+            frame.items.push(Item {
+                kind: ItemKind::Asteroid(k),
+                transform: matrix(&r.coordsys, v3(r.position)),
+                age: 10.0,
+                lod: 0,
+                clip: None,
+                tint: TintParams::default(),
+                time: now,
+            });
+            frame.poses.push(None);
+        }
+        self.combat_effects(&mut frame.effects, glow_texture);
+        frame
+    }
+
+    /// Bullets, beams, harvesting beams, hit sparks and explosion glows as effect primitives.
+    fn combat_effects(&self, out: &mut EffectBatch, glow: EffectTexture) {
+        let u = self.universe();
+        for &bid in &u.bullet_list {
+            let b = u.bullets.bullet(bid);
+            let p = v3(b.posinfo.position);
+            let beam = hwc_sim::bullet::is_beam(b.weapon);
+            let tail = if beam {
+                p + v3(b.heading) * b.beam_travel_dist
+            } else {
+                p - v3(b.heading) * b.length_mag.max(30.0)
+            };
+            let c = WEAPON_COLORS[(b.weapon as usize).min(WEAPON_COLORS.len() - 1)];
+            let mut faded = c;
+            faded[3] = 0.0;
+            out.lines.push(FxLine {
+                from: p,
+                to: tail,
+                from_color: c,
+                to_color: if beam { c } else { faded },
+                width: if beam { 3.0 } else { 1.5 },
+                blend: Blend::Additive,
+            });
+        }
+        for s in u
+            .ships
+            .iter()
+            .filter(|s| s.flags & hwc_sim::object::sof::HIDE == 0 && s.base.harvest_effect)
+        {
+            let target = s
+                .command
+                .and_then(|c| u.commands.get(c))
+                .and_then(|c| c.collect.resource)
+                .and_then(|r| u.base.resources.get(r));
+            if let Some(r) = target {
+                out.lines.push(FxLine {
+                    from: v3(s.posinfo.position),
+                    to: v3(r.position),
+                    from_color: BEAM_COLOR,
+                    to_color: BEAM_COLOR,
+                    width: 2.0,
+                    blend: Blend::Additive,
+                });
+            }
+        }
+        let now = u.total_time_elapsed;
+        for e in &self.effects {
+            let (size, color) = if e.explosion {
+                let k = ((now - e.start) / EXPLOSION_TIME).clamp(0.0, 1.0);
+                let mut c = EXPLOSION_COLOR;
+                c[3] = 1.0 - k;
+                (e.radius.max(40.0) * (0.8 + 2.2 * k), c)
+            } else {
+                let k = ((now - e.start) / HIT_TIME).clamp(0.0, 1.0);
+                let mut c = HIT_COLOR;
+                c[3] = 1.0 - k;
+                (12.0, c)
+            };
+            out.sprites.push(Sprite {
+                position: e.position,
+                half_size: Vec2::splat(size),
+                rotation: e.start * 7.0,
+                color,
+                uv: FULL_UV,
+                texture: glow,
+                blend: Blend::Additive,
+            });
+        }
+    }
+
+    /// The ship instances and their render states for a prepared frame.
+    pub fn instances<'a>(
+        &'a self,
+        frame: &'a Frame,
+    ) -> (Vec<ShipInstance<'a>>, Vec<ShipRenderState<'a>>) {
+        let mut ships = Vec::with_capacity(frame.items.len());
+        let mut states = Vec::with_capacity(frame.items.len());
+        for (item, pose) in frame.items.iter().zip(&frame.poses) {
+            let gpu = match item.kind {
+                ItemKind::Ship(t, scheme) => self.art.get(&t).and_then(|a| a.gpu.get(&scheme)),
+                ItemKind::Asteroid(k) => self
+                    .resource_art
+                    .get(&k)
+                    .and_then(|a| a.as_ref())
+                    .and_then(|a| a.gpu.as_ref()),
+            };
+            let Some(gpu) = gpu else { continue };
+            ships.push(ShipInstance {
+                ship: gpu,
+                transform: item.transform,
+                age: item.age,
+            });
+            states.push(ShipRenderState {
+                lod: item.lod,
+                pose: pose.as_deref(),
+                clip_plane: item.clip,
+                tint: item.tint,
+                time: item.time,
+                ..Default::default()
+            });
+        }
+        (ships, states)
+    }
+
+    pub fn scene<'a>(&'a self, instances: &'a [ShipInstance<'a>]) -> Scene<'a> {
+        Scene {
+            camera: &self.camera,
+            lighting: &self.lighting,
+            background: self.background.as_ref(),
+            ships: instances,
+            nav_lights: self.nav_lights,
+        }
+    }
+    /// Renders a prepared frame offscreen.
+    pub fn render_offscreen(
+        &self,
+        renderer: &mut Renderer,
+        target: &hwc_render::OffscreenTarget,
+        frame: &Frame,
+    ) -> Result<Vec<u8>, String> {
+        let (ships, states) = self.instances(frame);
+        let scene = self.scene(&ships);
+        let extras = SceneExtras {
+            ship_states: &states,
+            effects: Some(&frame.effects),
+        };
+        target.render_ex(renderer, &scene, &extras)
+    }
+
+    pub fn view_proj(&self, size: (u32, u32)) -> Mat4 {
+        let aspect = size.0 as f32 / size.1.max(1) as f32;
+        self.camera.projection(aspect) * self.camera.view()
+    }
+
+    /// World point to pixel (None behind the camera).
+    pub fn project(&self, size: (u32, u32), p: Vec3) -> Option<[f32; 2]> {
+        let c = self.view_proj(size) * p.extend(1.0);
+        if c.w <= 1e-3 {
+            return None;
+        }
+        let n = c.truncate() / c.w;
+        Some([
+            (n.x + 1.0) * 0.5 * size.0 as f32,
+            (1.0 - n.y) * 0.5 * size.1 as f32,
+        ])
+    }
+
+    /// Ray through a pixel: (origin, direction).
+    pub fn ray(&self, size: (u32, u32), px: [f32; 2]) -> (Vec3, Vec3) {
+        let inv = self.view_proj(size).inverse();
+        let nx = px[0] / size.0 as f32 * 2.0 - 1.0;
+        let ny = 1.0 - px[1] / size.1 as f32 * 2.0;
+        let a = inv * Vec4::new(nx, ny, 0.0, 1.0);
+        let b = inv * Vec4::new(nx, ny, 1.0, 1.0);
+        let (a, b) = (a.truncate() / a.w, b.truncate() / b.w);
+        (a, (b - a).normalize())
+    }
+
+    /// Where the ray through a pixel meets the horizontal plane at height `z`.
+    pub fn plane_point(&self, size: (u32, u32), px: [f32; 2], z: f32) -> Option<Vec3> {
+        let (o, d) = self.ray(size, px);
+        if d.z.abs() < 1e-5 {
+            return None;
+        }
+        let t = (z - o.z) / d.z;
+        (t > 0.0).then(|| o + d * t)
+    }
+
+    /// Screen box of a ship (its collision sphere's projection).
+    pub fn screen_box(&self, size: (u32, u32), s: &hwc_sim::Ship) -> Option<([f32; 2], [f32; 2])> {
+        let r = self
+            .universe()
+            .statics
+            .ship(s.ship_type)
+            .map_or(50.0, |st| st.header.coll.coll_sphere_size)
+            .max(20.0);
+        let c = v3(s.coll.coll_position);
+        let p = self.project(size, c)?;
+        let right = self.camera.view().row(0).truncate();
+        let q = self.project(size, c + right * r)?;
+        let rad = ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2))
+            .sqrt()
+            .max(6.0);
+        Some(([p[0] - rad, p[1] - rad], [p[0] + rad, p[1] + rad]))
+    }
+
+    /// The nearest visible ship whose screen box contains the point.
+    pub fn ship_at(&self, size: (u32, u32), px: [f32; 2]) -> Option<ShipId> {
+        let mut best: Option<(f32, ShipId)> = None;
+        for s in self
+            .universe()
+            .ships
+            .iter()
+            .filter(|s| s.flags & hwc_sim::object::sof::HIDE == 0)
+        {
+            if let Some((lo, hi)) = self.screen_box(size, s) {
+                if px[0] >= lo[0] && px[0] <= hi[0] && px[1] >= lo[1] && px[1] <= hi[1] {
+                    let d = (v3(s.posinfo.position) - self.camera.eye()).length();
+                    if best.is_none_or(|b| d < b.0) {
+                        best = Some((d, s.id));
+                    }
+                }
+            }
+        }
+        best.map(|b| b.1)
+    }
+}
+/// The ship a ship is clamped to: its clamp host, or for a mission, the level's module clamps.
+fn clamp_host(run: &MissionRun, s: &hwc_sim::Ship) -> Option<ShipId> {
+    s.base.clamp.as_ref().and_then(|c| c.host).or_else(|| {
+        run.game
+            .level
+            .clamps
+            .iter()
+            .find(|(m, _)| *m == s.id)
+            .map(|(_, h)| *h)
+    })
+}
+
+/// The hyperspace clip plane in ship space for effect state `state` (`hsGetEquation`): points
+/// with `plane . (p, 1) >= 0` are drawn.
+fn hs_plane(state: u32, clipt: f32, forward_length: f32) -> Option<Vec4> {
+    let fl = forward_length;
+    Some(match state {
+        hs_effect::POPUP_OUTOF => Vec4::new(0.0, 0.0, 1.0, -fl),
+        hs_effect::SLICING_OUTOF => Vec4::new(0.0, 0.0, 1.0, -clipt * fl),
+        hs_effect::COLLAPSE_OUTOF => Vec4::new(0.0, 0.0, 1.0, fl),
+        hs_effect::SLICING_INTO => Vec4::new(0.0, 0.0, -1.0, clipt * fl),
+        hs_effect::COLLAPSE_INTO => Vec4::new(0.0, 0.0, -1.0, -fl),
+        _ => return None,
+    })
+}
+
+/// The ship's current `.mad` pose for detail level `level` (None when nothing is playing).
+fn fx_pose(art: &ShipArt, fx: &ShipFx, level: usize) -> Option<Vec<Option<Mat4>>> {
+    let clip = art.clip.as_ref()?;
+    fx.anim.current?;
+    let binding = art.bindings.get(level)?;
+    clip.pose(&fx.anim, binding)
+}
+
+/// The hyperspace window (`hsRectangle`) at the clip plane of an arriving ship, in ship space.
+fn hyperspace_window(
+    out: &mut EffectBatch,
+    transform: Mat4,
+    st: &hwc_sim::statics::ShipStaticInfo,
+    state: u32,
+    clipt: f32,
+) {
+    let c = &st.header.coll;
+    let (z, scale) = match state {
+        hs_effect::POPUP_OUTOF | hs_effect::POPUP_INTO => (c.forward_length, 1.0 - clipt),
+        hs_effect::SLICING_OUTOF | hs_effect::SLICING_INTO => (clipt * c.forward_length, 1.0),
+        hs_effect::COLLAPSE_OUTOF | hs_effect::COLLAPSE_INTO => (-c.forward_length, clipt),
+        _ => return,
+    };
+    let scale = scale.clamp(0.0, 1.0);
+    let half_x = HS_DIST_2 * c.up_length * scale;
+    let half_y = HS_DIST_2 * c.right_length;
+    let o = Vec3::new(c.coll_sphere_offset.x, c.coll_sphere_offset.y, z);
+    let corners = [
+        Vec3::new(-half_x, -half_y, 0.0),
+        Vec3::new(-half_x, half_y, 0.0),
+        Vec3::new(half_x, half_y, 0.0),
+        Vec3::new(half_x, -half_y, 0.0),
+    ]
+    .map(|p| transform.transform_point3(o + p));
+    out.quad(corners.map(|p| (p, HS_WINDOW)), Blend::Alpha);
+    for i in 0..4 {
+        out.lines.push(FxLine {
+            from: corners[i],
+            to: corners[(i + 1) % 4],
+            from_color: HS_OUTLINE,
+            to_color: HS_OUTLINE,
+            width: 2.0,
+            blend: Blend::Additive,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hyperspace_planes_follow_hs_get_equation() {
+        let fl = 100.0;
+        assert_eq!(
+            hs_plane(hs_effect::POPUP_OUTOF, 1.0, fl),
+            Some(Vec4::new(0.0, 0.0, 1.0, -100.0))
+        );
+        // Mid-slice the nose (+z) is through the window, the tail is not.
+        let p = hs_plane(hs_effect::SLICING_OUTOF, 0.25, fl).unwrap();
+        assert!(p.dot(Vec4::new(0.0, 0.0, 90.0, 1.0)) > 0.0);
+        assert!(p.dot(Vec4::new(0.0, 0.0, 0.0, 1.0)) < 0.0);
+        let p = hs_plane(hs_effect::COLLAPSE_OUTOF, 1.0, fl).unwrap();
+        assert!(p.dot(Vec4::new(0.0, 0.0, -99.0, 1.0)) > 0.0);
+        assert_eq!(hs_plane(hs_effect::INACTIVE, 0.0, fl), None);
+    }
+}

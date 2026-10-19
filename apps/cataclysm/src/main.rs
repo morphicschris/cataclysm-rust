@@ -1,12 +1,22 @@
-//! Homeworld: Cataclysm recreation — the game executable. For now it runs what the original
-//! runs from launch to the main menu: the start-up movies with their music, then the front end
-//! (the menu system) with its music, sounds and bitmap pointer, on the player's imported data.
+//! Homeworld: Cataclysm recreation — the game executable: the start-up movies with their
+//! music, the front end (the menu system) with its music, sounds and bitmap pointer, and from
+//! Single Player -> New Game the loading screen and the mission on the simulation, with the
+//! 3D view, the in-game interface, the game's controls, music, speech and sound.
 
 mod app;
 mod audio;
+mod data;
+mod game;
+mod host;
 mod intro;
+mod loading;
+mod mission;
+mod play;
 mod preview;
+#[cfg(test)]
+mod smoke;
 mod tour;
+mod world;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -39,13 +49,15 @@ options:
   --tour <outdir>       render a scripted walk through the intro and the menus to PNG
                         files and exit
   --exit-after <s>      close the window after s seconds (smoke tests)
+  --mission <n>         go straight from the front end into mission n (development;
+                        only mission 1 is playable on the simulation so far)
   --ingame-preview      starting a game opens the in-game interface (managers, overlay,
                         menus, keys) on a stand-in fleet instead of returning to the menu
   -h, --help            this text
 
 The original's switches /window, /fullscreen and /disableAVI are accepted too.
 keys: Escape (released) stops the movie playing; F11 toggles borderless full screen;
-      F10 cycles the scaling mode";
+      F10 cycles the scaling mode; in a mission the game's key bindings (keys.cfg)";
 
 pub struct Args {
     pub data: Option<PathBuf>,
@@ -59,6 +71,7 @@ pub struct Args {
     pub intro: bool,
     pub sound: bool,
     pub ingame_preview: bool,
+    pub mission: Option<u32>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -74,6 +87,7 @@ fn parse_args() -> Result<Args, String> {
         intro: true,
         sound: true,
         ingame_preview: false,
+        mission: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -101,6 +115,9 @@ fn parse_args() -> Result<Args, String> {
             "--skip-intro" => a.intro = false,
             "--no-sound" => a.sound = false,
             "--ingame-preview" => a.ingame_preview = true,
+            "--mission" => {
+                a.mission = Some(value("--mission")?.parse().map_err(|_| "bad --mission")?)
+            }
             "--scale" => {
                 let v = value("--scale")?;
                 a.scale = ScaleMode::parse(&v).ok_or_else(|| format!("unknown scale mode {v}"))?;
