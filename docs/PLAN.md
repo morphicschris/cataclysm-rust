@@ -233,3 +233,7 @@ code and notes:
   the exe) — decide whether that interface description is acceptable, or generate it at import time;
 - format/sim docs describe layouts and offsets found by reverse engineering (normal practice; keep);
 - search for any embedded game strings, tables or asset bytes in tests and examples.
+- 2026-10-19 — decompile map essentially complete: game code 98.5% named (4,985/5,063), platform 100%, ship
+  modules 98%; the remaining missions-region entries are false function starts. Per-subsystem porting notes
+  (docking/construction, sensors/HUD, research/upgrades, universe update, single-player flow, particles/ETG,
+  render, UI, keys/KAS/NIS) are in `recovered/naming/n2/*-report.md` (private).
