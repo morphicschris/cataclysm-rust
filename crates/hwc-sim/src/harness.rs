@@ -8,7 +8,8 @@ use hwc_math::Vector;
 use crate::command;
 use crate::formation;
 use crate::object::ShipId;
-use crate::statics::{ShipRace, ShipType, StaticWorld};
+use crate::resource::ResourceKind;
+use crate::statics::{ShipRace, ShipType, StaticWorld, Technology};
 use crate::tunables::SimTweaks;
 use crate::universe::{CreateError, Universe};
 
@@ -97,6 +98,7 @@ pub fn world_hash(u: &Universe) -> u64 {
         h.u32(b.owner.map_or(u32::MAX, |o| u32::from(o.0)));
         h.u32(b.target.map_or(u32::MAX, |o| u32::from(o.0)));
     }
+    hash_base(&mut h, u);
     h.u32(u.randy.number_get(hwc_math::random::RAN_GAME));
     for c in u.commands.iter() {
         h.u32(c.id.0);
@@ -108,6 +110,50 @@ pub fn world_hash(u: &Universe) -> u64 {
         h.f32(c.formation.travel_vel);
     }
     h.finish()
+}
+
+/// The base layer's state: docking, clamping, cargo and construction per ship, players'
+/// resources and research, factory jobs and the resources.
+fn hash_base(h: &mut Fnv64, u: &Universe) {
+    let opt = |s: Option<ShipId>| s.map_or(u32::MAX, |s| u32::from(s.0));
+    for s in u.ships.iter() {
+        let b = &s.base;
+        h.u32(u32::from(s.id.0));
+        h.u32(b.dock_state | (b.dock_point as u32) << 8);
+        h.u32(opt(b.dock_with));
+        h.f32(b.dock_dist);
+        h.f32(b.dock_timer);
+        h.u32(opt(b.clamp.as_ref().and_then(|c| c.host)));
+        h.u32(b.resources as u32);
+        h.u32(u32::from(b.harvest_state) | b.salvage.state << 8 | b.link.state << 16);
+        h.f32(b.build_progress);
+        h.u32(s.special_flags2);
+    }
+    for p in &u.base.players {
+        h.u32(p.resource_units as u32);
+        h.u32(p.su_used as u32 | (p.su_capacity as u32) << 16);
+        for t in &p.topics {
+            h.u32(t.tech as u32);
+            h.f32(t.time_left);
+        }
+        for l in &p.labs {
+            h.u32(l.status as u32);
+        }
+        h.u32(p.tech.has.iter().enumerate().fold(0u32, |a, (i, &v)| a ^ ((v as u32) << (i % 32))));
+    }
+    for f in &u.base.factories {
+        h.u32(opt(f.ship));
+        for j in f.jobs.iter().filter(|j| j.n_jobs > 0) {
+            h.u32(j.n_jobs as u32);
+            h.u32(j.time_left as u32);
+            h.u32(j.cost_frac as u32);
+        }
+    }
+    for r in &u.base.resources.list {
+        h.u32(u32::from(r.id.0));
+        h.vector(r.position);
+        h.u32(r.resource_value as u32);
+    }
 }
 
 /// One ship to create at the start.
@@ -130,6 +176,25 @@ pub enum Order {
     Attack { ships: Vec<usize>, targets: Vec<usize> },
     /// Set the tactics (`object::tactics`) of the ships.
     Tactics { ships: Vec<usize>, tactics: usize },
+    /// Queue `count` ships of a type at a factory (as the build manager does).
+    Build { factory: usize, ship_type: ShipType, count: i32 },
+    /// The ships harvest (the nearest resource).
+    Collect { ships: Vec<usize> },
+    /// The player starts researching a technology.
+    Research { player: usize, tech: Technology },
+    /// Ship `a` links with ship `b`.
+    Link { a: usize, b: usize },
+    /// The salvagers salvage the targets.
+    Salvage { ships: Vec<usize>, targets: Vec<usize> },
+    /// The ships dock (with a given ship, or the nearest) for a purpose (`dock::purpose`).
+    Dock { ships: Vec<usize>, purpose: i32, with: Option<usize> },
+}
+
+/// A resource object to place.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResourceSpawn {
+    pub kind: ResourceKind,
+    pub position: Vector,
 }
 
 /// A scenario: the races of the players, the ships and the orders by tick.
@@ -140,6 +205,10 @@ pub struct Scenario {
     pub spawns: Vec<Spawn>,
     /// `(tick, order)`: the order is issued before tick `tick` runs (tick 0 = first update).
     pub orders: Vec<(u32, Order)>,
+    /// Resources placed after the ships.
+    pub resources: Vec<ResourceSpawn>,
+    /// Starting resource units per player (missing entries: 0).
+    pub resource_units: Vec<i32>,
 }
 
 /// The centre of a group (what the move pie plate uses as "from").
@@ -163,9 +232,17 @@ pub struct Run {
 impl Run {
     pub fn new(statics: Arc<StaticWorld>, tweaks: SimTweaks, scenario: Scenario) -> Result<Self, CreateError> {
         let mut universe = Universe::new(statics, tweaks, &scenario.players);
+        for (p, &ru) in scenario.resource_units.iter().enumerate() {
+            if let Some(pl) = universe.base.players.get_mut(p) {
+                pl.resource_units = ru;
+            }
+        }
         let mut ids = Vec::new();
         for s in &scenario.spawns {
             ids.push(universe.add_ship(s.ship_type, s.player, s.position, None)?);
+        }
+        for r in &scenario.resources {
+            crate::resource::add_resource(&mut universe, r.kind, r.position);
         }
         Ok(Self { universe, ids, scenario, tick: 0 })
     }
@@ -210,6 +287,32 @@ impl Run {
                 let s = sel(ships);
                 command::cl_set_tactics(&mut self.universe, &s, *tactics);
             }
+            Order::Build { factory, ship_type, count } => {
+                if let Some(&f) = sel(&[*factory]).first() {
+                    crate::construction::queue_build(&mut self.universe, f, *ship_type, *count);
+                }
+            }
+            Order::Collect { ships } => {
+                let s = sel(ships);
+                crate::resource::cl_collect_resource(&mut self.universe, &s, None);
+            }
+            Order::Research { player, tech } => {
+                crate::research::research_tech_if_lab_free(&mut self.universe, *player, tech.index());
+            }
+            Order::Link { a, b } => {
+                if let (Some(&a), Some(&b)) = (sel(&[*a]).first(), sel(&[*b]).first()) {
+                    crate::link::cl_link(&mut self.universe, a, b);
+                }
+            }
+            Order::Salvage { ships, targets } => {
+                let (s, t) = (sel(ships), sel(targets));
+                crate::salvage::cl_salvage(&mut self.universe, &s, &t);
+            }
+            Order::Dock { ships, purpose, with } => {
+                let s = sel(ships);
+                let w = with.and_then(|w| sel(&[w]).first().copied());
+                crate::dock::cl_dock(&mut self.universe, &s, *purpose, w);
+            }
         }
     }
 
@@ -233,7 +336,7 @@ pub fn scenario(name: &str) -> Option<Scenario> {
         for (i, t) in [sMultiBeamFrigate, sHiveFrigate, sRammingFrigate].into_iter().enumerate() {
             spawns.push(Spawn { ship_type: t, player: 0, position: v(1500.0, -1200.0 + i as f32 * 700.0, -200.0) });
         }
-        Scenario { name, players: vec![ShipRace::Somtaaw], spawns, orders: extra }
+        Scenario { name, players: vec![ShipRace::Somtaaw], spawns, orders: extra, resources: Vec::new(), resource_units: Vec::new() }
     };
     let acolytes: Vec<usize> = (1..=6).collect();
     let frigates: Vec<usize> = (7..=9).collect();
@@ -282,6 +385,8 @@ pub fn scenario(name: &str) -> Option<Scenario> {
                     (0, Order::Tactics { ships: ours.clone(), tactics: crate::object::tactics::AGGRESSIVE }),
                     (1, Order::Attack { ships: ours, targets: theirs }),
                 ],
+                resources: Vec::new(),
+                resource_units: Vec::new(),
             })
         }
         // Three multi-beam frigates attack a Taiidan destroyer, which fires back (neutral).
@@ -299,6 +404,36 @@ pub fn scenario(name: &str) -> Option<Scenario> {
                     (0, Order::Tactics { ships: vec![3], tactics: crate::object::tactics::NEUTRAL }),
                     (1, Order::Attack { ships: vec![0, 1, 2], targets: vec![3] }),
                 ],
+                resources: Vec::new(),
+                resource_units: Vec::new(),
+            })
+        }
+        // A Somtaaw base: the mothership (with its starting modules), four workers harvesting an
+        // asteroid field, a docking bay and two recon ships queued at the mothership.
+        "base" => {
+            let mut spawns = vec![Spawn { ship_type: sMothership, player: 0, position: v(0.0, 0.0, 0.0) }];
+            for i in 0..4 {
+                spawns.push(Spawn { ship_type: sWorker, player: 0, position: v(1500.0, -900.0 + i as f32 * 600.0, 400.0) });
+            }
+            let mut resources = Vec::new();
+            for i in 0..10 {
+                let k = i as f32;
+                resources.push(ResourceSpawn {
+                    kind: ResourceKind::Asteroid(1 + (i % 3) as u8),
+                    position: v(9000.0 + (k * 1.7).sin() * 1500.0, -2500.0 + k * 550.0, (k * 2.3).cos() * 800.0),
+                });
+            }
+            Some(Scenario {
+                name: "base",
+                players: vec![ShipRace::Somtaaw],
+                spawns,
+                orders: vec![
+                    (0, Order::Collect { ships: vec![1, 2, 3, 4] }),
+                    (1, Order::Build { factory: 0, ship_type: sMothershipDockingBay, count: 1 }),
+                    (2, Order::Build { factory: 0, ship_type: sRecon, count: 2 }),
+                ],
+                resources,
+                resource_units: vec![3000],
             })
         }
         _ => None,
@@ -306,4 +441,4 @@ pub fn scenario(name: &str) -> Option<Scenario> {
 }
 
 /// Names of the built-in scenarios.
-pub const SCENARIOS: [&str; 5] = ["fleet", "idle", "patrol", "dogfight", "frigates"];
+pub const SCENARIOS: [&str; 6] = ["fleet", "idle", "patrol", "dogfight", "frigates", "base"];

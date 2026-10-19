@@ -18,7 +18,7 @@ use crate::blobs::{BlobList, Objects};
 use crate::combat_statics::CombatStatics;
 use crate::command::{self, CommandLayer};
 use crate::formation;
-use crate::object::{sof, BulletId, BulletTable, NonStats, ObjRef, Player, PosInfo, RotInfo, Ship, ShipId, ShipTable};
+use crate::object::{sof, BulletId, BulletTable, ObjRef, Player, Ship, ShipId, ShipTable};
 use crate::physics::{self, PhysContext};
 use crate::statics::{ShipRace, ShipType, StaticWorld};
 use crate::tactics::MaxVelocityContext;
@@ -62,6 +62,24 @@ pub enum SimEvent {
     /// A ship gained a veterancy level.
     Upgraded { ship: ShipId, level: u32 },
 }
+
+/// Game-mode work that runs inside [`Universe::update_with`] (`singlePlayerGameUpdate` and the
+/// computer players / KAS in `univUpdate`).
+pub trait UpdateHooks {
+    /// After the collision blobs, before bullet collisions (`singlePlayerGameUpdate`).
+    fn before_bullet_collisions(&mut self, u: &mut Universe) {
+        let _ = u;
+    }
+
+    /// After bullet collisions, before the command layer (`aiplayerUpdateAll`, `kasExecute`).
+    fn computer_players(&mut self, u: &mut Universe) {
+        let _ = u;
+    }
+}
+
+struct NoHooks;
+
+impl UpdateHooks for NoHooks {}
 
 /// The simulation state.
 #[derive(Debug, Clone)]
@@ -110,13 +128,18 @@ pub struct Universe {
     pub temp_disable_avoiding: bool,
     /// What happened during the last update.
     pub events: Vec<SimEvent>,
+    /// KAS `PauseUniverse` (0x8f1fc0): orders and ship movement stop, time goes on.
+    pub universe_paused: bool,
+    /// The base-building layer: players' resources, research and construction, resources,
+    /// factories (see [`crate::base`]).
+    pub base: crate::base::BaseState,
 }
 
 impl Universe {
     /// An empty universe with `players` players.
     pub fn new(statics: Arc<StaticWorld>, tweaks: SimTweaks, players: &[ShipRace]) -> Self {
         let combat = Arc::new(CombatStatics::build(&statics));
-        Self {
+        let mut u = Self {
             statics,
             combat,
             tweaks,
@@ -144,7 +167,11 @@ impl Universe {
             sp_difficulty: 1,
             temp_disable_avoiding: false,
             events: Vec::new(),
-        }
+            universe_paused: false,
+            base: crate::base::BaseState::new(players),
+        };
+        crate::base::init(&mut u);
+        u
     }
 
     /// `ShipIDtoShip`.
@@ -164,49 +191,23 @@ impl Universe {
     /// `univCreateShip` (0x53d3c0) + `univAddShip`: a new ship at `position` with the default
     /// orientation (facing +X), owned by `player`. Optionally oriented to `heading`.
     pub fn add_ship(&mut self, ship_type: ShipType, player: usize, position: Vector, heading: Option<Vector>) -> Result<ShipId, CreateError> {
-        let stat = self.statics.ship(ship_type).ok_or(CreateError::NoStatics(ship_type))?;
-        if player >= self.players.len() {
-            return Err(CreateError::NoSuchPlayer(player));
-        }
-        let id = ShipId(self.ship_number);
-        self.ship_number = self.ship_number.wrapping_add(1);
-        let g = &stat.guidance;
-        let mut flags = sof::ROTATABLE | sof::IMPACTABLE | sof::SELECTABLE | sof::TARGETABLE;
-        if ld(self.tweaks.verybigship_size) < ld(stat.header.coll.coll_sphere_size) {
-            flags |= sof::BIG_OBJECT;
-        }
-        let mut coordsys = DEFAULT_SHIP_MATRIX;
-        if let Some(h) = heading {
-            coordsys = Matrix::coord_sys_from_heading(h.normalized());
-        }
-        let mut ship = Ship::new(id, ship_type, stat.ship_race, player);
-        ship.flags = flags;
-        ship.posinfo = PosInfo { position, havent_calculated_dist: true, ..Default::default() };
-        ship.rotinfo = RotInfo { coordsys, ..Default::default() };
-        ship.health = stat.health.max_health;
-        ship.nonstat = NonStats { thrust_strength: g.thrust_strength, rot_strength: g.rot_strength, turn_speed: g.turn_speed };
-        ship.max_velocity_copy = stat.header.max_velocity;
-        ship.time_created = self.total_time_elapsed;
-        ship.color_scheme = self.players[player].color_scheme;
-        ship.guns = crate::gun::init_guns(stat);
-        physics::update_obj_rot_info(&mut ship, stat);
-        self.ships.insert(ship);
-        let statics = self.statics.clone();
-        let mut objs = Objects { ships: &mut self.ships, bullets: &mut self.bullets };
-        self.blobs.add_to_nearest(ObjRef::Ship(id), &mut objs, &statics);
-        self.space_obj_list.push(ObjRef::Ship(id));
-        self.ship_list.push(id);
-        self.impactable_list.push(ObjRef::Ship(id));
-        Ok(id)
+        crate::base::spawn_ship(self, ship_type, player, position, heading)
     }
 
     /// `univUpdate` (0x547410): one fixed step of `phys_time_elapsed` (1/16 s).
     pub fn update(&mut self) {
+        self.update_with(&mut NoHooks);
+    }
+
+    /// [`update`](Self::update) with game-mode work (single player, KAS) run in its places.
+    pub fn update_with(&mut self, hooks: &mut dyn UpdateHooks) {
         let dt = UNIVERSE_UPDATE_PERIOD;
         self.events.clear();
         self.total_time_elapsed = st(ld(self.total_time_elapsed) + ld(dt));
         self.update_counter = self.update_counter.wrapping_add(1);
         self.phys_time_elapsed = dt;
+        // The multiplayer resource trickle.
+        crate::resource::resource_trickle(self);
 
         // Collision blobs: rebuilt on the first frame and every eighth, refreshed otherwise.
         let statics = self.statics.clone();
@@ -224,17 +225,25 @@ impl Universe {
             }
         }
 
-        // (Build manager, research, resource injection, crates and the computer players run
-        // around here in the original.)
+        // Build manager and research.
+        crate::base::after_blobs(self);
+        hooks.before_bullet_collisions(self);
         crate::collision::check_all_bullet_collisions(self);
-        command::cl_process(self);
+        hooks.computer_players(self);
+        if !self.universe_paused {
+            command::cl_process(self);
+        }
         // (clPostProcess handles guard/protect retaliation; not modelled.)
         crate::collision::check_all_bump_collisions(self);
         crate::bullet::update_all(self);
-        // (Missiles, derelicts and asteroids would move here.)
-        self.update_all_pos_vel_ships();
+        // (Missiles and derelicts would move here.)
+        if !self.universe_paused {
+            crate::resource::update_all_pos_vel(self);
+            self.update_all_pos_vel_ships();
+        }
         // (Effects update here.)
         crate::damage::delete_dead_ships(self);
+        crate::resource::delete_dead_resources(self);
         // (Resource regrowth and bounties follow.)
     }
 
@@ -243,14 +252,24 @@ impl Universe {
     fn update_all_pos_vel_ships(&mut self) {
         let statics = self.statics.clone();
         let list = self.ship_list.clone();
+        // Hosts whose clamped ships move with them (`updateClampedObject`).
+        let mut hosts: Vec<ShipId> = Vec::new();
         for &id in &list {
             let Some(ship) = self.ships.get(id) else { continue };
             if ship.flags & sof::DONT_APPLY_PHYSICS != 0 {
+                if crate::clamp::host_of(self, id).is_some() {
+                    crate::clamp::follow_host(self, id);
+                }
                 continue;
             }
             let Some(stat) = statics.ship(ship.ship_type) else { continue };
             self.check_ship_state(id);
             let Some(ship) = self.ships.get(id) else { continue };
+            if let Some(host) = crate::clamp::physics_deferred_to_host(self, id) {
+                hosts.push(host);
+                self.housekeep(id);
+                continue;
+            }
             let ctx = PhysContext {
                 dt: self.phys_time_elapsed,
                 update_counter: self.update_counter,
@@ -262,9 +281,19 @@ impl Universe {
             physics::update_ship(self.ships.ship_mut(id), stat, tw, &ctx);
             self.housekeep(id);
         }
+        for host in hosts {
+            if self.ships.get(host).is_some_and(|h| h.base.clamp.as_ref().is_some_and(|c| c.host.is_none())) {
+                crate::clamp::update_clamped_object(self, host);
+            }
+        }
         for &id in &list {
             if self.ships.get(id).is_some_and(|s| s.flags & sof::DEAD == 0) {
                 self.upkeep(id);
+            }
+        }
+        for &id in &list {
+            if self.ships.get(id).is_some_and(|s| s.flags & sof::DEAD == 0) {
+                crate::think::housekeep(self, id);
             }
         }
     }
@@ -397,6 +426,7 @@ impl Universe {
 
     /// Per-ship upkeep after all ships moved (0x53f850): the end of a burst.
     fn upkeep(&mut self, id: ShipId) {
+        crate::think::ship_think(self, id);
         let now = self.total_time_elapsed;
         let s = self.ships.ship_mut(id);
         if s.burst_firing {

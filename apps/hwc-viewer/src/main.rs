@@ -37,7 +37,7 @@ options:
     --fov <deg>           vertical field of view (default from camera.script)
     --time <s>            seconds since the ship appeared (nav light phase, default 0.75)
 
-sandbox mode (--sandbox [fleet|idle|patrol|dogfight|frigates]):
+sandbox mode (--sandbox [fleet|idle|patrol|dogfight|frigates|base]):
   --interpolate           blend rendering between 16 Hz updates (default: show the latest)
   --ticks <n,n,..>        with --screenshot: save one image per universe tick count
   --select <i,i,..>       pre-select ships by creation index
@@ -46,7 +46,8 @@ sandbox mode (--sandbox [fleet|idle|patrol|dogfight|frigates]):
   --follow                camera follows the selection (or the whole fleet)
   sandbox controls: left click / drag select (shift adds), M then click moves the selection
   on the plane through its centre, A then click attacks a ship, F cycles formations, H halts,
-  C focuses the camera,
+  C focuses the camera, B queues a ship at the mothership, L launches the ships inside it,
+  U toggles its auto-launch, R starts research, G sends the selection harvesting,
   Space pauses (. steps), I toggles interpolation, right-drag rotates, wheel zooms
 
 controls:

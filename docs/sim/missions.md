@@ -1,0 +1,182 @@
+# Single-player missions on the simulation (`hwc_sim` level, mission, kas_host)
+
+A campaign mission runs headless on the simulation: the level is loaded as the original
+loads it, the player's fleet arrives from hyperspace, and the mission's KAS script (extracted
+from the player's `cataclysm.exe` or the imported `.kasb`) drives the computer player's teams
+through `hwc_kas::Interpreter` with the runtime functions implemented on the universe.
+Code: `crates/hwc-sim/src/level.rs`, `mission.rs`, `kas_host.rs`; runner
+`crates/hwc-sim/examples/mission.rs`; tests `crates/hwc-sim/tests/mission.rs`.
+
+```text
+cargo run --release -p hwc-sim --example mission -- <data> 1 --ticks 4000 [--no-calls]
+    [--speech SECONDS] [--nislet SECONDS] [--skill N] [--every N]
+```
+
+`<data>` is an imported data directory, an install (the script is then extracted from
+`cataclysm.exe`) or a `.big`. The log lists level loading, single-player state changes, NISlet
+skips, the hyperspace arrival, every FSM creation and state change, objectives and (unless
+`--no-calls`) every KAS runtime call with its arguments and result.
+
+## Level loading (`level.rs`, `LevelLoad.c`)
+
+`load_level` is `levelStartNext` (0x49f2e0), the single-player level path:
+
+1. MissionMan detection (`; MissionMan` on the first line): positions in the sphere files are
+   absolute and the sphere's position and rotation are ignored (all shipped levels).
+2. `SetSMMissionTweaks`: the sensors-manager keywords anywhere in the file;
+   `smUniverseSizeX/Y/Z` + 5000 become the world bounds (0x888c58).
+3. The `.mission` lines in file order: `MissionSphere` (`scriptSetMissionSphereCB`); `Lighting`,
+   `Background`, `LensFlare`, `Fog` are recorded only. In single player every sphere's
+   contents belong to the computer player (player 1); a sphere for a real player sets its RUs.
+4. Each sphere file line by line with Cataclysm's table (0x879908): `Ships`, `AIPoint`,
+   `AIPath`, `AIBox`, `AISphere`, `Resources`, `MeteorStorm`, `Mine`, `Slipgate`, `Derelict`.
+
+`Ships` (`scriptSetShipsCB` 0x49ca50): an optional leading label names a KAS team; the team is
+created at the end of the computer player's team list the first time the label appears
+(`aitCreate(ScriptTeam)`), so the team list order - which is the order `kasExecute` runs teams
+and `MsgSendAll` sends - is the order of first appearance in the files. `kasOrigShipsCount` adds
+up the line counts and `kasOrigShipsType` is the last line's type. `numShipsUpper` raises the
+count by `(upper - n) * spFleetModifier + 0.5` when the fleet modifier is not 0 (it is 0 in
+mission 1, so lines like `FleetIntel ... sRecon,0,...,1` create no ship). Ships of a group are
+created at the same point, each `2 * collspheresize` higher in z, yawed by the line's angle
+(`univRotateObjYaw`, about the ship's own X axis), coloured by `colorScheme(n)` (clamped to 7),
+and given `clFormation` when the line names a formation (`StrToTypeOfFormation`; unknown names
+such as `NULL_FORMATION` mean none). sMothership, bMothership, kCarrier, tCarrier and
+trFloatingCity become their player's mothership. Ship numbers therefore follow the file order.
+An sMothership created in a single-player game gets its mission modules
+(`univMissionModuleTypesGet`: six in missions 1-2, five in 3, three later) created right after
+it and clamped to it.
+
+`AIPoint`/`AIPath`/`AIBox`/`AISphere` define the hashed KAS labels (`kasNameHash`): points keep
+their fourth value (an angle), paths their open/closed flag and points by index, boxes are
+stored as extents (`x - w/2 .. w/2 + x`), spheres as centre and half the diameter.
+
+`Resources` (`scriptSetResourcesCB` 0x49be10) builds the resource volume, reads its `.dist`
+file (`GetResourceDistribution`: `Asteroid0-4`, `DustCloud0-3`, `GasCloud0-1`, two `uword`
+columns, running sums) and creates its objects with the game random stream (stream 10) exactly
+as the original draws it: three numbers per position (sphere, cylinder, rectangle, or the
+shell variant), one for the type, and for asteroids of type 3 and up one for the spin chance
+(`ASTEROID_ROTATE_PROB`, 210/255 in `resource.script`) plus three for the spin. Volumes with
+the regrow attribute are kept. The objects themselves are records in `LevelState` (the
+simulation has no asteroid objects yet), but the random stream is left where the original
+leaves it. `Derelict` lines are records too (type, position, pitch and yaw orientation,
+attributes, colour scheme).
+
+After loading, `clPresetShipsToPosition` puts every formation's ships at their slots
+(`setFormationToDo`: the leader's collision centre plus the slot offset in the leader's or the
+locked formation's axes; sphere formations without rotation).
+
+## Single-player flow (`mission.rs`)
+
+The original path into mission 1 is `singlePlayerStartGame` -> the opening NIS (`nis\n01`,
+level `Mission01_NIS01`) -> `singlePlayerNisStoppedCB` (the first player ship of class
+Mothership becomes the player's mothership; the state is set to 6) -> `singlePlayerLoadNewLevel`
+(non-capital player ships are put inside the mothership, capital ships and modules go into the
+hyperspace list, every other ship is deleted, the universe is reset keeping the game clock, the
+fleet modifier is computed from `BaseFleetStrengthForLevel`, the level is loaded with
+`levelStartNext`, then `clPresetShipsToPosition`).
+
+`MissionRun::start` does the same without playing the NIS: the fleet is what `nis\n01.script`
+keeps at the end (`remainAtEnd` on Somtaaw ship paths: the mothership, three recons, two
+workers) plus the mothership's mission modules and, in mission 1, the docking bay the NIS adds;
+recons and workers travel docked in the mothership.
+
+`MissionRun::step` is one `univUpdate` via `Universe::update_with`; the mission's work runs in
+the original's slots:
+
+* `singlePlayerGameUpdate` (after the collision blobs): `G_PlayNis` / `G_PlayNislet` requests
+  (the variable is destroyed when seen; the NIS is not played and `G_Nis<n>Complete` /
+  `G_Nislet<n>Complete` is set, at once or after `--nislet` seconds, and logged); state 6
+  starts the KAS mission (`kasMissionStart`) and moves to 7; state 9 runs the arrival.
+* `aiplayerUpdateAll` (after bullet collisions): `kasExecute` when
+  `univUpdateCounter & 15 == 0` (`AIPLAYER_UPDATE_RATE[AI_ADV]`, `SP_KAS_UPDATE_FRAME`), skipped
+  while the state is neither 0 nor 7 (i.e. during the arrival).
+* `PauseUniverse` stops the command layer and ship movement (`universe_paused`; time runs on).
+
+Arrival (`StartLevelByHyperspacingShips` sets state 9; `UpdateArrivingShip` 0x513340 per ship
+each frame, `singleplayer.script` timings): the ship is put at `StartPointPlayer` plus its
+offset from the mothership (y negated, turned by the point's angle) with the default
+orientation yawed by that angle and hidden; it waits `2 * HYPERSPACE_BASE_WAITTIME` (mothership
+and its modules) or `3 * BASE_WAITTIME + HYPERSPACE_RANDOM_WAITTIME * random(stream 10)`;
+then it is shown, stopped, and the hyperspace effect runs (`hsStart`, `hsUpdate`: pop-up, slice
+and collapse with `HYPERSPACE_SLICE_RATE` and the `HS_CLIPT_*` scalars; ships in the slice
+phase wait while another is still popping out, the mothership collapses last) for at least
+`HYPERSPACE_DECELERATE_TIME`. When every ship is in, `G_ShipsHaveArrived` is set, the state
+returns to 0 and the docked ships are launched (`clAutoLaunch`). In mission 1 this happens at
+13.75 s.
+
+Mission 1 timeline (no speech timing): KAS mission starts at update 1, the NISlet request is
+skipped at update 2, `StartLevelByHyperspacingShips` and the team FSMs at update 16 (the first
+KAS tick), arrival complete at update 220, the intel sequence then advances one message per
+`IntelEventEnded` (each waits out `SUBMESSAGE_SAFETY_TIMEOUT`, 25 s, because no subtitle
+reports its end), and the first objective (`DestroyBombers`, "Destroy Taiidani Bombers") is
+created at update 3040. With `--speech 3` it is created at update 832.
+
+## KAS runtime on the simulation (`kas_host.rs`)
+
+`SimHost` implements `hwc_kas::KasRuntime`/`KasHost` over the universe and the mission state.
+Teams are the level's teams, registered with the interpreter in team-list order before the
+mission starts. Selections are the original grow-selections: named selections are created on
+first use, team lists are written in place (`THISTEAMSHIPS`), removals swap the last ship into
+the hole (`growSelectRemoveShip`, `clRemoveTargetFromSelection`), `ShipsAdd` skips duplicates.
+Ships that die leave every selection and team. Positions of selections and teams are the
+centre of their bounding box (`selCentrePointComputeGeneral`); distances use
+`aiuFindDistanceSquared`'s order (z first, kept in the FPU).
+
+Implemented from the `kasf*` functions (Mission01 uses all of these): `Attack`, `MoveTo`,
+`PatrolPath` (closed paths loop), `Stop`, `FormationDelta/Broad/Delta3D/Claw/Wall`,
+`DockInstant`, `Launch`, `TeamDockedReadyForLaunch`, `TeamFinishedLaunching`,
+`ShipsCreateLaunch`, `ReinforceTeamWithShips`, `TeamSwitchPlayerOwner`, `ShipsClear/Count/Add/
+Remove`, `FirstShip`, `FindShipsInside`, `FindShipsNearPoint`, `FindEnemiesNearby`,
+`ShipsSelectEnemy/Friendly/Player/Race/Type/Nearby`, `ShipsSort` (the original's exchange
+sort), `GetPlayerMothership`, `IsIdle`, `HasShipBeenDiscovered`, `TeamCount`,
+`TeamCountOriginal`, `TeamHealthAverage` (rounded with the 1.5*2^52 trick), `TeamHealthSet`,
+`ShipsDamageModifierSet/Clear`, `ShipsRepairModifierSet`, `ShipsSetInvincible`,
+`ShipsSetColor`, `HideShips`/`UnhideShips` (with the "hidden twice" bit), `RUsSet`,
+`GetWorldResources`, `MissionSkillGet`, `MissionFailed`, `StartLevelByHyperspacingShips`,
+`ObjectiveCreate/Destroy/DestroyAll`, `SpeechEvent`, `IntelEventEnded/NotEnded`,
+`LocationCard`, `SensorsIsOpen`, `OpenSensors`, `CloseSensors`, `SetSensorsLookAtPoint`,
+`PauseUniverse`/`UnpauseUniverse`; recorded only (state kept for a UI): `MusicPlay`,
+`TechSet`, `TechSetResearch`, `EnableShipConstruction`, `SaveLevel`, wide screen, camera,
+pointers, pings, tutorial flags, `DeleteShipsWhenMissionEnds`. Variables, timers, messages,
+`Random` (stream 6), `ThisTeamIs` and the KAS pause are the interpreter's. Anything else falls
+through to `unhandled`, which logs the call (`Unimplemented`) and returns 0.
+
+## Known differences from the original
+
+* NIS and NISlets are not played (the completion variables are set; `--nislet` delays them).
+* The player's fleet is recreated when it comes out of hyperspace, so it gets new ship numbers
+  after the level's ships; in the original the ships keep the numbers they got in the NIS and
+  the level's numbering restarts at 0 (duplicates in the original's ID table).
+* Docked ships (the fleet's recons and workers, KAS `DockInstant`, `ShipsCreateLaunch`) are
+  hidden and frozen inside their host; launching puts them beside the host at once (no launch
+  path, no docking AI); launches therefore finish immediately.
+* `Guard` (protect) and `Harvest` have no simulation behind them yet and only log; `UpgradeShips`
+  does nothing (no research upgrades yet); `MoveTo`/`PatrolPath` issue the move at once instead
+  of through the AI move layer (`aimCreateMoveTeam` processed per AI tick).
+* `HasShipBeenDiscovered` uses the human player's ships' `fowRadius` instead of the fog-of-war
+  grid; enemy selection treats every ship as visible (no cloaking, no Mimic disguise).
+* `IntelEventEnded` only ends by the safety timeout unless `--speech` simulates the subtitle;
+  real speech/subtitle lengths are not known headless.
+* Resource objects, derelicts, meteor storms, mines and slipgates are records, not simulation
+  objects; `GetWorldResources` sums the static resource values of the recorded asteroids and
+  dust clouds.
+* Mothership modules are kept at the mothership's position and orientation and out of physics
+  and bumps (not through the clamp code); the computer player's AI (`aifFleetCommand`), research,
+  construction and unit caps do not run.
+* Single-player and KAS hooks run inside `Universe::update_with`; the universe update itself
+  still lacks the build manager, research, missiles and effects (see `runtime.md`).
+
+## Next steps
+
+* Carry the player's fleet over between missions (the hyperspace list with offsets,
+  `CalculateHyperspaceTimeForShip`, roll call, `singlePlayerGameUpdate` states 2-5 and 10) and
+  move ship creation, docking, launching and clamping onto the base layer (`base.rs`,
+  `dock.rs`, `clamp.rs`) as it lands.
+* Implement the AI move layer (`aimCreate*`) for `MoveTo`, `PatrolPath`, `Guard`, `Launch`,
+  `DockInstant`, and the remaining Tutorial1 functions (tutorial UI predicates, `ShipsCreate`,
+  `TeamHyperspaceIn/Out`, `SelectContainsShipTypes`, `ObjectiveSet/Get`).
+* Viewer: `MissionRun` exposes `universe` and `step()`; the sandbox (`apps/hwc-viewer`,
+  `sandbox.rs`) holds a `harness::Run`, so a `--mission N` mode needs the sandbox to step either
+  a `Run` or a `MissionRun` (e.g. an enum over both); not done here because the viewer is being
+  changed by another worker.

@@ -125,6 +125,8 @@ pub struct SimTweaks {
     /// Combat tunables (Tactics, CommandLayer, FlightMan and the combat parts of Tweak and
     /// AIShip).
     pub combat: crate::combat_tweaks::CombatTweaks,
+    /// Base-building tunables (Resource.script and the base entries of Tweak.script).
+    pub base: crate::base_tweaks::BaseTweaks,
 }
 
 impl Default for SimTweaks {
@@ -212,6 +214,7 @@ impl Default for SimTweaks {
                 sqrt_overlap_factor: 0.0,
             },
             combat: crate::combat_tweaks::CombatTweaks::default(),
+            base: crate::base_tweaks::BaseTweaks::default(),
         }
     }
 }
@@ -336,6 +339,7 @@ impl SimTweaks {
         }
         t.precalculate();
         t.combat = crate::combat_tweaks::CombatTweaks::load(src);
+        t.base = crate::base_tweaks::BaseTweaks::load(src);
         t
     }
 

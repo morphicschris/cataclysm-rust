@@ -4,6 +4,12 @@
 //! ordered to attack (`A` then click an enemy). Bullets and beams are drawn as lines, hits as
 //! sparks, deaths as an expanding flash, and every ship has a health bar.
 //!
+//! Base building: mothership modules are separate ships clamped to the hull, asteroids are
+//! drawn with their meshes, harvesting beams and docking traffic are shown, `B` queues a ship at
+//! the mothership, `L` launches the ships inside it, `U` toggles its auto-launch, `R` starts
+//! research, `G` sends the selected workers harvesting; the title shows resource units, support
+//! units, the build queue and research.
+//!
 //! The simulation runs at the original's 16 Hz through the task scheduler model of
 //! `hwc_math::timing` (240 Hz ticks, the universe task every 15). Rendering shows the latest
 //! update as the original does; `--interpolate` blends between the last two updates instead.
@@ -21,6 +27,7 @@ use hwc_render::{
     ShipDef, ShipInstance, ShipModel, TeamColors, TeamPaint,
 };
 use hwc_sim::harness::{group_centre, Run, Scenario};
+use hwc_sim::resource::ResourceKind;
 use hwc_sim::statics::{LoadOptions, ShipType, StaticWorld};
 use hwc_sim::{command, formation, ShipId, SimTweaks};
 
@@ -65,6 +72,16 @@ struct ShipArt {
     model: ShipModel,
 }
 
+/// The art of a resource kind (`None` when its mesh could not be loaded).
+type ResourceArt = Option<ShipArt>;
+
+const BEAM_COLOR: [f32; 4] = [0.6, 1.0, 0.9, 0.8];
+const DOCK_COLOR: [f32; 4] = [0.5, 0.7, 1.0, 0.5];
+const ASTEROID_COLOR: [f32; 4] = [0.7, 0.6, 0.5, 0.7];
+
+/// What `B` builds: the first type the mothership can build now.
+const BUILD_CHOICES: [ShipType; 4] = [ShipType::sAcolyte, ShipType::sWorker, ShipType::sRecon, ShipType::sMothershipDockingBay];
+
 /// What the left mouse button does next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -99,6 +116,7 @@ pub struct Sandbox {
     /// The camera keeps looking at these ships (the game's camera focus).
     pub focus: Vec<ShipId>,
     effects: Vec<Effect>,
+    resource_art: BTreeMap<u8, ResourceArt>,
 }
 
 /// Engine vector to render vector.
@@ -148,6 +166,7 @@ impl Sandbox {
             status: String::new(),
             focus: Vec::new(),
             effects: Vec::new(),
+            resource_art: BTreeMap::new(),
         };
         sb.load_art()?;
         sb.camera.look_at = sb.fleet_centre();
@@ -181,12 +200,32 @@ impl Sandbox {
                 .cloned()
                 .ok_or_else(|| format!("no model for {race}\\{name}"))?;
             let mut model = ShipModel::load(&self.src, &def).map_err(|e| e.to_string())?;
-            for m in mothership_modules(&def, &all) {
-                if let Err(e) = model.add_module(&self.src, m) {
-                    eprintln!("warning: module {}: {e}", m.name);
+            // Mothership modules are ships of their own in the simulation (clamped to the hull);
+            // only other ships with module meshes get them added.
+            if !matches!(t, ShipType::sMothership | ShipType::bMothership) {
+                for m in mothership_modules(&def, &all) {
+                    if let Err(e) = model.add_module(&self.src, m) {
+                        eprintln!("warning: module {}: {e}", m.name);
+                    }
                 }
             }
             self.art.insert(t, ShipArt { gpu: None, model });
+        }
+        let kinds: Vec<u8> = self.run.universe.base.resources.list.iter().filter_map(|r| match r.kind {
+            ResourceKind::Asteroid(k) => Some(k),
+            ResourceKind::DustCloud(_) => None,
+        }).collect();
+        for k in kinds {
+            if self.resource_art.contains_key(&k) {
+                continue;
+            }
+            let name = format!("asteroid{k}");
+            let art = ShipDef::load(&self.src, "resources\\asteroids", &name)
+                .and_then(|d| ShipModel::load(&self.src, &d))
+                .map_err(|e| eprintln!("warning: {name}: {e}"))
+                .ok()
+                .map(|model| ShipArt { gpu: None, model });
+            self.resource_art.insert(k, art);
         }
         Ok(())
     }
@@ -203,6 +242,11 @@ impl Sandbox {
                     None => TeamPaint::None,
                 };
                 art.gpu = Some(renderer.upload_ship(&art.model, paint));
+            }
+        }
+        for art in self.resource_art.values_mut().flatten() {
+            if art.gpu.is_none() {
+                art.gpu = Some(renderer.upload_ship(&art.model, TeamPaint::None));
             }
         }
         if self.background.is_none() {
@@ -249,6 +293,12 @@ impl Sandbox {
     pub fn step(&mut self) {
         self.snapshot();
         self.run.step();
+        // Ships built since the last update need their art.
+        if self.run.universe.ships.iter().any(|s| !self.art.contains_key(&s.ship_type)) {
+            if let Err(e) = self.load_art() {
+                eprintln!("warning: {e}");
+            }
+        }
         let now = self.run.universe.total_time_elapsed;
         self.effects.retain(|e| now - e.start < if e.explosion { EXPLOSION_TIME } else { HIT_TIME });
         for e in &self.run.universe.events {
@@ -318,6 +368,7 @@ impl Sandbox {
             .universe
             .ships
             .iter()
+            .filter(|s| s.flags & hwc_sim::object::sof::HIDE == 0)
             .map(|s| {
                 let (p, m) = Self::transform_of(s);
                 let m = match (a < 1.0, self.previous.get(&s.id)) {
@@ -340,7 +391,8 @@ impl Sandbox {
     }
 
     pub fn instances(&self) -> Vec<ShipInstance<'_>> {
-        self.render_transforms()
+        let mut v: Vec<ShipInstance<'_>> = self
+            .render_transforms()
             .into_iter()
             .filter_map(|(_, t, m, age)| {
                 let gpu = self.art.get(&t)?.gpu.as_ref()?;
@@ -350,7 +402,20 @@ impl Sandbox {
                     age,
                 })
             })
-            .collect()
+            .collect();
+        for r in &self.run.universe.base.resources.list {
+            let ResourceKind::Asteroid(k) = r.kind else { continue };
+            let Some(gpu) = self.resource_art.get(&k).and_then(|a| a.as_ref()).and_then(|a| a.gpu.as_ref()) else { continue };
+            let m = &r.coordsys.m;
+            let transform = Mat4::from_cols(
+                Vec4::new(m[0], m[1], m[2], 0.0),
+                Vec4::new(m[3], m[4], m[5], 0.0),
+                Vec4::new(m[6], m[7], m[8], 0.0),
+                v3(r.position).extend(1.0),
+            );
+            v.push(ShipInstance { ship: gpu, transform, age: 10.0 });
+        }
+        v
     }
 
     pub fn scene<'a>(&'a self, instances: &'a [ShipInstance<'a>]) -> Scene<'a> {
@@ -539,6 +604,59 @@ impl Sandbox {
         true
     }
 
+    /// The local player's mothership.
+    fn mothership(&self) -> Option<ShipId> {
+        self.run.universe.base.players.first().and_then(|p| p.mothership)
+    }
+
+    /// `B`: queue one ship at the mothership (the first of [`BUILD_CHOICES`] it can build).
+    pub fn queue_build(&mut self) {
+        let Some(ms) = self.mothership() else {
+            self.status = "no mothership".into();
+            return;
+        };
+        for t in BUILD_CHOICES {
+            if hwc_sim::construction::queue_build(&mut self.run.universe, ms, t, 1) > 0 {
+                self.status = format!("queued {t}");
+                return;
+            }
+        }
+        self.status = "nothing can be built".into();
+    }
+
+    /// `L`: launch everything inside the mothership.
+    pub fn launch(&mut self) {
+        let Some(ms) = self.mothership() else { return };
+        let inside = self.run.universe.ship(ms).and_then(|s| s.base.inside.as_ref()).map(|i| i.ships.clone()).unwrap_or_default();
+        hwc_sim::dock::cl_launch_multiple_ships(&mut self.run.universe, &inside, ms);
+        self.status = format!("launching {}", inside.len());
+    }
+
+    /// `U`: toggle the mothership's auto-launch.
+    pub fn toggle_auto_launch(&mut self) {
+        let bits = self.run.universe.base.players.first().map_or(0, |p| p.auto_launch) ^ 1;
+        hwc_sim::dock::cl_auto_launch(&mut self.run.universe, bits, 0);
+        self.status = format!("auto-launch {}", if bits & 1 != 0 { "on" } else { "off" });
+    }
+
+    /// `R`: research the first technology a lab is free for.
+    pub fn research(&mut self) {
+        for &t in hwc_sim::statics::Technology::ALL {
+            if hwc_sim::research::research_tech_if_lab_free(&mut self.run.universe, 0, t.index()) {
+                self.status = format!("researching {t}");
+                return;
+            }
+        }
+        self.status = "no lab free".into();
+    }
+
+    /// `G`: the selected ships harvest.
+    pub fn gather(&mut self) {
+        let sel = self.selection.clone();
+        hwc_sim::resource::cl_collect_resource(&mut self.run.universe, &sel, None);
+        self.status = "harvesting".into();
+    }
+
     pub fn halt(&mut self) {
         let sel = self.selection.clone();
         command::cl_halt(&mut self.run.universe, &sel);
@@ -602,8 +720,44 @@ impl Sandbox {
         o
     }
 
+    /// Harvest beams, docking lines and asteroids without a mesh.
+    fn base_overlay(&self, o: &mut Overlay, size: (u32, u32)) {
+        let u = &self.run.universe;
+        for s in u.ships.iter().filter(|s| s.flags & hwc_sim::object::sof::HIDE == 0) {
+            if s.base.harvest_effect {
+                let target = s.command.and_then(|c| u.commands.get(c)).and_then(|c| c.collect.resource).and_then(|r| u.base.resources.get(r));
+                if let Some(r) = target {
+                    if let (Some(a), Some(b)) = (self.project(size, v3(s.posinfo.position)), self.project(size, v3(r.position))) {
+                        o.line(a, b, BEAM_COLOR);
+                    }
+                }
+            }
+            if let Some(d) = s.base.dock_with.and_then(|d| u.ship(d)) {
+                if s.base.dock_state < hwc_sim::dock::state::FLY_OUT {
+                    if let (Some(a), Some(b)) = (self.project(size, v3(s.posinfo.position)), self.project(size, v3(d.posinfo.position))) {
+                        o.line(a, b, DOCK_COLOR);
+                    }
+                }
+            }
+        }
+        for r in &u.base.resources.list {
+            let has_mesh = matches!(r.kind, ResourceKind::Asteroid(k) if self.resource_art.get(&k).is_some_and(|a| a.is_some()));
+            if has_mesh {
+                continue;
+            }
+            if let Some(c) = self.project(size, v3(r.position)) {
+                let pts: Vec<[f32; 2]> = (0..12).map(|i| {
+                    let a = i as f32 / 12.0 * std::f32::consts::TAU;
+                    [c[0] + a.cos() * 6.0, c[1] + a.sin() * 6.0]
+                }).collect();
+                o.polygon(&pts, ASTEROID_COLOR);
+            }
+        }
+    }
+
     /// Bullets, beams, hit sparks, explosion flashes and health bars.
     fn combat_overlay(&self, o: &mut Overlay, size: (u32, u32)) {
+        self.base_overlay(o, size);
         let u = &self.run.universe;
         for &bid in &u.bullet_list {
             let b = u.bullets.bullet(bid);
@@ -646,7 +800,7 @@ impl Sandbox {
                 o.line([c[0] - 4.0, c[1] + 4.0], [c[0] + 4.0, c[1] - 4.0], HIT_COLOR);
             }
         }
-        for s in u.ships.iter() {
+        for s in u.ships.iter().filter(|s| s.flags & hwc_sim::object::sof::HIDE == 0 && s.flags & hwc_sim::base::SOF_MODULE == 0) {
             let Some(max) = u.statics.ship(s.ship_type).map(|st| st.health.max_health) else { continue };
             let Some((lo, hi)) = self.screen_box(size, s) else { continue };
             let frac = (s.health / max).clamp(0.0, 1.0);
@@ -697,14 +851,39 @@ impl Sandbox {
         }
     }
 
+    /// Resource units, support units, the build queue and research of player 0.
+    pub fn base_status(&self) -> String {
+        let u = &self.run.universe;
+        let Some(p) = u.base.players.first() else { return String::new() };
+        let mut queue = Vec::new();
+        for f in u.base.factories.iter().filter(|f| f.ship.and_then(|s| u.ship(s)).is_some_and(|s| s.player == 0)) {
+            for j in f.jobs.iter().filter(|j| j.n_jobs > 0) {
+                if let Some(t) = j.info {
+                    let done = if j.time_total > 0 { 100 - 100 * j.time_left / j.time_total } else { 0 };
+                    queue.push(format!("{t} x{} {done}%", j.n_jobs));
+                }
+            }
+        }
+        let research: Vec<String> = p.topics.iter().map(|t| format!("{} {:.0}s", hwc_sim::statics::Technology::from_index(t.tech).map_or("?", |x| x.name()), t.time_left)).collect();
+        format!(
+            "RU {} SU {}/{} build [{}] research [{}] ",
+            p.resource_units,
+            p.su_used,
+            p.su_capacity,
+            queue.join(", "),
+            research.join(", ")
+        )
+    }
+
     pub fn title(&self) -> String {
         let u = &self.run.universe;
         format!(
-            "hwc-viewer sandbox - tick {} ({:.1} s) - {} ships, {} selected - {}{}{}",
+            "hwc-viewer sandbox - tick {} ({:.1} s) - {} ships, {} selected - {}{}{}{}",
             u.update_counter,
             u.total_time_elapsed,
             u.ship_list.len(),
             self.selection.len(),
+            self.base_status(),
             match self.mode {
                 Mode::Move => "MOVE: click a point - ",
                 Mode::Attack => "ATTACK: click a ship - ",

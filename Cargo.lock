@@ -767,6 +767,7 @@ version = "0.1.0"
 dependencies = [
  "hwc-formats",
  "hwc-math",
+ "png",
 ]
 
 [[package]]
@@ -797,6 +798,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "hwc-formats",
+ "png",
  "pollster",
  "wgpu",
 ]
@@ -814,6 +816,7 @@ name = "hwc-sim"
 version = "0.1.0"
 dependencies = [
  "hwc-formats",
+ "hwc-kas",
  "hwc-math",
 ]
 

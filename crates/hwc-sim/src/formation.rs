@@ -722,6 +722,7 @@ mod tests {
                 attack_targets: Vec::new(),
                 attack_in_range: false,
                 resume_move: None,
+                ..crate::command::new_command_pub(Vec::new())
             };
             cmd.formation.formation_type = *ftype;
             cmd.formation.flip_state = *flip;

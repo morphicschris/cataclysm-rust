@@ -8,4 +8,5 @@ description = "Homeworld: Cataclysm simulation: static game data (ships, weapons
 
 [dependencies]
 hwc-formats = { path = "../hwc-formats" }
+hwc-kas = { path = "../hwc-kas" }
 hwc-math = { path = "../hwc-math" }

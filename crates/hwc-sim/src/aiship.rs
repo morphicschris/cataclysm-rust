@@ -222,6 +222,7 @@ pub fn fly_to_point_avoiding_objs(
         let mut ship_row_pad = ship_pad;
         let mut row_enabled = false;
         let docking_small = cmd.as_ref().is_some_and(|c| c.order == order::DOCK)
+            && ship.base.dock_point != -1
             && matches!(stat.ship_class, Some(ShipClass::Fighter) | Some(ShipClass::Corvette));
         if !docking_small && stat.header.right_of_way > 0 {
             row_enabled = true;
@@ -342,7 +343,15 @@ pub fn fly_to_point_avoiding_objs(
                 if n.docking_ship == Some(id) {
                     continue;
                 }
-                // (Salvager, clamping, cloaking and slaved-ship exceptions are not modelled.)
+                // A salvager latching onto its target does not avoid it.
+                if ship.special_flags & crate::base::special::SALVAGER != 0 && ship.base.salvage.target == Some(n.id) && ship.base.salvage.latching {
+                    continue;
+                }
+                // Ships clamped to us (modules, latched workers, salvagers) are not avoided.
+                if n.ship.flags & sof::CLAMPED != 0 && n.ship.base.clamp.as_ref().and_then(|c| c.host) == Some(id) {
+                    continue;
+                }
+                // (Salvager, cloaking and slaved-ship exceptions are not modelled.)
                 let mag2 = (ld(rep.z) * ld(rep.z) + ld(rep.y) * ld(rep.y)) + ld(rep.x) * ld(rep.x);
                 if mag2 > ld(max_consider) * ld(max_consider) {
                     continue;

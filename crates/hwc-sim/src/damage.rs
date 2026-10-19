@@ -292,6 +292,12 @@ pub fn delete_dead_ships(u: &mut Universe) {
     }
 }
 
+/// `univReallyDeleteThisShipRightNow`: remove a ship immediately (cancelled hulls).
+pub fn really_delete_ship(u: &mut Universe, id: ShipId) {
+    u.dead_ships.retain(|&d| d != id);
+    delete_dead_ship(u, id);
+}
+
 fn delete_dead_ship(u: &mut Universe, id: ShipId) {
     let Some(s) = u.ships.get_mut(id) else { return };
     s.posinfo.force = Vector::ZERO;
@@ -318,6 +324,8 @@ fn delete_dead_ship(u: &mut Universe, id: ShipId) {
             b.target = None;
         }
     }
+    // The base layer lets go (factories, docking, clamping, labs, support units...).
+    crate::base::ship_died(u, id);
     u.blobs.object_died(ObjRef::Ship(id));
     u.ships.ship_mut(id).coll_my_blob = None;
     crate::command::cl_ship_died(u, id);

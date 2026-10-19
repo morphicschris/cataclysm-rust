@@ -318,6 +318,14 @@ impl Interpreter {
         self.vars[i].value = value;
     }
 
+    /// Destroys a variable from the game side (`kasVarDestroyEntry`); `team` and `name` as for
+    /// [`var`](Self::var). Returns its value if it existed.
+    pub fn remove_var(&mut self, team: Option<Hash>, name: Hash) -> Option<i32> {
+        let key = if name & GLOBAL_FLAG != 0 { (0, name & !GLOBAL_FLAG) } else { (team.unwrap_or(0), name) };
+        let i = self.var_find(key)?;
+        Some(self.vars.remove(i).value)
+    }
+
     /// Timers, in creation order.
     pub fn timers(&self) -> &[Timer] {
         &self.timers

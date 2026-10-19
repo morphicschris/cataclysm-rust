@@ -423,6 +423,109 @@ pub fn zero_rotation_anywhere(ship: &mut Ship, stat: &ShipStaticInfo, tw: &SimTw
     false
 }
 
+/// `aitrackHeadingAndUp` (0x418a90): turn so the heading and up vectors match the desired
+/// ones. True when both are within `accuracy` (the rotation is then stopped).
+pub fn heading_and_up(ship: &mut Ship, stat: &ShipStaticInfo, dt: f32, desired_heading: Vector, desired_up: Vector, accuracy: f32) -> bool {
+    if ship.dont_rotate_ever {
+        return true;
+    }
+    let h = ship.heading();
+    let up = ship.up();
+    let hd = (ld(h.x) * ld(desired_heading.x) + ld(h.y) * ld(desired_heading.y)) + ld(h.z) * ld(desired_heading.z);
+    let ud = (ld(up.x) * ld(desired_up.x) + ld(up.y) * ld(desired_up.y)) + ld(up.z) * ld(desired_up.z);
+    let rs = ship.nonstat.rot_strength;
+    if hd <= -1.0 {
+        apply_rot(ship, rs[1], rot::ABOUT_X_CW);
+        return false;
+    }
+    if ud <= -1.0 {
+        apply_rot(ship, rs[5], rot::ABOUT_Z_CW);
+        return false;
+    }
+    if ld(accuracy) <= hd && ld(accuracy) <= ud {
+        if ship.flags & sof::CRAZY == 0 {
+            ship.rotinfo.rotspeed = Vector::ZERO;
+        }
+        return true;
+    }
+    let lh = ship.rotinfo.coordsys.vec_mul(desired_heading);
+    let lu = ship.rotinfo.coordsys.vec_mul(desired_up);
+    let inv_dt = 1.0 / ld(dt);
+    let ts = ship.nonstat.turn_speed;
+    let moi = stat.header.moment_of_inertia;
+    if !eq_or_unordered(ld(lh.y), 0.0) {
+        let f = if ld(lh.z) >= 0.0 {
+            -(ld(lh.y) * ld(ts[0]))
+        } else if ld(lh.y) >= 0.0 {
+            -ld(ts[0])
+        } else {
+            ld(ts[0])
+        };
+        let f = ld(st(f));
+        let cur = ld(ship.rotinfo.rotspeed.x);
+        if f <= cur {
+            let t = cap((cur - f) * ld(moi.x) * inv_dt, rs[1]);
+            apply_rot(ship, t, rot::ABOUT_X_CW);
+        } else {
+            let t = cap((f - cur) * ld(moi.x) * inv_dt, rs[0]);
+            apply_rot(ship, t, rot::ABOUT_X_CCW);
+        }
+    }
+    if !eq_or_unordered(ld(lh.x), 0.0) {
+        let f = ld(st(ld(lh.x) * ld(ts[1])));
+        let cur = ld(ship.rotinfo.rotspeed.y);
+        if f <= cur {
+            let t = cap((cur - f) * ld(moi.y) * inv_dt, rs[3]);
+            apply_rot(ship, t, rot::ABOUT_Y_CW);
+        } else {
+            let t = cap((f - cur) * ld(moi.y) * inv_dt, rs[2]);
+            apply_rot(ship, t, rot::ABOUT_Y_CCW);
+        }
+    }
+    if !eq_or_unordered(ld(lu.y), 0.0) {
+        let v = ld(st(ld(lu.y) * ld(ts[2])));
+        let cur = ld(ship.rotinfo.rotspeed.z);
+        if cur < v {
+            let t = cap((v - cur) * ld(moi.z) * inv_dt, rs[4]);
+            apply_rot(ship, t, rot::ABOUT_Z_CCW);
+        } else {
+            let t = cap((cur - v) * ld(moi.z) * inv_dt, rs[5]);
+            apply_rot(ship, t, rot::ABOUT_Z_CW);
+        }
+    }
+    false
+}
+
+/// `aitrackZeroForwardVelocity` (0x419b10): stop moving along the heading. True when the
+/// forward speed is within (-3, 3).
+pub fn zero_forward_velocity(ship: &mut Ship, stat: &ShipStaticInfo, dt: f32) -> bool {
+    let h = ship.heading();
+    let v = ship.posinfo.velocity;
+    let fwd = ld(st((ld(h.x) * ld(v.x) + ld(h.y) * ld(v.y)) + ld(h.z) * ld(v.z)));
+    if fwd > -3.0 && fwd < 3.0 {
+        return true;
+    }
+    let mot = ld(stat.header.mass) / ld(dt);
+    let caps = ship.nonstat.thrust_strength;
+    if fwd >= 0.0 {
+        let f = cap(mot * fwd, caps[trans::BACK as usize]);
+        apply_force(ship, f, trans::BACK);
+    } else {
+        let f = cap(-(mot * fwd), caps[trans::FORWARD as usize]);
+        apply_force(ship, f, trans::FORWARD);
+    }
+    false
+}
+
+/// `FUN_00419e90`: within `dist` of `point` (squared distance compared).
+pub fn within_distance(ship: &Ship, point: Vector, dist: f32) -> bool {
+    let p = ship.posinfo.position;
+    let dx = ld(p.x) - ld(point.x);
+    let dy = ld(p.y) - ld(point.y);
+    let dz = ld(p.z) - ld(point.z);
+    (dx * dx + dy * dy) + dz * dz < ld(dist) * ld(dist)
+}
+
 /// `MoveReachedDestinationVariable` (0x419d60): within `bounds` on every axis (exclusive).
 pub fn move_reached_destination(ship: &Ship, dest: Vector, bounds: f32) -> bool {
     let p = ship.posinfo.position;

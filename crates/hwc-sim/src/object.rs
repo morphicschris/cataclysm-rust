@@ -401,6 +401,8 @@ pub struct Ship {
     pub interceptor: InterceptorSpec,
     /// Side-step specifics of corvettes (+0x638) and the multi-beam frigate (+0x658).
     pub side_step: SideStepSpec,
+    /// Docking, clamping, construction, resourcing and salvage state (see [`crate::base`]).
+    pub base: crate::base::ShipBase,
 }
 
 impl Ship {
@@ -484,6 +486,7 @@ impl Ship {
             guns: Vec::new(),
             interceptor: InterceptorSpec::default(),
             side_step: SideStepSpec::default(),
+            base: crate::base::ShipBase::default(),
         }
     }
 

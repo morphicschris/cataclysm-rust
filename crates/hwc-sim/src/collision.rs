@@ -532,6 +532,16 @@ fn pair_touches(a: &Ship, astat: &ShipStaticInfo, b: &Ship, bstat: &ShipStaticIn
     if a.docking_ship == Some(b.id) || b.docking_ship == Some(a.id) || (a.docking_ship.is_some() && b.docking_ship.is_some()) {
         return false;
     }
+    // Salvagers latching onto their target do not bump it.
+    let latching = |s: &Ship, t: &Ship| s.special_flags & crate::base::special::SALVAGER != 0 && s.base.salvage.target == Some(t.id) && s.base.salvage.latching;
+    if latching(a, b) || latching(b, a) {
+        return false;
+    }
+    // A ship and the host it is clamped to never bump.
+    let host = |s: &Ship| s.base.clamp.as_ref().and_then(|c| c.host);
+    if (a.flags & sof::CLAMPED != 0 && host(a) == Some(b.id)) || (b.flags & sof::CLAMPED != 0 && host(b) == Some(a.id)) {
+        return false;
+    }
     if (a.flags | b.flags) & sof::HIDE != 0 {
         return false;
     }

@@ -22,8 +22,14 @@ pub mod order {
     pub const MOVE: u16 = 1;
     pub const ATTACK: u16 = 2;
     pub const DOCK: u16 = 3;
+    pub const LAUNCH_SHIP: u16 = 4;
+    pub const COLLECT_RESOURCE: u16 = 5;
+    pub const BUILDING_SHIP: u16 = 6;
+    pub const SPECIAL: u16 = 7;
     pub const HALT: u16 = 8;
     pub const MILITARY_PARADE: u16 = 9;
+    pub const LINK: u16 = 0xb;
+    pub const UNLINK: u16 = 0xc;
 }
 
 /// Order attributes (`COMMAND_IS_*`).
@@ -65,6 +71,38 @@ pub struct CommandToDo {
     /// The move a command was carrying out when it was ordered to attack (+0x120, +0x124):
     /// waypoint mode, waypoints and index, resumed afterwards.
     pub resume_move: Option<(u32, Vec<Vector>, i32)>,
+    /// Dock orders (+0x290..+0x29b).
+    pub dock: DockInfo,
+    /// Launch orders: the ship launched from (+0x29c).
+    pub launch_from: Option<ShipId>,
+    /// Resource collection (+0x2a0..+0x2b0).
+    pub collect: CollectInfo,
+    /// Special orders (salvage): the targets (+0x2bc).
+    pub special_targets: Vec<ShipId>,
+    /// Link orders: the partner ship.
+    pub link_with: Option<ShipId>,
+}
+
+/// The dock part of a command.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DockInfo {
+    /// +0x290: dock purpose (see [`crate::dock::purpose`]).
+    pub purpose: i32,
+    /// +0x298: go back to harvesting after docking.
+    pub collect_after: bool,
+    /// +0x299: every ship docks with the same ship.
+    pub same_dockwith: bool,
+}
+
+/// The resource-collection part of a command.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct CollectInfo {
+    /// +0x2a0: the resource being harvested.
+    pub resource: Option<crate::resource::ResourceId>,
+    /// +0x2a4: radius of the zone to look for resources in (0 = anywhere).
+    pub zone_radius: f32,
+    /// +0x2a8: centre of that zone.
+    pub zone_centre: Vector,
 }
 
 /// `CommandLayer`: the to-do list in order, over a store indexed by [`CommandId`].
@@ -102,6 +140,26 @@ impl CommandLayer {
         self.add(cmd)
     }
 
+    /// Appends a command (`listAddNode`).
+    pub fn add_pub(&mut self, cmd: CommandToDo) -> CommandId {
+        self.add(cmd)
+    }
+
+    /// Puts a command at the front of the to-do list (`listAddNodeBeginning`, used for
+    /// launches).
+    pub fn add_front_pub(&mut self, mut cmd: CommandToDo) -> CommandId {
+        let id = CommandId(self.slots.len() as u32);
+        cmd.id = id;
+        self.slots.push(Some(cmd));
+        self.todo.insert(0, id);
+        id
+    }
+
+    /// Removes a command (`listDeleteNode`).
+    pub fn delete_pub(&mut self, id: CommandId) {
+        self.delete(id)
+    }
+
     fn delete(&mut self, id: CommandId) {
         self.todo.retain(|&c| c != id);
         if let Some(s) = self.slots.get_mut(id.0 as usize) {
@@ -123,7 +181,17 @@ fn new_command(selection: Vec<ShipId>) -> CommandToDo {
         attack_targets: Vec::new(),
         attack_in_range: false,
         resume_move: None,
+        dock: DockInfo::default(),
+        launch_from: None,
+        collect: CollectInfo::default(),
+        special_targets: Vec::new(),
+        link_with: None,
     }
+}
+
+/// A fresh command for `selection` (no order yet).
+pub fn new_command_pub(selection: Vec<ShipId>) -> CommandToDo {
+    new_command(selection)
 }
 
 /// `clRemoveShipFromSelection`: swap-remove every occurrence.
@@ -264,6 +332,7 @@ pub fn remove_ships_from_doing_stuff(u: &mut Universe, ships: &[ShipId]) {
                     formation::calculate_offsets(u, cid);
                 }
             } else if remove_from_selection(&mut cmd.selection, id) {
+                let order_ = cmd.order;
                 u.ships.ship_mut(id).command = None;
                 let sel = cmd.selection.clone();
                 if attacking {
@@ -273,6 +342,18 @@ pub fn remove_ships_from_doing_stuff(u: &mut Universe, ships: &[ShipId]) {
                     let s = u.ships.ship_mut(id);
                     s.move_to = Vector::ZERO;
                     s.move_from = Vector::ZERO;
+                }
+                match order_ {
+                    order::DOCK => crate::dock::remove_ship_from_docking(u, id),
+                    order::LAUNCH_SHIP => crate::dock::remove_ship_from_launching(u, id),
+                    order::COLLECT_RESOURCE => {
+                        let s = u.ships.ship_mut(id);
+                        s.base.harvest_effect = false;
+                        s.base.harvest_state = 0;
+                        s.base.harvest_state2 = 0;
+                    }
+                    order::SPECIAL => crate::salvage::special_done(u, id),
+                    _ => {}
                 }
                 if u.commands.get(cid).expect("command").selection.is_empty() {
                     u.commands.delete(cid);
@@ -748,6 +829,27 @@ pub fn cl_process(u: &mut Universe) {
                         finish_attack(u, cid);
                     }
                 }
+                order::DOCK => {
+                    if crate::dock::process_dock_to_do(u, cid) {
+                        let empty = u.commands.get(cid).is_none_or(|c| c.selection.is_empty());
+                        if empty {
+                            delete_command(u, cid);
+                        } else {
+                            free_last_order(u, cid);
+                            u.commands.get_mut(cid).expect("command").order = order::NULL;
+                        }
+                    }
+                }
+                order::LINK => {
+                    if crate::link::process_link_to_do(u, cid) {
+                        delete_command(u, cid);
+                    }
+                }
+                order::UNLINK => {
+                    if crate::link::process_unlink_to_do(u, cid) {
+                        delete_command(u, cid);
+                    }
+                }
                 order::HALT => {
                     run_passive_attack(u, cid);
                     let leader = cmd.selection[0];
@@ -811,6 +913,44 @@ pub fn cl_process(u: &mut Universe) {
                     } else {
                         u.commands.get_mut(cid).expect("command").order = order::NULL;
                     }
+                }
+            }
+            order::DOCK => {
+                if crate::dock::process_dock_to_do(u, cid) {
+                    let collect_after = u.commands.get(cid).is_some_and(|c| c.dock.collect_after);
+                    if !collect_after {
+                        delete_command(u, cid);
+                    } else {
+                        free_last_order(u, cid);
+                        crate::resource::change_single_ship_to_collect_resource(u, cid, None);
+                    }
+                }
+            }
+            order::LAUNCH_SHIP => {
+                if crate::dock::process_launch_ship_to_do(u, cid) {
+                    // (The launched ship would join the host's formation or military parade.)
+                    delete_command(u, cid);
+                }
+            }
+            order::COLLECT_RESOURCE => {
+                if crate::resource::process_collect_resource(u, cid) {
+                    // (CreateMilitaryGroupAroundShip: the harvester would join the parade.)
+                    delete_command(u, cid);
+                }
+            }
+            order::SPECIAL => {
+                if crate::salvage::process_special_to_do(u, cid) {
+                    delete_command(u, cid);
+                }
+            }
+            order::LINK => {
+                if crate::link::process_link_to_do(u, cid) {
+                    delete_command(u, cid);
+                }
+            }
+            order::UNLINK => {
+                if crate::link::process_unlink_to_do(u, cid) {
+                    delete_command(u, cid);
                 }
             }
             order::HALT => {
@@ -919,11 +1059,120 @@ fn free_last_order(u: &mut Universe, cid: CommandId) {
                 c.attack_targets.clear();
             }
         }
+        order::DOCK => {
+            // DockCleanup.
+            for &id in &cmd.selection {
+                crate::dock::remove_ship_from_docking(u, id);
+            }
+        }
+        order::LAUNCH_SHIP => {
+            // LaunchCleanup.
+            if let Some(&id) = cmd.selection.first() {
+                crate::dock::remove_ship_from_launching(u, id);
+            }
+        }
+        order::COLLECT_RESOURCE => {
+            for &id in &cmd.selection {
+                let s = u.ships.ship_mut(id);
+                s.base.harvest_effect = false;
+                s.base.harvest_state = 0;
+                s.base.harvest_state2 = 0;
+            }
+        }
+        order::SPECIAL => {
+            for &id in &cmd.selection {
+                crate::salvage::special_done(u, id);
+            }
+            if let Some(c) = u.commands.get_mut(cid) {
+                c.special_targets.clear();
+            }
+        }
+        order::LINK | order::UNLINK => {
+            for &id in &cmd.selection {
+                crate::link::free_link_order(u, id);
+            }
+        }
         _ => {}
     }
     if let Some(c) = u.commands.get_mut(cid) {
         c.attributes &= !attr::HOLDING_PATTERN;
     }
+}
+
+/// `FreeCommandToDoContents` + `listDeleteNode`: the ships leave the command and it is
+/// removed.
+pub fn delete_command(u: &mut Universe, cid: CommandId) {
+    let Some(cmd) = u.commands.get(cid).cloned() else { return };
+    for &id in &cmd.selection {
+        if let Some(s) = u.ships.get_mut(id) {
+            if s.command == Some(cid) {
+                s.command = None;
+            }
+        }
+    }
+    if cmd.attributes & attr::PASSIVE_ATTACKING != 0 || cmd.order == order::ATTACK {
+        attack_cleanup(u, cid);
+    }
+    u.commands.delete(cid);
+}
+
+/// `FreeLastOrder` for other modules.
+pub fn free_last_order_pub(u: &mut Universe, cid: CommandId) {
+    free_last_order(u, cid);
+}
+
+/// `IsSelectionAlreadyDoingSomething`: the command whose selection is the same set of ships.
+pub fn selection_already_doing_something(u: &Universe, sel: &[ShipId]) -> Option<CommandId> {
+    u.commands.todo.iter().copied().find(|&c| u.commands.get(c).is_some_and(|cmd| selections_equivalent(sel, &cmd.selection)))
+}
+
+/// `ClearProtecting` and `ClearPassiveAttacking` when set.
+pub fn clear_protecting_and_passive(u: &mut Universe, cid: CommandId) {
+    let attrs = u.commands.get(cid).map_or(0, |c| c.attributes);
+    if attrs & attr::PROTECTING != 0 {
+        if let Some(c) = u.commands.get_mut(cid) {
+            c.attributes &= !attr::PROTECTING;
+        }
+    }
+    if attrs & attr::PASSIVE_ATTACKING != 0 {
+        clear_passive_attacking(u, cid);
+    }
+}
+
+/// `InitShipsForAI(selection, TRUE)`.
+pub fn init_ships_for_ai(u: &mut Universe, sel: &[ShipId]) {
+    for &id in sel {
+        init_ship_ai(u, id);
+    }
+}
+
+/// `InitShipAI(ship, TRUE)`.
+pub fn init_ship_ai_pub(u: &mut Universe, id: ShipId) {
+    init_ship_ai(u, id);
+}
+
+/// `PrepareShipsForCommand(command, TRUE)`.
+pub fn prepare_ships_pub(u: &mut Universe, cid: CommandId) {
+    prepare_ships(u, cid);
+}
+
+/// `clRemoveTargetFromSelection` on a command's selection; a formation recalculates its
+/// offsets (`formationContentHasChanged`).
+pub fn remove_ship_from_command_selection(u: &mut Universe, cid: CommandId, id: ShipId) {
+    let Some(c) = u.commands.get_mut(cid) else { return };
+    let formation_cmd = c.attributes & attr::FORMATION != 0;
+    if formation_cmd {
+        if remove_from_formation(c, id).is_some() && !c.selection.is_empty() {
+            formation::calculate_offsets(u, cid);
+        }
+    } else {
+        remove_from_selection(&mut c.selection, id);
+    }
+}
+
+/// `RemoveShipFromFormation` + `formationContentHasChanged`.
+pub fn remove_ship_from_formation_pub(u: &mut Universe, cid: CommandId, id: ShipId) {
+    remove_ship_from_command_selection(u, cid, id);
 }
 
 /// `BreakupIntoLeaderWingman` (0x43c8b0): fighters are paired with the nearest unpaired
@@ -1681,7 +1930,7 @@ fn run_passive_attack(u: &mut Universe, cid: CommandId) {
 }
 
 /// `RemoveShipFromBeingTargeted`: a dead ship leaves every target list.
-fn remove_ship_from_being_targeted(u: &mut Universe, dead: ShipId) {
+pub(crate) fn remove_ship_from_being_targeted(u: &mut Universe, dead: ShipId) {
     let todo = u.commands.todo.clone();
     for cid in todo {
         let Some(c) = u.commands.get_mut(cid) else { continue };

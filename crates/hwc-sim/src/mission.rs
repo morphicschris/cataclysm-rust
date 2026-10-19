@@ -1,0 +1,1023 @@
+//! Single-player missions: a level plus its KAS script running on the simulation.
+//!
+//! [`MissionRun::start`] follows the original's path into a campaign mission
+//! (`singlePlayerStartGame` -> the opening NIS -> `singlePlayerNisStoppedCB` ->
+//! `singlePlayerLoadNewLevel` -> `levelStartNext`): the player's fleet is put into hyperspace,
+//! the universe is reset (game time is kept), the mission level is loaded and the
+//! single-player state machine is set to start the KAS mission on the next frame.
+//! [`MissionRun::step`] is one `univUpdate`: the parts of `singlePlayerGameUpdate` that matter
+//! before the mission's hyperspace exit (KAS mission start, NIS/NISlet requests, the hyperspace
+//! arrival of the player's fleet with its effect states, `G_ShipsHaveArrived`) run where the
+//! original runs them, and `kasExecute` runs from the computer-player slot every
+//! `AIPLAYER_UPDATE_RATE[AI_ADV]` + 1 frames, skipped while a hyperspace transition is in
+//! progress.
+//!
+//! NIS and NISlets are not played: a request is logged and treated as finished (optionally
+//! after a configurable time), which sets the same `G_Nis<n>Complete` / `G_Nislet<n>Complete`
+//! variables the original's NIS-stopped callback sets.
+//!
+//! See `docs/sim/missions.md`.
+
+use std::fmt;
+use std::sync::Arc;
+
+use hwc_formats::nis::{object_key, Nis, NisScript, ObjectCategory};
+use hwc_kas::interp::{kas_frame_due, Interpreter};
+use hwc_kas::{kas_hash, var_hash, Hash, Mission as KasMission};
+use hwc_math::fpu::{fild_u32, ld, st};
+use hwc_math::random::RAN_GAME;
+use hwc_math::trig::{fcos, fsin};
+use hwc_math::{Matrix, Vector};
+
+use crate::level::{self, LevelContext, LevelError, LevelState, ResourceTweaks};
+use crate::object::{sof, ShipId};
+use crate::statics::{DataSource, ShipClass, ShipRace, ShipType, StaticWorld};
+use crate::tunables::SimTweaks;
+use crate::universe::{SimEvent, Universe, DEFAULT_SHIP_MATRIX};
+
+/// The human player.
+pub const HUMAN_PLAYER: usize = 0;
+
+/// `AIPLAYER_UPDATE_RATE[AI_ADV]`: the single-player computer player (and so KAS) runs when
+/// `univUpdateCounter & 15 == SP_KAS_UPDATE_FRAME & 15`.
+pub const SP_KAS_UPDATE_RATE: u32 = 15;
+
+/// Single-player states (`singlePlayerGameInfo.hyperspaceState`, 0xaaf910).
+pub mod sp_state {
+    pub const NONE: u32 = 0;
+    pub const START_KAS: u32 = 6;
+    pub const KAS_STARTED: u32 = 7;
+    pub const ARRIVING: u32 = 9;
+}
+
+/// Per-ship hyperspace states (`shipHyperspaceState`, ship info +0x20).
+pub mod ship_hs {
+    pub const INITIAL: u32 = 4;
+    pub const WAITING: u32 = 6;
+    pub const DECELERATING: u32 = 7;
+}
+
+/// Hyperspace effect states (`hsState`).
+pub mod hs_effect {
+    pub const INACTIVE: u32 = 0;
+    pub const POPUP_INTO: u32 = 1;
+    pub const POPUP_OUTOF: u32 = 2;
+    pub const SLICING_INTO: u32 = 3;
+    pub const SLICING_OUTOF: u32 = 4;
+    pub const COLLAPSE_INTO: u32 = 5;
+    pub const COLLAPSE_OUTOF: u32 = 6;
+    pub const FINISHED: u32 = 7;
+}
+
+/// `singleplayer.script` (table at 0x88a0e0).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpTweaks {
+    pub clipt_neg_thresh: f32,
+    pub clipt_neg_scalar: f32,
+    pub clipt_neg_finish: f32,
+    pub clipt_pos_thresh: f32,
+    pub clipt_pos_scalar: f32,
+    pub clipt_pos_start: f32,
+    pub slice_rate: f32,
+    pub mothership_always_arrives_first: bool,
+    pub base_waittime: f32,
+    pub base_arrivetime: f32,
+    pub base_mothership_arrivetime: f32,
+    pub random_waittime: f32,
+    pub decelerate_time: f32,
+    pub starting_rus: i32,
+    /// `SUBMESSAGE_SAFETY_TIMEOUT`: how long `IntelEventEnded` waits for a subtitle that never
+    /// reports its end.
+    pub submessage_safety_timeout: f32,
+    /// `BaseFleetStrengthForLevel` per mission (low, high).
+    pub base_fleet_strength: Vec<(u32, f32, f32)>,
+}
+
+impl Default for SpTweaks {
+    fn default() -> Self {
+        SpTweaks {
+            clipt_neg_thresh: -0.4,
+            clipt_neg_scalar: 0.33,
+            clipt_neg_finish: 0.9,
+            clipt_pos_thresh: 0.5,
+            clipt_pos_scalar: 0.5,
+            clipt_pos_start: 1.0,
+            slice_rate: 0.075,
+            mothership_always_arrives_first: true,
+            base_waittime: 3.0,
+            base_arrivetime: 2.0,
+            base_mothership_arrivetime: 1.0,
+            random_waittime: 0.2,
+            decelerate_time: 3.0,
+            starting_rus: 200,
+            submessage_safety_timeout: 15.0,
+            base_fleet_strength: Vec::new(),
+        }
+    }
+}
+
+impl SpTweaks {
+    /// Defaults overlaid with `singleplayer.script`.
+    pub fn load(src: &dyn DataSource) -> Self {
+        use crate::statics::cscan::{parse_bool, scan, scan_f32, scan_i32, Scanned};
+        let mut t = SpTweaks::default();
+        let Some(lines) = level::read_lines(src, "singleplayer.script") else { return t };
+        for (k, v) in lines {
+            let f = |dst: &mut f32| {
+                if let Some(x) = scan_f32(&v) {
+                    *dst = x;
+                }
+            };
+            match k.to_ascii_uppercase().as_str() {
+                "HS_CLIPT_NEG_THRESH" => f(&mut t.clipt_neg_thresh),
+                "HS_CLIPT_NEG_SCALAR" => f(&mut t.clipt_neg_scalar),
+                "HS_CLIPT_NEG_FINISH" => f(&mut t.clipt_neg_finish),
+                "HS_CLIPT_POS_THRESH" => f(&mut t.clipt_pos_thresh),
+                "HS_CLIPT_POS_SCALAR" => f(&mut t.clipt_pos_scalar),
+                "HS_CLIPT_POS_START" => f(&mut t.clipt_pos_start),
+                "HYPERSPACE_SLICE_RATE" => f(&mut t.slice_rate),
+                "HYPERSPACE_MOTHERSHIP_ALWAYS_ARRIVES_FIRST" => t.mothership_always_arrives_first = parse_bool(&v),
+                "HYPERSPACE_BASE_WAITTIME" => f(&mut t.base_waittime),
+                "HYPERSPACE_BASE_ARRIVETIME" => f(&mut t.base_arrivetime),
+                "HYPERSPACE_BASE_MOTHERSHIPARRIVETIME" => f(&mut t.base_mothership_arrivetime),
+                "HYPERSPACE_RANDOM_WAITTIME" => f(&mut t.random_waittime),
+                "HYPERSPACE_DECELERATE_TIME" => f(&mut t.decelerate_time),
+                "SUBMESSAGE_SAFETY_TIMEOUT" => f(&mut t.submessage_safety_timeout),
+                "SINGLEPLAYER_STARTINGRUS" => {
+                    if let Some(x) = scan_i32(&v) {
+                        t.starting_rus = x;
+                    }
+                }
+                "BASEFLEETSTRENGTHFORLEVEL" => {
+                    let s = scan(&v, "%d %f %f");
+                    if let (Some(Scanned::Int(l)), Some(Scanned::Float(a)), Some(Scanned::Float(b))) = (s.first(), s.get(1), s.get(2)) {
+                        t.base_fleet_strength.push((*l as u32, *a, *b));
+                    }
+                }
+                _ => {}
+            }
+        }
+        t
+    }
+}
+
+/// Choices for a headless run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MissionConfig {
+    /// The mission number (1..17).
+    pub mission: u32,
+    /// `MissionSkillGet` (the single-player difficulty, 0x88a0d8; the game's default is 2).
+    pub skill: i32,
+    /// How long a requested NISlet "plays" before it counts as finished (0: at once).
+    pub nislet_seconds: f32,
+    /// When set, a speech event ends after this many seconds (standing in for the subtitle that
+    /// reports the end of an intel event); otherwise only the safety timeout ends it, as in the
+    /// original with no subtitles drawn.
+    pub speech_seconds: Option<f32>,
+    /// Record every KAS runtime call in the log.
+    pub log_calls: bool,
+}
+
+impl MissionConfig {
+    pub fn new(mission: u32) -> Self {
+        MissionConfig { mission, skill: 2, nislet_seconds: 0.0, speech_seconds: None, log_calls: true }
+    }
+}
+
+/// What a log line records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogKind {
+    /// Level loading, NIS skips, hyperspace, single-player state changes.
+    Flow,
+    /// A team entered a state or got an FSM.
+    State,
+    /// Objectives created, destroyed, completed.
+    Objective,
+    /// A KAS runtime call.
+    Call,
+    /// A runtime function the host does not implement yet (logged once per call).
+    Unimplemented,
+    /// A warning from the interpreter or the host.
+    Warning,
+}
+
+/// One log line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LogEntry {
+    /// `univUpdateCounter` when it happened.
+    pub frame: u32,
+    /// Game time.
+    pub time: f32,
+    pub kind: LogKind,
+    pub text: String,
+}
+
+impl fmt::Display for LogEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{:6} {:8.3}s] {:?}: {}", self.frame, self.time, self.kind, self.text)
+    }
+}
+
+/// A mission objective (`Objective`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Objective {
+    pub label: String,
+    pub brief: String,
+    pub full: String,
+    pub primary: bool,
+    pub complete: bool,
+}
+
+/// A ship of the player's fleet travelling in hyperspace between levels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FleetShip {
+    pub ship_type: ShipType,
+    /// Offset from the mothership when the fleet left (ship info +0x2c..+0x34).
+    pub offset: Vector,
+    /// Ships docked inside it (launched on arrival).
+    pub docked: Vec<ShipType>,
+    /// A module that rides on the mothership.
+    pub module: bool,
+}
+
+/// A ship on its way in from hyperspace (`UpdateArrivingShip`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArrivingShip {
+    pub ship_type: ShipType,
+    /// The ship, once it is back in the universe.
+    pub ship: Option<ShipId>,
+    pub offset: Vector,
+    /// `shipHyperspaceState`.
+    pub state: u32,
+    /// `timeToHyperspace` (+0x24).
+    pub time: f32,
+    /// `hsState`, `clipt` (+0x38), rate (+0x3c), `hsFlags` (+0x44).
+    pub hs_state: u32,
+    pub clipt: f32,
+    pub rate: f32,
+    pub hs_flags: u32,
+    pub mothership: bool,
+    pub clamped_to_mothership: bool,
+    pub docked: Vec<ShipType>,
+}
+
+/// Camera state the KAS camera functions read and write.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CameraState {
+    pub angle: f32,
+    pub declination: f32,
+    pub distance: f32,
+    pub focus: Vec<ShipId>,
+    pub scripted: bool,
+}
+
+/// Game-side state of a running mission (everything but the universe and the interpreter).
+#[derive(Debug, Clone)]
+pub struct Game {
+    pub config: MissionConfig,
+    pub sp_tweaks: SpTweaks,
+    pub level: LevelState,
+    /// Named KAS selections (`SHIPS_x`), in creation order.
+    pub selections: Vec<(Hash, Vec<ShipId>)>,
+    pub objectives: Vec<Objective>,
+    pub pings: Vec<String>,
+    pub pointers: Vec<String>,
+    pub tut_flags: Vec<String>,
+    /// The sensors manager is open (0x900620) and the KAS sensors flag (0x900608).
+    pub sensors_open: bool,
+    pub sensors_kas_flag: i32,
+    pub sensors_look_at: Vector,
+    pub wide_screen: bool,
+    pub camera: CameraState,
+    pub music: Option<i32>,
+    pub techs: Vec<String>,
+    pub research_allowed: Vec<String>,
+    pub construction: Vec<(String, String, i32)>,
+    /// `player->resourceUnits` per player.
+    pub resource_units: Vec<i32>,
+    pub pending_save: Option<(i32, String)>,
+    pub mission_failed: bool,
+    pub delete_when_mission_ends: Vec<ShipId>,
+    /// Repair modifiers set by KAS (+0x3dc), by ship.
+    pub repair_modifiers: Vec<(ShipId, f32)>,
+    /// Ships docked inside another ship by KAS (`DockInstant`, `ShipsCreateLaunch`): (ship, host).
+    pub docked: Vec<(ShipId, ShipId)>,
+    /// 0x91b324: the last intel event (subtitle) has ended.
+    pub intel_ended: bool,
+    /// 0x8e9dd0: when `IntelEventEnded` started waiting without a subtitle.
+    pub intel_stamp: f32,
+    /// When the current speech event ends ([`MissionConfig::speech_seconds`]).
+    pub speech_end: Option<f32>,
+    /// Single-player state machine.
+    pub sp_state: u32,
+    /// The player's fleet in hyperspace.
+    pub fleet: Vec<FleetShip>,
+    pub arriving: Vec<ArrivingShip>,
+    /// A NISlet "playing": (number, finish time).
+    pub nislet: Option<(i32, f32)>,
+    pub ships_have_arrived: bool,
+    /// Label names for the log (team labels from the level, names from the mission IR).
+    pub names: std::collections::HashMap<Hash, String>,
+    pub log: Vec<LogEntry>,
+    pub(crate) frame: u32,
+    pub(crate) time: f32,
+}
+
+impl Game {
+    pub fn name(&self, h: Hash) -> String {
+        self.names.get(&(h & !hwc_kas::GLOBAL_FLAG)).cloned().unwrap_or_else(|| format!("#{h:08x}"))
+    }
+
+    pub fn log(&mut self, kind: LogKind, text: impl Into<String>) {
+        let text = text.into();
+        self.log.push(LogEntry { frame: self.frame, time: self.time, kind, text });
+    }
+
+    /// The selection with this label, created empty on first use (`kasGrowSelectionPtr`).
+    pub fn selection_mut(&mut self, h: Hash) -> &mut Vec<ShipId> {
+        let i = match self.selections.iter().position(|s| s.0 == h) {
+            Some(i) => i,
+            None => {
+                self.selections.push((h, Vec::new()));
+                self.selections.len() - 1
+            }
+        };
+        &mut self.selections[i].1
+    }
+
+    pub fn selection(&self, h: Hash) -> Option<&Vec<ShipId>> {
+        self.selections.iter().find(|s| s.0 == h).map(|s| &s.1)
+    }
+
+    pub fn objective(&self, label: &str) -> Option<&Objective> {
+        self.objectives.iter().find(|o| o.label.eq_ignore_ascii_case(label))
+    }
+
+    /// A ship left the universe: out of every selection (`kasShipDied`) and team
+    /// (`aitShipDied`), swapping the last entry into its place as the original does.
+    pub fn ship_removed(&mut self, id: ShipId) {
+        for (_, s) in &mut self.selections {
+            swap_remove_all(s, id);
+        }
+        for t in &mut self.level.teams {
+            swap_remove_all(&mut t.ships, id);
+        }
+        self.level.clamps.retain(|&(m, h)| m != id && h != id);
+        for m in &mut self.level.motherships {
+            if *m == Some(id) {
+                *m = None;
+            }
+        }
+        self.docked.retain(|&(s, h)| s != id && h != id);
+        self.delete_when_mission_ends.retain(|&s| s != id);
+    }
+}
+
+/// `growSelectRemoveShip` / `clRemoveTargetFromSelection`: remove every occurrence, moving the
+/// last entry into the hole.
+pub fn swap_remove_all(v: &mut Vec<ShipId>, id: ShipId) -> bool {
+    let mut found = false;
+    let mut i = 0;
+    while i < v.len() {
+        if v[i] == id {
+            v.swap_remove(i);
+            found = true;
+        } else {
+            i += 1;
+        }
+    }
+    found
+}
+
+/// Why a mission could not start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissionError(pub String);
+
+impl fmt::Display for MissionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MissionError {}
+
+impl From<LevelError> for MissionError {
+    fn from(e: LevelError) -> Self {
+        MissionError(e.0)
+    }
+}
+
+/// The player's fleet after the opening NIS of the campaign (`nis\n01.nis` with its
+/// `.script`): every Somtaaw ship path the script keeps at the end (`remainAtEnd`). When the
+/// level changes, ships that are not capital ships or modules go inside the mothership; the
+/// mothership (with its modules, and in mission 1 the docking bay the NIS adds) goes into
+/// hyperspace.
+pub fn opening_nis_fleet(src: &dyn DataSource, statics: &StaticWorld, mission: u32) -> Result<Vec<FleetShip>, MissionError> {
+    let nis_bytes = src.read("nis\\n01.nis").ok_or_else(|| MissionError("nis\\n01.nis not found".into()))?;
+    let nis = Nis::parse(&nis_bytes).map_err(|e| MissionError(format!("n01.nis: {e:?}")))?;
+    let script_bytes = src.read("nis\\n01.script").ok_or_else(|| MissionError("nis\\n01.script not found".into()))?;
+    let script = NisScript::parse_bytes(&script_bytes).map_err(|e| MissionError(format!("n01.script: {e:?}")))?;
+    let mut remain: Vec<String> = Vec::new();
+    for e in &script.events {
+        if e.keyword.eq_ignore_ascii_case("remainAtEnd") {
+            if let Some(o) = &e.object {
+                remain.push(object_key(o));
+            }
+        }
+    }
+    let mut kept: Vec<ShipType> = Vec::new();
+    for path in &nis.objects {
+        let ObjectCategory::Ship(race) = path.category() else { continue };
+        if race != ShipRace::Somtaaw.index() as u32 {
+            continue;
+        }
+        if !remain.contains(&object_key(&path.name)) {
+            continue;
+        }
+        if let Some(t) = ShipType::from_name(path.base_name()) {
+            kept.push(t);
+        }
+    }
+    let mut fleet = Vec::new();
+    let mut docked = Vec::new();
+    for t in kept {
+        let stat = statics.ship(t);
+        let capital = stat.is_some_and(|s| s.is_capital_ship || s.ship_class == Some(ShipClass::Component));
+        if t == ShipType::sMothership {
+            fleet.push(FleetShip { ship_type: t, offset: Vector::ZERO, docked: Vec::new(), module: false });
+            // (The mission modules come with the mothership: `univCreateShip` creates them.)
+            if mission == 1 {
+                fleet.push(FleetShip { ship_type: ShipType::sMothershipDockingBay, offset: Vector::ZERO, docked: Vec::new(), module: true });
+            }
+        } else if capital {
+            fleet.push(FleetShip { ship_type: t, offset: Vector::ZERO, docked: Vec::new(), module: false });
+        } else {
+            docked.push(t);
+        }
+    }
+    match fleet.iter_mut().find(|f| f.ship_type == ShipType::sMothership) {
+        Some(ms) => ms.docked = docked,
+        None => return Err(MissionError("opening NIS has no mothership".into())),
+    }
+    Ok(fleet)
+}
+
+/// A running mission: the universe, the KAS interpreter and the game-side state.
+#[derive(Debug, Clone)]
+pub struct MissionRun {
+    pub universe: Universe,
+    pub kas: Interpreter,
+    pub game: Game,
+}
+
+impl MissionRun {
+    /// Sets up mission `config.mission` from `src` with the mission script `script`: the
+    /// player's fleet (from the opening NIS for mission 1) goes into hyperspace and the level is
+    /// loaded; the KAS mission starts on the first [`step`](Self::step).
+    pub fn start(
+        statics: Arc<StaticWorld>,
+        tweaks: SimTweaks,
+        src: &dyn DataSource,
+        script: KasMission,
+        config: MissionConfig,
+    ) -> Result<Self, MissionError> {
+        let mission = config.mission;
+        let fleet = if mission == 1 {
+            opening_nis_fleet(src, &statics, mission)?
+        } else {
+            return Err(MissionError(format!("mission {mission}: carrying a fleet over from the previous mission is not implemented")));
+        };
+        let mut universe = Universe::new(statics.clone(), tweaks, &[ShipRace::Somtaaw, ShipRace::Taiidan]);
+        universe.single_player = true;
+        universe.sp_difficulty = config.skill.max(0) as u32;
+        let sp_tweaks = SpTweaks::load(src);
+
+        let mut game = Game {
+            config,
+            sp_tweaks,
+            level: LevelState::default(),
+            selections: Vec::new(),
+            objectives: Vec::new(),
+            pings: Vec::new(),
+            pointers: Vec::new(),
+            tut_flags: Vec::new(),
+            sensors_open: false,
+            sensors_kas_flag: 0,
+            sensors_look_at: Vector::ZERO,
+            wide_screen: false,
+            camera: CameraState::default(),
+            music: None,
+            techs: Vec::new(),
+            research_allowed: Vec::new(),
+            construction: Vec::new(),
+            resource_units: vec![0; 2],
+            pending_save: None,
+            mission_failed: false,
+            delete_when_mission_ends: Vec::new(),
+            repair_modifiers: Vec::new(),
+            docked: Vec::new(),
+            intel_ended: false,
+            intel_stamp: 0.0,
+            speech_end: None,
+            sp_state: sp_state::NONE,
+            fleet,
+            arriving: Vec::new(),
+            nislet: None,
+            ships_have_arrived: false,
+            names: script.names.iter().map(|(h, n)| (*h, n.clone())).collect(),
+            log: Vec::new(),
+            frame: 0,
+            time: 0.0,
+        };
+        game.log(LogKind::Flow, format!("mission {mission}: opening NIS skipped (nis\\n01.nis); fleet in hyperspace: {}", fleet_summary(&game.fleet)));
+
+        // singlePlayerLoadNewLevel: the fleet strength scales the level (0 for mission 1).
+        let fleet_modifier = fleet_modifier(&game, &statics, mission);
+        let ctx = LevelContext { single_player: true, mission, fleet_modifier, resources: ResourceTweaks::load(src) };
+        let (dir, file) = level::mission_paths(mission, None);
+        game.log(LogKind::Flow, format!("loading {dir}{file} (fleet modifier {fleet_modifier})"));
+        level::load_level(&mut universe, src, &dir, &file, &ctx, &mut game.level)?;
+        // clPresetShipsToPosition after the level is in.
+        level::preset_ships_to_position(&mut universe);
+        for w in game.level.warnings.clone() {
+            game.log(LogKind::Warning, w);
+        }
+        for (h, n) in game.level.names.clone() {
+            game.names.entry(h).or_insert(n);
+        }
+        let ships = universe.ship_list.len();
+        let teams = game.level.teams.len();
+        game.log(
+            LogKind::Flow,
+            format!(
+                "level loaded: {ships} ships, {teams} KAS teams, {} points, {} volumes, {} paths, {} resources, {} derelicts",
+                game.level.points.len(),
+                game.level.volumes.len(),
+                game.level.paths.len(),
+                game.level.resources.len(),
+                game.level.derelicts.len()
+            ),
+        );
+        // levelInit's single-player starting RUs are replaced by the mission's own RUsSet.
+        game.resource_units = game.level.resource_units.clone();
+        if game.resource_units.len() < 2 {
+            game.resource_units.resize(2, 0);
+        }
+
+        let mut kas = Interpreter::new(script);
+        for t in &game.level.teams {
+            kas.register_team(t.label);
+        }
+        // singlePlayerNisStoppedCB sets the state that starts the KAS mission next frame.
+        game.sp_state = sp_state::START_KAS;
+        Ok(MissionRun { universe, kas, game })
+    }
+
+    /// One universe update with the single-player and KAS work in their places.
+    pub fn step(&mut self) {
+        let MissionRun { universe, kas, game } = self;
+        let mut hooks = Hooks { kas, game };
+        universe.update_with(&mut hooks);
+        // Ships that died this update leave KAS selections and teams.
+        let dead: Vec<ShipId> = universe.events.iter().filter_map(|e| if let SimEvent::ShipDied { ship, .. } = e { Some(*ship) } else { None }).collect();
+        for id in dead {
+            game.ship_removed(id);
+        }
+        level::update_clamped(universe, &game.level);
+    }
+
+    /// Runs `n` updates.
+    pub fn run(&mut self, n: u32) {
+        for _ in 0..n {
+            self.step();
+        }
+    }
+
+    /// The current state hash of a team, by label name.
+    pub fn team_state(&self, team: &str) -> Option<Hash> {
+        self.kas.team(kas_hash(team)).and_then(|t| t.state)
+    }
+
+    /// A KAS variable (`team` `None` for mission scope; `G_` names are global).
+    pub fn var(&self, team: Option<&str>, name: &str) -> Option<i32> {
+        self.kas.var(team.map(kas_hash), var_hash(name))
+    }
+}
+
+fn fleet_summary(fleet: &[FleetShip]) -> String {
+    fleet
+        .iter()
+        .map(|f| if f.docked.is_empty() { f.ship_type.to_string() } else { format!("{} (+{} docked)", f.ship_type, f.docked.len()) })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `spFleetModifier` from `BaseFleetStrengthForLevel`: where the fleet's build cost plus RUs
+/// falls between the mission's two thresholds.
+fn fleet_modifier(game: &Game, statics: &StaticWorld, mission: u32) -> f32 {
+    let Some(&(_, lo, hi)) = game.sp_tweaks.base_fleet_strength.iter().find(|b| b.0 == mission) else { return 0.0 };
+    if lo == 0.0 || hi <= lo {
+        return 0.0;
+    }
+    let mut total = 0.0f32;
+    for f in &game.fleet {
+        let cost = |t: ShipType| statics.ship(t).filter(|s| s.ship_class != Some(ShipClass::Mothership)).map_or(0.0, |s| s.build_cost as f32);
+        total = st(ld(total) + ld(cost(f.ship_type)));
+        for &d in &f.docked {
+            total = st(ld(total) + ld(cost(d)));
+        }
+    }
+    total = st(ld(game.resource_units.first().copied().unwrap_or(0) as f32) + ld(total));
+    if total <= lo {
+        0.0
+    } else if total < hi {
+        st((ld(total) - ld(lo)) / (ld(hi) - ld(lo))).clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+/// The parts of the frame the mission adds to `univUpdate`.
+struct Hooks<'a> {
+    kas: &'a mut Interpreter,
+    game: &'a mut Game,
+}
+
+impl crate::universe::UpdateHooks for Hooks<'_> {
+    fn before_bullet_collisions(&mut self, u: &mut Universe) {
+        self.game.frame = u.update_counter;
+        self.game.time = u.total_time_elapsed;
+        single_player_update(u, self.kas, self.game);
+    }
+
+    fn computer_players(&mut self, u: &mut Universe) {
+        // aiplayerUpdateAll: KAS is skipped while a hyperspace transition is in progress.
+        let state = self.game.sp_state;
+        if state != sp_state::NONE && state != sp_state::KAS_STARTED {
+            return;
+        }
+        if kas_frame_due(u.update_counter, SP_KAS_UPDATE_RATE, 0) {
+            let mut host = crate::kas_host::SimHost { u, g: self.game };
+            self.kas.execute(&mut host);
+        }
+    }
+}
+
+/// The start-point the player's fleet arrives at (`StartPointPlayer`), or the origin.
+fn start_point(game: &Game) -> [f32; 4] {
+    game.level.point(kas_hash("StartPointPlayer")).unwrap_or([0.0; 4])
+}
+
+/// `singlePlayerGameUpdate` (0x5148f0), the parts that run before the mission's exit.
+fn single_player_update(u: &mut Universe, kas: &mut Interpreter, game: &mut Game) {
+    // G_PlayNis / G_PlayNislet requests (variables at mission scope, destroyed when seen).
+    if let Some(n) = kas.remove_var(None, var_hash("G_PlayNis")) {
+        if n != 0 {
+            game.log(LogKind::Flow, format!("NIS {n} requested: not played (counts as finished)"));
+            kas.set_var(None, var_hash(&format!("G_Nis{n}Complete")), 1);
+        }
+    }
+    if let Some(n) = kas.var(None, var_hash("G_PlayNislet")) {
+        kas.remove_var(None, var_hash("G_PlayNislet"));
+        if n != 0 {
+            let until = st(ld(u.total_time_elapsed) + ld(game.config.nislet_seconds));
+            game.log(LogKind::Flow, format!("NISlet {n} of mission {} requested: not played (finishes at {until:.3}s)", game.config.mission));
+            game.nislet = Some((n, until));
+        }
+    }
+    if let Some((n, until)) = game.nislet {
+        if !(u.total_time_elapsed < until) {
+            game.nislet = None;
+            kas.set_var(None, var_hash(&format!("G_Nislet{n}Complete")), 1);
+            game.log(LogKind::Flow, format!("NISlet {n} finished: G_Nislet{n}Complete = 1"));
+        }
+    }
+
+    match game.sp_state {
+        sp_state::START_KAS => {
+            game.sp_state = sp_state::KAS_STARTED;
+            game.log(LogKind::Flow, format!("kasMissionStart(\"mission{:02}\")", game.config.mission));
+            let mut host = crate::kas_host::SimHost { u, g: game };
+            kas.start(&mut host);
+        }
+        sp_state::ARRIVING => arrival_update(u, kas, game),
+        _ => {}
+    }
+}
+
+/// `kasfStartLevelByHyperspacingShips`: the player's fleet comes in from hyperspace (state 9;
+/// the ships re-enter the universe on the next single-player update).
+pub(crate) fn begin_arrival(game: &mut Game) {
+    game.sp_state = sp_state::ARRIVING;
+    game.log(LogKind::Flow, "hyperspacing ships in (state 9)");
+    let fleet = std::mem::take(&mut game.fleet);
+    for f in fleet {
+        let mothership = f.ship_type == ShipType::sMothership;
+        game.arriving.push(ArrivingShip {
+            ship_type: f.ship_type,
+            ship: None,
+            offset: f.offset,
+            state: ship_hs::INITIAL,
+            time: 0.0,
+            hs_state: hs_effect::INACTIVE,
+            clipt: 0.0,
+            rate: 0.0,
+            hs_flags: 0,
+            mothership,
+            clamped_to_mothership: f.module,
+            docked: f.docked,
+        });
+    }
+}
+
+/// The arrival branch of `singlePlayerGameUpdate` state 9 (fade-in table entry 0): every
+/// arriving ship steps through `UpdateArrivingShip`; when all are in, `G_ShipsHaveArrived`.
+fn arrival_update(u: &mut Universe, kas: &mut Interpreter, game: &mut Game) {
+    let sp = start_point(game);
+    let mut all = true;
+    for i in 0..game.arriving.len() {
+        let done = update_arriving_ship(u, game, i, sp);
+        all &= done;
+    }
+    if !all {
+        return;
+    }
+    kas.set_var(None, var_hash("G_ShipsHaveArrived"), 1);
+    game.ships_have_arrived = true;
+    game.sp_state = sp_state::NONE;
+    game.log(LogKind::Flow, "all ships arrived: G_ShipsHaveArrived = 1 (state 0)");
+    let arrived = std::mem::take(&mut game.arriving);
+    // clAutoLaunch / LaunchAllInternalShipsOfPlayerThatMustBeLaunched: the ships that
+    // travelled docked come out.
+    for a in &arrived {
+        let Some(host) = a.ship else { continue };
+        for (k, &t) in a.docked.iter().enumerate() {
+            launch_new_ship(u, game, t, host, k);
+        }
+    }
+}
+
+/// Puts a ship that travelled docked next to its host (the launch manoeuvre itself is not
+/// modelled).
+fn launch_new_ship(u: &mut Universe, game: &mut Game, t: ShipType, host: ShipId, k: usize) {
+    let Some(h) = u.ships.get(host) else { return };
+    let (pos, coordsys) = (h.posinfo.position, h.rotinfo.coordsys);
+    let r = u.statics.ship(h.ship_type).map_or(0.0, |s| s.header.coll.coll_sphere_size);
+    let side = if k.is_multiple_of(2) { 1.0 } else { -1.0 };
+    let along = (k / 2) as f32 * 200.0;
+    let offset = coordsys.col(1).scale(side * r) + coordsys.col(2).scale(along);
+    match u.add_ship(t, HUMAN_PLAYER, pos + offset, None) {
+        Ok(id) => {
+            if let Some(s) = u.ships.get_mut(id) {
+                s.rotinfo.coordsys = coordsys;
+            }
+            game.log(LogKind::Flow, format!("{t} launched from {} as ship {}", u.ships.ship(host).ship_type, id.0));
+        }
+        Err(e) => game.log(LogKind::Warning, format!("{t}: {e}")),
+    }
+}
+
+/// `UpdateArrivingShip` (0x513340). Returns true once the ship is fully in.
+fn update_arriving_ship(u: &mut Universe, game: &mut Game, i: usize, sp: [f32; 4]) -> bool {
+    let now = u.total_time_elapsed;
+    let tw = game.sp_tweaks.clone();
+    if game.arriving[i].ship.is_none() {
+        // The ship re-enters the universe (in the original it kept its identity in the
+        // hyperspace list; here it is created now and gets the next ship number).
+        let t = game.arriving[i].ship_type;
+        match u.add_ship(t, HUMAN_PLAYER, Vector::ZERO, None) {
+            Ok(id) => {
+                game.arriving[i].ship = Some(id);
+                if game.arriving[i].mothership {
+                    if game.level.motherships.is_empty() {
+                        game.level.motherships.push(None);
+                    }
+                    game.level.motherships[HUMAN_PLAYER] = Some(id);
+                } else if game.arriving[i].clamped_to_mothership {
+                    if let Some(ms) = game.arriving.iter().find(|o| o.mothership).and_then(|o| o.ship) {
+                        level::attach_module(u, &mut game.level, id, ms);
+                    }
+                }
+            }
+            Err(e) => {
+                game.log(LogKind::Warning, format!("{t}: {e}"));
+                game.arriving[i].state = 0;
+                return true;
+            }
+        }
+    }
+    let a = game.arriving[i].clone();
+    let id = a.ship.expect("arriving ship exists");
+    if let Some(s) = u.ships.get_mut(id) {
+        s.autostabilize_ship = false;
+        s.ship_idle = false;
+    }
+    match a.state {
+        ship_hs::INITIAL => {
+            let rot = st(ld(sp[3]) * ld(level::DEG_TO_RAD));
+            let m = Matrix::rot_about_z(st(fcos(ld(rot))), st(fsin(ld(rot))));
+            let o = m.mul_vec(Vector::new(a.offset.x, -a.offset.y, a.offset.z));
+            let p = Vector::new(st(ld(o.x) + ld(sp[0])), st(ld(o.y) + ld(sp[1])), st(ld(o.z) + ld(sp[2])));
+            put_ship_outside_at(u, id, p, rot);
+            let wait = if a.mothership || a.clamped_to_mothership {
+                st(ld(tw.base_waittime) + ld(tw.base_waittime))
+            } else {
+                let r = u.randy.random(RAN_GAME);
+                st(ld(tw.base_waittime) * 3.0 + ld(tw.random_waittime) * 2.328_306_4e-10 * fild_u32(r))
+            };
+            game.arriving[i].state = ship_hs::WAITING;
+            game.arriving[i].time = st(ld(now) + ld(wait));
+            if let Some(s) = u.ships.get_mut(id) {
+                s.flags &= !sof::HYPERSPACE;
+                s.flags |= sof::HIDE;
+            }
+            false
+        }
+        ship_hs::WAITING => {
+            if !(a.time < now) {
+                return false;
+            }
+            if let Some(s) = u.ships.get_mut(id) {
+                s.posinfo.velocity = Vector::ZERO;
+                s.flags &= !sof::HIDE;
+            }
+            let a = &mut game.arriving[i];
+            a.state = ship_hs::DECELERATING;
+            a.time = st(ld(tw.decelerate_time) + ld(now));
+            // hsStart(ship, HYPERSPACE_SLICE_RATE, arriving)
+            a.rate = tw.slice_rate;
+            a.clipt = 1.0;
+            a.hs_state = hs_effect::POPUP_OUTOF;
+            false
+        }
+        ship_hs::DECELERATING => {
+            match a.hs_state {
+                hs_effect::INACTIVE => {
+                    a.time < now
+                }
+                hs_effect::SLICING_OUTOF => {
+                    // Wait while another capital ship is still popping out or done.
+                    let others = game.arriving.iter().enumerate().any(|(j, o)| j != i && (o.hs_state == hs_effect::POPUP_OUTOF || o.hs_state == hs_effect::FINISHED));
+                    if !others {
+                        hs_update(&mut game.arriving[i], &tw);
+                    }
+                    false
+                }
+                hs_effect::COLLAPSE_OUTOF => {
+                    // The mothership collapses last (HYPERSPACE_MOTHERSHIP_ALWAYS_ARRIVES_FIRST
+                    // only affects the timing above).
+                    let waiting = a.mothership && game.arriving.iter().enumerate().any(|(j, o)| j != i && o.hs_state != hs_effect::INACTIVE);
+                    if !waiting {
+                        hs_update(&mut game.arriving[i], &tw);
+                    }
+                    false
+                }
+                _ => {
+                    hs_update(&mut game.arriving[i], &tw);
+                    false
+                }
+            }
+        }
+        _ => false,
+    }
+}
+
+/// `PutShipOutsideAt`: back in the universe at `p` with the default orientation turned by `yaw`.
+fn put_ship_outside_at(u: &mut Universe, id: ShipId, p: Vector, yaw: f32) {
+    if let Some(s) = u.ships.get_mut(id) {
+        s.flags &= !sof::HIDE;
+        s.posinfo.position = p;
+        s.posinfo.velocity = Vector::ZERO;
+        s.rotinfo.coordsys = DEFAULT_SHIP_MATRIX;
+    }
+    level::rotate_yaw(u, id, yaw);
+}
+
+/// `hsUpdate` (the hyperspace effect's clip plane and state changes).
+fn hs_update(a: &mut ArrivingShip, tw: &SpTweaks) {
+    let s = a.hs_state;
+    if s == hs_effect::INACTIVE || s == hs_effect::FINISHED {
+        return;
+    }
+    let limit: f64 = match s {
+        hs_effect::POPUP_INTO | hs_effect::POPUP_OUTOF | hs_effect::COLLAPSE_INTO | hs_effect::COLLAPSE_OUTOF => {
+            a.clipt = st(ld(a.clipt) - ld(a.rate) * 2.5);
+            0.0
+        }
+        _ => {
+            let k = if 0.0 <= a.clipt {
+                if tw.clipt_pos_thresh <= a.clipt {
+                    tw.clipt_pos_start
+                } else {
+                    tw.clipt_pos_scalar
+                }
+            } else if a.clipt <= tw.clipt_neg_thresh {
+                tw.clipt_neg_finish
+            } else {
+                tw.clipt_neg_scalar
+            };
+            a.clipt = st(ld(a.clipt) - ld(st(ld(a.rate) * ld(k))));
+            -1.0
+        }
+    };
+    if !(ld(a.clipt) < limit) {
+        return;
+    }
+    if a.hs_flags & 1 != 0 {
+        a.clipt = limit as f32;
+        return;
+    }
+    a.clipt = 1.0;
+    a.hs_state = match s {
+        hs_effect::POPUP_INTO => hs_effect::SLICING_INTO,
+        hs_effect::POPUP_OUTOF => hs_effect::SLICING_OUTOF,
+        hs_effect::SLICING_INTO => hs_effect::COLLAPSE_INTO,
+        hs_effect::SLICING_OUTOF => hs_effect::COLLAPSE_OUTOF,
+        _ => {
+            a.clipt = -2.0;
+            a.rate = 0.0;
+            if s == hs_effect::COLLAPSE_INTO {
+                hs_effect::FINISHED
+            } else {
+                hs_effect::INACTIVE
+            }
+        }
+    };
+}
+
+/// The game's files through [`hwc_formats::gamedata::GameData`] as a [`DataSource`].
+pub struct GameDataSource<'a>(pub &'a hwc_formats::gamedata::GameData);
+
+impl DataSource for GameDataSource<'_> {
+    fn read(&self, path: &str) -> Option<Vec<u8>> {
+        self.0.read(path).ok().flatten()
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        self.0.contains(path)
+    }
+}
+
+/// The KAS script of a mission (`"Mission01"`, `"Tutorial1"`): the imported `.kasb` of a data
+/// directory, else extracted from the install's `cataclysm.exe`.
+pub fn load_kas_mission(gd: &hwc_formats::gamedata::GameData, name: &str) -> Result<KasMission, MissionError> {
+    if let Some(bytes) = gd.mission_ir(name).map_err(|e| MissionError(format!("{name}: {e}")))? {
+        return hwc_kas::binary::decode(&bytes).map_err(|e| MissionError(format!("{name}.kasb: {e}")));
+    }
+    let exe = gd.exe_path().ok_or_else(|| MissionError(format!("{name}: no imported mission and no cataclysm.exe to extract it from")))?;
+    let bytes = std::fs::read(&exe).map_err(|e| MissionError(format!("{}: {e}", exe.display())))?;
+    let all = hwc_kas::extract::extract_each(&bytes).map_err(|e| MissionError(format!("extracting missions: {e}")))?;
+    for m in all.into_iter().flatten() {
+        if m.name.eq_ignore_ascii_case(name) {
+            return Ok(m);
+        }
+    }
+    Err(MissionError(format!("{name}: not found in {}", exe.display())))
+}
+
+/// The mission's script name for a mission number (`Mission01`).
+pub fn mission_script_name(mission: u32) -> String {
+    format!("Mission{mission:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hs_effect_runs_popup_slice_collapse() {
+        let tw = SpTweaks { slice_rate: 0.025, ..SpTweaks::default() };
+        let mut a = ArrivingShip {
+            ship_type: ShipType::sMothership,
+            ship: None,
+            offset: Vector::ZERO,
+            state: ship_hs::DECELERATING,
+            time: 0.0,
+            hs_state: hs_effect::POPUP_OUTOF,
+            clipt: 1.0,
+            rate: 0.025,
+            hs_flags: 0,
+            mothership: false,
+            clamped_to_mothership: false,
+            docked: Vec::new(),
+        };
+        let mut seen = vec![a.hs_state];
+        for _ in 0..1000 {
+            hs_update(&mut a, &tw);
+            if *seen.last().unwrap() != a.hs_state {
+                seen.push(a.hs_state);
+            }
+            if a.hs_state == hs_effect::INACTIVE {
+                break;
+            }
+        }
+        assert_eq!(seen, vec![hs_effect::POPUP_OUTOF, hs_effect::SLICING_OUTOF, hs_effect::COLLAPSE_OUTOF, hs_effect::INACTIVE]);
+    }
+
+    #[test]
+    fn swap_remove_matches_the_original() {
+        let mut v = vec![ShipId(1), ShipId(2), ShipId(3), ShipId(2), ShipId(4)];
+        assert!(swap_remove_all(&mut v, ShipId(2)));
+        assert_eq!(v, vec![ShipId(1), ShipId(4), ShipId(3)]);
+    }
+}

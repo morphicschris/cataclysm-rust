@@ -1,4 +1,4 @@
-# Run-time simulation (`hwc_sim` universe: movement and combat)
+# Run-time simulation (`hwc_sim` universe: movement, combat and base building)
 
 Ships exist in a universe, take move, formation, attack and halt orders, fly them with the
 original's AI and physics at 16 Hz, bump into each other, fire guns, hit, damage and destroy
@@ -29,6 +29,9 @@ Ghidra p-code emulation of the original functions on constructed inputs, compare
 | `collCheckRectLine` | 0x4359e0 | 48 rays against those boxes (hit distance and face; 30 hits) |
 | `gunOrientGimbleGun` | 0x485c10 | 8 gimbal guns (result and barrel heading; uses `aishipGetTrajectoryWithVelPrediction`) |
 | fixed-gun hit check | 0x488360 | 8 (result) |
+| `dockGetDockPointType` | 0x45f310 | 672 (every class and purpose, sample types, hosts with and without small-in points and the slipgate flag, single-player mission 16) |
+| `dockReserveDockPoint` | 0x45fc00 | 10 (nearest free point among 2..7 with reservations, rotated hosts; point and cone distance) |
+| `cmBuildTaskFunction` | 0x450160 | 6 jobs over 5..25 frames each (multiplayer and single-player cost shift, cost divisors 1 and 2, external hulls: fraction, cost so far, RUs, hull health and `1 - left/total` progress) |
 | `univBulletCollidedWithTarget` + `ApplyDamageToTarget` | 0x541ac0, 0x5412f0 | 12 hits (knock-back force, spin, health, chatter bits; weapon/armour table, side modifiers, friendly fire, heavy-defender armour piercing). Speech, alliance, crystal and dock helpers were stubbed with `RET` in the emulator and the rock ranges collapsed so the random numbers do not matter. |
 
 The emulator needs the `fmathSqrtDouble` table (built by the game at start-up) written to
@@ -95,6 +98,93 @@ waypoints, the formation origin being the leader's collision centre.
   move aside (`rowSignalShipToGetOutOfWayOfMe`), which fly out of the way and back
   (`rowFlyShipOutOfWay`).
 
+## Base building
+
+Code: `base` (shared state, `univCreateShip`, clean-up when a ship dies), `clamp`, `dock`,
+`construction`, `modules`, `research`, `upgrade`, `resource`, `salvage`, `link`, `think`,
+`base_tweaks`. Per-ship state is `Ship::base` (`ShipBase`), per-player and game state
+`Universe::base` (`BaseState`); field docs give the original offsets.
+
+- **Ship creation** (`base::create_ship` = `univCreateShip`): upgrades applied, dock-point
+  occupancy table, ships-inside list, factory registration (motherships and carriers),
+  external-build hulls starting at 0 health with `specialFlags2 & 8`, support units, the
+  universe lists (skipped for ships built inside a factory) and the mothership's modules.
+  `Universe::add_ship` is `base::spawn_ship` (level placement: also the type's default upgrade
+  bits, the unit-cap counters, the lab of a research module and the player's mothership).
+- **Clamping** (`Clamp.c`): a host keeps a list of slaves; `univUpdateAllPosVelShips` gives the
+  first slave of an unclamped host its physics through `updateClampedObject` (every slave runs
+  its physics step, then takes pose and velocity from the host; later slaves also run the normal
+  step, as in the original); hidden ships follow without physics. Clamped pairs neither bump nor
+  avoid each other.
+- **Mothership modules** (`univCreateMothershipModules`): the starting modules of the game mode
+  (multiplayer: upper engines, command, engineering; tutorial and missions 1..3 their own lists;
+  with research off in multiplayer the seven research modules too) are ships clamped to the
+  mothership. Modules built later are external-build hulls clamped where they were built. A
+  module whose host is gone waits its type's delay and explodes (`ShipModuleHouseKeep`); losing
+  the docking bay cancels the mothership's external jobs and refunds them (`cmFloatRefundRatio`).
+- **Docking** (`Dock.c`): `dockGetDockPointType` maps class, type, external-build flag,
+  capability flags, purpose and host to one of 35 point types; a mothership without a docking
+  bay (or with its normal points full) uses the engineering points. `ShipDocksAtShip` states:
+  0 reserve the nearest free point (or wait in range), 2 fly into the cone, 5 slide down to the
+  point (following a turning host), 6/7 stand off and latch (own `center` point onto the host's
+  point, `dockCalcLatchCoordSys`), 8 inside (timer +4 s with cargo, +6 s when damaged; then launch
+  or finish), 9 latched (unload, then release), 10 launch from the first free launch point,
+  11 external construction (clamped, disabled), 12 fly out of the cone. Resourcers unload into
+  `resourceUnits` and the statistics. Retiring (purpose 7) refunds
+  `buildCost * TW_RETIRE_MONEYBACK_RATIO` plus cargo and removes the ship. Launch commands go to
+  the front of the command list; the per-host auto-launch bits (all on at game start,
+  `clAutoLaunch`) decide whether built and docked ships launch.
+- **Construction** (`ConsMgr.c`): factories with one job per type; each update the local
+  player's jobs are charged in 16.16 fixed point (`buildCost << 16 / buildTime`, single player
+  `<< (17 - divisor)` with the skill divisors 4/2/1) and counted down; finished ships are created
+  inside the factory (`clCreateShip`) and launched. External-build types first get a hull at a
+  build point (`dockHasFreeBuildDockPoint`; needs a docking bay unless it is a component or the
+  factory is the Beast mothership); the hull's health follows `1 - left/total` and it is released
+  (components stay clamped) when done. Support units (`supportUnits` used, `providesSU` capacity
+  once finished) and unit caps (total, type, class, counting queued jobs) gate `queue_build`,
+  which also checks the build-manager tables (`cmCanBuildShipType`) and research.
+- **Research** (`ResearchAPI.c`): 41-entry technology sets with the ALL/disabled mode word, five
+  labs (one per research module: docking bay, armour, micro, special, weapons) and the
+  per-technology lab table; topics count down one second per `REFRESH_RESEARCH_RATE` frames
+  (eight in the tutorial); `rmCanBuildShip` with the docking-bay rule for external hulls; the
+  Beast's single lab and `rmAcquireShipTechOnDock`.
+- **Upgrades** (`ShipUpgrade.c`): tech level (0..2 from Armour2/Armour3), upgrade bits from the
+  25-entry technology table masked per type, the energy-gun upgrade; applied at creation, on
+  launching after a dock (`UpgradeByDocking`, workers) and when an upgrade finishes.
+- **Resources** (`ResCollect.c`): asteroids and dust clouds with their resource value, random
+  orientation and basic physics; `clCollectResource` (one command per ship, a zone around the
+  resource), `processCollectResource` (harvest until `maxresources`, then dock with purpose 3 and
+  come back; `ResourceAlreadyBeingHarvested` with `harvestableByMultipleShips`, the
+  not-accessible timer, out-of-world checks), `CollectResources` (per `harvestRate` mask frames,
+  x5 in the tutorial; asteroid health follows its value, empty resources are deleted), the worker
+  beam (`WorkerUpdateBeam`), the resource collector routine (`R1ResourcerHarvestsAsteroid`) and
+  the multiplayer trickle (`regenerateRUs` per `regenerateRUrate` frames below
+  `regenerateRUsIfUnder`).
+- **Salvage** (`Salvage.c`): salvagers latch onto the free salvage-latch (else salvage) points of
+  a target damaged enough (`twSalvageDamageLimit` by class); once every point is taken the target
+  flies itself to the player's nearest depot, which keeps it for its length / `twSalTransSpeed`
+  seconds (whole seconds, as stored) and converts it (`univConvertShipToPlayer`: a new ship keeps
+  pose, health, cargo and upgrades). `gameStatsAddShipSalvaged` keeps its indexing quirk (it
+  writes `[type + player*8]`, the getter reads `[player*145 + type]`).
+- **Linking**: Acolyte + Acolyte -> ACV, Mimic + Mimic -> MCV, Beast Acolyte pair -> Beast ACV
+  (`processLinkToDo`: approach below the partner, align upside down, merge; health is the mean of
+  the two health fractions, kills add up); unlinking splits the ship.
+- **univShipThink**: health regeneration (`repairTime`/`repairDamage`, combat values while
+  attacked or attacking; repair upgrade or Beast) with the Somtaaw mothership sharing seven
+  times a module's repair among the damaged modules of the highest priority group; finished
+  upgrades.
+
+Tunables: `Resource.script` and the base entries of `Tweak.script` (`base_tweaks.rs`; the
+binary's `twSalvageDamageLimit[CLASS_MonsterShip]` entry writes the corvette slot and the
+shipped file's `[CLASS_Composite]` line matches nothing, both reproduced).
+
+Scenario `base` (harness and viewer sandbox): a mothership with its modules, four workers
+harvesting ten asteroids, a docking bay and two recon ships queued. Tests (`tests/base.rs`):
+modules and ship numbering, build and launch (time, cost, support units, dock point release),
+harvest and delivery, research (no lab before the docking bay; time; then Acolytes buildable),
+two Acolytes linking into an ACV, two workers salvaging a damaged derelict ion array frigate
+(ownership, statistics), with determinism checks.
+
 ## Not yet modelled / known differences
 
 - Combat: missiles and mines (launchers hold fire), kamikaze, ramming, salvage, leech, DFG,
@@ -108,15 +198,23 @@ waypoints, the formation origin being the leader's collision centre.
   (`clHoldingPattern`); formations attack ship by ship (`processAttackToDoInFormation` and
   `holdFormationDuringBattle` are not modelled), guard/protect (`clPostProcess`) and the
   attack-move ("move while attacking") are not modelled.
-- Evasive ships do not retreat to a dock when badly damaged (no docking yet).
+- Evasive ships do not retreat to a dock when badly damaged.
+- Base layer: mesh animations (MAD) complete immediately (worker grinders, latch animations;
+  the link merge happens when the original's 2 s limit runs out); slipgate transit (states
+  13..17) and the slipgate queue, carrier doors, crystals, the Beast infection and big-gun depot
+  processes, message pods, hive frigate swarmers, Mimic disguises on docking, fog of war, the
+  military parade launched ships join (they stay where they leave the dock), the network command
+  stream (`multiPlayerGame`, deterministic build lists) and computer players. The build task runs
+  for `BaseState::cur_player` only, as the original's local build manager does. Resources are not
+  in the collision blobs (ships neither avoid nor bump them, bullets pass through), dust clouds
+  do not change size, resources do not regrow. Unlinking is an immediate split.
 - The tactics retaliation list (`tacticsShipDied`) and battle chatter are not modelled.
 - Dead ships leave the ship list at the end of the update in which they die (the original
   keeps the hulk until its explosion effect ends).
 - Only the parts listed in the table above are verified bit for bit against the binary; the
   AI routines follow the decompiled code with the original operation order.
 
-- Missiles, resources, derelicts and effects have lists but no objects. No docking,
-  building, research, sensors, KAS.
+- Missiles, derelicts and effects have lists but no objects. No sensors.
 - Not modelled in the fly-to code: salvager, clamped, cloaked and slaved-ship exceptions; the
   Sentinel force field; the docking dock-point lists; military parades.
 - Formations: sphere and the Sentinel force-field walls are not implemented; per-type formation
@@ -136,12 +234,16 @@ waypoints, the formation origin being the leader's collision centre.
 `harness::Scenario` (spawns plus orders by tick), `harness::Run` and `harness::world_hash`
 (FNV-1a over the exact bits of every ship's state including health, attack state, guns and
 manoeuvres, every bullet, the game random stream and the command list). Orders: move,
-formation, halt, attack, tactics. Scenarios: `fleet`, `idle`, `patrol`, `dogfight` (six
+formation, halt, attack, tactics, build, collect, research, link, salvage, dock (scenarios also
+place resources and set starting resource units). Scenarios: `fleet`, `idle`, `patrol`, `dogfight` (six
 Acolytes against six Taiidan heavy interceptors, both aggressive) and `frigates` (three
-multi-beam frigates against a Taiidan destroyer). Tests (`tests/runtime.rs`,
-`tests/combat.rs`, need `HWC_EXTRACTED_DIR` or `HWC_GAME_DIR`): two runs of each built-in
+multi-beam frigates against a Taiidan destroyer), `base` (see Base building). Tests (`tests/runtime.rs`,
+`tests/combat.rs`, `tests/base.rs`, need `HWC_EXTRACTED_DIR` or `HWC_GAME_DIR`): two runs of each built-in
 scenario hash identically for 600 ticks (1600 for the combat scenarios, which also check that
 guns fire, hit and kill), a cloned universe continues identically, and golden bit patterns of
 ship positions after 400/800 ticks (regression values of this implementation, not taken from
 the game; the fleet values changed with the combat slice because the Acolytes of the delta
-formation now bump each other).
+formation now bump each other; the base layer changed them again: the mothership's three module
+ships are clamped to it and take part in blobs and avoidance, and without them the earlier values
+and hash are reproduced exactly). The world hash also covers the base state (docking, clamping,
+cargo, players' resources and research, factory jobs, resources).

@@ -1,0 +1,261 @@
+//! Base-building scenarios over the real game data (`HWC_GAME_DIR` or `HWC_EXTRACTED_DIR`;
+//! skipped when neither is set): building and launching, harvesting, research, linking and
+//! salvage, each run twice to check determinism.
+
+use std::sync::{Arc, OnceLock};
+
+use hwc_formats::big::BigArchive;
+use hwc_math::Vector;
+use hwc_sim::base::BaseEvent;
+use hwc_sim::harness::{scenario, Order, Run, Scenario, Spawn};
+use hwc_sim::statics::{DataSource, DirSource, LoadOptions, ShipRace, ShipType, StaticWorld, Technology};
+use hwc_sim::SimTweaks;
+
+struct Data {
+    statics: Arc<StaticWorld>,
+    tweaks: SimTweaks,
+}
+
+fn data() -> Option<&'static Data> {
+    static DATA: OnceLock<Option<Data>> = OnceLock::new();
+    DATA.get_or_init(|| {
+        let src: Box<dyn DataSource> = if let Ok(dir) = std::env::var("HWC_EXTRACTED_DIR") {
+            Box::new(DirSource::new(dir).ok()?)
+        } else if let Ok(dir) = std::env::var("HWC_GAME_DIR") {
+            Box::new(BigArchive::open(std::path::Path::new(&dir).join("cataclysm.big")).ok()?)
+        } else {
+            return None;
+        };
+        let statics = Arc::new(StaticWorld::load_from(src.as_ref(), LoadOptions::default()));
+        let tweaks = SimTweaks::load(src.as_ref());
+        Some(Data { statics, tweaks })
+    })
+    .as_ref()
+}
+
+fn start(s: Scenario) -> Option<Run> {
+    let d = data()?;
+    Some(Run::new(d.statics.clone(), d.tweaks.clone(), s).unwrap())
+}
+
+/// Runs until `pred` holds (at most `max` updates); returns the tick and the hash then.
+fn run_until(run: &mut Run, max: u32, mut pred: impl FnMut(&Run) -> bool) -> Option<(u32, u64)> {
+    for _ in 0..max {
+        let h = run.step();
+        if pred(run) {
+            return Some((run.tick(), h));
+        }
+    }
+    None
+}
+
+fn events(run: &Run) -> &[BaseEvent] {
+    &run.universe.base.events
+}
+
+#[test]
+fn mothership_comes_with_its_modules() {
+    let Some(run) = start(scenario("base").unwrap()) else { return };
+    let u = &run.universe;
+    let ms = run.ids[0];
+    let modules: Vec<ShipType> = u.ships.iter().filter(|s| s.base.clamp.as_ref().and_then(|c| c.host) == Some(ms)).map(|s| s.ship_type).collect();
+    assert_eq!(modules, vec![ShipType::sMothershipEnginesUpper, ShipType::sMothershipCommand, ShipType::sMothershipEngineering]);
+    // The workers got the next ship numbers.
+    assert_eq!(run.ids[1].0, 4);
+    assert!(u.base.factories.iter().any(|f| f.ship == Some(ms)));
+}
+
+#[test]
+fn build_a_ship_and_launch_it() {
+    let Some(mut run) = start(scenario("base").unwrap()) else { return };
+    let ru0 = run.universe.base.players[0].resource_units;
+    let su0 = run.universe.base.players[0].su_used;
+    let mut built = None;
+    let got = run_until(&mut run, 2000, |r| {
+        for e in events(r) {
+            if let BaseEvent::ShipBuilt { ship: Some(s), ship_type: ShipType::sRecon, .. } = e {
+                built = Some(*s);
+            }
+        }
+        built.is_some()
+    });
+    let (tick, _) = got.expect("a recon ship is built");
+    let recon = built.unwrap();
+    let u = &run.universe;
+    let stat = u.statics.ship(ShipType::sRecon).unwrap();
+    // Built in its build time (the docking bay hull is clamped on the first frames and builds
+    // in parallel).
+    assert!(tick >= stat.build_time as u32 && tick < stat.build_time as u32 + 20, "built at {tick}");
+    assert_eq!(u.base.players[0].su_used, su0 + stat.support_units);
+    assert!(u.base.players[0].resource_units < ru0);
+    // Auto-launch: it is put outside at a launch point and flies out of the cone.
+    let s = u.ship(recon).unwrap();
+    assert!(u.ship_list.contains(&recon));
+    assert_eq!(s.base.dock_state, hwc_sim::dock::state::FLY_OUT);
+    run_until(&mut run, 400, |r| r.universe.ship(recon).is_some_and(|s| s.command.is_none())).expect("launch completes");
+    let s = run.universe.ship(recon).unwrap();
+    assert_eq!(s.base.dock_point, -1);
+    assert!(s.base.dock_with.is_none());
+    let ms = run.universe.ship(run.ids[0]).unwrap();
+    let free = ms.base.occupancy.as_ref().unwrap();
+    assert!(free.reserved.iter().filter(|&&r| r).count() >= 1, "the docking bay hull keeps its build point");
+}
+
+#[test]
+fn workers_harvest_and_deliver() {
+    let Some(mut run) = start(scenario("base").unwrap()) else { return };
+    let mut delivered = 0;
+    run_until(&mut run, 4000, |r| {
+        for e in events(r) {
+            if let BaseEvent::ResourcesDelivered { amount, .. } = e {
+                delivered += amount;
+            }
+        }
+        delivered >= 1200
+    })
+    .expect("two workers unload");
+    let stats = &run.universe.base.stats.players[0];
+    assert!(stats.ru_collected >= 1200);
+    // Resource units left the asteroids.
+    let left: i32 = run.universe.base.resources.list.iter().map(|r| r.resource_value).sum();
+    let total: i32 = scenario("base").unwrap().resources.iter().map(|r| match r.kind {
+        hwc_sim::resource::ResourceKind::Asteroid(t) => run.universe.statics.asteroids[t as usize].as_ref().unwrap().info.resource_value,
+        _ => 0,
+    }).sum();
+    assert!(left <= total - 1200);
+}
+
+#[test]
+fn research_a_technology() {
+    let Some(mut run) = start(scenario("base").unwrap()) else { return };
+    let drive = Technology::DriveFighter.index();
+    // No docking bay yet: no lab for fighter drives.
+    assert!(!hwc_sim::research::research_tech_if_lab_free(&mut run.universe, 0, drive));
+    run_until(&mut run, 3000, |r| r.universe.base.players[0].labs[0].status == hwc_sim::base::lab_status::IDLE).expect("the docking bay is built");
+    assert!(!hwc_sim::research::can_build_ship(&run.universe, 0, ShipType::sAcolyte, true));
+    assert!(hwc_sim::research::research_tech_if_lab_free(&mut run.universe, 0, drive));
+    let time = run.universe.statics.research.multiplayer_somtaaw.tech_time[drive];
+    let start = run.tick();
+    let (tick, _) = run_until(&mut run, 16 * (time as u32 + 5), |r| r.universe.base.players[0].tech.contains(drive)).expect("researched");
+    // One second of research per 16 frames.
+    assert!((tick - start) / 16 >= time as u32 && (tick - start) / 16 <= time as u32 + 2, "{} frames for {time} s", tick - start);
+    assert!(hwc_sim::research::can_build_ship(&run.universe, 0, ShipType::sAcolyte, true));
+    let ms = run.ids[0];
+    assert_eq!(hwc_sim::construction::queue_build(&mut run.universe, ms, ShipType::sAcolyte, 2), 2);
+}
+
+fn link_scenario() -> Scenario {
+    Scenario {
+        name: "link",
+        players: vec![ShipRace::Somtaaw],
+        spawns: vec![
+            Spawn { ship_type: ShipType::sAcolyte, player: 0, position: Vector::new(0.0, 0.0, 0.0) },
+            Spawn { ship_type: ShipType::sAcolyte, player: 0, position: Vector::new(600.0, 300.0, 0.0) },
+        ],
+        orders: vec![(0, Order::Link { a: 0, b: 1 })],
+        resources: Vec::new(),
+        resource_units: Vec::new(),
+    }
+}
+
+#[test]
+fn two_acolytes_link_into_an_acv() {
+    let Some(mut run) = start(link_scenario()) else { return };
+    let mut acv = None;
+    let (_, h1) = run_until(&mut run, 2000, |r| {
+        for e in events(r) {
+            if let BaseEvent::Linked { new_ship } = e {
+                acv = Some(*new_ship);
+            }
+        }
+        acv.is_some()
+    })
+    .expect("linked");
+    let u = &run.universe;
+    let acv = u.ship(acv.unwrap()).unwrap();
+    assert_eq!(acv.ship_type, ShipType::sACV);
+    assert!(u.ship(run.ids[0]).is_none() && u.ship(run.ids[1]).is_none());
+    assert_eq!(acv.health, u.statics.ship(ShipType::sACV).unwrap().health.max_health);
+    // Deterministic.
+    let mut again = start(link_scenario()).unwrap();
+    let mut done = false;
+    let (_, h2) = run_until(&mut again, 2000, |r| {
+        done |= events(r).iter().any(|e| matches!(e, BaseEvent::Linked { .. }));
+        done
+    })
+    .unwrap();
+    assert_eq!(h1, h2);
+}
+
+fn salvage_scenario() -> Scenario {
+    Scenario {
+        name: "salvage",
+        players: vec![ShipRace::Somtaaw, ShipRace::Derelict],
+        spawns: vec![
+            Spawn { ship_type: ShipType::sMothership, player: 0, position: Vector::new(0.0, 0.0, 0.0) },
+            Spawn { ship_type: ShipType::sWorker, player: 0, position: Vector::new(2000.0, -300.0, 0.0) },
+            Spawn { ship_type: ShipType::sWorker, player: 0, position: Vector::new(2000.0, 300.0, 0.0) },
+            Spawn { ship_type: ShipType::dIonArrayFrigate, player: 1, position: Vector::new(6000.0, 0.0, 0.0) },
+        ],
+        orders: vec![(1, Order::Salvage { ships: vec![1, 2], targets: vec![3] })],
+        resources: Vec::new(),
+        resource_units: Vec::new(),
+    }
+}
+
+fn prepare_salvage(run: &mut Run) {
+    // The salvage technology, taken over by the workers; the derelict is damaged enough.
+    let u = &mut run.universe;
+    u.base.players[0].tech.add(Technology::Salvage.index());
+    hwc_sim::upgrade::player_update_from_research(u, 0);
+    for i in [1, 2] {
+        hwc_sim::upgrade::apply_upgrades(u, run.ids[i]);
+    }
+    let t = run.ids[3];
+    let max = u.statics.ship(ShipType::dIonArrayFrigate).unwrap().health.max_health;
+    u.ships.ship_mut(t).health = max * 0.3;
+    // A derelict does not run from the salvagers.
+    u.ships.ship_mut(t).tactics = hwc_sim::object::tactics::NEUTRAL;
+}
+
+#[test]
+fn salvage_a_derelict() {
+    let Some(mut run) = start(salvage_scenario()) else { return };
+    prepare_salvage(&mut run);
+    assert!(hwc_sim::upgrade::has_upgrade(run.universe.ship(run.ids[1]).unwrap(), hwc_sim::upgrade::BIT_SALVAGE));
+    let mut salvaged = None;
+    let (tick, h1) = run_until(&mut run, 6000, |r| {
+        for e in events(r) {
+            if let BaseEvent::Salvaged { ship, .. } = e {
+                salvaged = Some(*ship);
+            }
+        }
+        salvaged.is_some()
+    })
+    .expect("salvaged");
+    let u = &run.universe;
+    let s = u.ship(salvaged.unwrap()).unwrap();
+    assert_eq!(s.ship_type, ShipType::dIonArrayFrigate);
+    assert_eq!(s.player, 0);
+    assert!(u.ship(run.ids[3]).is_none());
+    // gameStatsAddShipSalvaged writes [type + player * 8]; the getter reads [player * 145 + type]
+    // (both index player 0 the same way).
+    assert_eq!(u.base.stats.ships_salvaged(ShipType::dIonArrayFrigate, 0), 1);
+    let mut again = start(salvage_scenario()).unwrap();
+    prepare_salvage(&mut again);
+    for _ in 0..tick {
+        again.step();
+    }
+    assert_eq!(hwc_sim::harness::world_hash(&again.universe), h1);
+}
+
+#[test]
+fn salvage_count_quirk_for_other_players() {
+    let mut st = hwc_sim::base::GameStats::default();
+    st.add_ship_salvaged(ShipType::sRecon, 1);
+    // Player 1's count lands at type + 8 ...
+    assert_eq!(st.ships_salvaged(ShipType::sRecon, 1), 0);
+    assert_eq!(st.salvaged[8], 1);
+    // ... which the getter reads as player 0's type 8.
+    assert_eq!(st.ships_salvaged(ShipType::from_index(8).unwrap(), 0), 1);
+}

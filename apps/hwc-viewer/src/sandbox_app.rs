@@ -203,6 +203,11 @@ impl App {
                     };
                 }
                 "f" => sb.cycle_formation(),
+                "b" => sb.queue_build(),
+                "l" => sb.launch(),
+                "u" => sb.toggle_auto_launch(),
+                "r" => sb.research(),
+                "g" => sb.gather(),
                 "h" => sb.halt(),
                 "i" => {
                     sb.interpolate = !sb.interpolate;

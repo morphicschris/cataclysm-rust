@@ -61,7 +61,11 @@ fn cloned_universe_continues_identically() {
 
 /// Bit patterns of a few ships after N ticks of the built-in scenarios. These pin the current
 /// implementation (regression goldens); they were not produced by the original game. (The
-/// combat slice changed the fleet values: the Acolytes of the delta formation now bump.)
+/// combat slice changed the fleet values: the Acolytes of the delta formation now bump. The base
+/// layer changed them again: the scenario's mothership now comes with its three starting module
+/// ships clamped to it (`univCreateMothershipModules`), which take part in collision blobs and
+/// avoidance; with the modules left out the previous values and hash are reproduced exactly.
+/// The hash also covers the base state now.)
 #[test]
 fn golden_trajectories() {
     let Some((hashes, run)) = run("fleet", 400) else { return };
@@ -90,13 +94,13 @@ fn run_named(name: &str, ticks: u32) -> (Vec<u64>, Run) {
 }
 
 const GOLDEN_FLEET_400: [[u32; 3]; 4] = [
-    [0x44f3f212, 0xc48c31b0, 0x431e8a67],
-    [0x44dece52, 0xc471a3ae, 0x431e7d34],
-    [0xc52d9442, 0xc542142a, 0xc3c4f850],
-    [0xc521f9a3, 0xc4d40108, 0xc3e3cd02],
+    [0x44f920c3, 0xc48fe28a, 0x432b7151],
+    [0x44e59e26, 0xc47c4c3c, 0x43340234],
+    [0xc52d845c, 0xc542513e, 0xc3c5e02a],
+    [0xc53038cf, 0xc4d0709c, 0xc4073b96],
 ];
-const GOLDEN_FLEET_HASH_400: u64 = 0x2e81_a5dc_157d_efff;
-const GOLDEN_PATROL_800: [u32; 3] = [0x45488e56, 0x44e72b24, 0x431f1d85];
+const GOLDEN_FLEET_HASH_400: u64 = 0x66c5_3d31_855b_3940;
+const GOLDEN_PATROL_800: [u32; 3] = [0x454cc8f4, 0x44ce9e83, 0x435ba23f];
 
 #[test]
 fn print_fleet() {
