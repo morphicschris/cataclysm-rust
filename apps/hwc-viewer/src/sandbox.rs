@@ -94,11 +94,6 @@ const EXPLOSION_TIME: f32 = 1.5;
 const BEAM_COLOR: [f32; 4] = [0.6, 1.0, 0.9, 0.8];
 const DOCK_COLOR: [f32; 4] = [0.5, 0.7, 1.0, 0.5];
 const ASTEROID_COLOR: [f32; 4] = [0.7, 0.6, 0.5, 0.7];
-/// The hyperspace window (`hsRectangle`: colour 70,90,255 at alpha 90, outline +40).
-const HS_WINDOW: [f32; 4] = [70.0 / 255.0, 90.0 / 255.0, 1.0, 90.0 / 255.0];
-const HS_OUTLINE: [f32; 4] = [110.0 / 255.0, 130.0 / 255.0, 1.0, 90.0 / 255.0];
-/// `HS_DIST / 2`: how far beyond the bounding box the window reaches.
-const HS_DIST_2: f32 = 1.08 / 2.0;
 /// How long a quick key's result stays on screen (seconds).
 const ACTION_NOTE_SECONDS: f64 = 4.0;
 /// How long the key hint shows after a mission starts (seconds of real time).
@@ -963,7 +958,6 @@ impl Sandbox {
             effects: EffectBatch::default(),
             fx_list: hwc_fx::RenderList::default(),
         };
-        let effects_on = self.effects_on;
         let transforms = self.render_transforms();
         let sim = &self.sim;
         let u = sim.universe();
@@ -1009,8 +1003,8 @@ impl Sandbox {
                     hs_plane(state, clipt, fl)
                 }),
             };
-            // (With effects the window is the original's HyperWindow effect.)
-            if let (Some((state, clipt)), Some(st), None, false) = (hs, st, host, effects_on) {
+            // `hsEnd` draws the window on top of the HyperWindow effect, effects or not.
+            if let (Some((state, clipt)), Some(st), None) = (hs, st, host) {
                 hyperspace_window(&mut frame.effects, transform, st, state, clipt);
             }
             let max_velocity = if s.max_velocity_copy > 0.0 {
@@ -1876,12 +1870,9 @@ impl Sandbox {
         let Some(p) = u.base.players.first() else {
             return String::new();
         };
-        // A mission keeps the RUs its script sets (`RUsSet`) on the game side.
-        let rus = self
-            .sim
-            .mission()
-            .and_then(|m| m.game.resource_units.first().copied())
-            .unwrap_or(p.resource_units);
+        // The player's live RUs (the mission's `game.resource_units` only mirrors what the
+        // script set with `RUsSet` and goes stale as soon as anything is built or harvested).
+        let rus = p.resource_units;
         let mut queue = Vec::new();
         for f in u
             .base
@@ -2048,46 +2039,8 @@ fn fx_pose(art: &ShipArt, fx: &ShipFx, level: usize) -> Option<Vec<Option<Mat4>>
     clip.pose(&fx.anim, binding)
 }
 
-/// The hyperspace window's corners in ship space (`hsEnd` / `hsRectangle`): centred on the
-/// collision sphere's axis at the clip plane, `HS_DIST` times the bounding box across, scaled by
-/// the ship's `hyperspaceBoxScale` (6 for the Kuun-Lan, so that its spine's window covers the
-/// modules too). The up extent opens and closes with `clipt` while popping up and collapsing.
-fn hyperspace_window_corners(st: &hwc_sim::statics::ShipStaticInfo, state: u32, clipt: f32) -> Option<[Vec3; 4]> {
-    let c = &st.header.coll;
-    let (z, open) = match state {
-        hs_effect::POPUP_OUTOF | hs_effect::POPUP_INTO => (c.forward_length, 1.0 - clipt),
-        hs_effect::SLICING_OUTOF | hs_effect::SLICING_INTO => (clipt * c.forward_length, 1.0),
-        hs_effect::COLLAPSE_OUTOF | hs_effect::COLLAPSE_INTO => (-c.forward_length, clipt),
-        _ => return None,
-    };
-    let box_scale = st.hyperspace_box_scale;
-    let half_x = HS_DIST_2 * c.up_length * box_scale * open.clamp(0.0, 1.0);
-    let half_y = HS_DIST_2 * c.right_length * box_scale;
-    let o = Vec3::new(c.coll_sphere_offset.x, c.coll_sphere_offset.y, z);
-    Some(
-        [
-            Vec3::new(-half_x, -half_y, 0.0),
-            Vec3::new(-half_x, half_y, 0.0),
-            Vec3::new(half_x, half_y, 0.0),
-            Vec3::new(half_x, -half_y, 0.0),
-        ]
-        .map(|p| o + p),
-    )
-}
-
-/// The window's fill and outline colours: the ship's `hyperspaceColor` unless black, else the
-/// default blue; alpha 90, the outline 40 brighter in red and green (wrapping as bytes do).
-fn hyperspace_colors(st: &hwc_sim::statics::ShipStaticInfo) -> ([f32; 4], [f32; 4]) {
-    let [r, g, b, _] = st.hyperspace_color;
-    if [r, g, b] == [0, 0, 0] {
-        return (HS_WINDOW, HS_OUTLINE);
-    }
-    let f = |v: u8| f32::from(v) / 255.0;
-    let a = 90.0 / 255.0;
-    ([f(r), f(g), f(b), a], [f(r.wrapping_add(40)), f(g.wrapping_add(40)), f(b), a])
-}
-
-/// The hyperspace window (`hsRectangle`) at the clip plane of an arriving ship.
+/// The hyperspace window (`hsEnd`, drawn by [`hwc_render::effects::hyperspace_window`]) of a
+/// ship in hyperspace state `state`; `transform` is its model matrix.
 fn hyperspace_window(
     out: &mut EffectBatch,
     transform: Mat4,
@@ -2095,20 +2048,17 @@ fn hyperspace_window(
     state: u32,
     clipt: f32,
 ) {
-    let Some(corners) = hyperspace_window_corners(st, state, clipt) else { return };
-    let corners = corners.map(|p| transform.transform_point3(p));
-    let (fill, outline) = hyperspace_colors(st);
-    out.quad(corners.map(|p| (p, fill)), Blend::Alpha);
-    for i in 0..4 {
-        out.lines.push(FxLine {
-            from: corners[i],
-            to: corners[(i + 1) % 4],
-            from_color: outline,
-            to_color: outline,
-            width: 2.0,
-            blend: Blend::Additive,
-        });
-    }
+    let c = &st.header.coll;
+    let [r, g, b, _] = st.hyperspace_color;
+    let shape = hwc_render::effects::HyperspaceWindowShape {
+        forward_length: c.forward_length,
+        up_length: c.up_length,
+        right_length: c.right_length,
+        coll_sphere_offset: Vec3::new(c.coll_sphere_offset.x, c.coll_sphere_offset.y, c.coll_sphere_offset.z),
+        box_scale: st.hyperspace_box_scale,
+        color: [r, g, b],
+    };
+    hwc_render::effects::hyperspace_window(out, transform, &shape, state, clipt);
 }
 
 #[cfg(test)]
@@ -2162,7 +2112,9 @@ mod tests {
             assert_eq!(windows, vec![ms], "only the mothership opens a window");
             let m = u.ship(ms).unwrap();
             let st = u.statics.ship(m.ship_type).unwrap();
-            let corners = hyperspace_window_corners(st, state, clipt).unwrap();
+            let mut batch = EffectBatch::default();
+            hyperspace_window(&mut batch, Mat4::IDENTITY, st, state, clipt);
+            let corners: Vec<Vec3> = batch.triangles.iter().flat_map(|t| t.vertices.iter().map(|v| v.position)).collect();
             let (_, host_m) = Sandbox::transform_of(m);
             let inv = host_m.inverse();
             for &id in hyper.keys().filter(|&&id| id != ms) {

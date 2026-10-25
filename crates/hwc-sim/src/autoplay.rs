@@ -96,9 +96,29 @@ impl Autoplay {
                 let ids = run.game.level.team(kas_hash(&t)).map(|x| x.ships.clone()).unwrap_or_default();
                 let homing: Vec<String> = run.universe.missiles.iter().filter(|m| m.target.is_some_and(|x| ids.contains(&x))).map(|m| {
                     let tp = run.universe.ships.ship(m.target.unwrap()).posinfo.position;
-                    format!("kind {} p{:?} owner {:?} d {:.0}", m.kind, m.player, m.owner.and_then(|o| run.universe.ships.get(o)).map(|o| o.ship_type), (m.posinfo.position - tp).mag_sq().sqrt())
+                    let owner = m.owner.and_then(|o| run.universe.ships.get(o)).map(|o| {
+                        let c = o.command.and_then(|c| run.universe.commands.get(c));
+                        (o.id, o.ship_type, o.tactics, o.attack.target, c.map(|c| (c.order, c.attributes, c.attack_targets.clone())))
+                    });
+                    format!("kind {} p{:?} owner {:?} d {:.0} life {:.1}", m.kind, m.player, owner, (m.posinfo.position - tp).mag_sq().sqrt(), m.time_lived)
                 }).collect();
                 self.note(now, format!("watch {t}: {v:?} homing {homing:?}"));
+            }
+        }
+        if let Some(list) = std::env::var_os("HWC_WATCH_SHIPS") {
+            let list = list.to_string_lossy().to_string();
+            for id in list.split(',').filter_map(|x| x.trim().parse::<u16>().ok()).map(ShipId) {
+                if let Some(s) = run.universe.ships.get(id) {
+                    let c = s.command.and_then(|c| run.universe.commands.get(c));
+                    let line = format!(
+                        "ship {} {:?} p{} hp {:.0} pos ({:.0},{:.0},{:.0}) idle {} target {:?} cmd {:?}",
+                        id.0, s.ship_type, s.player, s.health, s.posinfo.position.x, s.posinfo.position.y, s.posinfo.position.z, s.ship_idle, s.attack.target,
+                        c.map(|c| (c.order, c.attributes, c.attack_targets.clone(), c.waypoints.clone()))
+                    );
+                    if now.is_multiple_of(32) {
+                        self.note(now, line);
+                    }
+                }
             }
         }
         if !run.game.ships_have_arrived {
@@ -168,6 +188,13 @@ impl Autoplay {
         let Some(ms) = fleet.mothership else { return };
         // Common to every mission: harvesting, keeping a few workers and a defence force.
         harvest(&mut run.universe, &fleet);
+        if std::env::var_os("HWC_DEBUG_RU").is_some() {
+            let u = &run.universe;
+            let orders: Vec<String> = fleet.workers.iter().map(|&w| format!("{:?}", u.ships.ship(w).command.and_then(|c| u.commands.get(c)).map(|c| c.order))).collect();
+            let jobs: Vec<String> = u.base.factories.iter().flat_map(|f| f.jobs.iter().filter(|j| j.n_jobs > 0).map(|j| format!("{:?}x{}", j.info, j.n_jobs))).collect();
+            let world: i64 = u.base.resources.list.iter().map(|r| i64::from(r.resource_value)).sum();
+            self.note(now, format!("RU {} workers {orders:?} jobs {jobs:?} world {world}", u.base.players[HUMAN_PLAYER].resource_units));
+        }
         match mission {
             1 => self.mission1(run, &fleet, ms),
             2 => self.mission2(run, &fleet, ms),
@@ -240,14 +267,17 @@ impl Autoplay {
         let mp = run.universe.ships.ship(ms).posinfo.position;
         let micro_done = count_type(&run.universe, ShipType::sMothershipMicro) > 0 && !under_construction_any(&run.universe);
         build_up_to(&mut run.universe, ms, ShipType::sRecon, 2);
-        build_up_to(&mut run.universe, ms, ShipType::sWorker, if micro_done { 7 } else { 4 });
+        let worker_target = if micro_done { 8 } else { 5 };
+        build_up_to(&mut run.universe, ms, ShipType::sWorker, worker_target);
         if run.game.objective("Build").is_some() {
             queue_up_to(&mut run.universe, ms, ShipType::sMothershipMicro, 1);
         }
         for tech in ["TECH_REPAIR", "TECH_SALVAGE"] {
             research(&mut run.universe, tech);
         }
-        if micro_done {
+        // Acolytes one at a time (a long queue charges RUs the workers and the repair need).
+        let pending = crate::construction::job(&run.universe, ms, ShipType::sAcolyte).map_or(0, |j| j.n_jobs.max(0));
+        if micro_done && pending == 0 {
             build_up_to(&mut run.universe, ms, ShipType::sAcolyte, 16);
         }
         // Once salvage is researched, new workers come with the upgrade: build two.
@@ -419,9 +449,30 @@ impl Autoplay {
         // The Caal-Shto is helpless: half the fleet guards it; the rest goes for the heavy
         // cruiser first (it infects what it reaches), then for the rest of the Beast.
         let caal = team_ships(run, "CaalShto");
-        if !caal.is_empty() && (run.game.objective("ProtectCaalShto").is_some() || run.game.objective("DestroyBeast").is_some()) {
-            let half = fleet.combat.len() / 2;
+        let protecting = !caal.is_empty() && (run.game.objective("ProtectCaalShto").is_some() || run.game.objective("DestroyBeast").is_some());
+        // While the Beast is near the Caal-Shto the whole fleet guards it.
+        let threatened = protecting && {
+            let cp = run.universe.ships.ship(caal[0]).posinfo.position;
+            enemies(&run.universe).iter().any(|&e| (run.universe.ships.ship(e).posinfo.position - cp).mag_sq() < 12000.0 * 12000.0)
+        };
+        if protecting {
+            let half = if threatened { fleet.combat.len() } else { fleet.combat.len() / 2 };
             guard(&mut run.universe, &fleet.combat[..half], &caal);
+            if std::env::var_os("HWC_DEBUG_GUARDS").is_some() {
+                let u = &run.universe;
+                let cp = u.ships.ship(caal[0]).posinfo.position;
+                let g: Vec<String> = fleet.combat[..half].iter().map(|&id| {
+                    let s = u.ships.ship(id);
+                    let c = s.command.and_then(|c| u.commands.get(c));
+                    format!("{}:{:?} d{:.0} {:?}", id.0, s.ship_type, (s.posinfo.position - cp).mag_sq().sqrt(), c.map(|c| (c.order, c.attributes, c.attack_targets.len())))
+                }).collect();
+                let near: Vec<String> = u.ship_list.iter().filter(|&&e| u.ships.ship(e).player != HUMAN_PLAYER && (u.ships.ship(e).posinfo.position - cp).mag_sq() < 6000.0 * 6000.0).map(|&e| format!("{}:{:?}", e.0, u.ships.ship(e).ship_type)).collect();
+                let rocked = u.ships.ship(caal[0]).getting_rocked;
+                self.note(now, format!("M5 guards {g:?} enemies near {near:?} rocked {rocked:?}"));
+            }
+        }
+        if threatened {
+            return;
         }
         if run.game.objective("DestroyBeast").is_some() {
             let rest: Vec<ShipId> = fleet.combat[fleet.combat.len() / 2..].to_vec();
@@ -473,6 +524,13 @@ impl Autoplay {
         if run.game.objective("Escort").is_some() {
             if let Some(&c) = team_ships(run, "CaalShto").first() {
                 let cp = run.universe.ships.ship(c).posinfo.position;
+                if std::env::var_os("HWC_DEBUG_GUARDS").is_some() {
+                    let u = &run.universe;
+                    let near = |p: usize, r: f32| u.ship_list.iter().filter(|&&e| u.ships.ship(e).player == p && (u.ships.ship(e).posinfo.position - cp).mag_sq() < r * r).count();
+                    let ms_d = (mp - cp).mag_sq().sqrt();
+                    let busy = fleet.combat.iter().filter(|&&id| !idle(u, id)).count();
+                    self.note(now, format!("M6 caal hp {:.0} combat {} busy {busy} ours<6k {} theirs<6k {} ms d {ms_d:.0} recons {}", u.ships.ship(c).health, fleet.combat.len(), near(HUMAN_PLAYER, 6000.0), near(1, 6000.0), fleet.recons.len()));
+                }
                 if (cp - mp).mag_sq() > 4000.0 * 4000.0 {
                     move_ships(&mut run.universe, &[ms], cp);
                 }

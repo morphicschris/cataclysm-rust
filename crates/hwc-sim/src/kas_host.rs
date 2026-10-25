@@ -373,7 +373,22 @@ impl KasRuntime for SimHost<'_> {
         if sel.is_empty() {
             return 0;
         }
-        i32::from(sel.iter().all(|id| self.g.docked.iter().any(|d| d.0 == *id)))
+        // `kasfTeamDockedReadyForLaunch`: every ship is inside a host (hidden, not in
+        // hyperspace) and not waiting for a soft launch from a carrier or mothership, or it
+        // stays docked at a carrier or mothership's refuelling point.
+        let soft_launch_host = |u: &Universe, h: Option<ShipId>| h.and_then(|h| u.ships.get(h)).is_some_and(|h| matches!(h.ship_type.index(), 0xc | 0x2f | 0x4c | 0x3e));
+        for &id in &sel {
+            let Some(s) = self.u.ships.get(id) else { return 0 };
+            let refuelling = s.base.dock_with.is_some() && matches!(s.base.dock_state, 8 | 9);
+            if s.flags & sof::HIDE != 0 && s.flags & sof::HYPERSPACE == 0 {
+                if refuelling && soft_launch_host(self.u, s.base.dock_with) {
+                    return 0;
+                }
+            } else if s.special_flags & crate::base::special::DOCK_STAY == 0 || !refuelling {
+                return 0;
+            }
+        }
+        1
     }
 
     fn team_finished_launching(&mut self, cx: &Cx) -> i32 {

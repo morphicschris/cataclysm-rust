@@ -173,3 +173,26 @@ fn mission4_from_warp_completes_for_real() {
     }
     assert!(run.game.log.iter().any(|e| e.text == "ObjectiveSet \"Research\" = 1"));
 }
+
+/// Mission 3 from the `warp.script` fleet is completed for real: the Clee-San is found and
+/// handed over, the Mimic sent to it, the mothership brought near so that it docks
+/// (`ShipsDockStay`, then `TeamDockedReadyForLaunch` once it is inside), the jump offered and
+/// taken.
+#[test]
+fn mission3_from_warp_completes_for_real() {
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    let c = Carry::warp(d.statics.clone(), d.tweaks.clone(), &src, 3).expect("warp.script level 3");
+    let mut run = start(d, 3, Some(&c));
+    let mut ap = Autoplay::new(16 * 3000);
+    let ending = ap.play(&mut run, 16 * 3600);
+    assert_eq!(ending, Ending::Hyperspace, "{:?}", ap.notes);
+    assert!(!ap.forced);
+    for label in ["Find", "Mimic"] {
+        assert!(run.game.log.iter().any(|e| e.text == format!("ObjectiveDestroy {label:?}")), "objective {label} completed");
+    }
+    assert!(run.game.log.iter().any(|e| e.text.starts_with("ObjectiveCreate \"Hyperspace\"")));
+    // The Clee-San travels on inside the mothership.
+    let c = run.carry().expect("carry-over");
+    assert!(c.fleet.iter().any(|f| f.docked.iter().any(|x| x.ship_type == ShipType::dEcclesiam)), "the Clee-San is carried");
+}

@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! cargo run --release -p hwc-sim --example campaign -- <install> [--from N] [--to M]
-//!     [--budget SECONDS] [--limit SECONDS] [--speech S] [--carry-dir DIR] [--log]
+//!     [--budget SECONDS] [--limit SECONDS] [--speech S] [--carry-dir DIR] [--log] [--effects]
 //! ```
 //!
 //! `--from N` (N > 1) starts from the `warp.script` fleet of mission N, or from
@@ -28,6 +28,7 @@ fn main() {
     let mut speech = Some(3.0f32);
     let mut carry_dir: Option<String> = None;
     let mut log = false;
+    let mut effects = false;
     let mut i = 1;
     while i < args.len() {
         let v = || args.get(i + 1).cloned().unwrap_or_default();
@@ -40,6 +41,11 @@ fn main() {
             "--carry-dir" => carry_dir = Some(v()),
             "--log" => {
                 log = true;
+                i += 1;
+                continue;
+            }
+            "--effects" => {
+                effects = true;
                 i += 1;
                 continue;
             }
@@ -69,6 +75,10 @@ fn main() {
             Some(c) => MissionRun::start_campaign(statics.clone(), tweaks.clone(), &src, script, config, c),
         }
         .unwrap_or_else(|e| panic!("mission {m}: {e}"));
+        if effects {
+            // As the viewer and the game run it: with the effects attached.
+            hwc_sim::effects::attach(&mut run.universe, &hwc_sim::effects::EffectData::load_from(&src));
+        }
         let mut ap = Autoplay::new((budget * 16.0) as u32);
         let ending = ap.play(&mut run, (limit * 16.0) as u32);
         let config_calls = std::env::var_os("HWC_LOG_CALLS").is_some();

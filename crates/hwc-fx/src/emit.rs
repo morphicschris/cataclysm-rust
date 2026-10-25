@@ -426,6 +426,7 @@ fn emit_particles(
                     additive: p.flags & pflag::ADDITIVE != 0,
                     alpha_system: alpha_sys,
                     xyz_scale: p.flags & pflag::XYZSCALE != 0,
+                    effect_color: owner.map_or(0, |o| o.hyperspace_color),
                     morph_base,
                     billboard_velocity,
                     system_coordsys: sys_mat,

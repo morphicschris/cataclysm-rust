@@ -745,7 +745,10 @@ impl Tess<'_> {
         };
         let alpha = if m.alpha_system { m.color[3] } else { 1.0 };
         let mut base = [m.color[0], m.color[1], m.color[2]];
-        if m.bias[0] + m.bias[1] + m.bias[2] > 0.0 {
+        if m.xyz_scale {
+            // Hyperspace windows: the bias is folded into the colour (blue windows).
+            base = m.folded_color();
+        } else if m.bias[0] + m.bias[1] + m.bias[2] > 0.0 {
             base = saturate_add(m.bias, base);
         }
         let lit = if textured { m.lit } else { system_lit };

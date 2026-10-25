@@ -318,10 +318,20 @@ fn effects_leave_gameplay_alone() {
         vec![(1, Order::Attack { ships: vec![2], targets: vec![1] }), (40, Order::Special { ships: vec![3], targets: vec![] })],
     );
     let ticks = 16 * 30;
-    let setup = |r: &mut Run| upgrade(r, 3, acv::UPGRADE_EMP);
+    // Nothing may die here: a dead ship stays as a hulk until its explosion effect deletes it
+    // (the original's effects-enabled path) but is wiped at once without effects, so a death
+    // would show in the hashes. The scenario was written for evasive ships; with the
+    // original's neutral default the ACV dies at update 327, so the ships are evasive.
+    let setup = |r: &mut Run| {
+        upgrade(r, 3, acv::UPGRADE_EMP);
+        for &id in &r.ids {
+            r.universe.ships.ship_mut(id).tactics = hwc_sim::object::tactics::EVASIVE;
+        }
+    };
     let (with, _, _) = run_fx(s.clone(), ticks, &setup, &mut |_, _| {});
     let mut run = Run::new(d.statics.clone(), d.tweaks.clone(), s).unwrap();
     setup(&mut run);
     let without: Vec<u64> = (0..ticks).map(|_| run.step()).collect();
+    assert!(run.ids.iter().all(|&id| run.universe.ships.get(id).is_some()), "a ship died");
     assert_eq!(with, without);
 }

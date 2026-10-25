@@ -120,8 +120,13 @@ pub struct MeshInstance {
     pub additive: bool,
     /// The system's `PART_ALPHA` flag (`glColor4f` and blending on).
     pub alpha_system: bool,
-    /// `PART_XYZSCALE` (hyperspace-style meshes; their colour bias is not applied).
+    /// `PART_XYZSCALE` (hyperspace-style meshes): the original has no texture colour-add for
+    /// them and folds the bias into the vertex colour instead, scaled so that its brightest
+    /// channel is 1 (see [`MeshInstance::folded_color`]).
     pub xyz_scale: bool,
+    /// The owner's `hyperspaceColor` (`partEffectColor`, RGBA bytes little-endian; black when
+    /// there is no owner). When not black it replaces the bias of `PART_XYZSCALE` meshes.
+    pub effect_color: u32,
     /// The mesh of the morph animation's first frame; the original takes the polygon list and
     /// materials of a morphed mesh from it.
     pub morph_base: Option<String>,
@@ -138,6 +143,28 @@ pub struct MeshInstance {
 }
 
 impl MeshInstance {
+    /// The vertex colour of a `PART_XYZSCALE` mesh (`partRenderMeshSystem` without
+    /// `RGL_COLOROP_ADD`): when the particle has a bias, the bias (the owner's hyperspace
+    /// colour in 1/256 steps when that is not black) is added to the colour and the sum is
+    /// divided by its largest channel, so a white particle with a blue bias comes out blue.
+    /// Without a bias the colour is the particle's.
+    pub fn folded_color(&self) -> [f32; 3] {
+        let c = [self.color[0], self.color[1], self.color[2]];
+        if self.bias[0] + self.bias[1] + self.bias[2] <= 0.0 {
+            return c;
+        }
+        let rgb = self.effect_color & 0x00ff_ffff;
+        let bias = if rgb != 0 {
+            [rgb & 0xff, (rgb >> 8) & 0xff, (rgb >> 16) & 0xff].map(|b| b as f32 * 0.003_906_25)
+        } else {
+            self.bias
+        };
+        let sum = [bias[0] + c[0], bias[1] + c[1], bias[2] + c[2]];
+        let max = sum[0].max(sum[1]).max(sum[2]);
+        let k = if max == 0.0 { 1.0 } else { 1.0 / max };
+        sum.map(|v| k * v)
+    }
+
     /// The pseudo-billboard basis (`calcPseudoBillboardMatrixWorld`/`NotWorld`): its columns
     /// are up = eye ray × velocity, right = velocity × up, and the velocity. `eye` is the camera
     /// position in world space. For a local system the eye is brought into the system's space

@@ -104,6 +104,11 @@ const MAX_PROXIMITY_ENEMIES: usize = 6;
 pub fn is_valid_target(u: &Universe, t: ShipId) -> bool {
     let Some(s) = u.ships.get(t) else { return false };
     let Some(stat) = u.statics.ship(s.ship_type) else { return false };
+    // Crystals, ships being converted by the Beast (+0x4e4) and the other untargetables.
+    // (+0x3ec, a reference the dying-ship cleanup clears, is not modelled.)
+    if crate::ships::crystal::is_crystal_type(s.ship_type) || s.beast.timer != 0.0 {
+        return false;
+    }
     if stat.capability_flags & 0x4000 != 0 || s.special_flags2 & 0x0200_0000 != 0 {
         return false;
     }
@@ -207,6 +212,12 @@ fn react_to_enemies(u: &mut Universe, id: ShipId, cmd: Option<CommandId>, enemie
         }
         protecting = c.attributes & attr::PROTECTING != 0;
     }
+    // An Acolyte that is linking with a partner (+0x650) does not react. (So does a Mimic
+    // with +0x650 set, a field of its own that is not modelled; Mimics have no guns.)
+    let s = u.ships.ship(id);
+    if crate::ships::acolyte::is_link_acolyte(s.ship_type) && s.base.link.partner.is_some() {
+        return;
+    }
     match u.ships.ship(id).tactics {
         crate::object::tactics::EVASIVE => evasive_reaction(u, id, cmd, enemies),
         crate::object::tactics::NEUTRAL => passive_reaction(u, id, cmd, enemies),
@@ -233,11 +244,17 @@ fn passive_reaction(u: &mut Universe, id: ShipId, cmd: Option<CommandId>, mut en
     if enemies.is_empty() || !crate::attack::can_attack_passive(u, id) {
         return;
     }
+    // `FUN_00524680`: the command's targets plus the enemies it does not have yet; when it
+    // already has targets and none is new, nothing changes.
     let mut targets: Vec<ShipId> = cmd.and_then(|c| u.commands.get(c)).map(|c| c.attack_targets.clone()).unwrap_or_default();
+    let had = targets.len();
     for e in enemies {
-        if !targets.contains(&e) {
+        if !targets[..had].contains(&e) {
             targets.push(e);
         }
+    }
+    if had > 0 && targets.len() == had {
+        return;
     }
     let sel = selection_of(u, id, cmd);
     if command::ships_in_passive_attack_range(u, &sel, &targets) {

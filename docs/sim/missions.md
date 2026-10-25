@@ -248,13 +248,39 @@ quadrants, Engineering module, research repair and salvage, the fleet guards the
 workers repair it, upgraded workers salvage the pod, the fleet clears the raiders) complete for
 real and jump without the override (`tests/campaign.rs`, `missions_1_and_2_complete_for_real`);
 mission 4 (hangar module, ten Acolytes guarding the Clee-San, the infection research) completes
-for real from the `warp.script` fleet (`mission4_from_warp_completes_for_real`). Still ending
-with the forced jump: mission 3 (the Clee-San, handed to the player when found, is killed within
-seconds by missiles of the pirate missile corvettes that attack the player's ships in its 60 km
-`NearCleesan` box: the missiles' target ends up being the Clee-San), mission 5 (reaches
-"Destroy Beast fleet"; the helpless Caal-Shto is then killed by Beast Acolytes despite half the
-fleet guarding it) and mission 6 (fails at about 890 s from the warp fleet; the Caal-Shto or the
-mothership is lost before the nav points are scouted).
+for real from the `warp.script` fleet (`mission4_from_warp_completes_for_real`), and so does
+mission 3 (`mission3_from_warp_completes_for_real`: recons find the Clee-San, the Mimic goes to it,
+the mothership comes within 6 km so that it docks with `ShipsDockStay`; the mission waited for
+`TeamDockedReadyForLaunch`, which only knew the instant-dock helpers until it was made the
+original's test: every team ship hidden inside a host and not waiting for a soft launch, or staying
+docked at a carrier's refuelling point). The pirate missile corvettes' missiles that hit the
+Clee-San come from passive retaliation (`univCheckShipState` -> `getEnemiesWithinProximity` ->
+`FUN_00524d50` -> `clPassiveAttack`): moving ships are idle in the original's sense, so a neutral
+corvette flying back to its patrol point fires at any visible enemy within its
+`passiveRetaliateZone` (5 km), and the KAS `Attack` lists do not restrict that; the original does
+the same. Mines may home on it once `ShipsEffectedByMines(.., 0)` clears flag 0x20 (bit set =
+ignored by mines, as in the binary).
+
+Still ending otherwise: mission 5 fails when the Bentusi's blast wipes the Beast fighters
+attacking it: their teams (`BEASTFighters`) re-create six Acolytes each from the Beast carrier at
+once (36 in the same update), and in the `Create` state they miss the `#010a2ed4` message that
+would scuttle them, so they attack the player's ships and the helpless Caal-Shto (health held at
+40 %) with `TacticsAggressive`. In the original `ShipsCreateLaunch` puts them inside the carrier
+and launches them through its launch points one after another (`dockPutShipInside`,
+`aiuWrapDock`); here KAS launches are instant, so the whole swarm arrives together and overwhelms
+the guards. Mission 6 fails at about 890 s from the warp fleet: the Caal-Shto (a kCarrier held at
+40 %, no repair) stops while five or more mines are within 16 km of it (`Wait` -> `Stop`), the
+scripted fleet's attacks near it trigger the Taiidan `Death` fleet (standard and ion cannon
+frigates, standard destroyers), and that fleet kills it; the mines are never cleared and the
+"Scout" nav points are not all reached.
+
+The viewer and the headless runs differ in speech timing only: headless runs end intel events
+after `--speech` seconds (3 by default), the viewer after the real speech/subtitle length. Mission
+2 from a weak mission-1 carry-over is short of RUs (1005 RUs, three workers), and with some
+timings the Engineering module build ran out of RUs; the viewer's RU readout showed the mission's
+`RUsSet` mirror (`game.resource_units`) instead of the player's live RUs. The readout now shows
+`base.players[0].resource_units`, and the mission 2 plan builds more workers and one Acolyte at a
+time.
 
 ## Known differences from the original
 
