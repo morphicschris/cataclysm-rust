@@ -13,6 +13,7 @@ mod loading;
 mod mission;
 mod play;
 mod preview;
+mod sensors;
 #[cfg(test)]
 mod smoke;
 mod tour;

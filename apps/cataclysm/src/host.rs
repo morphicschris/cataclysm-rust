@@ -21,127 +21,6 @@ use hwc_ui::ingame::strings::Strings;
 /// The local player (`universe.curPlayerIndex` in single player).
 pub const PLAYER: usize = 0;
 
-/// The build-manager tables (0x7499e0.., `cmCanBuildShipType`): `(flag, value)` with flag 0 a
-/// class heading (value = ship class) and 1 / 2 a ship type (2: buildable once acquired).
-/// TODO: take these from `hwc_sim::construction` once its table is public.
-const SOMTAAW_SMALL: &[(u8, u8)] = &[
-    (0, 6),
-    (1, 0),
-    (1, 1),
-    (1, 133),
-    (1, 2),
-    (0, 5),
-    (1, 4),
-    (1, 5),
-    (0, 4),
-    (1, 6),
-    (1, 7),
-    (1, 8),
-    (0, 11),
-    (1, 3),
-    (1, 17),
-    (0, 8),
-    (1, 14),
-    (0, 10),
-    (1, 13),
-];
-const SOMTAAW_BIG: &[(u8, u8)] = &[
-    (0, 6),
-    (1, 0),
-    (1, 1),
-    (1, 133),
-    (1, 2),
-    (0, 5),
-    (1, 4),
-    (1, 5),
-    (0, 4),
-    (1, 6),
-    (1, 7),
-    (1, 8),
-    (0, 3),
-    (1, 25),
-    (1, 10),
-    (1, 12),
-    (0, 11),
-    (1, 3),
-    (1, 17),
-    (0, 8),
-    (1, 14),
-    (1, 16),
-    (0, 10),
-    (1, 26),
-    (1, 24),
-    (1, 22),
-    (1, 19),
-    (1, 21),
-    (1, 23),
-    (1, 31),
-];
-const BEAST_SMALL: &[(u8, u8)] = &[
-    (0, 6),
-    (1, 33),
-    (1, 35),
-    (1, 36),
-    (2, 34),
-    (1, 37),
-    (0, 5),
-    (1, 39),
-    (1, 40),
-    (1, 59),
-    (1, 58),
-    (2, 38),
-    (0, 4),
-    (1, 44),
-    (1, 45),
-    (2, 48),
-    (2, 41),
-    (2, 42),
-    (0, 11),
-    (2, 52),
-    (0, 8),
-    (1, 49),
-];
-const BEAST_BIG: &[(u8, u8)] = &[
-    (0, 6),
-    (1, 33),
-    (1, 35),
-    (1, 36),
-    (2, 34),
-    (1, 37),
-    (0, 5),
-    (1, 39),
-    (1, 40),
-    (1, 59),
-    (1, 58),
-    (2, 38),
-    (0, 4),
-    (1, 44),
-    (1, 45),
-    (2, 48),
-    (2, 41),
-    (2, 42),
-    (0, 3),
-    (1, 47),
-    (1, 46),
-    (0, 11),
-    (2, 52),
-    (0, 8),
-    (1, 49),
-    (1, 51),
-    (0, 10),
-    (1, 57),
-];
-
-pub fn build_table(race: ShipRace, big: bool) -> &'static [(u8, u8)] {
-    match (race, big) {
-        (ShipRace::Somtaaw, false) => SOMTAAW_SMALL,
-        (ShipRace::Somtaaw, true) => SOMTAAW_BIG,
-        (ShipRace::Beast, false) => BEAST_SMALL,
-        (ShipRace::Beast, true) => BEAST_BIG,
-        _ => &[],
-    }
-}
-
 /// UI ship number of a simulation ship.
 pub fn ui_id(id: ShipId) -> u32 {
     u32::from(id.0)
@@ -160,6 +39,8 @@ pub struct SimHost<'a> {
     pub messages: &'a [GameMessage],
     pub paused: bool,
     pub escape_pending: bool,
+    /// The sensors manager is open.
+    pub in_sensors: bool,
     /// RUs shown (the mission's `RUsSet` value is copied onto the player as it changes).
     pub resource_units: i32,
     /// Screen position and radius of ships (popup highlights).
@@ -371,7 +252,7 @@ impl GameUiHost for SimHost<'_> {
             single_player: true,
             multiplayer: false,
             paused: self.paused,
-            in_sensors: false,
+            in_sensors: self.in_sensors,
             tutorial: false,
             mission: self.run.game.config.mission as i32,
         }
@@ -397,10 +278,10 @@ impl GameUiHost for SimHost<'_> {
         let Some(fst) = u.statics.ship(f.ship_type) else {
             return Vec::new();
         };
-        let at_mothership = f.ship_type == ShipType::sMothership;
-        let p = &u.base.players[PLAYER];
         let mut rows = Vec::new();
-        for &(flag, value) in build_table(fst.ship_race, fst.can_build_big_ships) {
+        // The table's order; what is offered comes from the simulation's
+        // `cmUpdateShipAvailable` (level Include/ExcludeShips, research, acquired types).
+        for &(flag, value) in construction::build_table(fst.ship_race, fst.can_build_big_ships) {
             if flag == 0 {
                 let class = ShipClass::from_index(value as usize);
                 let name = class.map_or_else(String::new, |c| self.class_name(c));
@@ -414,8 +295,7 @@ impl GameUiHost for SimHost<'_> {
             let Some(st) = u.statics.ship(t) else {
                 continue;
             };
-            let researched = research::can_build_ship(u, PLAYER, t, at_mothership)
-                && (flag != 2 || p.acquired.get(t.index()).copied().unwrap_or(false));
+            let researched = hwc_sim::level::construction_offers(u, fid, t);
             let status = if !researched {
                 BuildStatus::Hidden
             } else if !construction::can_build_ship_type(u, fid, t, true)
@@ -769,9 +649,11 @@ mod tests {
 
     #[test]
     fn tables_start_with_fighters() {
-        assert_eq!(build_table(ShipRace::Somtaaw, true)[0], (0, 6));
-        assert!(build_table(ShipRace::Somtaaw, true).contains(&(1, 14)));
-        assert!(build_table(ShipRace::Taiidan, true).is_empty());
+        assert_eq!(
+            construction::build_table(ShipRace::Somtaaw, true)[0],
+            (0, 6)
+        );
+        assert!(construction::build_table(ShipRace::Somtaaw, true).contains(&(1, 14)));
         assert_eq!(sim_id(ui_id(ShipId(42))), ShipId(42));
     }
 }

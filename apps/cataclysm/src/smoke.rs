@@ -107,8 +107,7 @@ impl Rig {
 
     fn render(&mut self, g: &mut Game, name: &str) {
         g.render(&mut self.renderer, SIZE).expect("render");
-        let (mx, my) = g.mouse();
-        self.session.draw_pointer(g.canvas_mut(), mx, my);
+        g.draw_cursor();
         save(g.canvas(), name);
     }
 
@@ -328,4 +327,256 @@ fn mission_one_plays_through_the_game_path() {
     assert_eq!(g.world.universe().update_counter, t, "paused");
     rig.render(g, "13_escape_menu");
     assert!(g.world.universe().update_counter > 500);
+}
+
+fn save_sensors(canvas: &Canvas, name: &str) {
+    if std::env::var_os("HWC_SCREENSHOTS").is_none() {
+        return;
+    }
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/sensors");
+    std::fs::create_dir_all(&dir).expect("dir");
+    canvas
+        .save_png(&dir.join(format!("{name}.png")))
+        .expect("png");
+}
+
+impl Rig {
+    fn shot(&mut self, g: &mut Game, name: &str) {
+        g.render(&mut self.renderer, SIZE).expect("render");
+        g.draw_cursor();
+        save_sensors(g.canvas(), name);
+    }
+}
+
+/// The sensors manager (zoom out and back, fleet, ranges, selection and a move order inside
+/// it) and the pointer for the modifiers and over an enemy. With `HWC_SCREENSHOTS` set the
+/// frames go to `screenshots/sensors/`.
+#[test]
+fn sensors_manager_and_pointers() {
+    use crate::sensors::Phase;
+    use hwc_ui::ingame::cursor::CursorKind;
+    const SPACE: u16 = 0x20;
+    const CTRL: u16 = 0x11;
+    const ALT: u16 = 0x12;
+    const LEFT: u16 = 0x25;
+    let Some((data, mut rig)) = setup() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut loading = Loading::new(data.clone(), &rig.session, 1, 2, SIZE).expect("loading");
+    let mut game = loop {
+        match loading.advance(&rig.session, Some(&mut rig.renderer), DT) {
+            Progress::Working => {}
+            Progress::Ready(g) => break g,
+            Progress::Abandon(e) => panic!("mission 1 did not start: {e}"),
+        }
+    };
+    let g = &mut *game;
+    rig.frames(g, 270);
+    assert!(g.world.run.game.ships_have_arrived);
+    // The fleet, without the mothership.
+    let ms = g.world.universe().base.players[0]
+        .mothership
+        .expect("mothership");
+    // The build list is the simulation's (no Super Acolyte in Mission 1).
+    let offered = hwc_sim::level::construction_list(g.world.universe(), ms);
+    eprintln!("mission 1 build list: {offered:?}");
+    assert!(offered
+        .iter()
+        .all(|t| !t.name().to_ascii_lowercase().contains("super")));
+    rig.drag(g, (2, 2), (SIZE.0 - 3, SIZE.1 - 3));
+    g.selection.retain(|&id| id != ms);
+    assert!(!g.selection.is_empty(), "fleet selected");
+
+    // Ctrl: the attack pointer and a red band box; Alt: the eye and a grey one.
+    for (key, name, kind) in [
+        (CTRL, "01_ctrl_attack_band_box", CursorKind::Attack),
+        (ALT, "02_alt_focus_band_box", CursorKind::FocusNoSelect),
+    ] {
+        rig.input(g, InputEvent::KeyDown(key));
+        rig.input(g, InputEvent::MouseMove { x: 300, y: 200 });
+        rig.input(
+            g,
+            InputEvent::MouseButton {
+                left: true,
+                down: true,
+            },
+        );
+        rig.frame(g);
+        rig.input(g, InputEvent::MouseMove { x: 620, y: 450 });
+        rig.frame(g);
+        assert_eq!(g.cursor(), kind, "{name}");
+        rig.shot(g, name);
+        // Let go of the button away from everything with the modifier released first.
+        rig.input(g, InputEvent::KeyUp(key));
+        rig.input(g, InputEvent::MouseMove { x: 300, y: 200 });
+        rig.input(
+            g,
+            InputEvent::MouseButton {
+                left: true,
+                down: false,
+            },
+        );
+        rig.frame(g);
+        rig.drag(g, (2, 2), (SIZE.0 - 3, SIZE.1 - 3));
+        g.selection.retain(|&id| id != ms);
+    }
+    // Over an enemy ship: the attack pointer. Put the camera on the nearest one.
+    let u = g.world.universe();
+    let ms_pos = u.ship(ms).unwrap().posinfo.position;
+    let enemy = u
+        .ship_list
+        .iter()
+        .copied()
+        .filter(|&id| {
+            u.ship(id)
+                .is_some_and(|s| s.player != 0 && s.flags & hwc_sim::object::sof::HIDE == 0)
+        })
+        .min_by(|&a, &b| {
+            let d = |id: hwc_sim::ShipId| {
+                let p = u.ship(id).unwrap().posinfo.position;
+                let v = glam::Vec3::new(p.x - ms_pos.x, p.y - ms_pos.y, p.z - ms_pos.z);
+                v.length()
+            };
+            d(a).total_cmp(&d(b))
+        });
+    if let Some(e) = enemy {
+        let keep = g.world.focus.clone();
+        g.world.focus = vec![e];
+        rig.frames(g, 2);
+        if let Some(p) = ship_px(g, e) {
+            rig.input(g, InputEvent::MouseMove { x: p.0, y: p.1 });
+            rig.frame(g);
+            rig.shot(g, "03_cursor_over_enemy");
+            if !hwc_sim::command::attack_capable(g.world.universe(), &g.selection).is_empty() {
+                assert_eq!(
+                    g.cursor(),
+                    CursorKind::Attack,
+                    "attack pointer over an enemy"
+                );
+            }
+        }
+        g.world.focus = keep;
+        rig.frames(g, 2);
+    } else {
+        eprintln!("no enemy ship in the level yet");
+    }
+    // Over the mothership with the fleet selected: docking.
+    if let Some(p) = ship_px(g, ms) {
+        rig.input(g, InputEvent::MouseMove { x: p.0, y: p.1 });
+        rig.frame(g);
+        rig.shot(g, "04_cursor_over_mothership");
+    }
+
+    // Space: the sensors manager zooms out.
+    rig.input(
+        g,
+        InputEvent::MouseMove {
+            x: SIZE.0 / 2 + 200,
+            y: SIZE.1 / 2,
+        },
+    );
+    rig.input(g, InputEvent::KeyDown(SPACE));
+    rig.input(g, InputEvent::KeyUp(SPACE));
+    rig.frame(g);
+    assert!(g.sensors.is_open(), "sensors open");
+    let mut k = 0;
+    let mut phases = Vec::new();
+    while g.sensors.zooming() {
+        rig.frame(g);
+        phases.push(g.sensors.phase());
+        rig.shot(g, &format!("10_zoom_out_{k:02}"));
+        k += 1;
+        assert!(k < 40, "zoom never ends");
+    }
+    assert!(phases.contains(&Phase::Main) && phases.contains(&Phase::Sensors));
+    rig.frames(g, 4);
+    rig.shot(g, "20_sensors_view");
+    // Pan left a little.
+    let before = g.world.camera.look_at;
+    rig.input(g, InputEvent::KeyDown(LEFT));
+    rig.frames(g, 10);
+    rig.input(g, InputEvent::KeyUp(LEFT));
+    rig.frames(g, 10);
+    assert!(g.world.camera.look_at.distance(before) > 1.0, "panned");
+    rig.shot(g, "21_sensors_panned");
+    // Band box in the sensors view selects the fleet again.
+    g.selection.clear();
+    rig.drag(g, (2, 2), (SIZE.0 - 3, SIZE.1 - 3));
+    assert!(!g.selection.is_empty(), "band box in sensors");
+    g.selection.retain(|&id| id != ms);
+    rig.shot(g, "22_sensors_selected");
+    // The move plate inside the sensors view, and the order.
+    let movers = g.selection.clone();
+    rig.key(g, 0x4d);
+    assert!(matches!(g.mode, Mode::Move { .. }));
+    rig.input(
+        g,
+        InputEvent::MouseMove {
+            x: SIZE.0 / 2 + 120,
+            y: SIZE.1 / 2 + 40,
+        },
+    );
+    rig.frame(g);
+    rig.shot(g, "23_sensors_move_plate");
+    rig.input(
+        g,
+        InputEvent::MouseButton {
+            left: true,
+            down: true,
+        },
+    );
+    rig.input(
+        g,
+        InputEvent::MouseButton {
+            left: true,
+            down: false,
+        },
+    );
+    rig.frame(g);
+    let u = g.world.universe();
+    assert!(
+        movers.iter().any(|&id| u
+            .ship(id)
+            .and_then(|s| s.command)
+            .and_then(|c| u.commands.get(c))
+            .is_some_and(|c| c.order == order::MOVE)),
+        "move order from the sensors view"
+    );
+    // Ctrl in the sensors view: attack pointer and band box.
+    rig.input(g, InputEvent::KeyDown(CTRL));
+    rig.input(g, InputEvent::MouseMove { x: 200, y: 200 });
+    rig.input(
+        g,
+        InputEvent::MouseButton {
+            left: true,
+            down: true,
+        },
+    );
+    rig.frame(g);
+    rig.input(g, InputEvent::MouseMove { x: 500, y: 400 });
+    rig.frame(g);
+    rig.shot(g, "24_sensors_ctrl_band_box");
+    rig.input(g, InputEvent::KeyUp(CTRL));
+    rig.input(g, InputEvent::MouseMove { x: 200, y: 200 });
+    rig.input(
+        g,
+        InputEvent::MouseButton {
+            left: true,
+            down: false,
+        },
+    );
+    rig.frame(g);
+    // Space again: zoom back in.
+    rig.input(g, InputEvent::KeyDown(SPACE));
+    rig.input(g, InputEvent::KeyUp(SPACE));
+    let mut k = 0;
+    while g.sensors.is_open() {
+        rig.frame(g);
+        rig.shot(g, &format!("30_zoom_in_{k:02}"));
+        k += 1;
+        assert!(k < 40, "zoom in never ends");
+    }
+    rig.frames(g, 2);
+    rig.shot(g, "31_back_in_main_view");
 }

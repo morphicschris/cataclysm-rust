@@ -391,8 +391,9 @@ impl App {
             return Ok(true);
         };
         g.render(r, size)?;
-        let (mx, my) = g.mouse();
-        self.session.draw_pointer(g.canvas_mut(), mx, my);
+        if self.session.cursor_visible {
+            g.draw_cursor();
+        }
         gpu.present(g.canvas(), self.session.placement.viewport);
         Ok(true)
     }

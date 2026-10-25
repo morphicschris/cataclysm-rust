@@ -25,14 +25,17 @@ use hwc_ui::session::Session;
 use hwc_ui::text::{self, Shadow};
 use hwc_ui::AssetSource;
 
+use hwc_ui::ingame::cursor::{self, avail, Availability, Pointer, PointerAction};
+
 use crate::audio::Audio;
 use crate::host::{selectable, sim_id, SimHost, PLAYER};
 use crate::mission::{Cue, CueReader};
+use crate::sensors::{self, Phase, Sensors};
 use crate::world::World;
 
 /// Pixels the pointer may move between press and release and still count as a click
-/// (`selClickBoxWidth/Height`).
-const CLICK_SLOP: i32 = 4;
+/// (`selClickBoxWidth/Height`: a band box needs `|dx| + 1 > 5`).
+const CLICK_SLOP: i32 = 5;
 /// Right-button movement that still opens the menu (`MR_MouseMovementClickLimit`).
 const RIGHT_CLICK_LIMIT: f32 = 6.0;
 /// Subtitles without a known length stay this long (`subTitleShortest`).
@@ -44,7 +47,6 @@ const MOVEMENT_GUI_ON: u32 = 0x109;
 const MOVEMENT_GUI_OFF: u32 = 0x10a;
 const CLICK: u32 = 0x108;
 
-const BAND_BOX: Color = [255, 255, 255, 255];
 const PLATE: Color = [60, 120, 255, 160];
 const PLATE_LINE: Color = [255, 220, 60, 255];
 
@@ -57,6 +59,13 @@ pub enum Outcome {
     Restart,
     /// The options were changed in game (audio levels and the like).
     ApplyOptions,
+}
+
+/// What is under the pointer (`mouseCursorObjPtr`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Hover {
+    Ship(ShipId),
+    Resource(hwc_sim::resource::ResourceId),
 }
 
 /// What the left button does in the main view.
@@ -106,6 +115,15 @@ pub struct Game {
     subtitle_font: Option<Rc<hwc_formats::font::Font>>,
     big_font: Option<Rc<hwc_formats::font::Font>>,
     real_time: f32,
+    /// The sensors manager.
+    pub sensors: Sensors,
+    /// The game's pointer.
+    pub pointer: Pointer,
+    /// Overlay pan arrows held (left, right, up, down).
+    pan_arrows: [bool; 4],
+    /// What is under the pointer this frame.
+    pub hover: Option<Hover>,
+    hotkey_font: Option<Rc<hwc_formats::font::Font>>,
 }
 
 fn v3(v: hwc_math::Vector) -> Vec3 {
@@ -132,6 +150,21 @@ impl Game {
             },
         )?;
         let strings = ui.state().strings.clone();
+        let read = |name: &str| {
+            source
+                .read(name)
+                .and_then(|d| hwc_formats::script::ScriptFile::parse_bytes(&d).ok())
+        };
+        let tweaks = sensors::Tweaks::from_scripts(
+            read("sensors.script").as_ref(),
+            read("cameracommand.script").as_ref(),
+        );
+        let icons = read("Tactical.script")
+            .map(|s| sensors::Icons::from_script(&s))
+            .unwrap_or_default();
+        let mut sensors = Sensors::new(tweaks, sensors::Toggles::from_options(&options), icons);
+        sensors.instant = options.get("InstantTransition") != 0;
+        let pointer = Pointer::new(hwc_ui::Resources::new(source.clone()));
         let mut res = hwc_ui::Resources::new(source);
         res.set_language(hwc_ui::Language::from_index(options.get("language") as u32));
         let mut g = Game {
@@ -159,7 +192,12 @@ impl Game {
             target: None,
             subtitle_font: res.font("Arial_13.hff"),
             big_font: res.font("Arial_13.hff"),
+            hotkey_font: res.font("default.hff"),
             real_time: 0.0,
+            sensors,
+            pointer,
+            pan_arrows: [false; 4],
+            hover: None,
         };
         g.sync_resource_units();
         Ok(g)
@@ -205,8 +243,12 @@ impl Game {
             selecting: &self.selecting,
             messages: &self.messages,
             paused: self.paused,
-            // Escape first cancels the move plate or the selection (`kbcbEscape`).
-            escape_pending: self.mode != Mode::Select || !self.selection.is_empty(),
+            // Escape first cancels the move plate, the sensors manager or the selection
+            // (`kbcbEscape`).
+            escape_pending: self.mode != Mode::Select
+                || self.sensors.is_open()
+                || !self.selection.is_empty(),
+            in_sensors: self.sensors.is_open(),
             resource_units: world.universe().base.players[PLAYER].resource_units,
             screen_pos: &pos,
         };
@@ -223,8 +265,12 @@ impl Game {
             let (dx, dy) = (x - self.mouse.0, y - self.mouse.1);
             self.mouse = (x, y);
             if self.right_down {
-                // Camera rotation, or zoom with both buttons (`mrCameraMotion`).
+                // Camera rotation, or zoom with both buttons (`mrCameraMotion`); the sensors
+                // camera while the sensors manager is open, nothing while it zooms.
                 self.right_moved += (dx.abs() + dy.abs()) as f32;
+                if self.sensors.zooming() {
+                    return;
+                }
                 let both = self.left_down.is_some();
                 let min = self.world.camera.closest_zoom;
                 self.world
@@ -243,6 +289,17 @@ impl Game {
         }
         let used = self.with_host(|ui, host| ui.handle_input(host, ev));
         if used {
+            return;
+        }
+        // The sensors viewport takes nothing while it zooms (`smViewportProcess`).
+        if self.sensors.zooming()
+            && matches!(
+                ev,
+                InputEvent::MouseButton { .. } | InputEvent::Wheel { .. }
+            )
+        {
+            self.left_down = None;
+            self.right_down = false;
             return;
         }
         match ev {
@@ -310,7 +367,7 @@ impl Game {
             let inside = self.ships_in_box(a, p);
             if self.ui.action_held(keys::BANDBOX_FOCUS) {
                 if !inside.is_empty() {
-                    self.world.focus = inside;
+                    self.focus_on(inside, audio);
                 }
             } else if self.ui.action_held(keys::BANDBOX_ATTACK)
                 || self.ui.action_held(keys::BANDBOX_FORCE_ATTACK)
@@ -341,7 +398,7 @@ impl Game {
             return;
         }
         // A click.
-        match self.world.ship_at(size, p) {
+        match self.pick_ship(size, p) {
             Some(id) => self.object_click(id, audio),
             None => {
                 if !self.ui.action_held(keys::MULTIPLE_SELECT) {
@@ -357,7 +414,7 @@ impl Game {
         let Some(s) = u.ship(id) else { return };
         let own = s.player == PLAYER;
         if self.ui.action_held(keys::BANDBOX_FOCUS) {
-            self.world.focus = vec![id];
+            self.focus_on(vec![id], audio);
             return;
         }
         let ctrl_shift = self.ui.action_held(keys::BANDBOX_FORCE_ATTACK);
@@ -404,7 +461,230 @@ impl Game {
         if self.selection.is_empty() {
             return;
         }
+        // `mrRightClickSmartOrder`: with a context-sensitive scheme the action under the
+        // pointer, otherwise (and in the sensors manager) the menu.
+        if !self.sensors.is_open() && self.context_scheme() {
+            if let Some(h) = self.hover {
+                let in_sel = matches!(h, Hover::Ship(id) if self.selection.contains(&id));
+                if !in_sel && self.smart_order(h) {
+                    return;
+                }
+            }
+        }
         self.with_host(|ui, host| ui.open_popup(host, false));
+    }
+
+    /// A context-sensitive action scheme is on (`RightClick_CSA` or `Homeworld_CSA`).
+    fn context_scheme(&self) -> bool {
+        let o = &self.ui.fe.game.options;
+        o.get("RightClick_CSA") != 0 || o.get("Homeworld_CSA") != 0
+    }
+
+    /// The classifier's action on an object (`mouseCursorActionClassify`).
+    fn classify(&self, h: Hover) -> PointerAction {
+        let sel = self.availability(&self.selection);
+        let (tgt, facts) = self.target_facts(h);
+        let classic = self.ui.fe.game.options.get("Homeworld_CSA") != 0;
+        cursor::classify(&sel, &tgt, self.selection.len(), &facts, classic)
+    }
+
+    /// Carries out the right-click action on an object; false opens the menu instead.
+    fn smart_order(&mut self, h: Hover) -> bool {
+        match (self.classify(h), h) {
+            (PointerAction::Harvest, Hover::Resource(r)) => {
+                let sel = self.selection.clone();
+                hwc_sim::resource::cl_collect_resource(self.world.universe_mut(), &sel, Some(r));
+                true
+            }
+            (PointerAction::Attack, Hover::Ship(t)) => {
+                self.attack(&[t]);
+                true
+            }
+            (PointerAction::Dock, Hover::Ship(t)) => {
+                let sel = self.selection.clone();
+                dock::cl_dock(
+                    self.world.universe_mut(),
+                    &sel,
+                    dock::purpose::DOCK,
+                    Some(t),
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `selGetCommandAvailability` over a set of ships, as far as the simulation tells.
+    fn availability(&self, ships: &[ShipId]) -> Availability {
+        use hwc_sim::upgrade::has_upgrade;
+        let u = self.world.universe();
+        let mut t = [false; avail::LEN];
+        let all = [
+            (avail::ALL_LEECH, 0x40),
+            (avail::ALL_EMP, 0x200),
+            (avail::ALL_MIMIC, 0x20),
+            (avail::ALL_HIVE, 0x800),
+        ];
+        let any = !ships.is_empty();
+        for (i, _) in all {
+            t[i] = any;
+        }
+        t[avail::ALL_RAMMING] = any;
+        t[avail::ALL_MISSILES] = any;
+        for &id in ships {
+            let Some(s) = u.ship(id) else { continue };
+            let st = u.statics.ship(s.ship_type);
+            let class = st.and_then(|st| st.ship_class);
+            let ti = s.ship_type.index();
+            if s.player == PLAYER || u.players.get(PLAYER).is_some_and(|p| p.is_ally(s.player)) {
+                t[avail::ALLY] = true;
+            } else {
+                t[avail::ENEMY] = true;
+            }
+            if class == Some(hwc_sim::statics::ShipClass::Resource) && matches!(ti, 0x0e | 0x31) {
+                t[avail::HARVEST] = true;
+            }
+            if has_upgrade(s, 0x40000) && !matches!(ti, 0x10 | 0x33) {
+                t[avail::REPAIR] = true;
+            }
+            if has_upgrade(s, 0x80000) {
+                t[avail::SALVAGE] = true;
+            }
+            if !command::attack_capable(u, &[id]).is_empty() {
+                t[avail::ATTACK] = true;
+            }
+            match ti {
+                0x70 => t[avail::SLIPGATE_SMALL] = true,
+                0x71 => t[avail::SLIPGATE_MEDIUM] = true,
+                0x72 => t[avail::SLIPGATE_LARGE] = true,
+                _ => {}
+            }
+            for (bit, i) in [
+                (0x800, avail::HIVE),
+                (0x200, avail::EMP),
+                (0x40, avail::LEECH),
+                (0x8, avail::LINK),
+                (0x20, avail::MIMIC),
+                (0x400, avail::FORCE_FIELD),
+            ] {
+                if has_upgrade(s, bit) {
+                    t[i] = true;
+                }
+            }
+            if has_upgrade(s, 0x1000) || has_upgrade(s, 0x2000) || has_upgrade(s, 0x4000) {
+                t[avail::MISSILES] = true;
+            } else {
+                t[avail::ALL_MISSILES] = false;
+            }
+            for (i, bit) in all {
+                if !has_upgrade(s, bit) {
+                    t[i] = false;
+                }
+            }
+            if matches!(ti, 6 | 0x30) {
+                t[avail::RAMMING] = true;
+            } else {
+                t[avail::ALL_RAMMING] = false;
+            }
+            if ti == 5 {
+                t[avail::MIMIC_TYPE] = true;
+            }
+            if has_upgrade(s, 0x20000) {
+                if hwc_sim::cloak::is_cloaked(s) {
+                    t[avail::CLOAKED] = true;
+                } else {
+                    t[avail::CLOAK] = true;
+                }
+            }
+        }
+        t
+    }
+
+    /// The object under the pointer as the classifier sees it.
+    fn target_facts(&self, h: Hover) -> (Availability, cursor::TargetFacts) {
+        let mut facts = cursor::TargetFacts::default();
+        match h {
+            Hover::Resource(_) => {
+                let mut t = [false; avail::LEN];
+                t[avail::RESOURCE] = true;
+                (t, facts)
+            }
+            Hover::Ship(id) => {
+                let t = self.availability(&[id]);
+                let u = self.world.universe();
+                if let Some(s) = u.ship(id) {
+                    facts.own_ship = s.player == PLAYER;
+                    facts.all_can_dock = facts.own_ship
+                        && !self.selection.is_empty()
+                        && self.selection.iter().all(|&a| {
+                            dock::ship_can_dock_with(u, a, id, dock::purpose::DOCK, false)
+                        });
+                    let link = hwc_sim::upgrade::has_upgrade(s, 0x8);
+                    facts.link_with_all = link
+                        && self.selection.iter().all(|&a| {
+                            u.ship(a).is_some_and(|x| {
+                                hwc_sim::upgrade::has_upgrade(x, 0x8) && x.ship_type == s.ship_type
+                            })
+                        });
+                }
+                (t, facts)
+            }
+        }
+    }
+
+    /// The ship under the pointer among those the local player can see (in the sensors
+    /// manager the fog of war hides ships).
+    fn pick_ship(&self, size: (u32, u32), p: [f32; 2]) -> Option<ShipId> {
+        if self.sensors.is_open() {
+            let u = self.world.universe();
+            let fog = sensors::Fog::of(u);
+            self.world
+                .ship_at_where(size, p, |id| sensors::ship_visible(u, &fog, id))
+        } else {
+            self.world.ship_at(size, p)
+        }
+    }
+
+    /// Focus on ships: in the sensors manager, zoom back onto them.
+    fn focus_on(&mut self, ships: Vec<ShipId>, audio: &mut Option<Audio>) {
+        if self.sensors.is_open() {
+            if let Some(e) = self.sensors.close_on(&self.world, &ships) {
+                sound(audio, e);
+            }
+        } else {
+            self.world.focus = ships;
+        }
+    }
+
+    /// Opens or closes the sensors manager (`Toggle_SensorsManager`).
+    fn toggle_sensors(&mut self, audio: &mut Option<Audio>) {
+        if self.sensors.is_open() {
+            self.close_sensors(audio);
+        } else if let Some(e) = self.sensors.begin(&mut self.world) {
+            self.left_down = None;
+            self.selecting.clear();
+            sound(audio, e);
+        }
+    }
+
+    fn close_sensors(&mut self, audio: &mut Option<Audio>) {
+        // `ccLockOnTargetNow`: the main camera looks at its focus.
+        let look = if self.world.focus.is_empty() {
+            self.sensors
+                .main_camera()
+                .map_or(self.world.camera.look_at, |c| c.look_at)
+        } else {
+            v3(group_centre(self.world.universe(), &self.world.focus))
+        };
+        if let Some(e) = self.sensors.close(&self.world, look) {
+            sound(audio, e);
+            // A plate far from where the camera goes is cancelled.
+            if let (Mode::Move { .. }, Some(c)) = (self.mode, self.selection_centre()) {
+                if (c - look).length_squared() >= sensors::MAX_MOVE_DISTANCE_SQ {
+                    self.mode = Mode::Select;
+                }
+            }
+        }
     }
 
     /// Ships whose centres project inside the band box.
@@ -415,9 +695,12 @@ impl Game {
             [a[0].max(b[0]), a[1].max(b[1])],
         );
         let u = self.world.universe();
+        let fog = sensors::Fog::of(u);
+        let in_sensors = self.sensors.is_open();
         u.ship_list
             .iter()
             .copied()
+            .filter(|&id| !in_sensors || sensors::ship_visible(u, &fog, id))
             .filter(|&id| {
                 u.ship(id).is_some_and(|s| {
                     s.flags & hwc_sim::object::sof::HIDE == 0
@@ -675,7 +958,21 @@ impl Game {
 
     /// Key actions the game handles (`mrKeyPress`).
     fn action(&mut self, a: Action, down: bool, audio: &mut Option<Audio>) {
+        // The overlay's pan arrows are held like keys.
+        let arrows = [
+            keys::PAN_SENSORS_LEFT,
+            keys::PAN_SENSORS_RIGHT,
+            keys::PAN_SENSORS_UP,
+            keys::PAN_SENSORS_DOWN,
+        ];
+        if let Some(i) = arrows.iter().position(|&x| x == a) {
+            self.pan_arrows[i] = down;
+            return;
+        }
         if !down {
+            return;
+        }
+        if (136..=147).contains(&a.0) && self.sensors.toggles.toggle(a.0 as u8) {
             return;
         }
         if let Some((op, n)) = a.ship_group() {
@@ -706,9 +1003,11 @@ impl Game {
             keys::MOVE => self.start_move(audio),
             keys::FOCUS => {
                 if !self.selection.is_empty() {
-                    self.world.focus = self.selection.clone();
+                    let sel = self.selection.clone();
+                    self.focus_on(sel, audio);
                 }
             }
+            keys::TOGGLE_SENSORS_MANAGER => self.toggle_sensors(audio),
             keys::FOCUS_ON_MOTHERSHIP => {
                 if let Some(ms) = self.world.universe().base.players[PLAYER].mothership {
                     self.world.focus = vec![ms];
@@ -729,6 +1028,9 @@ impl Game {
                 if self.mode != Mode::Select {
                     self.mode = Mode::Select;
                     sound(audio, MOVEMENT_GUI_OFF);
+                } else if self.sensors.is_open() {
+                    // `smCancelMoveOrClose`.
+                    self.close_sensors(audio);
                 } else {
                     self.selection.clear();
                 }
@@ -774,14 +1076,36 @@ impl Game {
         for r in requests {
             self.apply(r, audio, &mut out);
         }
-        // Polled keys: zoom.
+        // Polled keys: zoom (the sensors camera's while the sensors manager is up).
         let min = self.world.camera.closest_zoom;
-        if self.ui.action_held(keys::ZOOM_IN) {
-            self.world.camera.key_zoom(true, min);
+        if !self.sensors.zooming() {
+            if self.ui.action_held(keys::ZOOM_IN) {
+                self.world.camera.key_zoom(true, min);
+            }
+            if self.ui.action_held(keys::ZOOM_OUT) {
+                self.world.camera.key_zoom(false, min);
+            }
         }
-        if self.ui.action_held(keys::ZOOM_OUT) {
-            self.world.camera.key_zoom(false, min);
+        // The sensors manager: a mission opening or closing it, the zoom, panning.
+        let kas_open = self.world.run.game.sensors_open;
+        if kas_open != self.sensors.is_open() && !self.sensors.zooming() {
+            if kas_open {
+                self.toggle_sensors(audio);
+            } else {
+                self.close_sensors(audio);
+            }
         }
+        let pan = [
+            self.pan_arrows[0] || self.ui.action_held(keys::PAN_SENSORS_LEFT),
+            self.pan_arrows[1] || self.ui.action_held(keys::PAN_SENSORS_RIGHT),
+            self.pan_arrows[2] || self.ui.action_held(keys::PAN_SENSORS_UP),
+            self.pan_arrows[3] || self.ui.action_held(keys::PAN_SENSORS_DOWN),
+        ];
+        let menu_open = hwc_ui::ingame::popup::is_open(&self.ui.fe);
+        for e in self.sensors.update(&mut self.world, dt, pan, menu_open) {
+            sound(audio, e);
+        }
+        self.update_pointer();
         // The band box being dragged lists its ships.
         if let (Some(a), Mode::Select, false) = (self.left_down, self.mode, self.right_down) {
             let b = self.mouse;
@@ -802,7 +1126,12 @@ impl Game {
         if let Some(a) = audio.as_mut() {
             let eye = self.world.camera.eye();
             let at = self.world.camera.look_at;
-            a.game_update(eye.to_array(), at.to_array(), !self.paused);
+            a.game_update(
+                eye.to_array(),
+                at.to_array(),
+                !self.paused,
+                &self.world.run.universe,
+            );
         }
         let now = self.world.universe().total_time_elapsed;
         self.subtitles.retain(|s| s.1 > now);
@@ -918,11 +1247,21 @@ impl Game {
             self.target = Some(OffscreenTarget::new(renderer, px.0, px.1));
         }
         self.world.prepare(renderer);
-        let frame = self.world.frame(px);
-        let target = self.target.as_ref().expect("target");
-        let rgba = self.world.render_offscreen(renderer, target, &frame)?;
-        for (dst, src) in self.canvas.pixels.iter_mut().zip(rgba.as_chunks::<4>().0) {
-            *dst = [src[0], src[1], src[2], 255];
+        if self.sensors.phase() == Phase::Sensors {
+            self.render_sensors(renderer, px)?;
+        } else {
+            // The main-view part of a sensors zoom uses the main camera's clip planes.
+            let saved = self.world.camera.tweaks;
+            if let Some(m) = self.sensors.main_camera() {
+                self.world.camera.tweaks = m.tweaks;
+            }
+            let frame = self.world.frame(px);
+            let target = self.target.as_ref().expect("target");
+            let rgba = self.world.render_offscreen(renderer, target, &frame);
+            self.world.camera.tweaks = saved;
+            for (dst, src) in self.canvas.pixels.iter_mut().zip(rgba?.as_chunks::<4>().0) {
+                *dst = [src[0], src[1], src[2], 255];
+            }
         }
         self.draw_marks();
         self.draw_text();
@@ -934,19 +1273,120 @@ impl Game {
         &self.canvas
     }
 
-    pub fn canvas_mut(&mut self) -> &mut Canvas {
-        &mut self.canvas
+    /// What is under the pointer and which pointer shows (`mouseSetCursorSetting`).
+    fn update_pointer(&mut self) {
+        let size = self.size();
+        let p = [self.mouse.0 as f32, self.mouse.1 as f32];
+        let over_ui = self.ui.manager().is_some() || hwc_ui::ingame::popup::is_open(&self.ui.fe);
+        self.hover = if over_ui || self.sensors.zooming() {
+            None
+        } else {
+            self.pick_ship(size, p).map(Hover::Ship).or_else(|| {
+                (!self.sensors.is_open())
+                    .then(|| self.world.resource_at(size, p).map(Hover::Resource))
+                    .flatten()
+            })
+        };
+        let band = self.left_down.is_some() && self.mode == Mode::Select;
+        let action = match self.hover {
+            Some(h)
+                if self.context_scheme()
+                    && !band
+                    && !self.sensors.is_open()
+                    && !matches!(h, Hover::Ship(id) if self.selection.contains(&id)) =>
+            {
+                Some(self.classify(h))
+            }
+            _ => None,
+        };
+        let ui = &self.ui;
+        let state = cursor::PointerState {
+            action,
+            screen_up: ui.manager().is_some(),
+            menu_open: hwc_ui::ingame::popup::is_open(&ui.fe),
+            move_plate: matches!(self.mode, Mode::Move { .. }),
+            camera_motion: self.right_down && self.right_moved > RIGHT_CLICK_LIMIT,
+            ..Default::default()
+        }
+        .with_keys(|a| ui.action_held(a));
+        let now = self.world.universe().total_time_elapsed;
+        self.pointer.update(&state, now);
     }
 
-    pub fn mouse(&self) -> (i32, i32) {
-        self.mouse
+    /// Draws the game's pointer (`mouseDraw`) at the mouse position.
+    pub fn draw_cursor(&mut self) {
+        let (x, y) = self.mouse;
+        self.pointer.draw(&mut self.canvas, x, y);
+    }
+
+    /// The pointer shown this frame.
+    #[cfg(test)]
+    pub fn cursor(&self) -> cursor::CursorKind {
+        self.pointer.kind
+    }
+
+    /// The sensors view (`smSceneRender`): the dimmed backdrop, the 2D layer under the ships,
+    /// the large ships' meshes, then points, icons and hot-key numbers.
+    fn render_sensors(&mut self, renderer: &mut Renderer, px: (u32, u32)) -> Result<(), String> {
+        let target = self.target.as_ref().expect("target");
+        let (clear, dim) = self.sensors.background();
+        let show_bg = self.sensors.toggles.background;
+        let rgba = self.world.render_background(renderer, target, show_bg)?;
+        for (dst, src) in self.canvas.pixels.iter_mut().zip(rgba.as_chunks::<4>().0) {
+            *dst = if show_bg {
+                let m = |c: u8| (f32::from(c) * dim) as u8;
+                [m(src[0]), m(src[1]), m(src[2]), 255]
+            } else {
+                clear
+            };
+        }
+        let frame = self.world.frame(px);
+        let mut groups: Vec<(u8, Vec<ShipId>)> =
+            self.groups.iter().map(|(k, v)| (*k, v.clone())).collect();
+        groups.sort_by_key(|g| g.0);
+        let font = self.hotkey_font.clone();
+        let inp = sensors::SceneInput {
+            world: &self.world,
+            size: px,
+            selection: &self.selection,
+            groups: &groups,
+            time: self.real_time,
+            font: font.as_deref(),
+        };
+        self.sensors.draw_under(&mut self.canvas, &inp);
+        let u = self.world.universe();
+        let fog = sensors::Fog::of(u);
+        let meshes: Vec<ShipId> = u
+            .ship_list
+            .iter()
+            .copied()
+            .filter(|&id| frame.is_mesh(id) && self.sensors.draws_mesh(&inp, &fog, id))
+            .collect();
+        if !meshes.is_empty() {
+            let rendered = self
+                .world
+                .render_ships_only(renderer, target, &frame, |id, _| meshes.contains(&id))?;
+            if let Some(rgba) = rendered {
+                for (dst, src) in self.canvas.pixels.iter_mut().zip(rgba.as_chunks::<4>().0) {
+                    if src[0] != 0 || src[1] != 0 || src[2] != 0 {
+                        *dst = [src[0], src[1], src[2], 255];
+                    }
+                }
+            }
+        }
+        self.sensors.draw_over(&mut self.canvas, &inp, &meshes);
+        Ok(())
     }
 
     fn draw_marks(&mut self) {
         let size = self.size();
+        let in_sensors = self.sensors.phase() == Phase::Sensors;
         let u = self.world.universe();
         let mut bars = Vec::new();
-        for &id in self.selection.iter().chain(&self.selecting) {
+        // Health bars are the main view's (`selSelectedDraw`).
+        let marked: &[ShipId] = if in_sensors { &[] } else { &self.selection };
+        let selecting: &[ShipId] = if in_sensors { &[] } else { &self.selecting };
+        for &id in marked.iter().chain(selecting) {
             let Some(s) = u.ship(id) else { continue };
             let Some(st) = u.statics.ship(s.ship_type) else {
                 continue;
@@ -966,8 +1406,12 @@ impl Game {
         for (x, y, r, f) in bars {
             hwc_ui::ingame::overlay::draw_health_bar(&mut self.canvas, x, y, r, f);
         }
+        // `mrSelectingDraw`: the band box in the modifier's colour, or before it is dragged
+        // (main view only) the box of the ship under the pointer.
         if let (Some(a), Mode::Select, false) = (self.left_down, self.mode, self.right_down) {
             let b = self.mouse;
+            let ui = &self.ui;
+            let color = cursor::band_box_color(|x| ui.action_held(x));
             if (a.0 - b.0).abs() >= CLICK_SLOP || (a.1 - b.1).abs() >= CLICK_SLOP {
                 let r = Rect::new(
                     a.0.min(b.0),
@@ -975,9 +1419,20 @@ impl Game {
                     a.0.max(b.0) + 1,
                     a.1.max(b.1) + 1,
                 );
-                self.canvas.outline_rect(r, BAND_BOX);
+                self.canvas.outline_rect(r, color);
+            } else if !in_sensors {
+                let p = [b.0 as f32, b.1 as f32];
+                let boxed = self
+                    .world
+                    .ship_at(size, p)
+                    .and_then(|id| self.world.screen_box(size, self.world.universe().ship(id)?));
+                if let Some((lo, hi)) = boxed {
+                    let r = Rect::new(lo[0] as i32, lo[1] as i32, hi[0] as i32, hi[1] as i32);
+                    self.canvas.outline_rect(r, color);
+                }
             }
         }
+
         if let Mode::Move { height } = self.mode {
             self.draw_plate(height);
         }

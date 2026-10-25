@@ -8,6 +8,7 @@
 //! [`InGameUi::draw`] on a canvas that already holds the 3D view.
 
 pub mod consmgr;
+pub mod cursor;
 pub mod draw;
 pub mod escmenu;
 pub mod host;

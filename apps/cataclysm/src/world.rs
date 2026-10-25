@@ -18,7 +18,7 @@ use hwc_formats::hsf::Hsf;
 use hwc_math::timing::{TaskTicker, TIMER_RESOLUTION};
 use hwc_render::assets::{load_mad_clip, mothership_modules, read_script, AssetSource};
 use hwc_render::effects::{EffectBatch, Line as FxLine, Sprite, FULL_UV};
-use hwc_render::lod::{screen_radius, LodSelector, LodTable};
+use hwc_render::lod::{screen_radius, LodKind, LodSelector, LodTable};
 use hwc_render::render_state::{normalized_team_color, ShipTint, TintParams};
 use hwc_render::trails::{
     ShipTrailDef, ShipTrails, TeamTrailColors, TrailFrame, TrailGate, TrailTick, TrailTweaks,
@@ -122,9 +122,18 @@ struct ShipFx {
     harvesting: bool,
 }
 
+impl Frame {
+    /// Whether the ship is drawn at a mesh level of detail this frame.
+    pub fn is_mesh(&self, id: ShipId) -> bool {
+        self.ids.iter().any(|&(i, mesh)| i == Some(id) && mesh)
+    }
+}
+
 /// What `Sandbox::frame` prepared for one drawn frame.
 pub struct Frame {
     items: Vec<Item>,
+    /// The ship each item draws (None for asteroids), and whether its detail level is a mesh.
+    ids: Vec<(Option<ShipId>, bool)>,
     poses: Vec<Option<Vec<Option<Mat4>>>>,
     pub effects: EffectBatch,
 }
@@ -173,6 +182,8 @@ pub struct World {
     resource_art: BTreeMap<u8, Option<ResourceArt>>,
     /// The camera has not been put on the mothership yet.
     camera_pending: bool,
+    /// The camera follows [`focus`](Self::focus) (off while the sensors manager owns it).
+    pub follow_focus: bool,
 }
 
 /// Engine vector to render vector.
@@ -259,6 +270,7 @@ impl World {
             effects: Vec::new(),
             resource_art: BTreeMap::new(),
             camera_pending: true,
+            follow_focus: true,
         };
         w.set_lighting(&lighting);
         w.load_art()?;
@@ -502,7 +514,7 @@ impl World {
 
     /// The camera goes to the player's mothership once it is out of hyperspace.
     fn camera_start(&mut self) {
-        if !self.camera_pending {
+        if !self.camera_pending || !self.follow_focus {
             return;
         }
         let u = &self.run.universe;
@@ -623,7 +635,7 @@ impl World {
 
     /// Keeps the camera on the focused ships.
     pub fn update_focus(&mut self) {
-        if !self.focus.is_empty() {
+        if self.follow_focus && !self.focus.is_empty() {
             let c = group_centre(self.universe(), &self.focus);
             self.camera.look_at = v3(c);
         }
@@ -693,6 +705,7 @@ impl World {
         let now = self.universe().total_time_elapsed;
         let mut frame = Frame {
             items: Vec::new(),
+            ids: Vec::new(),
             poses: Vec::new(),
             effects: EffectBatch::default(),
         };
@@ -724,16 +737,15 @@ impl World {
                 .get(s.color_scheme)
                 .or(self.team_colors.schemes.first());
             let team_color = scheme.map_or([1.0; 3], |c| normalized_team_color(c.base));
-            // Hyperspace: the window cuts the hull along its heading (`hsGetEquation`); ships
-            // clamped to an arriving host (the mothership's modules) take the host's plane.
+            // Hyperspace: the window cuts the hull along its heading (`hsGetEquation`). A ship
+            // clamped to a host (the mothership's modules) has no window of its own
+            // (`hsShouldDisplayEffect`) and is cut by the host's plane while the host is in
+            // hyperspace; the host's window is sized to cover them (`hyperspaceBoxScale`).
             let host = clamp_host(&self.run, s);
             let hs = hyper.get(&id).copied();
-            let clip = match (hs, host.and_then(|h| Some((h, *hyper.get(&h)?)))) {
-                (Some((state, clipt)), _) => {
-                    let fl = st.map_or(radius, |st| st.header.coll.forward_length);
-                    hs_plane(state, clipt, fl)
-                }
-                (None, Some((h, (state, clipt)))) => u.ship(h).and_then(|hs| {
+            let clip = match host {
+                Some(h) => hyper.get(&h).and_then(|&(state, clipt)| {
+                    let hs = u.ship(h)?;
                     let fl = u
                         .statics
                         .ship(hs.ship_type)
@@ -742,9 +754,12 @@ impl World {
                     let (_, host_m) = Self::transform_of(hs);
                     Some((host_m.inverse() * transform).transpose() * plane)
                 }),
-                _ => None,
+                None => hs.and_then(|(state, clipt)| {
+                    let fl = st.map_or(radius, |st| st.header.coll.forward_length);
+                    hs_plane(state, clipt, fl)
+                }),
             };
-            if let (Some((state, clipt)), Some(st)) = (hs, st) {
+            if let (Some((state, clipt)), Some(st), None) = (hs, st, host) {
                 hyperspace_window(&mut frame.effects, transform, st, state, clipt);
             }
             let max_velocity = if s.max_velocity_copy > 0.0 {
@@ -797,6 +812,12 @@ impl World {
                 time: now,
             });
             frame.poses.push(pose);
+            let mesh = art
+                .table
+                .as_ref()
+                .and_then(|t| t.levels.get(lod))
+                .is_none_or(|l| l.kind == LodKind::Mesh);
+            frame.ids.push((Some(id), mesh));
             // TODO(render states): cloak fade/wipe, phase blend, Beast infection and EMP
             // lightning once the simulation exposes cloaking, phasing, infection and the
             // Naggarok's EMP.
@@ -822,6 +843,7 @@ impl World {
                 time: now,
             });
             frame.poses.push(None);
+            frame.ids.push((None, false));
         }
         self.combat_effects(&mut frame.effects, glow_texture);
         frame
@@ -956,6 +978,105 @@ impl World {
         target.render_ex(renderer, &scene, &extras)
     }
 
+    /// Renders only the background (the sensors manager's backdrop), or the clear colour
+    /// when `background` is off.
+    pub fn render_background(
+        &self,
+        renderer: &mut Renderer,
+        target: &hwc_render::OffscreenTarget,
+        background: bool,
+    ) -> Result<Vec<u8>, String> {
+        let scene = Scene {
+            camera: &self.camera,
+            lighting: &self.lighting,
+            background: if background {
+                self.background.as_ref()
+            } else {
+                None
+            },
+            ships: &[],
+            nav_lights: false,
+        };
+        target.render_ex(renderer, &scene, &SceneExtras::default())
+    }
+
+    /// Renders the frame's ships for which `keep(id, mesh_level)` holds over a black clear,
+    /// with no background and no effects (the sensors manager's ship meshes).
+    pub fn render_ships_only(
+        &self,
+        renderer: &mut Renderer,
+        target: &hwc_render::OffscreenTarget,
+        frame: &Frame,
+        keep: impl Fn(ShipId, bool) -> bool,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let (all, all_states) = self.instances(frame);
+        let mut ships = Vec::new();
+        let mut states = Vec::new();
+        for ((ship, state), &(id, mesh)) in all.into_iter().zip(all_states).zip(&frame.ids) {
+            if id.is_some_and(|id| keep(id, mesh)) {
+                ships.push(ship);
+                states.push(state);
+            }
+        }
+        if ships.is_empty() {
+            return Ok(None);
+        }
+        let scene = Scene {
+            camera: &self.camera,
+            lighting: &self.lighting,
+            background: None,
+            ships: &ships,
+            nav_lights: false,
+        };
+        let extras = SceneExtras {
+            ship_states: &states,
+            effects: None,
+        };
+        target.render_ex(renderer, &scene, &extras).map(Some)
+    }
+
+    /// Bounding radius of an asteroid kind's mesh (for picking).
+    pub fn resource_radius(&self, r: &hwc_sim::resource::Resource) -> f32 {
+        match r.kind {
+            ResourceKind::Asteroid(k) => self
+                .resource_art
+                .get(&k)
+                .and_then(|a| a.as_ref())
+                .and_then(|a| a.gpu.as_ref())
+                .map_or(50.0, |g| g.bounds().1),
+            ResourceKind::DustCloud(_) => 200.0,
+        }
+    }
+
+    /// The nearest resource whose screen box contains the point.
+    pub fn resource_at(
+        &self,
+        size: (u32, u32),
+        px: [f32; 2],
+    ) -> Option<hwc_sim::resource::ResourceId> {
+        let right = self.camera.view().row(0).truncate();
+        let mut best: Option<(f32, hwc_sim::resource::ResourceId)> = None;
+        for r in &self.universe().base.resources.list {
+            let c = v3(r.position);
+            let Some(p) = self.project(size, c) else {
+                continue;
+            };
+            let Some(q) = self.project(size, c + right * self.resource_radius(r)) else {
+                continue;
+            };
+            let rad = ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2))
+                .sqrt()
+                .max(6.0);
+            if (px[0] - p[0]).abs() <= rad && (px[1] - p[1]).abs() <= rad {
+                let d = (c - self.camera.eye()).length();
+                if best.is_none_or(|b| d < b.0) {
+                    best = Some((d, r.id));
+                }
+            }
+        }
+        best.map(|b| b.1)
+    }
+
     pub fn view_proj(&self, size: (u32, u32)) -> Mat4 {
         let aspect = size.0 as f32 / size.1.max(1) as f32;
         self.camera.projection(aspect) * self.camera.view()
@@ -1015,12 +1136,22 @@ impl World {
 
     /// The nearest visible ship whose screen box contains the point.
     pub fn ship_at(&self, size: (u32, u32), px: [f32; 2]) -> Option<ShipId> {
+        self.ship_at_where(size, px, |_| true)
+    }
+
+    /// Like [`ship_at`](Self::ship_at) among the ships `keep` accepts.
+    pub fn ship_at_where(
+        &self,
+        size: (u32, u32),
+        px: [f32; 2],
+        keep: impl Fn(ShipId) -> bool,
+    ) -> Option<ShipId> {
         let mut best: Option<(f32, ShipId)> = None;
         for s in self
             .universe()
             .ships
             .iter()
-            .filter(|s| s.flags & hwc_sim::object::sof::HIDE == 0)
+            .filter(|s| s.flags & hwc_sim::object::sof::HIDE == 0 && keep(s.id))
         {
             if let Some((lo, hi)) = self.screen_box(size, s) {
                 if px[0] >= lo[0] && px[0] <= hi[0] && px[1] >= lo[1] && px[1] <= hi[1] {
@@ -1068,7 +1199,53 @@ fn fx_pose(art: &ShipArt, fx: &ShipFx, level: usize) -> Option<Vec<Option<Mat4>>
     clip.pose(&fx.anim, binding)
 }
 
-/// The hyperspace window (`hsRectangle`) at the clip plane of an arriving ship, in ship space.
+/// The hyperspace window's corners in ship space (`hsEnd` / `hsRectangle`): centred on the
+/// collision sphere's axis at the clip plane, `HS_DIST` times the bounding box across, scaled by
+/// the ship's `hyperspaceBoxScale` (the Kuun-Lan's spine window covers its modules too). The up
+/// extent opens and closes with `clipt` while popping up and collapsing.
+fn hyperspace_window_corners(
+    st: &hwc_sim::statics::ShipStaticInfo,
+    state: u32,
+    clipt: f32,
+) -> Option<[Vec3; 4]> {
+    let c = &st.header.coll;
+    let (z, open) = match state {
+        hs_effect::POPUP_OUTOF | hs_effect::POPUP_INTO => (c.forward_length, 1.0 - clipt),
+        hs_effect::SLICING_OUTOF | hs_effect::SLICING_INTO => (clipt * c.forward_length, 1.0),
+        hs_effect::COLLAPSE_OUTOF | hs_effect::COLLAPSE_INTO => (-c.forward_length, clipt),
+        _ => return None,
+    };
+    let box_scale = st.hyperspace_box_scale;
+    let half_x = HS_DIST_2 * c.up_length * box_scale * open.clamp(0.0, 1.0);
+    let half_y = HS_DIST_2 * c.right_length * box_scale;
+    let o = Vec3::new(c.coll_sphere_offset.x, c.coll_sphere_offset.y, z);
+    Some(
+        [
+            Vec3::new(-half_x, -half_y, 0.0),
+            Vec3::new(-half_x, half_y, 0.0),
+            Vec3::new(half_x, half_y, 0.0),
+            Vec3::new(half_x, -half_y, 0.0),
+        ]
+        .map(|p| o + p),
+    )
+}
+
+/// The window's fill and outline colours: the ship's `hyperspaceColor` unless black, else the
+/// default blue; alpha 90, the outline 40 brighter in red and green (wrapping as bytes do).
+fn hyperspace_colors(st: &hwc_sim::statics::ShipStaticInfo) -> ([f32; 4], [f32; 4]) {
+    let [r, g, b, _] = st.hyperspace_color;
+    if [r, g, b] == [0, 0, 0] {
+        return (HS_WINDOW, HS_OUTLINE);
+    }
+    let f = |v: u8| f32::from(v) / 255.0;
+    let a = 90.0 / 255.0;
+    (
+        [f(r), f(g), f(b), a],
+        [f(r.wrapping_add(40)), f(g.wrapping_add(40)), f(b), a],
+    )
+}
+
+/// The hyperspace window (`hsRectangle`) at the clip plane of an arriving ship.
 fn hyperspace_window(
     out: &mut EffectBatch,
     transform: Mat4,
@@ -1076,31 +1253,19 @@ fn hyperspace_window(
     state: u32,
     clipt: f32,
 ) {
-    let c = &st.header.coll;
-    let (z, scale) = match state {
-        hs_effect::POPUP_OUTOF | hs_effect::POPUP_INTO => (c.forward_length, 1.0 - clipt),
-        hs_effect::SLICING_OUTOF | hs_effect::SLICING_INTO => (clipt * c.forward_length, 1.0),
-        hs_effect::COLLAPSE_OUTOF | hs_effect::COLLAPSE_INTO => (-c.forward_length, clipt),
-        _ => return,
+    let Some(corners) = hyperspace_window_corners(st, state, clipt) else {
+        return;
     };
-    let scale = scale.clamp(0.0, 1.0);
-    let half_x = HS_DIST_2 * c.up_length * scale;
-    let half_y = HS_DIST_2 * c.right_length;
-    let o = Vec3::new(c.coll_sphere_offset.x, c.coll_sphere_offset.y, z);
-    let corners = [
-        Vec3::new(-half_x, -half_y, 0.0),
-        Vec3::new(-half_x, half_y, 0.0),
-        Vec3::new(half_x, half_y, 0.0),
-        Vec3::new(half_x, -half_y, 0.0),
-    ]
-    .map(|p| transform.transform_point3(o + p));
-    out.quad(corners.map(|p| (p, HS_WINDOW)), Blend::Alpha);
+    let corners = corners.map(|p| transform.transform_point3(p));
+    let (fill, outline) = hyperspace_colors(st);
+    out.quad(corners.map(|p| (p, fill)), Blend::Alpha);
     for i in 0..4 {
         out.lines.push(FxLine {
             from: corners[i],
             to: corners[(i + 1) % 4],
-            from_color: HS_OUTLINE,
-            to_color: HS_OUTLINE,
+            from_color: outline,
+            to_color: outline,
+
             width: 2.0,
             blend: Blend::Additive,
         });

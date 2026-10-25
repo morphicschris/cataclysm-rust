@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use hwc_audio::codec::Quality;
 use hwc_audio::mixer::AutoMode;
 use hwc_audio::output::{AudioOutput, OutputOptions};
-use hwc_audio::system::{event, Emitter, GameContext, SpeechStarted};
+use hwc_audio::system::{event, Emitter, GameContext, NearbyObject, SpeechStarted};
 use hwc_audio::tables::Listener;
 use hwc_audio::{DataSource, Mixer, MixerOptions, ShipSounds, SoundData, SoundSystem};
 use hwc_formats::GameData;
@@ -153,12 +153,24 @@ impl Audio {
     }
 
     /// Per-frame update in a game (`soundEventUpdate`), with the camera as the listener.
-    pub fn game_update(&mut self, eye: [f32; 3], look_at: [f32; 3], running: bool) {
+    pub fn game_update(&mut self, eye: [f32; 3], look_at: [f32; 3], running: bool, u: &Universe) {
         self.system.listener = Listener {
             eye,
             look_at,
             up: [0.0, 0.0, 1.0],
         };
+        // The in-game music level follows the distance to the nearest audible ship.
+        let objects = u.ship_list.iter().filter_map(|&id| {
+            let s = u.ship(id)?;
+            let st = u.statics.ship(s.ship_type)?;
+            let (p, v) = (s.posinfo.position, s.posinfo.velocity);
+            Some(NearbyObject {
+                position: [p.x, p.y, p.z],
+                class_row: Some(st.ship_class.map_or(0, |c| c.index())),
+                speed: (v.x * v.x + v.y * v.y + v.z * v.z).sqrt(),
+            })
+        });
+        self.system.note_nearby(objects);
         self.system.update(running);
     }
 
