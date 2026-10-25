@@ -32,6 +32,29 @@ use hwc_ui::AssetSource;
 /// (`hwSetRes(640, 480, 32)`, falling back to 16 bits).
 const INTRO_MODE: (u32, u32) = (640, 480);
 
+/// `Movies\animatics.lst`: the movie before mission `n` is `ANIMATICS[n - 1]`
+/// (`animBinkPlay(m, m + 1)` after mission `m`; Animatic01 on a new game).
+const ANIMATICS: [&str; 18] = [
+    "Animatic01.bik",
+    "Animatic02.bik",
+    "Animatic03.bik",
+    "Animatic04.bik",
+    "Animatic05.bik",
+    "Animatic06.bik",
+    "Animatic07.bik",
+    "Animatic08.bik",
+    "Animatic09.bik",
+    "Animatic10.bik",
+    "Animatic11.bik",
+    "Animatic12.bik",
+    "Animatic13.bik",
+    "Animatic14.bik",
+    "Animatic15.bik",
+    "Animatic16.bik",
+    "Animatic17.bik",
+    "Animatic18.bik",
+];
+
 struct Gpu {
     presenter: Presenter,
     surface: wgpu::Surface<'static>,
@@ -71,6 +94,10 @@ struct App {
     start_mission: Option<u32>,
     /// Mouse position in canvas pixels.
     mouse: (i32, i32),
+    /// The movie playing is a mission's (the game waits behind it), not the start-up's.
+    game_movie: bool,
+    /// `--debug-keys`.
+    debug_keys: bool,
 }
 
 pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), String> {
@@ -125,6 +152,8 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         renderer: None,
         start_mission: args.mission,
         mouse: (0, 0),
+        game_movie: false,
+        debug_keys: args.debug_keys,
     };
     if app.intro.is_none() {
         app.front_end_start();
@@ -315,6 +344,54 @@ impl App {
         }
     }
 
+    /// The fleet has jumped: the next mission loads with it (`singlePlayerLoadNewLevel`, the
+    /// loading screen of the next mission), or after the last one the game ends.
+    fn next_mission(&mut self) {
+        let Some(g) = self.game.take() else { return };
+        let run = &g.world.run;
+        let (mission, skill) = (run.game.config.mission, run.game.config.skill);
+        let carry = run.carry();
+        drop(g);
+        let next = mission + 1;
+        let carry = match carry {
+            Some(c) if crate::mission::supported(next) => c,
+            _ => {
+                self.back_to_menu();
+                return;
+            }
+        };
+        if let Some(a) = &mut self.audio {
+            a.stop_music(0.0);
+        }
+        let size = self.session.placement.canvas;
+        match Loading::new(self.data.clone(), &self.session, next, skill, size) {
+            Ok(l) => self.loading = Some(Box::new(l.with_carry(carry))),
+            Err(e) => {
+                eprintln!("cataclysm: cannot start mission {next}: {e}");
+                self.back_to_menu();
+            }
+        }
+    }
+
+    /// A mission's movie (`animBinkPlay`): played full screen while the game waits.
+    fn play_animatic(&mut self, n: u32) -> bool {
+        let Some(&file) = ANIMATICS.get(n.wrapping_sub(1) as usize) else {
+            return false;
+        };
+        let steps = [crate::intro::Step::Movie { file, music: -1 }];
+        match Intro::new(self.data.clone(), &steps) {
+            Ok(i) => {
+                self.intro = Some(i);
+                self.game_movie = true;
+                true
+            }
+            Err(e) => {
+                eprintln!("cataclysm: {file}: {e}");
+                false
+            }
+        }
+    }
+
     /// Back to the main menu and its music (quitting a game, or a mission that cannot start).
     fn back_to_menu(&mut self) {
         self.loading = None;
@@ -345,13 +422,19 @@ impl App {
             }
             match l.advance(&self.session, self.renderer.as_mut(), dt) {
                 Progress::Working => {}
-                Progress::Ready(game) => {
+                Progress::Ready(mut game) => {
                     self.loading = None;
+                    game.debug_keys |= self.debug_keys;
                     if let Some(a) = &mut self.audio {
                         a.stop_music(0.0);
                         a.set_in_game(true);
                     }
+                    // `singlePlayerPostInit`: a new game shows Animatic01 before the opening.
+                    let new_game = game.world.run.game.config.mission == 1 && game.has_queued_nis();
                     self.game = Some(game);
+                    if new_game {
+                        self.play_animatic(1);
+                    }
                 }
                 Progress::Abandon(why) => {
                     eprintln!("cataclysm: {why}");
@@ -365,6 +448,8 @@ impl App {
         };
         let mut leave = false;
         let mut restart = false;
+        let mut animatic = None;
+        let mut next = false;
         for o in g.update(dt, &mut self.audio) {
             match o {
                 game::Outcome::Leave => leave = true,
@@ -374,8 +459,25 @@ impl App {
                         a.apply_options(&g.ui.fe.game.options);
                     }
                 }
+                game::Outcome::Animatic(n) => animatic = Some(n),
+                game::Outcome::NextMission => next = true,
             }
         }
+        if let Some(n) = animatic {
+            if !self.play_animatic(n) {
+                if let Some(g) = self.game.as_mut() {
+                    g.movie_finished();
+                }
+            }
+            return Ok(true);
+        }
+        if next {
+            self.next_mission();
+            return Ok(true);
+        }
+        let Some(g) = self.game.as_mut() else {
+            return Ok(true);
+        };
         if leave || restart {
             let (mission, difficulty) = (
                 g.world.run.game.config.mission,
@@ -441,7 +543,13 @@ impl App {
             self.cues(cues);
             if done {
                 self.intro = None;
-                self.front_end_start();
+                if std::mem::take(&mut self.game_movie) {
+                    if let Some(g) = self.game.as_mut() {
+                        g.movie_finished();
+                    }
+                } else {
+                    self.front_end_start();
+                }
             }
         }
         if self.intro.is_none() && (self.loading.is_some() || self.game.is_some()) {
@@ -558,7 +666,8 @@ impl App {
                     return;
                 }
                 // The training mission is not a campaign level the simulation can start yet:
-                // mission 0 shows the "not playable" note.
+                // mission 0 shows the "not playable" note. New Game starts mission 1
+                // (`singlePlayerInit`).
                 self.start_loading(if tutorial { 0 } else { 1 }, difficulty);
             }
             Request::LoadGame(name) => eprintln!("cataclysm: would load saved game {name}"),

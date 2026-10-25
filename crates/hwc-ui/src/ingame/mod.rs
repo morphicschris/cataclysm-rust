@@ -20,6 +20,7 @@ pub mod mock;
 pub mod overlay;
 pub mod popup;
 pub mod research;
+pub mod rollcall;
 pub mod shipprint;
 pub mod strings;
 pub mod trader;
@@ -52,6 +53,7 @@ pub const FIBS: &[&str] = &[
     "in_game_esc_menu",
     "single_player_objective",
     "trader_interface",
+    "hyperspace_roll_call",
 ];
 
 /// The full-screen screen in front of the game, if any.
@@ -63,6 +65,8 @@ pub enum Manager {
     Trader,
     EscMenu,
     Objectives,
+    /// The single-player hyperspace roll call.
+    RollCall,
 }
 
 /// In-game state the screen callbacks work on (kept in [`Cataclysm::ig`]).
@@ -92,6 +96,10 @@ pub struct IgState {
     pub popup: popup::State,
     /// The game was paused by the UI (escape menu, objectives) and must resume on close.
     pub paused_by_ui: bool,
+    /// A roll-call button closed the roll call screen (see [`rollcall`]).
+    pub rollcall_dismissed: bool,
+    /// The roll call opened with "quick docking" disabled (else "emergency hyperspace").
+    pub rollcall_go_now_disabled: bool,
 }
 
 impl IgState {
@@ -403,6 +411,7 @@ impl InGameUi {
             .position(|&a| self.action_held(a))
             .map(|i| i as u8 + 1);
         self.fe.game.ig.overlay.keys_page = page;
+        rollcall::tick(&mut self.fe);
         if self.fe.game.ig.manager.is_some() {
             self.fe.process(dt);
             cataclysm::tick(&mut self.fe, dt);
@@ -474,6 +483,7 @@ pub fn register(fe: &mut Fe) {
     research::register(fe);
     trader::register(fe);
     escmenu::register(fe);
+    rollcall::register(fe);
 }
 
 /// The screen of a manager for the player's race.
@@ -489,6 +499,7 @@ fn screen_name(fe: &Fe, m: Manager) -> &'static str {
         (Manager::Trader, _) => "Trader_Interface",
         (Manager::EscMenu, _) => escmenu::screen_for(fe),
         (Manager::Objectives, _) => "Single_Player_Objective",
+        (Manager::RollCall, _) => rollcall::SCREEN,
     }
 }
 
@@ -523,6 +534,7 @@ pub fn open_manager(fe: &mut Fe, m: Manager) {
         Manager::Construction => consmgr::started(fe),
         Manager::Launch => launchmgr::started(fe),
         Manager::Research => research::started(fe),
+        Manager::RollCall => rollcall::started(fe),
         _ => {}
     }
 }

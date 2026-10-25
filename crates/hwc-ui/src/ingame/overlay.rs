@@ -245,8 +245,7 @@ pub fn layout(fe: &mut Fe) {
     if st.shown(view, OBJECTIVES) && !view.objectives.is_empty() {
         let mut y = bar + th + 4;
         for (i, o) in view.objectives.iter().enumerate() {
-            let state = if o.complete { "COMPLETE" } else { "INCOMPLETE" };
-            let s = format!("{state} - {}", o.text);
+            let s = objective_text(o);
             objective_rects.push((i, Rect::new(10, y, 10 + draw::width(&tf, &s), y + th)));
             y += th;
         }
@@ -355,6 +354,10 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool, x: i32, y: i32) -> bool
         return true;
     }
     if let Some(&(i, _)) = o.objective_rects.iter().find(|l| l.1.contains(x, y)) {
+        // `moProcessClick` does nothing while the game is paused.
+        if fe.game.ig.view.player.paused {
+            return true;
+        }
         fe.game
             .ig
             .request(GameRequest::Sound(SOUND_OBJECTIVE_CLICK));
@@ -385,6 +388,16 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool, x: i32, y: i32) -> bool
         return true;
     }
     false
+}
+
+/// An objective's line (`moDrawMissionInfo`): "COMPLETE - " or "INCOMPLETE - " before the
+/// text, except the hyperspace entry, which shows its label alone.
+fn objective_text(o: &crate::ingame::host::Objective) -> String {
+    if o.hyperspace {
+        return o.text.clone();
+    }
+    let state = if o.complete { "COMPLETE" } else { "INCOMPLETE" };
+    format!("{state} - {}", o.text)
 }
 
 /// Multiple_Select released: the marked lines leave the selection
@@ -463,8 +476,7 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
         widest = widest.max(draw::width(&tf, header));
         let mut texts = Vec::new();
         for (i, o) in view.objectives.iter().enumerate() {
-            let state = if o.complete { "COMPLETE" } else { "INCOMPLETE" };
-            let s = format!("{state} - {}", o.text);
+            let s = objective_text(o);
             widest = widest.max(draw::width(&tf, &s));
             texts.push((i, s, o.complete));
         }

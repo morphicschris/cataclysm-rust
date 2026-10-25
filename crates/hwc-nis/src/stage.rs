@@ -1,24 +1,31 @@
 //! An NIS on the simulation: the objects `nisNewObjectCreate` (0x4c80e0) puts into the
 //! universe, the poses written back every step, the object events, and what `nisStop` leaves
-//! behind.
+//! behind. The universe side is `hwc_sim::nis_support`.
 //!
 //! * Ship paths (races 0..6) become ships of player 0 when their race is the local player's,
 //!   of player 1 otherwise, flagged `SOF_DontApplyPhysics | SOF_Selectable | SOF_Targetable |
-//!   SOF_NISShip` with health `REALlyBig` (invincible). The Somtaaw mothership comes with its
-//!   modules clamped to it, in mission 1 also the docking bay; the NIS deletes the extra
-//!   modules it made when it stops.
-//! * Asteroid paths become asteroids. Other kinds (dust and gas clouds, derelict-table objects,
-//!   effects, generic objects, missiles) are not created yet; their paths still move but have
-//!   no object (none of the shipped NIS use them except the asteroid fields).
+//!   SOF_NISShip` with health `REALlyBig` (invincible). A Somtaaw mothership gets the modules
+//!   the fleet carried into the mission (`spGetHyperspaceShipTypesAttachedToType12`,
+//!   [`nis_support::create_nis_mothership_modules`]; in mission 1 the docking bay); the NIS
+//!   deletes them when it stops.
+//! * Asteroid paths become asteroids, deleted at once when the NIS stops
+//!   (`univReallyDeleteThisResourceRightNow`) unless they remain.
+//! * Missile paths become missiles of their race living as long as the NIS; effect paths get an
+//!   anchor whose effect `nisObjectShow` creates and `nisObjectHide` deletes.
+//! * Dust and gas clouds, nebulae, derelict-table and generic objects are not created (the
+//!   simulation has no such objects; none of the shipped NIS files uses them).
 //! * Every step the NIS pose goes onto the object (`univSetShipPosition`, the clamped modules
 //!   follow), with the step's displacement as velocity: capped at the type's top speed for the
 //!   first seven ship types (the original tests the type against `NUM_RACES`), and the trails
 //!   cut when the object jumped.
+//! * `hideUniverseToggle` is `univHideJustAboutEverything` / `univUnhideJustAboutEverything`.
+//! * The `NISlensflareSource1` object carries the NIS sun flare ([`Stage::sun`]).
 
 use hwc_math::fpu::{ld, st};
 use hwc_math::{Matrix, Vector};
 use hwc_sim::base::{self, CreateOptions};
-use hwc_sim::object::{sof, ShipId};
+use hwc_sim::nis_support::{self, REALLY_BIG as SIM_REALLY_BIG};
+use hwc_sim::object::{sof, MissileId, ShipId};
 use hwc_sim::resource::{self, ResourceId, ResourceKind};
 use hwc_sim::statics::{ShipRace, ShipType};
 use hwc_sim::Universe;
@@ -28,25 +35,46 @@ use crate::events::Action;
 use crate::player::{omf, Fired, NisPlayer, StopReport};
 
 /// `REALlyBig`, the health of an invincible NIS object.
-pub const REALLY_BIG: f32 = 1e21;
+pub const REALLY_BIG: f32 = SIM_REALLY_BIG;
+
+/// The type name of the object that carries the NIS sun flare.
+pub const SUN_SOURCE: &str = "NISlensflareSource1";
 
 /// The universe object an NIS path drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Handle {
     Ship(ShipId),
     Resource(ResourceId),
+    Missile(MissileId),
+    /// An effect path: its anchor, the effect static, and the effect while shown.
+    Effect {
+        owner: u32,
+        stat: Option<usize>,
+        effect: Option<u32>,
+    },
     None,
+}
+
+/// What the NIS sun flare does after a step (the presentation layer owns the flare).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SunEvent {
+    Show,
+    Hide,
 }
 
 /// The NIS objects in a universe.
 #[derive(Debug, Clone, Default)]
 pub struct Stage {
     pub handles: Vec<Handle>,
-    /// Modules the NIS created for its mothership (deleted when it stops).
+    /// Modules the NIS created for its motherships (deleted when it stops).
     pub extra_ships: Vec<ShipId>,
-    /// What `hideUniverseToggle` hid, and what was already hidden.
-    hidden: Vec<ShipId>,
-    hidden_resources: Vec<ResourceId>,
+    /// `hideUniverseToggle` has hidden the universe.
+    universe_hidden: bool,
+    /// The path that carries the NIS sun flare, if any.
+    pub sun: Option<usize>,
+    /// Show and hide events of the sun's path since the last call of
+    /// [`take_sun_events`](Self::take_sun_events).
+    sun_events: Vec<SunEvent>,
     /// Lines describing objects or events the stage could not handle.
     pub log: Vec<String>,
 }
@@ -71,8 +99,10 @@ fn is_ship(u: &Universe, h: Handle) -> Option<ShipId> {
 
 impl Stage {
     /// `nisNewObjectCreate` for every path, after `nisStart` (the player already holds the
-    /// starting poses). `mission` decides the mothership's modules.
-    pub fn create(u: &mut Universe, player: &NisPlayer, mission: u32) -> Stage {
+    /// starting poses). `mission` decides the mothership's modules; `module_types` are the
+    /// module types the fleet carried into the mission
+    /// ([`nis_support::hyperspace_ship_types_attached_to_mothership`], empty for the opening).
+    pub fn create(u: &mut Universe, player: &NisPlayer, mission: u32, module_types: &[ShipType]) -> Stage {
         let mut stage = Stage::default();
         let local_race = u.players.first().map(|p| p.race);
         for (i, path) in player.data.objects.iter().enumerate() {
@@ -84,6 +114,9 @@ impl Stage {
                         stage.handles.push(Handle::None);
                         continue;
                     };
+                    if path.type_name.eq_ignore_ascii_case(SUN_SOURCE) && stage.sun.is_none() {
+                        stage.sun = Some(i);
+                    }
                     let race = ShipRace::from_index(race as usize);
                     let owner = if race == local_race { 0 } else { 1.min(u.players.len() - 1) };
                     let opts = CreateOptions {
@@ -95,15 +128,15 @@ impl Stage {
                             let s = u.ships.ship_mut(id);
                             s.health = REALLY_BIG;
                             s.flags |= sof::DONT_APPLY_PHYSICS | sof::SELECTABLE | sof::TARGETABLE | sof::NIS_SHIP;
-                            if t == ShipType::sMothership && mission == 1 {
-                                // The docking bay the opening NIS adds to the hull.
-                                let pos = state.position;
-                                if let Ok(bay) = base::create_ship(u, ShipType::sMothershipDockingBay, 0, pos, CreateOptions::default()) {
-                                    let b = u.ships.ship_mut(bay);
-                                    b.flags |= sof::DONT_APPLY_PHYSICS | sof::SELECTABLE | sof::TARGETABLE;
-                                    hwc_sim::clamp::clamp_obj_to_obj(u, bay, id);
-                                    stage.extra_ships.push(bay);
+                            if t == ShipType::sMothership {
+                                let made = nis_support::create_nis_mothership_modules(u, id, module_types, mission as i32);
+                                for &m in &made {
+                                    if let Some(s) = u.ships.get_mut(m) {
+                                        // Shown with their host when the universe is hidden.
+                                        s.flags |= sof::NIS_SHIP;
+                                    }
                                 }
+                                stage.extra_ships.extend(made);
                             }
                             for m in hwc_sim::clamp::slaves_of(u, id) {
                                 if let Some(s) = u.ships.get_mut(m) {
@@ -124,6 +157,7 @@ impl Stage {
                     Some(id) => {
                         if let Some(r) = u.base.resources.get_mut(id) {
                             r.health = REALLY_BIG;
+                            r.flags |= sof::NIS_SHIP;
                         }
                         Handle::Resource(id)
                     }
@@ -132,20 +166,31 @@ impl Stage {
                         Handle::None
                     }
                 },
+                Category::Missile(race) => {
+                    let race = ShipRace::from_index(race as usize).unwrap_or(ShipRace::Somtaaw);
+                    match nis_support::create_nis_missile(u, race, state.position, player.data.length) {
+                        Some(id) => Handle::Missile(id),
+                        None => {
+                            stage.log.push(format!("{}: no missile for {race:?}", path.name));
+                            Handle::None
+                        }
+                    }
+                }
+                Category::Effect => {
+                    let owner = nis_support::nis_effect_owner(i);
+                    let stat = nis_support::nis_effect_static(u, &path.type_name);
+                    if stat.is_none() {
+                        stage.log.push(format!("{}: no effect {}", path.name, path.type_name));
+                    }
+                    nis_support::set_nis_effect_pose(u, owner, state.position, state.velocity, state.coordsys);
+                    Handle::Effect { owner, stat, effect: None }
+                }
                 other => {
                     stage.log.push(format!("{}: {other:?} objects are not created", path.name));
                     Handle::None
                 }
             };
             stage.handles.push(h);
-        }
-        // The flag the NIS sets on every object, and the starting poses.
-        for &h in &stage.handles {
-            if let Handle::Resource(id) = h {
-                if let Some(r) = u.base.resources.get_mut(id) {
-                    r.flags |= sof::NIS_SHIP;
-                }
-            }
         }
         stage.write_poses(u, player, true);
         stage
@@ -161,9 +206,12 @@ impl Stage {
             }
             match self.handles.get(i).copied().unwrap_or(Handle::None) {
                 Handle::Ship(id) => {
-                    let Some(s) = u.ships.get_mut(id) else { continue };
+                    if u.ships.get(id).is_none() {
+                        continue;
+                    }
+                    nis_support::set_ship_position(u, id, o.position);
+                    let s = u.ships.ship_mut(id);
                     let t = s.ship_type;
-                    s.posinfo.position = o.position;
                     s.rotinfo.coordsys = o.coordsys;
                     let mut v = o.velocity;
                     if o.moving && t.index() < 7 {
@@ -186,6 +234,16 @@ impl Stage {
                         r.is_moving = o.moving;
                     }
                 }
+                Handle::Missile(id) => {
+                    if let Some(m) = u.missiles.get_mut(id) {
+                        m.posinfo.position = o.position;
+                        m.posinfo.velocity = o.velocity;
+                        m.rotinfo.coordsys = o.coordsys;
+                    }
+                }
+                Handle::Effect { owner, .. } => {
+                    nis_support::set_nis_effect_pose(u, owner, o.position, o.velocity, o.coordsys);
+                }
                 Handle::None => {}
             }
         }
@@ -207,6 +265,16 @@ impl Stage {
         self.handles.get(i).and_then(|&h| is_ship(u, h))
     }
 
+    /// Where the NIS puts the sun flare's source now.
+    pub fn sun_position(&self, player: &NisPlayer) -> Option<Vector> {
+        self.sun.map(|i| player.objects[i].position)
+    }
+
+    /// The sun source's show and hide events since the last call.
+    pub fn take_sun_events(&mut self) -> Vec<SunEvent> {
+        std::mem::take(&mut self.sun_events)
+    }
+
     /// Objects that died or were deleted by the simulation stop being driven
     /// (`nisObjectDied`).
     pub fn forget_dead(&self, u: &Universe, player: &mut NisPlayer) {
@@ -214,7 +282,8 @@ impl Stage {
             let gone = match *h {
                 Handle::Ship(id) => u.ships.get(id).is_none_or(|s| s.flags & sof::DEAD != 0),
                 Handle::Resource(id) => u.base.resources.get(id).is_none(),
-                Handle::None => false,
+                Handle::Missile(id) => u.missiles.get(id).is_none(),
+                Handle::Effect { .. } | Handle::None => false,
             };
             if gone {
                 player.objects[i].flags |= omf::OBJECT_DIED | omf::CURVES_DELETED;
@@ -232,7 +301,24 @@ impl Stage {
             match &f.action {
                 Action::Show | Action::Hide => {
                     let hide = f.action == Action::Hide;
-                    set_hidden(u, h, hide);
+                    if f.object.is_some() && f.object == self.sun {
+                        self.sun_events.push(if hide { SunEvent::Hide } else { SunEvent::Show });
+                    }
+                    if let (Handle::Effect { owner, stat, effect }, Some(i)) = (h, f.object) {
+                        // Effects are created when shown (not while seeking) and deleted when
+                        // hidden.
+                        let effect = match (hide, effect, stat) {
+                            (true, Some(e), _) => {
+                                nis_support::nis_effect_hide(u, e);
+                                None
+                            }
+                            (false, None, Some(stat)) if !f.seeking => nis_support::nis_effect_show(u, owner, stat),
+                            (_, e, _) => e,
+                        };
+                        self.handles[i] = Handle::Effect { owner, stat, effect };
+                    } else {
+                        set_hidden(u, h, hide);
+                    }
                     rest.push(f.clone());
                 }
                 Action::ColorScheme(n) => {
@@ -307,7 +393,14 @@ impl Stage {
                     rest.push(f.clone());
                 }
                 Action::Fire => {
-                    self.log.push(format!("{:?}: fire is not implemented", f.object));
+                    if f.seeking {
+                        continue;
+                    }
+                    if let Some(id) = ship {
+                        if !nis_support::fire(u, id) {
+                            self.log.push(format!("{:?}: {:?} cannot fire without a target", f.object, u.ships.ship(id).ship_type));
+                        }
+                    }
                 }
                 _ => rest.push(f.clone()),
             }
@@ -315,56 +408,19 @@ impl Stage {
         rest
     }
 
-    /// `univHideJustAboutEverything` / `univUnhideJustAboutEverything`: everything that is
-    /// not an NIS object is hidden; what was hidden already stays hidden afterwards.
+    /// `univHideJustAboutEverything` / `univUnhideJustAboutEverything`.
     pub fn toggle_universe(&mut self, u: &mut Universe) {
-        if self.hidden.is_empty() && self.hidden_resources.is_empty() {
-            let nis: Vec<ShipId> = self
-                .handles
-                .iter()
-                .filter_map(|h| if let Handle::Ship(id) = h { Some(*id) } else { None })
-                .chain(self.extra_ships.iter().copied())
-                .collect();
-            let ids: Vec<ShipId> = u.ship_list.clone();
-            for id in ids {
-                let modules_of_nis = u
-                    .ships
-                    .get(id)
-                    .and_then(|s| s.base.clamp.as_ref())
-                    .and_then(|c| c.host)
-                    .is_some_and(|h| nis.contains(&h));
-                let Some(s) = u.ships.get_mut(id) else { continue };
-                if s.flags & sof::NIS_SHIP != 0 || nis.contains(&id) || modules_of_nis {
-                    continue;
-                }
-                if s.flags & sof::HIDE == 0 {
-                    s.flags |= sof::HIDE;
-                    self.hidden.push(id);
-                }
-            }
-            for r in &mut u.base.resources.list {
-                if r.flags & sof::NIS_SHIP == 0 && r.flags & sof::HIDE == 0 {
-                    r.flags |= sof::HIDE;
-                    self.hidden_resources.push(r.id);
-                }
-            }
+        if self.universe_hidden {
+            nis_support::unhide_just_about_everything(u);
         } else {
-            for id in self.hidden.drain(..) {
-                if let Some(s) = u.ships.get_mut(id) {
-                    s.flags &= !sof::HIDE;
-                }
-            }
-            for id in self.hidden_resources.drain(..) {
-                if let Some(r) = u.base.resources.get_mut(id) {
-                    r.flags &= !sof::HIDE;
-                }
-            }
+            nis_support::hide_just_about_everything(u);
         }
+        self.universe_hidden = !self.universe_hidden;
     }
 
     /// `nisStop`'s object part: `remainAtEnd` objects become ordinary objects (stopped unless
-    /// they keep moving, vincible, counted by the unit caps), the others and the extra
-    /// modules leave the universe. A hidden universe is shown again.
+    /// they keep moving, vincible, counted by the unit caps), the others, the extra modules and
+    /// the effects leave the universe. A hidden universe is shown again.
     pub fn stop(&mut self, u: &mut Universe, report: &StopReport) {
         for id in self.extra_ships.drain(..) {
             if u.ships.get(id).is_some() {
@@ -406,7 +462,7 @@ impl Stage {
                         r.is_moving = false;
                     }
                 }
-                Handle::None => {}
+                _ => {}
             }
         }
         for &i in &report.delete {
@@ -421,13 +477,16 @@ impl Stage {
                         hwc_sim::damage::really_delete_ship(u, id);
                     }
                 }
-                Handle::Resource(id) => {
-                    u.base.resources.list.retain(|r| r.id != id);
-                }
-                Handle::None => {}
+                Handle::Resource(id) => resource::really_delete_resource(u, id),
+                _ => {}
             }
         }
-        if report.unhide_universe && !(self.hidden.is_empty() && self.hidden_resources.is_empty()) {
+        for h in &self.handles {
+            if let Handle::Effect { owner, .. } = *h {
+                nis_support::nis_effect_remove(u, owner);
+            }
+        }
+        if report.unhide_universe && self.universe_hidden {
             self.toggle_universe(u);
         }
     }
@@ -458,7 +517,12 @@ fn set_hidden(u: &mut Universe, h: Handle, hide: bool) {
                 apply(&mut r.flags);
             }
         }
-        Handle::None => {}
+        Handle::Missile(id) => {
+            if let Some(m) = u.missiles.get_mut(id) {
+                apply(&mut m.flags);
+            }
+        }
+        Handle::Effect { .. } | Handle::None => {}
     }
 }
 
@@ -476,7 +540,8 @@ fn follow_host(u: &mut Universe, host: ShipId) {
             st(ld(off.z) + ld(hp.z)),
         );
         let sys: Matrix = hs.mul_mat(&info.rel_coordsys);
-        s.posinfo.position = pos;
+        nis_support::set_ship_position(u, m, pos);
+        let s = u.ships.ship_mut(m);
         s.rotinfo.coordsys = sys;
         s.posinfo.velocity = hv;
         follow_host(u, m);

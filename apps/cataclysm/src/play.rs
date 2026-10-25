@@ -94,6 +94,13 @@ impl Loading {
         })
     }
 
+    /// The next mission of the campaign: the fleet that jumped out of the mission before
+    /// arrives in it (`singlePlayerLoadNewLevel`).
+    pub fn with_carry(mut self, carry: hwc_sim::campaign::Carry) -> Self {
+        self.loader.carry = Some(carry);
+        self
+    }
+
     /// The note shown instead of loading, if loading failed.
     pub fn failure(&self) -> Option<&str> {
         match &self.step {
@@ -147,9 +154,10 @@ impl Loading {
                 }
             }
             Step::Nis => {
-                // `singlePlayerStartGame`: mission 1 starts with the opening NIS in its own
-                // level; the mission waits behind it.
-                if self.mission == 1 && self.opening_nis {
+                // `singlePlayerStartGame` / `singlePlayerStartNis`: mission 1 starts with the
+                // opening NIS in its own level, and so do the missions of table 0x88a3f4 with
+                // theirs; the mission waits behind it.
+                if crate::nis::level_nis(self.mission).is_some() && self.opening_nis {
                     let mission = self.world.take().expect("world");
                     let statics = self.loader.statics.clone().expect("statics");
                     let tweaks = self.loader.tweaks.clone().expect("tweaks");

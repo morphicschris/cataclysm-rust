@@ -52,6 +52,12 @@ impl SimHost<'_> {
         &self.run.universe
     }
 
+    /// `spMissionEndLabelGet`: "End Mission" in the missions without a roll call, else
+    /// "Hyperspace".
+    pub fn mission_end_label(&self) -> String {
+        mission_end_label(self.strings, self.run.game.config.mission)
+    }
+
     fn race(&self) -> ShipRace {
         self.u()
             .players
@@ -599,18 +605,53 @@ impl GameUiHost for SimHost<'_> {
     }
 
     fn objectives(&self) -> Vec<Objective> {
-        self.run
-            .game
-            .objectives
-            .iter()
-            .map(|o| Objective {
-                text: o.brief.clone(),
+        // `moObjectiveAddFirst`: the "hyperspace" objective goes to the top and shows the
+        // jump's label (`spMissionEndLabelGet`).
+        let mut v: Vec<Objective> = Vec::new();
+        for o in &self.run.game.objectives {
+            let hyperspace = o.label.eq_ignore_ascii_case("hyperspace");
+            let obj = Objective {
+                text: if hyperspace {
+                    self.mission_end_label()
+                } else {
+                    o.brief.clone()
+                },
                 description: o.full.clone(),
-                hyperspace: false,
+                hyperspace,
                 primary: o.primary,
                 complete: o.complete,
-            })
-            .collect()
+            };
+            if hyperspace {
+                v.insert(0, obj);
+            } else {
+                v.push(obj);
+            }
+        }
+        v
+    }
+
+    fn hyperspace_label(&self) -> Option<String> {
+        // `singlePlayerCanHyperspaceGet`.
+        self.run
+            .game
+            .hyper
+            .player_can_hyperspace
+            .then(|| self.mission_end_label())
+    }
+
+    fn roll_call(&self) -> Option<hwc_ui::ingame::host::RollCall> {
+        let h = &self.run.game.hyper;
+        let up = h.rollcall_screen
+            && self.run.game.sp_state == hwc_sim::mission::sp_state::WAITING_ROLLCALL;
+        let u = self.u();
+        up.then(|| hwc_ui::ingame::host::RollCall {
+            docked: h.rollcall_docked,
+            remaining: h.rollcall_remaining,
+            go_now_disabled: u.ship_list.iter().any(|&id| {
+                u.ship(id)
+                    .is_some_and(|s| s.player == PLAYER && s.attack.target.is_some())
+            }),
+        })
     }
 
     fn messages(&self) -> Vec<GameMessage> {
@@ -645,6 +686,16 @@ pub fn selectable(u: &Universe, id: ShipId) -> bool {
     })
 }
 
+/// `spMissionEndLabelGet` for a mission.
+pub fn mission_end_label(strings: &Strings, mission: u32) -> String {
+    let key = if hwc_sim::campaign::skips_roll_call(mission) {
+        "strSinglePlayerNextLevel"
+    } else {
+        "strSinglePlayerHyperspace"
+    };
+    strings.get(key).unwrap_or(if hwc_sim::campaign::skips_roll_call(mission) { "End Mission" } else { "Hyperspace" }).trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,3 +710,4 @@ mod tests {
         assert_eq!(sim_id(ui_id(ShipId(42))), ShipId(42));
     }
 }
+

@@ -5,12 +5,15 @@
 
 mod app;
 mod audio;
+#[cfg(test)]
+mod campaign_shots;
 mod data;
 mod game;
 mod host;
 mod intro;
 mod loading;
 mod mission;
+mod nebula_view;
 mod nis;
 #[cfg(test)]
 mod nis_shots;
@@ -56,7 +59,9 @@ options:
                         files and exit
   --exit-after <s>      close the window after s seconds (smoke tests)
   --mission <n>         go straight from the front end into mission n (development;
-                        only mission 1 is playable on the simulation so far)
+                        missions after the first start with the warp.script fleet)
+  --debug-keys          the original's single-player debug keys (compiled out of the
+                        retail game): C forces the jump to the next mission
   --ingame-preview      starting a game opens the in-game interface (managers, overlay,
                         menus, keys) on a stand-in fleet instead of returning to the menu
   -h, --help            this text
@@ -78,6 +83,7 @@ pub struct Args {
     pub sound: bool,
     pub ingame_preview: bool,
     pub mission: Option<u32>,
+    pub debug_keys: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -94,6 +100,7 @@ fn parse_args() -> Result<Args, String> {
         sound: true,
         ingame_preview: false,
         mission: None,
+        debug_keys: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -121,6 +128,7 @@ fn parse_args() -> Result<Args, String> {
             "--skip-intro" => a.intro = false,
             "--no-sound" => a.sound = false,
             "--ingame-preview" => a.ingame_preview = true,
+            "--debug-keys" => a.debug_keys = true,
             "--mission" => {
                 a.mission = Some(value("--mission")?.parse().map_err(|_| "bad --mission")?)
             }

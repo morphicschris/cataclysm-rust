@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use hwc_sim::campaign::Carry;
 use hwc_sim::level::LevelState;
 use hwc_sim::mission::{
     load_kas_mission, mission_script_name, LogKind, MissionConfig, MissionRun, Presentation,
@@ -94,13 +95,11 @@ pub fn level_presentation(level: &LevelState) -> (Option<String>, Option<String>
     (find("Background"), find("Lighting"))
 }
 
-/// `MissionConfig::nislet_seconds` while the game plays NISlets itself: never reached.
-pub const NISLET_HELD: f32 = 1e30;
-
-/// Missions the simulation can start (`MissionRun::start` carries no fleet over from an
-/// earlier mission yet, so only the first one).
+/// Missions the simulation can start: the campaign's seventeen (mission 1 from the opening
+/// NIS, the others with the fleet carried over from the mission before, or the `warp.script`
+/// fleet when started directly).
 pub fn supported(n: u32) -> bool {
-    n == 1
+    (1..=hwc_nis::tables::MISSIONS).contains(&n)
 }
 
 /// The pieces of a mission start, so the loading screen can show progress between them.
@@ -109,9 +108,12 @@ pub struct Loader {
     pub skill: i32,
     pub statics: Option<Arc<StaticWorld>>,
     pub tweaks: Option<SimTweaks>,
-    /// The game plays the NISlets the mission asks for (otherwise the simulation counts them
-    /// as played at once).
+    /// The game plays the NIS and NISlets the mission asks for (`MissionConfig::hold_nis`);
+    /// otherwise the simulation counts them as played at once.
     pub play_nislets: bool,
+    /// The fleet coming from the mission before (`singlePlayerLoadNewLevel`); without it a
+    /// mission after the first starts from the `warp.script` fleet (the original's warp).
+    pub carry: Option<Carry>,
 }
 
 impl Loader {
@@ -122,11 +124,15 @@ impl Loader {
             statics: None,
             tweaks: None,
             play_nislets: true,
+            carry: None,
         }
     }
 
     /// Ship and game statics (the slow part).
     pub fn load_statics(&mut self, assets: &Assets) {
+        if self.statics.is_some() {
+            return;
+        }
         let options = LoadOptions {
             single_player: true,
             ..LoadOptions::default()
@@ -138,26 +144,28 @@ impl Loader {
     /// The level and the KAS script (`singlePlayerLoadNewLevel`).
     pub fn start(&mut self, assets: &Assets) -> Result<MissionRun, String> {
         if !supported(self.mission) {
-            return Err(format!(
-                "mission {} is not supported yet (the simulation starts only mission 1)",
-                self.mission
-            ));
+            return Err(format!("mission {} is not part of the campaign", self.mission));
         }
-        if self.statics.is_none() {
-            self.load_statics(assets);
-        }
+        self.load_statics(assets);
         let statics = self.statics.clone().expect("statics");
         let tweaks = self.tweaks.clone().expect("tweaks");
         let name = mission_script_name(self.mission);
         let script = load_kas_mission(assets.data(), &name).map_err(|e| e.to_string())?;
         let mut config = MissionConfig::new(self.mission);
         config.skill = self.skill;
-        // The game plays the NISlets and reports their end; the simulation's stand-in timer
-        // must not end them first.
-        if self.play_nislets {
-            config.nislet_seconds = NISLET_HELD;
+        // The game plays the NIS and NISlets and reports their end.
+        config.hold_nis = self.play_nislets;
+        if self.mission == 1 && self.carry.is_none() {
+            return MissionRun::start(statics, tweaks, assets, script, config)
+                .map_err(|e| e.to_string());
         }
-        MissionRun::start(statics, tweaks, assets, script, config).map_err(|e| e.to_string())
+        let carry = match self.carry.take() {
+            Some(c) => c,
+            None => Carry::warp(statics.clone(), tweaks.clone(), assets, self.mission)
+                .ok_or_else(|| format!("no warp fleet for mission {}", self.mission))?,
+        };
+        MissionRun::start_campaign(statics, tweaks, assets, script, config, &carry)
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -166,8 +174,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_mission_one_starts() {
+    fn the_campaign_starts() {
         assert!(supported(1));
-        assert!(!supported(2));
+        assert!(supported(2));
+        assert!(supported(17));
+        assert!(!supported(0));
+        assert!(!supported(18));
     }
 }

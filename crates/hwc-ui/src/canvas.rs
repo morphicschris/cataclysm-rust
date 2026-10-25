@@ -215,6 +215,22 @@ impl Canvas {
         }
     }
 
+    /// Additive rectangle (`SRC_ALPHA, ONE`): `c * alpha` added to every pixel, saturating.
+    pub fn add_rect(&mut self, r: Rect, c: Color) {
+        let (x0, x1) = (r.x0.max(self.clip.x0), r.x1.min(self.clip.x1));
+        let (y0, y1) = (r.y0.max(self.clip.y0), r.y1.min(self.clip.y1));
+        let a = u32::from(c[3]);
+        let add = [0, 1, 2].map(|i| (u32::from(c[i]) * a / 255) as u8);
+        for y in y0..y1 {
+            let row = (y * self.width) as usize;
+            for p in &mut self.pixels[row + x0 as usize..row + x1.max(x0) as usize] {
+                for i in 0..3 {
+                    p[i] = p[i].saturating_add(add[i]);
+                }
+            }
+        }
+    }
+
     /// One-pixel outline of `r`, bottom edge at `y1 - 1` like `primRectOutline2`.
     pub fn outline_rect(&mut self, r: Rect, c: Color) {
         let bottom = r.y1 - 1;

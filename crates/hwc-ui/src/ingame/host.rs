@@ -488,6 +488,22 @@ pub enum GameRequest {
     ApplyOptions,
     /// Audio options changed in game.
     AudioSettings,
+    /// The hyperspace roll call's buttons (`spGoNowHyperspaceCB`, `spEmergencyHyperspaceCB`,
+    /// `spAbortHyperspaceCB`).
+    HyperspaceGoNow,
+    EmergencyHyperspace,
+    AbortHyperspace,
+}
+
+/// The single-player hyperspace roll call (`HyperspaceRollCall` screen) while it is up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RollCall {
+    /// Ships docked so far (0xaaf91c) and still to dock (0xaaf920).
+    pub docked: i32,
+    pub remaining: i32,
+    /// "Quick docking" is unavailable (a ship of the player is in combat); otherwise
+    /// "emergency hyperspace" is (`HyperspaceRollCallBegin` disables exactly one of them).
+    pub go_now_disabled: bool,
 }
 
 /// Everything the in-game screens read from the game.
@@ -550,6 +566,16 @@ pub trait GameUiHost {
     fn trader_offers(&self) -> Vec<Tech> {
         Vec::new()
     }
+    /// The single-player jump's label while the mission allows it
+    /// (`singlePlayerCanHyperspaceGet`, `spMissionEndLabelGet`: "Hyperspace" or "End
+    /// Mission"); the right-click menu offers it.
+    fn hyperspace_label(&self) -> Option<String> {
+        None
+    }
+    /// The hyperspace roll call, while its screen is up.
+    fn roll_call(&self) -> Option<RollCall> {
+        None
+    }
 }
 
 /// A copy of what the host showed this frame.
@@ -579,6 +605,8 @@ pub struct HostView {
     pub trader_offers: Vec<Tech>,
     /// Popup target highlights: (ship, x, y, radius).
     pub ship_positions: Vec<(ShipId, i32, i32, i32)>,
+    pub hyperspace_label: Option<String>,
+    pub roll_call: Option<RollCall>,
 }
 
 impl HostView {
@@ -619,6 +647,8 @@ impl HostView {
             player_names: host.player_names(),
             trader_offers: host.trader_offers(),
             ship_positions,
+            hyperspace_label: host.hyperspace_label(),
+            roll_call: host.roll_call(),
         }
     }
 

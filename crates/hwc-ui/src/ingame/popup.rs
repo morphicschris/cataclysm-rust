@@ -161,6 +161,11 @@ fn main_items(fe: &Fe) -> Vec<Item> {
     if has(view, Command::Hyperspace) && view.player.multiplayer {
         v.push(item("Hyperspace", Some(keys::HYPERSPACE), 3));
     }
+    // Single player (`pmEnableMenuItems`): the jump, labelled "Hyperspace" or "End Mission",
+    // while the mission allows it.
+    if let (Some(label), false) = (&view.hyperspace_label, view.player.multiplayer) {
+        v.push(item(label, Some(keys::HYPERSPACE), 3));
+    }
     if has(view, Command::Move) {
         v.push(item("Start Waypoints", Some(keys::WAYPOINTS), 3));
     }

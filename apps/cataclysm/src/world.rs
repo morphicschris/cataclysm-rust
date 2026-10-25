@@ -198,6 +198,14 @@ pub struct World {
     /// The simulation creates and runs the original's effects.
     pub effects_on: bool,
     fx_renderer: Option<hwc_render::EffectRenderer>,
+    /// The NIS sun lens flare (listed while an NIS plays in this world).
+    pub nis_sun: hwc_render::nis_sun::NisSunFlare,
+    /// Lens flares are on (the `LensFlare` option).
+    pub lens_flares: bool,
+    neb_renderer: Option<hwc_render::NebulaRenderer>,
+    /// The main view is not drawn (the sensors manager is open): the nebulae take no camera
+    /// and are not drawn.
+    pub sensors_open: bool,
 }
 
 /// Engine vector to render vector.
@@ -287,6 +295,10 @@ impl World {
             follow_focus: true,
             effects_on: false,
             fx_renderer: None,
+            nis_sun: hwc_render::nis_sun::NisSunFlare::default(),
+            lens_flares: true,
+            neb_renderer: None,
+            sensors_open: false,
         };
         w.attach_effects();
         w.set_lighting(&lighting);
@@ -518,6 +530,7 @@ impl World {
     /// work that follows it at the simulation rate: effects, animations and trails.
     pub fn step(&mut self) {
         self.snapshot();
+        self.set_nebula_camera();
         self.run.step();
         self.after_update();
     }
@@ -526,8 +539,17 @@ impl World {
     /// the universe of the opening NIS's level, which runs before the mission exists.
     pub fn step_universe(&mut self) {
         self.snapshot();
+        self.set_nebula_camera();
         self.run.universe.update();
         self.after_update();
+    }
+
+    /// `mrCamera` for the next universe update: the nebulae's render list and the tendrils they
+    /// build depend on the main camera.
+    fn set_nebula_camera(&mut self) {
+        if !self.sensors_open {
+            crate::nebula_view::set_camera(&mut self.run.universe, &self.camera);
+        }
     }
 
     /// The presentation work after a universe update.
@@ -628,32 +650,23 @@ impl World {
         true
     }
 
-    /// Looks from `eye` at `look_at` with a vertical field of view in degrees (the NIS camera;
-    /// the game camera's up is always +z, so a camera bank is not shown).
-    pub fn set_view(&mut self, eye: Vec3, look_at: Vec3, fov: f32) {
-        let d = eye - look_at;
-        let dist = d.length();
-        if dist.is_nan() || dist <= 1e-3 || !dist.is_finite() {
+    /// Looks from `eye` at `look_at` with `up` as the view's up (the NIS camera, banked as the
+    /// NIS says) and a vertical field of view in degrees.
+    pub fn set_view(&mut self, eye: Vec3, look_at: Vec3, up: Vec3, fov: f32) {
+        let dist = (eye - look_at).length();
+        if !dist.is_finite() || dist <= 1e-3 {
             return;
         }
-        self.camera.look_at = look_at;
-        self.camera.distance = dist;
-        self.camera.angle = d.y.atan2(d.x);
-        if self.camera.angle < 0.0 {
-            self.camera.angle += std::f32::consts::TAU;
-        }
-        self.camera.declination = (-d.z / dist).clamp(-1.0, 1.0).asin();
+        self.camera.set_eye_look_up(eye, look_at, Some(up));
         self.camera.tweaks.field_of_view = fov;
     }
 
-    /// Hyperspace effect state of each arriving ship: `(state, clipt)`.
+    /// Hyperspace window state of every ship arriving or leaving: `(state, clipt)`.
     fn hyperspace(&self) -> BTreeMap<ShipId, (u32, f32)> {
         self.run
-            .game
-            .arriving
-            .iter()
-            .filter(|a| a.hs_state != hs_effect::INACTIVE)
-            .filter_map(|a| Some((a.ship?, (a.hs_state, a.clipt))))
+            .hyperspace_windows()
+            .into_iter()
+            .map(|(id, state, clipt)| (id, (state, clipt)))
             .collect()
     }
 
@@ -996,7 +1009,8 @@ impl World {
         let mut flares = std::mem::take(&mut world.world.lens_flares);
         let u = &self.run.universe;
         let occluded = |pos: Vec3, dir: Vec3, dist: f32| flare_occluded(u, pos, dir, dist);
-        fx.prepare_lens_flares(&mut flares, &view, Some(&occluded));
+        let sun = Some(&mut self.nis_sun).filter(|s| s.listed);
+        fx.prepare_lens_flares_with_nis_sun(&mut flares, sun, &view, Some(&occluded));
         if let Some(world) = self.run.universe.effects.as_mut() {
             world.world.lens_flares = flares;
         }
@@ -1128,6 +1142,15 @@ impl World {
         frame: &Frame,
     ) -> Result<Vec<u8>, String> {
         let effects = self.prepare_effects(renderer, (target.width, target.height), frame);
+        let nebulae = !self.sensors_open
+            && crate::nebula_view::prepare(
+                &mut self.neb_renderer,
+                renderer,
+                &self.run.universe,
+                &self.camera,
+                (target.width, target.height),
+            );
+        let mut neb = self.neb_renderer.take();
         let mut fx = self.fx_renderer.take();
         let out = {
             let (ships, states) = self.instances(frame);
@@ -1140,9 +1163,14 @@ impl World {
                 if let Some(fx) = fx.as_mut().filter(|_| effects) {
                     fx.draw(r, enc, c, d);
                 }
+                // `nebRender`, after the effects.
+                if let Some(n) = neb.as_mut().filter(|_| nebulae) {
+                    n.draw(r, enc, c, d);
+                }
             })
         };
         self.fx_renderer = fx;
+        self.neb_renderer = neb;
         out
     }
 
