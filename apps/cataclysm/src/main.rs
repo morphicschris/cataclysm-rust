@@ -13,6 +13,7 @@ mod host;
 mod intro;
 mod loading;
 mod mission;
+mod movie_script;
 mod nebula_view;
 mod nis;
 #[cfg(test)]
@@ -64,6 +65,9 @@ options:
                         retail game): C forces the jump to the next mission
   --ingame-preview      starting a game opens the in-game interface (managers, overlay,
                         menus, keys) on a stand-in fleet instead of returning to the menu
+  --rollcall-below-subtitles
+                        open the hyperspace roll call below the speech band (the original
+                        keeps it in the top-left corner, under the band and portrait)
   -h, --help            this text
 
 The original's switches /window, /fullscreen and /disableAVI are accepted too.
@@ -84,6 +88,7 @@ pub struct Args {
     pub ingame_preview: bool,
     pub mission: Option<u32>,
     pub debug_keys: bool,
+    pub rollcall_below_band: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -101,6 +106,7 @@ fn parse_args() -> Result<Args, String> {
         ingame_preview: false,
         mission: None,
         debug_keys: false,
+        rollcall_below_band: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -129,6 +135,7 @@ fn parse_args() -> Result<Args, String> {
             "--no-sound" => a.sound = false,
             "--ingame-preview" => a.ingame_preview = true,
             "--debug-keys" => a.debug_keys = true,
+            "--rollcall-below-subtitles" => a.rollcall_below_band = true,
             "--mission" => {
                 a.mission = Some(value("--mission")?.parse().map_err(|_| "bad --mission")?)
             }

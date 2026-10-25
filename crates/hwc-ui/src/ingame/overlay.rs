@@ -103,6 +103,13 @@ pub struct State {
     view_buttons: Vec<(Rect, String, Action)>,
     pub icons: Icons,
     mouse: (i32, i32),
+    /// Seconds of real time (`taskTimeElapsed`), advanced by [`tick`].
+    clock: f32,
+    /// Where the top-left and top-right panels start (`moSetTop`): the bottom of the speaker
+    /// portrait while one is up, then sliding back to 0.
+    pub top: i32,
+    /// When the subtitles last drew (the slide back up starts from here).
+    top_stamp: f32,
 }
 
 impl State {
@@ -136,6 +143,27 @@ impl State {
             };
             let num = |s: &str| s.trim().parse::<i32>().unwrap_or(0) != 0;
             self.options[mode][view - 1][p] = (num(a), num(b));
+        }
+    }
+
+    /// `moSetTop`, called by the subtitle pass on every frame it draws something: a portrait
+    /// moves the top below it, and either way the slide back up starts again from now.
+    pub fn set_top(&mut self, hud: crate::subtitle::HudTop) {
+        if !hud.drawn {
+            return;
+        }
+        if let Some(y) = hud.portrait_bottom.filter(|&y| y != 0) {
+            self.top = y;
+        }
+        self.top_stamp = self.clock;
+    }
+
+    /// `moDraw`'s slide back up: each frame the top moves up by the whole seconds (rounded)
+    /// since the subtitles last drew, so it holds for half a second and then speeds up.
+    fn settle_top(&mut self) {
+        if self.top > 0 {
+            let step = (self.clock - self.top_stamp).round_ties_even() as i32;
+            self.top = (self.top - step).max(0);
         }
     }
 
@@ -203,9 +231,10 @@ pub fn toggle_option(fe: &mut Fe, digit: u8) {
     }
 }
 
-pub fn tick(fe: &mut Fe, _dt: f32) {
+pub fn tick(fe: &mut Fe, dt: f32) {
     let max = fe.game.ig.view.messages.len().saturating_sub(MESSAGE_LINES);
     let o = &mut fe.game.ig.overlay;
+    o.clock += dt;
     o.message_scroll = o.message_scroll.min(max);
     layout(fe);
 }
@@ -511,7 +540,7 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
         draw_messages(fe, canvas, &view, bar.min(h));
     }
     let st = &fe.game.ig.overlay;
-    let mut left_y = 20;
+    let mut left_y = st.top + 20;
     if st.shown(&view, PLAYERNAMES) && !view.player_names.is_empty() {
         left_y = draw_player_names(fe, canvas, &view);
     }
@@ -547,6 +576,7 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
     if let Some(page) = fe.game.ig.overlay.keys_page {
         draw_key_page(fe, canvas, page);
     }
+    fe.game.ig.overlay.settle_top();
 }
 
 /// `moDrawShipList` / `moDrawPlayersShipList`: "3 x ACOLYTE" per type, top right.
@@ -562,7 +592,7 @@ fn draw_ship_list(
     let h = crate::text::height(&f);
     let st = &fe.game.ig.overlay;
     let x = canvas.width - 150;
-    let mut y = 10;
+    let mut y = st.top + 10;
     if selecting {
         let groups = groups(&fe.game.ig.view.selection);
         y += groups.len() as i32 * h + 20 - 10;
@@ -724,11 +754,12 @@ fn draw_messages(fe: &mut Fe, canvas: &mut Canvas, view: &HostView, base: i32) {
 
 /// `moDrawPlayerStats`: colour swatches and names; returns the next free y.
 fn draw_player_names(fe: &Fe, canvas: &mut Canvas, view: &HostView) -> i32 {
+    let top = fe.game.ig.overlay.top;
     let Some(f) = font(fe, FONT_TEXT) else {
-        return 20;
+        return top + 20;
     };
     let h = crate::text::height(&f);
-    let mut y = 20;
+    let mut y = top + 20;
     for (name, colour) in &view.player_names {
         canvas.fill_rect(Rect::new(10, y, 10 + h, y + h), *colour);
         text(canvas, &f, h + 14, y, *colour, name);
@@ -992,7 +1023,8 @@ fn draw_options_menu(fe: &Fe, canvas: &mut Canvas, view: &HostView) {
     let h = crate::text::height(&f);
     let st = &fe.game.ig.overlay;
     let s = &fe.game.ig.strings;
-    let r = Rect::new(180, 10, draw::width(&f, &"A".repeat(48)) + 220, 9 * h + 40);
+    let top = st.top;
+    let r = Rect::new(180, top + 10, draw::width(&f, &"A".repeat(48)) + 220, top + 9 * h + 40);
     canvas.fill_rect(r, BLACK);
     canvas.outline_rect(r, WHITE);
     canvas.outline_rect(Rect::new(r.x0 + 1, r.y0 + 1, r.x1 - 1, r.y1 - 1), WHITE);
@@ -1027,7 +1059,7 @@ fn draw_options_menu(fe: &Fe, canvas: &mut Canvas, view: &HostView) {
             canvas,
             &f,
             190,
-            20 + i as i32 * h,
+            top + 20 + i as i32 * h,
             c,
             &format!("({}) {name} {state}", i + 1),
         );
@@ -1111,4 +1143,45 @@ pub fn draw_health_bar(canvas: &mut Canvas, cx: i32, cy: i32, radius: f32, fract
     let split = left + ((right - left) as f32 * f) as i32;
     canvas.fill_rect(Rect::new(left, top, split, top + h), fill);
     canvas.fill_rect(Rect::new(split, top, right, top + h), empty);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::subtitle::HudTop;
+
+    #[test]
+    fn top_follows_the_portrait_then_slides_back() {
+        let mut st = State::default();
+        let portrait = HudTop {
+            drawn: true,
+            portrait_bottom: Some(70),
+        };
+        st.set_top(portrait);
+        assert_eq!(st.top, 70);
+        // Text without a portrait keeps the top where it is and holds the slide.
+        for _ in 0..20 {
+            st.clock += 0.1;
+            st.set_top(HudTop {
+                drawn: true,
+                portrait_bottom: None,
+            });
+            st.settle_top();
+        }
+        assert_eq!(st.top, 70);
+        // Nothing drawn: nothing moves for half a second, then a pixel a frame (2 from 1.5 s on).
+        let mut tops = Vec::new();
+        for _ in 0..14 {
+            st.clock += 0.1;
+            st.set_top(HudTop::default());
+            st.settle_top();
+            tops.push(st.top);
+        }
+        assert_eq!(tops, [70, 70, 70, 70, 70, 69, 68, 67, 66, 65, 64, 63, 62, 61]);
+        while st.top > 0 {
+            st.clock += 0.1;
+            st.settle_top();
+        }
+        assert_eq!(st.top, 0);
+    }
 }

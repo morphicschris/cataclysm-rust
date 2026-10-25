@@ -152,6 +152,10 @@ pub struct Game {
     nis_notes: Vec<String>,
     /// The debug keys are on (the C key forces the jump).
     pub debug_keys: bool,
+    /// Opt-in (`--rollcall-below-subtitles`): the hyperspace roll call opens below the speech
+    /// band instead of at the original's fixed top-left place, where the band and portrait
+    /// are drawn over it.
+    pub rollcall_below_band: bool,
     /// The between-missions movie is playing: no universe updates until it ends.
     pub movie: bool,
     /// The simulation's `bink_pending` last seen.
@@ -238,6 +242,7 @@ impl Game {
             nis_notes: Vec::new(),
             queued_nis: None,
             debug_keys: std::env::var_os("HWC_DEBUG_KEYS").is_some(),
+            rollcall_below_band: false,
             movie: false,
             bink_pending: false,
             next_mission: false,
@@ -1792,11 +1797,18 @@ impl Game {
             let state = subtitle::DrawState {
                 letterbox_fading: self.letterbox.fade != 0.0,
                 letterboxed: self.letterbox.fully,
+                movie: false,
             };
             s.resize(self.canvas.width, self.canvas.height);
             s.draw(&mut self.canvas, now, None, state);
             if s.take_message_ended() != 0 {
                 self.world.run.game.intel_ended = true;
+            }
+            // `moSetTop`: the HUD's top panels go below a portrait (next frame's overlay).
+            self.ui.subtitle_top(s.hud_top());
+            if self.rollcall_below_band {
+                let band = s.band_rect(self.canvas.width);
+                self.ui.set_rollcall_offset(band.y1);
             }
         }
         self.draw_text();

@@ -22,6 +22,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 use crate::audio::{self, Audio};
 use crate::game::{self, Game};
 use crate::intro::{Cue, Intro, SEQUENCE};
+use crate::movie_script::MovieScript;
 use crate::play::{Loading, Progress};
 use crate::preview::{Outcome, Preview};
 use crate::Args;
@@ -96,6 +97,11 @@ struct App {
     mouse: (i32, i32),
     /// The movie playing is a mission's (the game waits behind it), not the start-up's.
     game_movie: bool,
+    /// The levels `animBinkPlay` saved before the movie (`soundEventGetVolume`), put back
+    /// when it ends: the movie's script sets levels of its own.
+    movie_volumes: Option<hwc_audio::system::Volumes>,
+    /// `--rollcall-below-subtitles`.
+    rollcall_below_band: bool,
     /// `--debug-keys`.
     debug_keys: bool,
 }
@@ -153,6 +159,8 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         start_mission: args.mission,
         mouse: (0, 0),
         game_movie: false,
+        movie_volumes: None,
+        rollcall_below_band: args.rollcall_below_band,
         debug_keys: args.debug_keys,
     };
     if app.intro.is_none() {
@@ -373,14 +381,36 @@ impl App {
         }
     }
 
-    /// A mission's movie (`animBinkPlay`): played full screen while the game waits.
+    /// A mission's movie (`animBinkPlay`): played full screen while the game waits, with
+    /// its soundtrack script `Movies\<name>.script` (music, levels, speech and subtitles).
+    /// The music and effects stop and the levels are kept to restore afterwards.
     fn play_animatic(&mut self, n: u32) -> bool {
         let Some(&file) = ANIMATICS.get(n.wrapping_sub(1) as usize) else {
             return false;
         };
         let steps = [crate::intro::Step::Movie { file, music: -1 }];
         match Intro::new(self.data.clone(), &steps) {
-            Ok(i) => {
+            Ok(mut i) => {
+                let name = script_name(file);
+                match self.source.read(&name).map(|d| MovieScript::parse(&d)) {
+                    Some(Ok(script)) => {
+                        for (line, what) in &script.ignored {
+                            eprintln!("note: {name}:{line}: {what} (ignored)");
+                        }
+                        i.set_script(script);
+                    }
+                    Some(Err(e)) => eprintln!("cataclysm: {name}: {e}"),
+                    // `animLoadNISScript` gives an empty event list when the file is missing.
+                    None => eprintln!("cataclysm: {name} not found; the movie plays silent"),
+                }
+                if let Some(a) = &mut self.audio {
+                    a.stop_music(0.0);
+                    a.stop_all_sfx();
+                    self.movie_volumes = Some(a.volumes());
+                }
+                if let Some(s) = self.game.as_mut().and_then(|g| g.subtitles.as_mut()) {
+                    s.reset();
+                }
                 self.intro = Some(i);
                 self.game_movie = true;
                 true
@@ -425,6 +455,7 @@ impl App {
                 Progress::Ready(mut game) => {
                     self.loading = None;
                     game.debug_keys |= self.debug_keys;
+                    game.rollcall_below_band = self.rollcall_below_band;
                     if let Some(a) = &mut self.audio {
                         a.stop_music(0.0);
                         a.set_in_game(true);
@@ -521,12 +552,45 @@ impl App {
     }
 
     fn cues(&mut self, cues: Vec<Cue>) {
-        let Some(a) = &mut self.audio else { return };
         for c in cues {
             match c {
-                Cue::PlayMusic(t) => a.play_music(t),
-                Cue::StopMusic => a.stop_music(0.0),
+                Cue::PlayMusic(t) => {
+                    if let Some(a) = &mut self.audio {
+                        a.play_music(t);
+                    }
+                }
+                Cue::StopMusic => {
+                    if let Some(a) = &mut self.audio {
+                        a.stop_music(0.0);
+                    }
+                }
+                Cue::Script(action) => {
+                    let (subs, mission) = match self.game.as_mut() {
+                        Some(g) => (g.subtitles.as_mut(), g.world.run.game.config.mission),
+                        None => (None, 0),
+                    };
+                    crate::movie_script::present(action, &mut self.audio, subs, mission);
+                }
             }
+        }
+    }
+
+    /// After a mission's movie (`animBinkPlay` returning): music, effects, speech and
+    /// subtitles stop and the saved levels come back.
+    fn animatic_finished(&mut self) {
+        if let Some(a) = &mut self.audio {
+            a.stop_music(0.0);
+            a.stop_all_sfx();
+            a.stop_all_speech();
+            if let Some(v) = self.movie_volumes.take() {
+                a.set_volumes(v);
+            }
+        }
+        if let Some(g) = self.game.as_mut() {
+            if let Some(s) = g.subtitles.as_mut() {
+                s.reset();
+            }
+            g.movie_finished();
         }
     }
 
@@ -540,13 +604,18 @@ impl App {
         if let Some(intro) = &mut self.intro {
             let cues = intro.update(dt);
             let done = intro.finished();
+            let clock = intro.script_clock();
             self.cues(cues);
+            // `animBinkDecode`'s `subTitlesUpdate`, on the movie clock.
+            if let (Some(t), true) = (clock, self.game_movie) {
+                if let Some(s) = self.game.as_mut().and_then(|g| g.subtitles.as_mut()) {
+                    s.update(t);
+                }
+            }
             if done {
                 self.intro = None;
                 if std::mem::take(&mut self.game_movie) {
-                    if let Some(g) = self.game.as_mut() {
-                        g.movie_finished();
-                    }
+                    self.animatic_finished();
                 } else {
                     self.front_end_start();
                 }
@@ -606,6 +675,11 @@ impl App {
                     self.session.scale,
                     (s.width, s.height),
                 );
+                if let (Some(t), true) = (intro.script_clock(), self.game_movie) {
+                    if let Some(subs) = self.game.as_mut().and_then(|g| g.subtitles.as_mut()) {
+                        draw_movie_subtitles(subs, &mut self.movie_canvas, t);
+                    }
+                }
                 gpu.present(&self.movie_canvas, placement.viewport);
             }
             None => {
@@ -903,4 +977,21 @@ impl ApplicationHandler for App {
             gpu.window.request_redraw();
         }
     }
+}
+
+/// `Movies\<name>.script` for `<name>.bik`.
+pub fn script_name(movie: &str) -> String {
+    let stem = movie.strip_suffix(".bik").unwrap_or(movie);
+    format!("Movies\\{stem}.script")
+}
+
+/// `animBinkDisplay`'s subtitle pass over the movie frame, on the movie clock: every region with
+/// text, without the band (rendering is off while `binkPlay` runs).
+pub fn draw_movie_subtitles(subs: &mut hwc_ui::subtitle::Subtitles, canvas: &mut Canvas, clock: f32) {
+    let state = hwc_ui::subtitle::DrawState {
+        movie: true,
+        ..Default::default()
+    };
+    subs.resize(canvas.width, canvas.height);
+    subs.draw(canvas, clock, None, state);
 }

@@ -204,6 +204,27 @@ impl Audio {
     }
 
     /// Sounds for one universe update's events.
+    /// A movie script's speech event (`nisAnimaticSpeechEvent`: `speechEventQueue` with no
+    /// object or actor) on the stream its speaker class uses. No single-player speech is in
+    /// progress while a movie plays, so nothing ducks it.
+    pub fn movie_speech(&mut self, event: u32, variable: i32) -> Option<SpeechStarted> {
+        self.system.context.mission_speech = 0;
+        let stream = crate::movie_script::speech_stream(event);
+        self.system.play_speech(event, variable, -1, stream)
+    }
+
+    /// `soundstopallSFX`: every effect stops (streams are left alone).
+    pub fn stop_all_sfx(&mut self) {
+        self.system.stop_all(0.0, false);
+    }
+
+    /// `speechEventCleanup`: every speech stream stops.
+    pub fn stop_all_speech(&mut self) {
+        for stream in 0..hwc_audio::mixer::NUM_STREAMS - 1 {
+            self.system.stop_speech(stream, 0.0);
+        }
+    }
+
     /// Stops the mission speech (`speechEventActorStop` when fleet intel is skipped).
     pub fn stop_mission_speech(&mut self, fade: f32) {
         self.system.stop_speech(0, fade);

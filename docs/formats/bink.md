@@ -30,9 +30,10 @@ That is 38,674 frames in total. Every frame decodes bit-identically to ffmpeg's 
 decoder. This was checked for all 20 movies, and setting `HWC_FFMPEG` enables a regression test
 for two of them.
 
-The animatic soundtracks are not stored in the `.bik` files. Each animatic has a
-`Movies\<name>.script` NIS script, and the per-frame callback fires that script's timed events
-(speech, subtitles).
+No `.bik` declares an audio track (track count 0 in all 20 headers), so there is no Bink audio
+(RDFT or DCT) to decode and none of RAD's audio tables is needed. The animatic soundtracks are
+`Movies\<name>.script` NIS event scripts instead (see "Soundtrack scripts" below); the two
+start-up movies play a music track (60, 61) for their length.
 
 ## Container
 
@@ -140,8 +141,14 @@ the screen, at ((screenW − 640)/2, (screenH − 480)/2). If the full-screen fl
 The screen is cleared to black first, so higher resolutions get a black border. The movies also
 contain their own letterbox bars.
 
-After the frame, subtitles are drawn over it. When the subtitles fit in the lower half of the
-screen, a black rectangle at least 128 px tall is painted at the bottom before they are drawn.
+After the frame, every subtitle region with text is drawn over it (`subTitlesDraw`, on the movie
+clock). `binkPlay` clears the game's "rendering on" flag for the length of the movie, and the
+translucent band behind the speech region is only drawn while it is set, so movie subtitles have
+no band; speaker portraits are drawn when the theme has one (the animatic speech events all carry
+the no-portrait flag 0x4000_0000). After the buffers are flipped, when the lowest subtitle
+bottom is in the upper half of the screen, the top of the new back buffer is cleared to black
+(from y = 0 down to that bottom, at least 128 px) so that text does not pile up where the
+unscaled movie does not reach.
 
 ### Timing and frame dropping
 
@@ -152,8 +159,28 @@ screen, a black rectangle at least 128 px tall is painted at the bottom before t
 * The copy flags always include 0x04000000 alongside the surface type. The game also keeps a
   flag word that holds 0x04000000 while it is 2 or more frames behind.
 * Playback ends when the due frame reaches the frame count.
-* `animBinkDecode(frame)` converts the frame number to seconds (`frame / fps`). It fires every NIS
-  script event whose time has passed (speech, subtitles), then updates the subtitles.
+* `animBinkDecode(frames)` is called once per update with the number of frames decoded so far
+  and converts it to seconds (`frames / fps`). It fires every script event whose time is at or
+  before that, sets the game clock the subtitles run on to it, then updates the subtitles.
+
+### Soundtrack scripts
+
+`animBinkPlay` builds `Movies\<name>.script` next to the movie (with the language folder
+inserted for other languages) and reads it with `animLoadNISScript`: the NIS keyword table,
+events sorted by time then script order. The 18 scripts use six keywords:
+
+* at time 0: `musicVolume`, `speechVolume`, `SFXVolume`. These go to `soundEvent*Vol`, whose
+  master factor is always 1, so they are absolute levels that replace the player's settings for
+  the movie; the levels saved before the movie are restored afterwards.
+* `startMusic n` (tracks 42–58).
+* `animaticSpeechEvent (n + flags)`, 81 in all: `speechEventQueue` with no object or actor. The
+  actor flags choose the stream (Fleet Command / Tactical Officer on stream 1, the generic
+  voice on stream 2, others on 0) and the subtitle theme; every one also has 0x4000_0000 (no
+  portrait). The subtitles go to the speech region at the top of the screen.
+
+Before the movie the music and effects stop and the subtitles are cleared; afterwards the music,
+effects and speech stop, the subtitles are cleared again and the levels come back. The
+recreation plays these in `apps/cataclysm` (`movie_script.rs`).
 
 ### Skipping and pausing
 

@@ -5,6 +5,11 @@
 //! engine switches to for the intro when running full screen (the same place). Releasing
 //! Escape stops the movie that is playing (`binkStop` from the window procedure); the pause and
 //! the other movie still follow. The hidden `/disableAVI` switch skips the whole sequence.
+//!
+//! The same player shows the between-missions movies (`animBinkPlay`, no music of its own):
+//! those get their soundtrack script ([`Intro::set_script`]), whose events come back as
+//! [`Cue::Script`] as frames are decoded, on the clock [`Intro::script_clock`] the subtitles
+//! also run on. None of the movies has a Bink audio track.
 
 use std::rc::Rc;
 
@@ -14,6 +19,8 @@ use hwc_ui::canvas::{BlitMode, Image};
 use hwc_ui::scale::{Placement, ScaleMode};
 use hwc_ui::Canvas;
 use hwc_video::{BinkFile, BinkTables, VideoDecoder};
+
+use crate::movie_script::{MovieAction, MovieScript};
 
 /// One step of the start-up sequence.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -41,12 +48,14 @@ pub const SEQUENCE: [Step; 3] = [
 const MUSIC_SETTLE: f32 = 0.15;
 
 /// What the sound system has to do as the sequence advances.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Cue {
     /// `soundEventPlayMusic(track)` as a movie starts.
     PlayMusic(i32),
     /// `soundEventStopMusic(0)` when a movie ends or is stopped.
     StopMusic,
+    /// An event of the movie's script came due (`animBinkDecode`).
+    Script(MovieAction),
 }
 
 struct Playing {
@@ -56,6 +65,8 @@ struct Playing {
     time: f64,
     /// Frames decoded so far.
     decoded: u32,
+    /// The movie's soundtrack script, if it has one.
+    script: Option<MovieScript>,
 }
 
 /// Plays [`SEQUENCE`]; drive it with [`Intro::update`] and draw it with [`Intro::render`].
@@ -73,6 +84,8 @@ pub struct Intro {
     picture: Option<Image>,
     rgba: Vec<u8>,
     done: bool,
+    /// The script for the next movie to start (`animBinkPlay` loads it with the movie).
+    script: Option<MovieScript>,
 }
 
 /// Loads the Bink codec tables the importer extracted (or, for an install, reads them from its
@@ -104,11 +117,26 @@ impl Intro {
             picture: None,
             rgba: Vec::new(),
             done: false,
+            script: None,
         })
     }
 
     pub fn finished(&self) -> bool {
         self.done
+    }
+
+    /// Gives the next movie its soundtrack script: its events come back as [`Cue::Script`]
+    /// as the frames are decoded.
+    pub fn set_script(&mut self, script: MovieScript) {
+        self.script = Some(script);
+    }
+
+    /// The movie clock of `animBinkDecode` (frames decoded / frame rate, in seconds) while a
+    /// movie with a script plays: the time its events and subtitles run on.
+    pub fn script_clock(&self) -> Option<f32> {
+        let p = self.playing.as_ref()?;
+        p.script.as_ref()?;
+        Some(frames_to_seconds(&p.file, p.decoded))
     }
 
     #[cfg(test)]
@@ -144,13 +172,13 @@ impl Intro {
                 let total = p.file.frame_count();
                 if due >= total {
                     // The last frame stays on screen.
-                    self.decode_to(total);
+                    self.decode_to(total, &mut cues);
                     self.playing = None;
                     cues.push(Cue::StopMusic);
                     continue;
                 }
                 // Behind: decode the missed frames and paint only the newest one.
-                self.decode_to(due + 1);
+                self.decode_to(due + 1, &mut cues);
                 break;
             }
             if let Some(step) = self.pending {
@@ -215,15 +243,17 @@ impl Intro {
                     decoder,
                     time: 0.0,
                     decoded: 0,
+                    script: self.script.take(),
                 });
-                self.decode_to(1);
+                self.decode_to(1, cues);
             }
             Err(e) => eprintln!("cataclysm: intro movie skipped: {e}"),
         }
     }
 
-    /// Decodes frames until `count` have been decoded, then converts the newest to RGBA.
-    fn decode_to(&mut self, count: u32) {
+    /// Decodes frames until `count` have been decoded, then converts the newest to RGBA and
+    /// fires the script events that are due (`animBinkDecode` with the frames decoded).
+    fn decode_to(&mut self, count: u32, cues: &mut Vec<Cue>) {
         let Some(p) = &mut self.playing else { return };
         let count = count.min(p.file.frame_count());
         if p.decoded >= count {
@@ -240,6 +270,10 @@ impl Intro {
                 break;
             }
             p.decoded += 1;
+        }
+        let seconds = frames_to_seconds(&p.file, p.decoded);
+        if let Some(s) = &mut p.script {
+            cues.extend(s.due(seconds).into_iter().map(Cue::Script));
         }
         let (w, h) = (p.decoder.width(), p.decoder.height());
         self.rgba.resize(w * h * 4, 0);
@@ -261,6 +295,13 @@ impl Intro {
         }
         placement
     }
+}
+
+/// `frames / fps` in single precision, as the decode callback works it out.
+fn frames_to_seconds(file: &BinkFile, frames: u32) -> f32 {
+    let h = file.header();
+    let fps = h.fps_num as f32 / h.fps_den.max(1) as f32;
+    frames as f32 / fps
 }
 
 #[cfg(test)]

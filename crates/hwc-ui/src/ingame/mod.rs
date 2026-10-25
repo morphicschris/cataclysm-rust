@@ -223,6 +223,19 @@ impl InGameUi {
         self.fe.set_screen_size(width, height);
     }
 
+    /// What the subtitle pass drew this frame (`moSetTop`): the top-left and top-right panels
+    /// move below a speaker portrait.
+    pub fn subtitle_top(&mut self, hud: crate::subtitle::HudTop) {
+        self.fe.game.ig.overlay.set_top(hud);
+    }
+
+    /// Opt-in layout change: the roll call (which the original keeps at its 640x480 position in
+    /// the top-left corner at every resolution, under the speech band and portrait) moves
+    /// down by `dy` pixels. Takes effect the next time the screen opens.
+    pub fn set_rollcall_offset(&mut self, dy: i32) {
+        self.fe.set_screen_offset(rollcall::SCREEN, 0, dy);
+    }
+
     /// Refreshes the copy of the host's state the screens show.
     pub fn refresh(&mut self, host: &dyn GameUiHost) {
         let factory = self.fe.game.ig.cm.factory;

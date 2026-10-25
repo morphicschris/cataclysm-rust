@@ -122,6 +122,9 @@ pub struct FeScreen {
     pub atoms: Vec<FeAtom>,
     /// Screens with menu items keep their 640x480 coordinates at any resolution.
     has_menus: bool,
+    /// An extra displacement of a screen that keeps its 640x480 coordinates (an opt-in
+    /// layout change, see [`FrontEnd::set_screen_offset`]); (0, 0) as loaded.
+    offset: (i32, i32),
 }
 
 impl FeScreen {
@@ -433,6 +436,7 @@ impl<G> FrontEnd<G> {
                 links,
                 atoms,
                 has_menus,
+                offset: (0, 0),
             };
             Self::position_screen(&mut screen, self.screen_size);
             self.screens.push(screen);
@@ -465,6 +469,11 @@ impl<G> FrontEnd<G> {
     /// are hidden.
     fn position_screen(screen: &mut FeScreen, size: (i32, i32)) {
         if screen.has_menus {
+            let (ox, oy) = screen.offset;
+            for atom in &mut screen.atoms {
+                atom.x = atom.loaded.0 + ox;
+                atom.y = atom.loaded.1 + oy;
+            }
             return;
         }
         let (dx, dy) = ((size.0 - FE_WIDTH) / 2, (size.1 - FE_HEIGHT) / 2);
@@ -529,6 +538,20 @@ impl<G> FrontEnd<G> {
 
     pub fn find_screen(&self, name: &str) -> Option<usize> {
         self.screens.iter().position(|s| s.name == name)
+    }
+
+    /// Moves a screen that keeps its 640x480 coordinates (the menus and the roll call) by
+    /// (`dx`, `dy`) from where the file puts it. Not something the original does; used for
+    /// opt-in layout changes. Takes effect the next time the screen starts.
+    pub fn set_screen_offset(&mut self, name: &str, dx: i32, dy: i32) {
+        let size = self.screen_size;
+        if let Some(i) = self.find_screen(name) {
+            let screen = &mut self.screens[i];
+            if screen.has_menus && screen.offset != (dx, dy) {
+                screen.offset = (dx, dy);
+                Self::position_screen(screen, size);
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------

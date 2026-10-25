@@ -254,6 +254,43 @@ fn mission_one_to_two_with_the_forced_jump() {
     rig.shot(g, "06_m2_location_card");
 }
 
+/// The opt-in `--rollcall-below-subtitles`: the roll call opens below the speech band instead
+/// of the original's top-left place under it (`07b_m3_roll_call_below_band`).
+#[test]
+fn roll_call_below_the_band() {
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(3, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    g.rollcall_below_band = true;
+    rig.frames_until(g, 16 * 90, "the fleet arriving in mission 3", |g| {
+        g.world.run.game.ships_have_arrived && g.world.run.game.sp_state == sp_state::NONE
+    });
+    // A render places the screen for this resolution.
+    g.render(&mut rig.renderer, SIZE).expect("render");
+    rig.key(g, 0x43);
+    rig.frame(g);
+    rig.frame(g);
+    assert_eq!(g.ui.manager(), Some(Manager::RollCall));
+    for _ in 0..16 {
+        rig.frame(g);
+    }
+    rig.shot(g, "07b_m3_roll_call_below_band");
+    let band = g
+        .subtitles
+        .as_ref()
+        .expect("subtitles")
+        .band_rect(SIZE.0);
+    let fe = &g.ui.fe;
+    let go = fe.find_atom("GoNowHyperspace").expect("GoNowHyperspace");
+    // 175 on the 640x480 layout, moved down by the band's bottom.
+    assert_eq!(fe.atom(go).rect().y0, 175 + band.y1);
+}
+
 /// Mission 3 from the warp fleet: the debug jump opens the roll call; Quick Docking closes it.
 #[test]
 fn mission_three_roll_call() {

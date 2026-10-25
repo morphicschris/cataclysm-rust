@@ -407,6 +407,20 @@ pub struct DrawState {
     pub letterbox_fading: bool,
     /// `nisFullyScissored`.
     pub letterboxed: bool,
+    /// A movie is playing (`binkPlay` turns the game's rendering off while it runs, and the
+    /// band is drawn only while rendering is on): the text and portraits go over the movie
+    /// without the band.
+    pub movie: bool,
+}
+
+/// What the subtitle pass tells the main overlay (`moSetTop` from `subTitlesDraw`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HudTop {
+    /// Some region was drawn this frame: the overlay's slide back up waits.
+    pub drawn: bool,
+    /// The bottom of the speaker portrait drawn (the last one, if several regions show one):
+    /// the top-left and top-right HUD text moves below it.
+    pub portrait_bottom: Option<i32>,
 }
 
 /// The subtitle system.
@@ -425,6 +439,8 @@ pub struct Subtitles {
     /// Counter for events of simulated subtitles and location cards.
     dummy_event: u32,
     size: (i32, i32),
+    /// What the last [`Subtitles::draw`] reported for the overlay.
+    hud_top: HudTop,
 }
 
 impl Subtitles {
@@ -475,6 +491,7 @@ impl Subtitles {
             message_ended: 0,
             dummy_event: 0,
             size: (640, 480),
+            hud_top: HudTop::default(),
         }
     }
 
@@ -792,6 +809,7 @@ impl Subtitles {
     /// Draws every region with cards (`rndRenderTask`'s subtitle pass). `now` is game time,
     /// `nis_now` the playing NIS's clock for the NIS region.
     pub fn draw(&mut self, canvas: &mut Canvas, now: f32, nis_now: Option<f32>, state: DrawState) {
+        self.hud_top = HudTop::default();
         for i in 0..self.regions.len() {
             if !self.regions[i].enabled || self.regions[i].cards.is_empty() {
                 continue;
@@ -799,6 +817,11 @@ impl Subtitles {
             let t = if i == region::NIS { nis_now.unwrap_or(now) } else { now };
             self.draw_region(canvas, i, t, state);
         }
+    }
+
+    /// What the last [`Subtitles::draw`] means for the main overlay's top (`moSetTop`).
+    pub fn hud_top(&self) -> HudTop {
+        self.hud_top
     }
 
     /// The band behind the letterbox region: the full screen width, 64 pixels from the
@@ -811,7 +834,8 @@ impl Subtitles {
 
     /// `subTitlesDraw`.
     fn draw_region(&mut self, canvas: &mut Canvas, index: usize, now: f32, state: DrawState) {
-        if index == region::LETTERBOX && !state.letterbox_fading && !state.letterboxed {
+        self.hud_top.drawn = true;
+        if index == region::LETTERBOX && !state.movie && !state.letterbox_fading && !state.letterboxed {
             let band = self.band_rect(canvas.width);
             canvas.blend_rect(band, [BAND_LEVEL, BAND_LEVEL, BAND_LEVEL, BAND_LEVEL]);
         }
@@ -872,6 +896,7 @@ impl Subtitles {
             let px = r.rect.x0 + r.def.icon_offset.0;
             let py = r.rect.y0 + r.def.icon_offset.1;
             canvas.blit(img, px, py, BlitMode::Blend);
+            self.hud_top.portrait_bottom = Some(py + PICTURE_SIZE);
         }
         if index == region::LETTERBOX && r.cards.is_empty() && !r.aborted && !r.continuous {
             self.message_ended = 1;

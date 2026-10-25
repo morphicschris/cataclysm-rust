@@ -242,6 +242,7 @@ fn intro_advance(intro: &mut Intro, seconds: f32) {
             match c {
                 Cue::PlayMusic(t) => eprintln!("tour: music track {t} starts"),
                 Cue::StopMusic => eprintln!("tour: music stops"),
+                Cue::Script(a) => eprintln!("tour: movie script {a:?}"),
             }
         }
         left -= dt;
