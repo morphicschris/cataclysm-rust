@@ -29,3 +29,6 @@
 /screenshots/
 __pycache__/
 /builds/
+
+# Exported music from the player's install (never commit)
+/music/
