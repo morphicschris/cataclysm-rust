@@ -69,8 +69,8 @@ const RANGE_NEST: f32 = 0.5;
 const BOUNDS_COLOR: Color = [64, 107, 162, 255];
 /// The sensors viewport's own colour (`SM_ViewPort` content colour default).
 const BACKGROUND_COLOR: Color = [73, 98, 100, 255];
-/// Hot-key number colour (`0x8889c0`).
-const HOTKEY_COLOR: Color = [250, 250, 250, 255];
+/// Hot-key number colour (`selHotKeyNumberColor`, 0x8889c0).
+const HOTKEY_COLOR: Color = hwc_ui::ingame::overlay::HOTKEY_NUMBER_COLOR;
 /// Explored-area outline gradients (near, far) for the explored and occupied layers, and how
 /// much of a cell an outline corner cuts off (`0x875638..0x875680`).
 const EXPLORED_NEAR: Color = [200, 200, 200, 255];
@@ -1214,7 +1214,8 @@ impl Sensors {
         let cw = hwc_ui::text::width(font, b"0").max(1);
         let fh = hwc_ui::text::height(font);
         for (n, ships) in inp.groups {
-            let label = [b'0' + (*n % 10)];
+            let Some(label) = crate::hotkeys::LABELS.get(usize::from(*n)) else { continue };
+            let label = label.as_bytes();
             let mut placed: Vec<(i32, i32)> = Vec::new();
             for &id in ships {
                 if !inp.selection.contains(&id) {
@@ -1238,7 +1239,7 @@ impl Sensors {
                     x,
                     y - fh,
                     HOTKEY_COLOR,
-                    &label,
+                    label,
                     (hwc_ui::text::Shadow::from_bits(0), [0, 0, 0, 255]),
                 );
             }

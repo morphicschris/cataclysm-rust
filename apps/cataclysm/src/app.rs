@@ -421,6 +421,11 @@ impl App {
         let run = g.world.run();
         let (mission, skill) = (run.game.config.mission, run.game.config.skill);
         let carry = run.carry();
+        // The hot-key groups go with the ships that jumped.
+        let groups = carry.as_ref().map(|c| {
+            g.hotkeys
+                .carry_out(&run.universe, &run.game.hyper.in_hyperspace, crate::host::PLAYER, c, mission + 1)
+        });
         // `singlePlayerStartNis` reads these from the mission that has just ended.
         let centre = run
             .var(None, "G_NisCentreDerelict")
@@ -439,7 +444,9 @@ impl App {
         }
         let size = self.session.placement.canvas;
         match Loading::new(self.data.clone(), &self.session, next, skill, size) {
-            Ok(l) => self.loading = Some(Box::new(l.with_carry(carry, centre))),
+            Ok(l) => {
+                self.loading = Some(Box::new(l.with_carry(carry, centre).with_groups(groups)))
+            }
             Err(e) => {
                 eprintln!("cataclysm: cannot start mission {next}: {e}");
                 self.back_to_menu();
@@ -450,8 +457,9 @@ impl App {
     /// The NIS level's NIS has stopped: the mission loads from it behind a loading screen
     /// of its own (`singlePlayerNisStoppedCB` -> `singlePlayerLoadNewLevel(0, 0)`).
     fn after_nis_level(&mut self) {
-        let Some(g) = self.game.take() else { return };
+        let Some(mut g) = self.game.take() else { return };
         let skill = g.world.skill();
+        let groups = g.carried_groups.take();
         let crate::world::Sim::NisLevel(nis) = g.world.into_sim() else {
             self.back_to_menu();
             return;
@@ -459,7 +467,7 @@ impl App {
         let size = self.session.placement.canvas;
         let mission = nis.mission;
         match Loading::after_nis_level(self.data.clone(), &self.session, *nis, skill, size) {
-            Ok(l) => self.loading = Some(Box::new(l)),
+            Ok(l) => self.loading = Some(Box::new(l.with_groups(groups))),
             Err(e) => {
                 eprintln!("cataclysm: cannot start mission {mission}: {e}");
                 self.back_to_menu();

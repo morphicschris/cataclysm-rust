@@ -7,7 +7,6 @@
 //! The window and the headless tests drive it the same way: [`Game::input`] for each event,
 //! [`Game::update`] once per frame, [`Game::render`] for the picture.
 
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use glam::Vec3;
@@ -31,6 +30,7 @@ use hwc_ui::ingame::cursor::{self, avail, Availability, Pointer, PointerAction};
 
 use crate::audio::Audio;
 use crate::host::{selectable, sim_id, SimHost, PLAYER};
+use crate::hotkeys::{CarriedGroups, HotKeyGroups};
 use crate::mission::{Cue, CueReader};
 use crate::nis::{self, Kind as NisKind, NisRun};
 use hwc_nis::{Action as NisAction, Fired};
@@ -115,7 +115,13 @@ pub struct Game {
     cues: CueReader,
     pub selection: Vec<ShipId>,
     selecting: Vec<ShipId>,
-    groups: HashMap<u8, Vec<ShipId>>,
+    /// The hot-key groups (`selHotKeyGroup`).
+    pub hotkeys: HotKeyGroups,
+    /// Groups coming from the mission before, held until the mission's own level loads (an NIS
+    /// level plays first).
+    pub carried_groups: Option<CarriedGroups>,
+    /// The hot-key number fonts by level of detail (`selGroupFont0..3`).
+    group_fonts: [Option<Rc<hwc_formats::font::Font>>; 4],
     messages: Vec<GameMessage>,
     /// Speech subtitles, simulated subtitles and location cards (`Subtitle.c`).
     pub subtitles: Option<Subtitles>,
@@ -209,11 +215,21 @@ impl Game {
         let icons = read("Tactical.script")
             .map(|s| sensors::Icons::from_script(&s))
             .unwrap_or_default();
+        let tweak = read("tweak.script");
         let mut sensors = Sensors::new(tweaks, sensors::Toggles::from_options(&options), icons);
         sensors.instant = options.get("InstantTransition") != 0;
         let pointer = Pointer::new(hwc_ui::Resources::new(source.clone()));
         let mut res = hwc_ui::Resources::new(source);
         res.set_language(hwc_ui::Language::from_index(options.get("language") as u32));
+        let group_fonts = std::array::from_fn(|i| {
+            let key = format!("selFontName{i}");
+            let name = tweak
+                .as_ref()
+                .and_then(|t| t.get(&key))
+                .and_then(|e| e.string().map(str::to_string))
+                .unwrap_or_else(|| format!("TO_{i}.hff"));
+            res.font(&name)
+        });
         let mut g = Game {
             world,
             ui,
@@ -221,7 +237,9 @@ impl Game {
             cues: CueReader::default(),
             selection: Vec::new(),
             selecting: Vec::new(),
-            groups: HashMap::new(),
+            hotkeys: HotKeyGroups::new(),
+            carried_groups: None,
+            group_fonts,
             messages: Vec::new(),
             subtitles: None,
             letterbox: Letterbox::default(),
@@ -1061,6 +1079,47 @@ impl Game {
         }
     }
 
+    /// The hot-key group keys (`kbcbGroupAssignN`, `kbcbGroupSelect`, `kbcbGroupAddSelect`).
+    fn group_key(&mut self, op: keys::GroupOp, n: u8, audio: &mut Option<Audio>) {
+        use keys::GroupOp;
+        let u = self.world.universe();
+        let r = match op {
+            GroupOp::Create => self.hotkeys.assign(n, &self.selection),
+            GroupOp::Select => {
+                let mut sel = std::mem::take(&mut self.selection);
+                let r = self
+                    .hotkeys
+                    .select(n, &mut sel, |id| crate::hotkeys::takes_part(u, id));
+                self.selection = sel;
+                r
+            }
+            GroupOp::AddSelect => {
+                let mut sel = std::mem::take(&mut self.selection);
+                let r = self
+                    .hotkeys
+                    .add_to_selection(n, &mut sel, |id| crate::hotkeys::can_add(u, id));
+                self.selection = sel;
+                r
+            }
+        };
+        self.respond(r, audio);
+    }
+
+    /// A group key's sound, speech and focus.
+    fn respond(&mut self, r: crate::hotkeys::Response, audio: &mut Option<Audio>) {
+        if let Some(e) = r.sound {
+            sound(audio, e);
+        }
+        if let (Some((event, n)), Some(a)) = (r.speech, audio.as_mut()) {
+            a.fleet_speech(event, i32::from(n));
+        }
+        if r.focus {
+            // In the main view `ccFocus`; in the sensors manager `smCullAndFocusSelecting`.
+            let sel = self.selection.clone();
+            self.focus_on(sel, audio);
+        }
+    }
+
     fn start_move(&mut self, audio: &mut Option<Audio>) {
         if self.mobile_selection().is_empty() {
             return;
@@ -1094,27 +1153,7 @@ impl Game {
             return;
         }
         if let Some((op, n)) = a.ship_group() {
-            use hwc_ui::ingame::keys::GroupOp;
-            match op {
-                GroupOp::Create => {
-                    self.groups.insert(n, self.selection.clone());
-                }
-                GroupOp::AddTo => {
-                    let g = self.groups.entry(n).or_default();
-                    for &id in &self.selection {
-                        if !g.contains(&id) {
-                            g.push(id);
-                        }
-                    }
-                }
-                GroupOp::Select => {
-                    let u = self.world.universe();
-                    if let Some(g) = self.groups.get_mut(&n) {
-                        g.retain(|&id| u.ship(id).is_some());
-                        self.selection = g.clone();
-                    }
-                }
-            }
+            self.group_key(op, n, audio);
             return;
         }
         match a {
@@ -1142,6 +1181,10 @@ impl Game {
                     .collect();
             }
             keys::SELECT_NONE => self.selection.clear(),
+            keys::REMOVE_SELECTED_SHIP_GROUP => {
+                let r = self.hotkeys.remove_selected(&self.selection);
+                self.respond(r, audio);
+            }
             keys::ESCAPE => {
                 if self.mode != Mode::Select {
                     self.mode = Mode::Select;
@@ -1250,6 +1293,7 @@ impl Game {
             }
             // An NIS level has no mission yet: only its universe updates.
             let opening = self.world.nis_level().is_some();
+            let before = self.hotkeys.snapshot(self.world.universe());
             if opening {
                 self.world.step_universe();
             } else {
@@ -1263,6 +1307,7 @@ impl Game {
                 a.effect_events(self.world.universe());
             }
             if !opening {
+                self.groups_after_step(&before, audio);
                 self.after_step(audio);
             }
             self.nis_step(audio);
@@ -1324,12 +1369,30 @@ impl Game {
         self.movie = false;
     }
 
+    /// The hot-key groups after an update: links and unlinks pass the group on; dead, removed
+    /// and given-away ships leave (`univDeleteDeadShip`, `univRemoveShipReferences`,
+    /// `SelectionSwitchPlayerOwner`).
+    fn groups_after_step(&mut self, before: &crate::hotkeys::Snapshot, audio: &mut Option<Audio>) {
+        let u = &self.world.run().universe;
+        self.hotkeys.relink(before, u);
+        let died: Vec<ShipId> = u
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                hwc_sim::universe::SimEvent::ShipDied { ship, .. } => Some(*ship),
+                _ => None,
+            })
+            .collect();
+        for n in self.hotkeys.prune(u, PLAYER, &died) {
+            if let Some(a) = audio.as_mut() {
+                a.fleet_speech(crate::hotkeys::SPEECH_DEFEAT, i32::from(n));
+            }
+        }
+    }
+
     fn after_step(&mut self, audio: &mut Option<Audio>) {
         let u = &self.world.run().universe;
         self.selection.retain(|&id| selectable(u, id));
-        for g in self.groups.values_mut() {
-            g.retain(|&id| u.ship(id).is_some());
-        }
         let now = u.total_time_elapsed;
         let mut posts = Vec::new();
         for e in &u.base.events {
@@ -1924,9 +1987,11 @@ impl Game {
             };
         }
         let frame = self.world.frame(px);
-        let mut groups: Vec<(u8, Vec<ShipId>)> =
-            self.groups.iter().map(|(k, v)| (*k, v.clone())).collect();
-        groups.sort_by_key(|g| g.0);
+        let groups: Vec<(u8, Vec<ShipId>)> = self
+            .hotkeys
+            .non_empty()
+            .map(|(n, g)| (n, g.to_vec()))
+            .collect();
         let font = self.hotkey_font.clone();
         let inp = sensors::SceneInput {
             world: &self.world,
@@ -1969,7 +2034,7 @@ impl Game {
         // Health bars are the main view's (`selSelectedDraw`).
         let marked: &[ShipId] = if in_sensors { &[] } else { &self.selection };
         let selecting: &[ShipId] = if in_sensors { &[] } else { &self.selecting };
-        for &id in marked.iter().chain(selecting) {
+        for (i, &id) in marked.iter().chain(selecting).enumerate() {
             let Some(s) = u.ship(id) else { continue };
             if s.flags & hwc_sim::object::sof::DEAD != 0 {
                 continue;
@@ -1982,15 +2047,34 @@ impl Game {
             };
             let r = (hi[0] - lo[0]) * 0.5;
             let f = s.health / st.health.max_health.max(1.0);
+            // `selSelectedDraw`: a mothership's status is drawn a level of detail lower.
+            let mut lod = self.world.ship_lod(id).unwrap_or(0);
+            if st.ship_class == Some(hwc_sim::statics::ShipClass::Mothership) && lod > 0 {
+                lod -= 1;
+            }
+            // The number goes with the selection's bars, not the band box's.
+            let number = (i < marked.len())
+                .then(|| self.hotkeys.group_of(id))
+                .flatten();
             bars.push((
                 ((lo[0] + hi[0]) * 0.5) as i32,
                 ((lo[1] + hi[1]) * 0.5) as i32,
                 r,
                 f,
+                number.map(|n| (n, lod)),
             ));
         }
-        for (x, y, r, f) in bars {
-            hwc_ui::ingame::overlay::draw_health_bar(&mut self.canvas, x, y, r, f);
+        for (x, y, r, f, number) in bars {
+            use hwc_ui::ingame::overlay;
+            overlay::draw_health_bar(&mut self.canvas, x, y, r, f);
+            if let Some((n, lod)) = number {
+                let font = self.group_fonts[overlay::hotkey_font_index(lod)].as_deref();
+                if let Some(font) = font {
+                    let rect = overlay::status_rect(x, y, r);
+                    let label = crate::hotkeys::LABELS[usize::from(n)];
+                    overlay::draw_hotkey_number(&mut self.canvas, font, rect, label);
+                }
+            }
         }
         // `mrSelectingDraw`: the band box in the modifier's colour, or before it is dragged
         // (main view only) the box of the ship under the pointer.

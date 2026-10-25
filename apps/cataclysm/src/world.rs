@@ -1434,6 +1434,11 @@ impl World {
         (t > 0.0).then(|| o + d * t)
     }
 
+    /// The level of detail a ship was last drawn at (`ship->currentLOD`).
+    pub fn ship_lod(&self, id: ShipId) -> Option<usize> {
+        self.fx.get(&id).map(|f| f.lod)
+    }
+
     /// Screen box of a ship (its collision sphere's projection).
     pub fn screen_box(&self, size: (u32, u32), s: &hwc_sim::Ship) -> Option<([f32; 2], [f32; 2])> {
         let r = self

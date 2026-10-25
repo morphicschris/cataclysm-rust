@@ -856,6 +856,46 @@ fn hot_key_groups() {
     got.sort();
     want.sort();
     assert_eq!(got, want, "1 did not select group 1");
+    assert_eq!(g.hotkeys.group_of(fleet[0]), Some(1));
+    // The number is drawn over the selected ships, at the right end of their bars.
+    let mut draw = |g: &mut Game| {
+        g.render(&mut rig.renderer, SIZE).expect("render");
+        g.canvas().pixels.clone()
+    };
+    let with = draw(g);
+    let groups = std::mem::take(&mut g.hotkeys);
+    let without = draw(g);
+    g.hotkeys = groups;
+    let changed = with.iter().zip(&without).filter(|(a, b)| a != b).count();
+    assert!(changed > 0, "no hot-key number drawn");
+    rig.render(g, "hot_key_numbers");
+    // Pressing 1 again with the group selected focuses the camera on it.
+    g.world.focus.clear();
+    rig.key(g, 0x31);
+    let mut focus = g.world.focus.clone();
+    focus.sort();
+    assert_eq!(focus, want, "1 again did not focus on group 1");
+    // Shift+1 adds the group to the selection; Ctrl+2 takes ships out of group 1.
+    let one = vec![fleet[0]];
+    g.selection = one.clone();
+    rig.input(g, InputEvent::KeyDown(0x11));
+    rig.key(g, 0x32);
+    rig.input(g, InputEvent::KeyUp(0x11));
+    assert_eq!(g.hotkeys.group_of(fleet[0]), Some(2));
+    g.selection.clear();
+    rig.input(g, InputEvent::KeyDown(0x10));
+    rig.key(g, 0x31);
+    rig.input(g, InputEvent::KeyUp(0x10));
+    let mut got = g.selection.clone();
+    got.sort();
+    let rest: Vec<_> = want.iter().copied().filter(|id| *id != fleet[0]).collect();
+    assert_eq!(got, rest, "Shift+1 did not add group 1");
+    // Ctrl+` with exactly group 2 selected removes it.
+    g.selection = one;
+    rig.input(g, InputEvent::KeyDown(0x11));
+    rig.key(g, 0xc0);
+    rig.input(g, InputEvent::KeyUp(0x11));
+    assert_eq!(g.hotkeys.group_of(fleet[0]), None, "Ctrl+` did not remove group 2");
 }
 
 /// Frame times of the sensors manager in Mission 1 (printed; `--ignored`).

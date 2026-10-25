@@ -12,6 +12,7 @@ mod data;
 mod draw_check;
 mod game;
 mod host;
+mod hotkeys;
 mod intro;
 mod loading;
 mod mission;

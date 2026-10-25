@@ -19,6 +19,7 @@ use hwc_ui::AssetSource;
 
 use crate::data::Assets;
 use crate::game::Game;
+use crate::hotkeys::CarriedGroups;
 use crate::loading::LoadingScreen;
 use crate::mission::{self, Loader};
 use crate::world::{Sim, World};
@@ -63,6 +64,8 @@ pub struct Loading {
     after_nis: Option<Box<NisLevelRun>>,
     /// `G_NisCentreDerelict` / `G_NisCentreInstance` of the mission before.
     centre: Option<(i32, Option<i32>)>,
+    /// The hot-key groups of the fleet coming from the mission before.
+    groups: Option<CarriedGroups>,
     game: Option<Game>,
     step: Step,
 }
@@ -104,6 +107,7 @@ impl Loading {
             opening_nis: std::env::var_os("HWC_SKIP_NIS").is_none(),
             after_nis: None,
             centre: None,
+            groups: None,
             game: None,
             step: Step::Start,
         })
@@ -120,6 +124,13 @@ impl Loading {
     ) -> Self {
         self.loader.carry = Some(carry);
         self.centre = centre;
+        self
+    }
+
+    /// The hot-key groups of the fleet coming in (they are put back on its ships once the
+    /// mission's level has loaded).
+    pub fn with_groups(mut self, groups: Option<CarriedGroups>) -> Self {
+        self.groups = groups;
         self
     }
 
@@ -246,6 +257,15 @@ impl Loading {
                     Ok(mut g) => {
                         if let Some((run, fired)) = self.nis.take() {
                             g.queue_nis(run, fired);
+                        }
+                        if let Some(groups) = self.groups.take() {
+                            match g.world.mission_run() {
+                                Some(run) => {
+                                    g.hotkeys =
+                                        groups.arrive(&run.universe, &run.game.hyper.fleet_ids)
+                                }
+                                None => g.carried_groups = Some(groups),
+                            }
                         }
                         self.game = Some(g);
                         self.screen.set_progress(0.9);

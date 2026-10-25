@@ -161,6 +161,13 @@ impl Audio {
         self.system.play_speech(event, -1, -1, 0);
     }
 
+    /// `speechEventQueue(NULL, event, variable, ...)` for a ship-group event (`COMM_AssGrp_*`,
+    /// `STAT_F_AssGrp_*`), on the stream of its speaker class.
+    pub fn fleet_speech(&mut self, event: u32, variable: i32) {
+        let stream = crate::movie_script::speech_stream(event);
+        self.system.play_speech(event, variable, -1, stream);
+    }
+
     pub fn play_music(&mut self, track: i32) {
         self.system.play_music(track);
     }

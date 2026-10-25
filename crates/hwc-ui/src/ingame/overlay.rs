@@ -1121,14 +1121,51 @@ fn draw_key_page(fe: &Fe, canvas: &mut Canvas, page: u8) {
     }
 }
 
-/// `selStatusRectCompute` + `selStatusBarDraw`: the health bar over a ship whose projected
-/// centre is (cx, cy) with a projected radius of `radius` pixels (for the game's 3D pass).
-pub fn draw_health_bar(canvas: &mut Canvas, cx: i32, cy: i32, radius: f32, fraction: f32) {
+/// `selStatusRectCompute`: the rectangle of the status bars over a ship whose projected centre
+/// is (cx, cy) with a projected radius of `radius` pixels.
+pub fn status_rect(cx: i32, cy: i32, radius: f32) -> Rect {
     let w = (1.6 * radius).max(8.0) as i32;
     let h = (radius / 32.0).max(2.0) as i32;
     let left = cx - w / 2 - 1;
     let right = left + (w - 2 * h) + 4;
     let top = cy - (radius as i32 + h);
+    Rect::new(left, top, right, top + h)
+}
+
+/// `selHotKeyNumberDraw`: the hot-key group number of a selected ship, at the right end of its
+/// status bars and a line of the font above them, in `selHotKeyNumberColor`.
+pub fn draw_hotkey_number(canvas: &mut Canvas, font: &hwc_formats::font::Font, bars: Rect, label: &str) {
+    let y = bars.y0 - crate::text::height(font);
+    crate::text::print(
+        canvas,
+        font,
+        bars.x1,
+        y,
+        HOTKEY_NUMBER_COLOR,
+        label.as_bytes(),
+        (crate::text::Shadow::from_bits(0), [0, 0, 0, 255]),
+    );
+}
+
+/// `selHotKeyNumberColor` (0x8889c0).
+pub const HOTKEY_NUMBER_COLOR: Color = [250, 250, 250, 255];
+
+/// `selHotKeyNumberDraw`'s font for a ship's level of detail: `selGroupFont0..2` for levels
+/// 0..2, `selGroupFont3` beyond.
+pub fn hotkey_font_index(lod: usize) -> usize {
+    lod.min(3)
+}
+
+/// `selStatusBarsDraw` + `selStatusBarDraw`: the health bar over a ship whose projected
+/// centre is (cx, cy) with a projected radius of `radius` pixels (for the game's 3D pass).
+pub fn draw_health_bar(canvas: &mut Canvas, cx: i32, cy: i32, radius: f32, fraction: f32) {
+    let Rect {
+        x0: left,
+        y0: top,
+        x1: right,
+        y1: bottom,
+    } = status_rect(cx, cy, radius);
+    let h = bottom - top;
     let f = fraction.clamp(0.0, 1.0);
     let (fill, empty) = crate::ingame::launchmgr::health_colours(f);
     // tweak.script colours for the fill.

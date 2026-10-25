@@ -38,13 +38,13 @@ impl Action {
         let op = match i {
             108..=116 => GroupOp::Create,
             117..=125 => GroupOp::Select,
-            126..=134 => GroupOp::AddTo,
+            126..=134 => GroupOp::AddSelect,
             _ => return None,
         };
         let first = match op {
             GroupOp::Create => 108,
             GroupOp::Select => 117,
-            GroupOp::AddTo => 126,
+            GroupOp::AddSelect => 126,
         };
         Some((op, (i - first + 1) as u8))
     }
@@ -77,7 +77,9 @@ impl Action {
 pub enum GroupOp {
     Create,
     Select,
-    AddTo,
+    /// `AddTo_ShipGroup_n`: the group joins the selection (`kbcbGroupAddSelect`); the group
+    /// itself does not change.
+    AddSelect,
 }
 
 /// Configuration names of the actions, in table order (`keys.cfg` names).
@@ -558,7 +560,7 @@ mod tests {
         );
         assert_eq!(Action(147).name(), "Toggle_SV_SlipgatePaths");
         assert_eq!(Action(117).ship_group(), Some((GroupOp::Select, 1)));
-        assert_eq!(Action(134).ship_group(), Some((GroupOp::AddTo, 9)));
+        assert_eq!(Action(134).ship_group(), Some((GroupOp::AddSelect, 9)));
     }
 
     #[test]
