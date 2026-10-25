@@ -215,6 +215,10 @@ pub struct ShipStaticInfo {
     pub hyperspace_color: [u8; 4],
     /// +0x3d0 `hyperspaceBoxScale` (default 1).
     pub hyperspace_box_scale: f32,
+    /// +0x30 bit 0 `IF_InfoNeeded`: the current level uses the type (everything, less the
+    /// level's `ExcludeShips`, plus its `IncludeShips` and the fleet in hyperspace). The
+    /// construction manager only offers types whose statics are loaded for the level.
+    pub info_needed: bool,
     /// +0x3d4 `leechRUsPerSecond` (default 1).
     pub leech_rus_per_second: i32,
     /// +0x3d8 `leechHPsPerSecond` (default 20).
@@ -363,6 +367,7 @@ impl ShipStaticInfo {
             dock_light_color: [120, 194, 255, 255],
             hyperspace_color: [0, 0, 0, 255],
             hyperspace_box_scale: 1.0,
+            info_needed: true,
             leech_rus_per_second: 1,
             leech_hps_per_second: 20.0,
             beast_attack_cascade_cost: 1.0,

@@ -322,7 +322,8 @@ pub fn shoot(u: &mut Universe, id: ShipId, gi: usize, target: Option<ShipId>, fo
     if m.forced {
         let f = forced.expect("forced mine");
         let r = u.randy.random(RAN_GAME);
-        m.damage = st((ld(f.damage_hi) - ld(f.damage_lo)) * ld(2.328_306_4e-10) * f64::from(r as f32) + ld(f.damage_lo));
+        // (The random number is loaded exactly, as a 64-bit integer.)
+        m.damage = st((ld(f.damage_hi) - ld(f.damage_lo)) * ld(2.328_306_4e-10) * f64::from(r) + ld(f.damage_lo));
         m.total_lifetime = f.lifetime;
     } else {
         let armour = target.and_then(|t| u.ships.get(t)).map_or(0, |t| t.armour_level);
@@ -369,6 +370,9 @@ pub fn shoot(u: &mut Universe, id: ShipId, gi: usize, target: Option<ShipId>, fo
     let target_blob = target.and_then(|t| u.ships.get(t)).and_then(|t| t.coll_my_blob);
     u.missiles.insert(m);
     link(u, mid, target_blob);
+    if let Some(f) = forced.filter(|_| !is_missile) {
+        crate::ships::minelayer::mine_added(u, f.formation, mid);
+    }
     if let Some(t) = target.and_then(|t| u.ships.get_mut(t)) {
         t.firing_at_us = Some(id);
         t.recently_fired_upon = crate::object::RECENT_ATTACK_DURATION;
@@ -568,11 +572,12 @@ fn guide_mine(u: &mut Universe, mid: MissileId) -> bool {
                 Some(o) => {
                     let p = m.posinfo.position;
                     let op = o.posinfo.position;
-                    let dx = st(ld(p.x) - ld(op.x));
-                    let dy = st(ld(p.y) - ld(op.y));
-                    let dz = st(ld(p.z) - ld(op.z));
+                    // The differences stay in registers; summed z, y, then x.
+                    let dx = ld(p.x) - ld(op.x);
+                    let dy = ld(p.y) - ld(op.y);
+                    let dz = ld(p.z) - ld(op.z);
                     let clear = crate::ships::minelayer::mine_clear_distance_sq(u, o.ship_type);
-                    ld(clear) < (ld(dx) * ld(dx) + ld(dy) * ld(dy)) + ld(dz) * ld(dz)
+                    ld(clear) < (dz * dz + dy * dy) + dx * dx
                 }
             };
             if leave {

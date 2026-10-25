@@ -351,7 +351,11 @@ pub fn fly_to_point_avoiding_objs(
                 if n.ship.flags & sof::CLAMPED != 0 && n.ship.base.clamp.as_ref().and_then(|c| c.host) == Some(id) {
                     continue;
                 }
-                // (Salvager, cloaking and slaved-ship exceptions are not modelled.)
+                // A cloaked ship the player cannot see is not avoided.
+                if crate::cloak::is_cloaked(&n.ship) && !crate::visibility::visible_to_player(u, n.id, ship.player) {
+                    continue;
+                }
+                // (Salvager and slaved-ship exceptions are not modelled.)
                 let mag2 = (ld(rep.z) * ld(rep.z) + ld(rep.y) * ld(rep.y)) + ld(rep.x) * ld(rep.x);
                 if mag2 > ld(max_consider) * ld(max_consider) {
                     continue;

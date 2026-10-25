@@ -169,15 +169,27 @@ fn routines(t: ShipType) -> (AttackKind, PassiveKind, FireKind) {
         }
         sSwarmer | bSwarmer => (A::SideStep, P::None, F::Default),
         trJunk_LGun | trJunk_SGun => (A::None, P::Default, F::Default),
+        // The module routines of the ACV (`ACVAttack`, `ACVFire`), the missile corvettes
+        // (`P1MissileCorvetteAttack`), the minelayer (`MinelayerCorvetteAttack` / `Fire`, no
+        // passive routine) and the cruise missile (`CruiseMissileAttack`, an empty passive
+        // routine, no fire routine); see `crate::ships`.
+        sACV | bACV => (A::Unsupported, P::Default, F::Unsupported),
+        bMissileCorvette | p1MissileCorvette => (A::Unsupported, P::Default, F::Default),
+        tMinelayerCorvette => (A::Unsupported, P::None, F::Unsupported),
+        bCruiseMissile => (A::Unsupported, P::Unsupported, F::None),
         // Attack routines of their own that are not reproduced yet: Mimic, ACV, MCV, ramming and
         // hive frigates, processors, sentinels, motherships, ion array and DFG frigates, gravity
         // wells, heavy defenders, missile and standard corvettes, minelayers, cloaked fighters,
         // cruise missiles, the Nomad moon.
-        sMimic | sACV | sMCV | sRammingFrigate | sHiveFrigate | sProcessor | sSentinel | sMothership | bCloakedFighter
-        | bACV | bHiveFrigate | bIonArrayFrigate | bDFGFrigate | bRammingFrigate | bProcessor | bSentinel
-        | bMothership | bCruiseMissile | bMissileCorvette | kGravWellGenerator | kHeavyDefender | tDFGFrigate
-        | tGravWellGenerator | tHeavyDefender | tMinelayerCorvette | p1IonArrayFrigate | p1MissileCorvette
-        | p1StandardCorvette | trGhostship | dBeastMothership | dNomadMoon => (A::Unsupported, P::Unsupported, F::Unsupported),
+        // Processors: `ProcessorAttack`, `RKOAttackPassive`, `DefaultShipFire`; the Beast
+        // mothership of the missions only fires (`DefaultShipFire`).
+        sProcessor | bProcessor => (A::Unsupported, P::Unsupported, F::Default),
+        dBeastMothership => (A::None, P::None, F::Default),
+        sMimic | sMCV | sRammingFrigate | sHiveFrigate | sSentinel | sMothership | bCloakedFighter
+        | bHiveFrigate | bIonArrayFrigate | bDFGFrigate | bRammingFrigate | bSentinel
+        | bMothership | kGravWellGenerator | kHeavyDefender | tDFGFrigate
+        | tGravWellGenerator | tHeavyDefender | p1IonArrayFrigate
+        | p1StandardCorvette | trGhostship | dNomadMoon => (A::Unsupported, P::Unsupported, F::Unsupported),
         _ => (A::None, P::None, F::None),
     }
 }
@@ -185,7 +197,10 @@ fn routines(t: ShipType) -> (AttackKind, PassiveKind, FireKind) {
 impl TypeCombat {
     fn build(stat: &ShipStaticInfo) -> Self {
         let (attack, passive, fire) = routines(stat.ship_type);
-        let interceptor = matches!(attack, AttackKind::Interceptor | AttackKind::Acolyte).then(|| InterceptorStatics::parse(stat));
+        // (`MimicStaticInit` and `CloakedFighterStaticInit` run `GenericInterceptorStaticInit` too.)
+        let interceptor = (matches!(attack, AttackKind::Interceptor | AttackKind::Acolyte)
+            || matches!(stat.ship_type, ShipType::sMimic | ShipType::bCloakedFighter))
+        .then(|| InterceptorStatics::parse(stat));
         let (range_k, min_k) = match stat.ship_type {
             ShipType::kIonCannonFrigate | ShipType::tIonCannonFrigate | ShipType::dIonArrayFrigate | ShipType::dIonCannonFrigate => {
                 (0.725f32, 0.5f32)

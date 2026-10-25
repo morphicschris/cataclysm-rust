@@ -189,11 +189,11 @@ two Acolytes linking into an ACV, two workers salvaging a damaged derelict ion a
 
 ## Not yet modelled / known differences
 
-- Combat: missiles and mines (launchers hold fire), kamikaze, ramming, salvage, leech, DFG,
-  Sentinel fields, crystals, the burst attack special, cloaking and Mimic disguise, the
-  mothership big gun; the gun-opening animations (`mad`); fog of war and the detection-time
-  gates of `getEnemiesWithinProximity` (everything counts as visible); alliances beyond "same
-  player". The ray/triangle refinement of hit positions is skipped (the box hit is used).
+- Combat: the burst attack special (heavy corvettes), the carriers' and advance support
+  frigates' specials, the RKO, slipgates and the salvage corvettes' own module routines; the
+  gun-opening animations (`mad`, they finish at once); alliances beyond "same player". The
+  ray/triangle refinement of hit positions is skipped (the box hit is used) for bullets,
+  missiles and ramming snap points.
 - `NewGimble` turrets start from an identity default orientation (the mesh-bound orientation
   is not computed yet).
 - Fighters that run out of targets stop instead of flying the holding pattern
@@ -203,9 +203,8 @@ two Acolytes linking into an ACV, two workers salvaging a damaged derelict ion a
 - Evasive ships do not retreat to a dock when badly damaged.
 - Base layer: mesh animations (MAD) complete immediately (worker grinders, latch animations;
   the link merge happens when the original's 2 s limit runs out); slipgate transit (states
-  13..17) and the slipgate queue, carrier doors, crystals, the Beast infection and big-gun depot
-  processes, message pods, hive frigate swarmers, Mimic disguises on docking, fog of war, the
-  military parade launched ships join (they stay where they leave the dock), the network command
+  13..17) and the slipgate queue, carrier doors, the Beast and big-gun depot processes, message
+  pods, the military parade launched ships join (they stay where they leave the dock), the network command
   stream (`multiPlayerGame`, deterministic build lists) and computer players. The build task runs
   for `BaseState::cur_player` only, as the original's local build manager does. Resources are not
   in the collision blobs (ships neither avoid nor bump them, bullets pass through), dust clouds
@@ -221,9 +220,13 @@ two Acolytes linking into an ACV, two workers salvaging a damaged derelict ion a
 - Fog of war: the discovery message interval uses game time instead of real time; the red/blue
   message distinction (`FUN_00525100`) is not made.
 - Auto behaviour: the periodic "go and get upgraded" decision is not modelled.
-- Not modelled in the fly-to code: salvager, clamped, cloaked and slaved-ship exceptions; the
-  Sentinel force field; the docking dock-point lists; military parades.
-- Formations: sphere and the Sentinel force-field walls are not implemented; per-type formation
+- Self-destruct timers (`clScuttle`, used by KAS `ShipsBeastify` for ships that cannot be
+  infected) are not simulated; repair droids are presentation only (as in the original) and
+  need a hull mesh from the presentation layer to land.
+- Not modelled in the fly-to code: salvager, clamped and slaved-ship exceptions; the docking
+  dock-point lists; military parades.
+- Formations: the sphere formation is not implemented (a sentinel field sphere falls back to the
+  wall, as the original does when it protects nothing); per-type formation
   filters (static +0x190) are not consulted. `processFormationToDo`, `clFormation`,
   `formationArrageCrazyOptimum` follow the binary; only `FormationCalculateOffsets` is verified.
 - `univCheckShipState`: no world-limits recall or death timer. Housekeeping skips damage
@@ -231,7 +234,6 @@ two Acolytes linking into an ACV, two workers salvaging a damaged derelict ion a
 - `FPTAN` (pitch while turning for frigates and up, two tweak setters) uses the `f64` tangent;
   results can differ in the last bit in rare cases. The emulator cannot run `FSIN`/`FPTAN`, so
   rotation and the capital-ship pitch path are verified only through the `hwc-math` trig tests.
-- The Beast mothership damage modifier and the Ramming Frigate ram bonus/push state are 0.
 - Blob itemising for the sensors manager and the attack flags of blobs are not computed.
 - The render list is a simple distance filter (`Universe::update_render_list`).
 
@@ -306,6 +308,67 @@ Generic Cataclysm machinery the modules share:
   visibility, auto behaviour).
 * `present.rs`: render flags (cloak, infection, EMP, field) for the viewer.
 
+## Special abilities (per module)
+
+Each file under `ships/` documents its module in detail; tests are in `tests/ships_*.rs`.
+
+* **Acolytes** (`acolyte.rs`): interceptor attack plus gun pods that open and close after random
+  delays, and two link missiles; with the upgrade a special target makes the group launch both
+  missiles within 4 km. **ACV** (`acv.rs`): side-step attacker whose EMP (activate or target,
+  formation members combine their charges, 2 s firing + 75 s recharge) disables ships through
+  `ShipApplyEMP`; it keeps its Acolytes' missile state for unlinking.
+* **Minelayer** (`minelayer.rs`): attack passes dropping mines within drop range; the special
+  lays a square wall of forced mines (`NumMinesInSide` squared) that fly to their wall points;
+  mine formations; mine regeneration. **Missile ships** (`missile_ships.rs`): missile destroyer
+  volleys and regeneration after `MissileLagVolleyTime`, missile corvettes, the cruise missile
+  (kamikaze within 5 km; with the infection upgrade it infects Beast-infectable ships).
+* **Mimic, MCV, P1 standard corvette** (`mimic.rs`): disguise state machine (delay, morph out,
+  hold, morph back), fooling players as a ship of another player, an asteroid (a real asteroid
+  record while still) or a derelict; disguised ships hold fire and attack by ramming; an MCV
+  splits into its Mimics for fighter disguises. **Leech** (`leech.rs`): latches onto `DPT_Leech`
+  points and drains RUs and/or health per second, hidden unless detected, lets go on EMP.
+* **Cloakers** (`cloaker.rs`, `cloak.rs`): the cloaked fighter and ion array frigates toggle
+  their cloak (cloak generators have no behaviour in Cataclysm). **Proximity sensors**
+  (`proximity.rs`): sense non-allied ships every 32 frames; revealing cloaked ships comes from
+  the detector capability (`visibility.rs`). Targeting skips ships the player cannot see.
+* **Ramming frigate** (`ramming.rs`): turn, close in, charge above top speed, snap onto the hull,
+  ram damage (fighters and micro ships die), clamp and push with the cutting beam for
+  `RamPushTime`, wait; Beast ships with a cascade are immune, and a rammer charging a Beast ship
+  catches the infection. **Hive frigate** (`hive.rs`): six swarmers created inside, launched at
+  the target, recalled, refuelled and replaced every 15 s; swarmer kills count for the hive.
+  **Sentinels** (`sentinel.rs`): field triangles between the sentinels of a wall formation stop
+  enemy bullets, beams and missiles and block bumps; field strength by upgrade, regeneration,
+  going down when spent, suppressed for 2 s by an enemy DFG; sentinels in a field formation take
+  no attack orders.
+* **Dreadnought** (`dreadnought.rs`): missile regeneration, the cannon module (upgrade 0x400),
+  one-second charge and a shock wave. **Motherships** (`mothership.rs`): the Somtaaw big gun
+  (target point, 11 s charge, a shell with distance falloff, scatter in multiplayer), the drawn-out
+  Somtaaw death, the Beast damage modes (speed, damage, research, build, fire rate; burning 20
+  health a frame), death shock waves; the Beast mothership's cascade. **DFG** (`dfg.rs`): reflects
+  enemy bullets in its field (percentage through, angle variance, life extension), detonates
+  big-gun shells, suppresses enemy sentinel fields. **Gravity well** (`gravwell.rs`): catches
+  strike craft, brakes, tumbles and repels them, collapses after its operation time. **Nomad
+  moon** (`nomad.rs`): 6 s charge, push-and-fling shock wave with a field slow-down, 11 s rest,
+  needs its emitters. Shock waves: `shockwave.rs`.
+* **Beast** (`beast.rs`): infection (hits until `beastAttacksRequired`, stun, conversion to
+  `beastAttackConvertTo` of the infecting player via `univConvertShipToPlayer`, beastified
+  statistics) and the cascade of Beast heavy cruisers, carriers and motherships (charge, shoot
+  the nearest special target, the beam jumps on within the cascade distance while points last).
+  **Crystals** (`crystal.rs`), **processors** (`processor.rs`, up to four auto-repair beams),
+  **worker repair** (`worker_repair.rs`, repair orders), **repair droids** (`repair_droid.rs`,
+  presentation only).
+* **Kamikaze** (`collision.rs`, the bump code's `FUN_00436470`): a kamikaze ship that bumps an
+  enemy (or its target's structure) destroys itself and does its `kamikazeDamage`
+  (Tactics.script) to the other ship (scaled for an upgraded disguised Mimic); ships with the
+  killer-collision attribute damage each other by the smaller health
+  (`ApplyDamageToCollidingObjects`).
+* **KAS** (`kas_host.rs`): `SpecialToggle`, `ShipsSpecialToggle`, `SpecialOn/Off`,
+  `ShipsSpecialOn/Off`, `Mimic`, `Unmimic`, `SetStayMimicked`, `ShipsBeastify`,
+  `ShipsSetBeastInfectionUnlimited`, `ShipsSelectBeastified`, `GetShipCountBeastified`,
+  `ShipInfectionTerminal`, `EnableBeastWeaponAutoAttack`, `IsBeastReady`, `TimesHitByEMP`,
+  `IsForceFieldActive`, `IsEMPReady`, `Salvage`; the mission variable `G_NaggarokEMP` feeds
+  `ShipApplyEMP`.
+
 ## Determinism harness
 
 `harness::Scenario` (spawns plus orders by tick), `harness::Run` and `harness::world_hash`
@@ -323,4 +386,9 @@ the game; the fleet values changed with the combat slice because the Acolytes of
 formation now bump each other; the base layer changed them again: the mothership's three module
 ships are clamped to it and take part in blobs and avoidance, and without them the earlier values
 and hash are reproduced exactly). The world hash also covers the base state (docking, clamping,
-cargo, players' resources and research, factory jobs, resources).
+cargo, players' resources and research, factory jobs, resources), the missiles, each ship's
+module state (`Ship::spec`) and the fog grids. With the ship modules the fleet hash changed again
+with unchanged positions (the hive's six swarmers are new ship-table entries and the module state
+is hashed); `harness::world_hash_with` leaving out the swarmers and the special state reproduces
+the previous hash exactly, which the golden test checks. Extra orders: `Special`, `Mine`,
+`ComputerPlayer`, `FogOfWar`.

@@ -23,6 +23,9 @@ pub struct RenderFlags {
     pub field_slowed: bool,
     /// Visible to the given player (stealthy types: Mimics, Leech, cloakers).
     pub visible_to_viewer: bool,
+    /// A Mimic's disguise: morph progress (1 own shape .. 0 the disguise) and the ship type
+    /// shown (`None`: an asteroid or nothing yet).
+    pub mimic: Option<(f32, Option<crate::statics::ShipType>)>,
 }
 
 /// The render state of `id` as seen by `viewer` (a player index).
@@ -37,5 +40,6 @@ pub fn render_flags(u: &Universe, id: ShipId, viewer: usize) -> RenderFlags {
         disabled: s.flags & crate::object::sof::DISABLED != 0,
         field_slowed: s.disable.slowed,
         visible_to_viewer: crate::visibility::visible_to_player(u, id, viewer),
+        mimic: crate::ships::mimic::render_state(u, id),
     }
 }

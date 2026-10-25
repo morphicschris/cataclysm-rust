@@ -541,6 +541,10 @@ impl MissionRun {
         let (dir, file) = level::mission_paths(mission, None);
         game.log(LogKind::Flow, format!("loading {dir}{file} (fleet modifier {fleet_modifier})"));
         level::load_level(&mut universe, src, &dir, &file, &ctx, &mut game.level)?;
+        // levelPreInit: the ships in hyperspace are needed whatever the level excludes.
+        for f in &game.fleet {
+            level::flag_ship_needed(&mut universe, f.ship_type, true);
+        }
         // clPresetShipsToPosition after the level is in.
         level::preset_ships_to_position(&mut universe);
         for w in game.level.warnings.clone() {
@@ -664,6 +668,8 @@ impl crate::universe::UpdateHooks for Hooks<'_> {
             let mut host = crate::kas_host::SimHost { u, g: self.game };
             self.kas.execute(&mut host);
         }
+        // `ShipApplyEMP` reads the mission variable `G_NaggarokEMP` (`kasVarFind`).
+        u.kas_naggarok_emp = self.kas.var(None, var_hash("G_NaggarokEMP"));
     }
 }
 

@@ -579,6 +579,17 @@ pub fn load_level(u: &mut Universe, src: &dyn DataSource, dir: &str, file: &str,
     u.world_bounds = Vector::new(st(ld(sm.universe_size.x) + 5000.0), st(ld(sm.universe_size.y) + 5000.0), st(ld(sm.universe_size.z) + 5000.0));
     state.sm = sm;
 
+    // levelPreInit: everything is needed, then the level's ExcludeShips / IncludeShips in file
+    // order (`MissionPreloadScriptTable`).
+    flag_everything_needed(u);
+    for (k, v) in &lines {
+        match k.to_ascii_lowercase().as_str() {
+            "excludeships" => exclude_ship(u, v, false, ctx),
+            "includeships" => exclude_ship(u, v, true, ctx),
+            _ => {}
+        }
+    }
+
     for (k, v) in &lines {
         match k.to_ascii_lowercase().as_str() {
             "missionsphere" => mission_sphere(u, src, dir, v, ctx, state)?,
@@ -587,6 +598,110 @@ pub fn load_level(u: &mut Universe, src: &dyn DataSource, dir: &str, file: &str,
         }
     }
     Ok(())
+}
+
+/// `universeFlagEverythingNeeded`: every ship type's statics are needed.
+pub fn flag_everything_needed(u: &mut Universe) {
+    let w = std::sync::Arc::make_mut(&mut u.statics);
+    for s in w.ships.iter_mut().flatten() {
+        s.info_needed = true;
+    }
+}
+
+/// `SetInfoNeededForShipAndRelatedStaticInfo` for one type (the fleet in hyperspace is
+/// flagged this way after the level's exclusions).
+pub fn flag_ship_needed(u: &mut Universe, t: ShipType, needed: bool) {
+    let w = std::sync::Arc::make_mut(&mut u.statics);
+    if let Some(s) = w.ships.get_mut(t.index()).and_then(Option::as_mut) {
+        s.info_needed = needed;
+    }
+}
+
+/// `rmEnableShip` (0x4ef090): a Somtaaw (race 0) or Beast (race 1) type's dependency set is
+/// enabled (mode 0) or disabled (mode -2) in that race's research tables. Only the race's own
+/// types count, plus the Super Acolyte (`dAcolyte`) under race 0, which the multiplayer table
+/// keeps disabled whatever is asked.
+pub fn enable_ship(u: &mut Universe, race: usize, t: ShipType, enabled: bool) {
+    let i = t.index();
+    if !(i < 0x3c || t == ShipType::dAcolyte) {
+        return;
+    }
+    let mode = if enabled { 0 } else { -2 };
+    let w = std::sync::Arc::make_mut(&mut u.statics);
+    match race {
+        0 => {
+            w.research.single_player_somtaaw.ship_mode.insert(t, mode);
+            let mp = if t == ShipType::dAcolyte { -2 } else { mode };
+            w.research.multiplayer_somtaaw.ship_mode.insert(t, mp);
+        }
+        1 => {
+            w.research.beast.ship_mode.insert(t, mode);
+        }
+        _ => {}
+    }
+}
+
+/// `llExcludeShip` (0x49e0e0) for `ExcludeShips` / `IncludeShips race,<type|All>`. In single
+/// player the race names the player's side: `RACE_SECT` is the player's race and `RACE_BEAST`
+/// the other one of the two. A single type also goes through `rmEnableShip`; `All` only flags
+/// the race's types needed or not (`universeFlagRaceNeeded`).
+fn exclude_ship(u: &mut Universe, field: &str, needed: bool, ctx: &LevelContext) {
+    let mut parts = field.split(',').map(str::trim);
+    let Some(race) = parts.next().and_then(ShipRace::from_name) else { return };
+    let player_race = u.players.first().map_or(0, |p| p.race.index());
+    let mut r = race.index();
+    if ctx.single_player {
+        r = match race {
+            ShipRace::Somtaaw => player_race,
+            ShipRace::Beast => usize::from(player_race == 0),
+            _ => r,
+        };
+    }
+    let Some(what) = parts.next() else { return };
+    if what.eq_ignore_ascii_case("All") {
+        let Some(mapped) = ShipRace::from_index(r) else { return };
+        for i in crate::research::race_types(mapped) {
+            if let Some(t) = ShipType::from_index(i) {
+                flag_ship_needed(u, t, needed);
+            }
+        }
+        return;
+    }
+    let Some(t) = ShipType::from_name(what) else { return };
+    flag_ship_needed(u, t, needed);
+    enable_ship(u, r, t, needed);
+}
+
+/// Whether the construction manager offers `t` at `factory` (`cmUpdateShipAvailable`): the
+/// factory's build table lists it, an acquire-first type (Beast) has been acquired, the
+/// player's research allows it (`rmCanBuildShip`, which honours `rmEnableShip`), and the
+/// level loaded its statics. Whether a job can be queued right now (unit caps, support units,
+/// a free build point) is a separate question ([`crate::construction::queue_build`]).
+pub fn construction_offers(u: &Universe, factory: ShipId, t: ShipType) -> bool {
+    let Some(f) = u.ships.get(factory) else { return false };
+    let Some(fstat) = u.statics.ship(f.ship_type) else { return false };
+    let table = crate::construction::build_table(fstat.ship_race, fstat.can_build_big_ships);
+    let Some(&(flag, _)) = table.iter().find(|&&(flag, ty)| flag != 0 && usize::from(ty) == t.index()) else { return false };
+    let player = f.player;
+    if flag == 2 && !u.base.players.get(player).is_some_and(|p| p.acquired[t.index()]) {
+        return false;
+    }
+    let at_mothership = f.ship_type == ShipType::sMothership;
+    if !crate::research::can_build_ship(u, player, t, at_mothership) {
+        return false;
+    }
+    u.statics.ship(t).is_some_and(|s| s.info_needed)
+}
+
+/// The types the construction manager offers at `factory`, in its list order.
+pub fn construction_list(u: &Universe, factory: ShipId) -> Vec<ShipType> {
+    let Some(fstat) = u.ships.get(factory).and_then(|f| u.statics.ship(f.ship_type)) else { return Vec::new() };
+    crate::construction::build_table(fstat.ship_race, fstat.can_build_big_ships)
+        .iter()
+        .filter(|&&(flag, _)| flag != 0)
+        .filter_map(|&(_, ty)| ShipType::from_index(usize::from(ty)))
+        .filter(|&t| construction_offers(u, factory, t))
+        .collect()
 }
 
 /// `scriptSetMissionSphereCB` (0x49da80), single-player path.

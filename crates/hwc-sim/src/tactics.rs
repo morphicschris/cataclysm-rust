@@ -17,16 +17,18 @@ pub const SPEED_UPGRADE_TABLE: [f32; 5] = [1.0, 1.1, 1.2, 1.3, 1.4];
 /// bits), plus the Ramming Frigate's ram bonus, minus a damage penalty from the health ratio.
 /// Returned as a register value.
 ///
-/// The Beast mothership's damage modifier and the ram bonus are not modelled (both are 0 for
-/// every ship this slice creates).
+/// The Beast mothership adds its speed damage mode (`MothershipGetDamageModifier1`); the ram
+/// bonus is `RammingFrigateGetRamSpeedBonus`.
 pub fn speed_multiplier(ship: &Ship, stat: &ShipStaticInfo) -> Ext {
     let level = (ship.speed_upgrade_level as usize).min(SPEED_UPGRADE_TABLE.len() - 1);
     let mut base = SPEED_UPGRADE_TABLE[level];
     if ship.upgrade_flags & 7 != 0 {
         base = st(ld(base) + ld(f32::from_bits(0x3e19_999a)));
     }
-    // + RammingFrigateGetRamSpeedBonus (0.0 when not ramming)
-    let r = ld(base) + 0.0;
+    if ship.ship_type == ShipType::bMothership {
+        base = st(ld(crate::ships::mothership::speed_modifier_of(ship)) + ld(base));
+    }
+    let r = crate::ships::ramming::ram_speed_bonus(ship) + ld(base);
     // The ratio is compared once straight from the register, then reloaded as a float.
     let ratio_ext = ld(ship.health) / ld(stat.health.max_health);
     let ratio = st(ratio_ext);
@@ -135,6 +137,11 @@ pub fn enemies_within_proximity(u: &Universe, id: ShipId, dist: f32) -> Vec<Ship
         if !is_valid_target(u, o) || !is_enemy(u, me, os) || os.special_flags & 0x24_0000 != 0 {
             continue;
         }
+        // Stealthy ships hidden from the player (cloaked, undetected Leeches, disguised Mimics)
+        // are not seen (`FUN_00525120` and the explicit `univShipVisibleToPlayer` test).
+        if !crate::visibility::visible_to_player(u, o, me.player) {
+            continue;
+        }
         if os.flags & (sof::HIDE | sof::DISABLED) != 0 || matches!(os.ship_type, ShipType::sMothership | ShipType::bMothership) {
             continue;
         }
@@ -177,7 +184,7 @@ pub fn retaliate(u: &mut Universe, id: ShipId, enemies: Vec<ShipId>) {
 /// Ships that may not be pulled into a retaliation (`FUN_005252b0`).
 fn can_join_retaliation(u: &Universe, id: ShipId) -> bool {
     let s = u.ships.ship(id);
-    s.special_flags2 & 8 == 0 && s.special_flags & 0x80 == 0
+    s.special_flags2 & 8 == 0 && s.special_flags & 0x80 == 0 && !crate::ships::mothership::big_gun_is_active(u, id)
 }
 
 /// `FUN_00524d50`: the reaction by tactics: evasive ships flee (and fire back), neutral ships

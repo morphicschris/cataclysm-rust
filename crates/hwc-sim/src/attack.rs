@@ -58,7 +58,11 @@ pub fn ship_attack(u: &mut Universe, id: ShipId, target: ShipId) {
         return;
     }
     match c.attack {
-        AttackKind::Interceptor | AttackKind::Acolyte => interceptor_attack(u, id, target, &c),
+        AttackKind::Interceptor => interceptor_attack(u, id, target, &c),
+        AttackKind::Acolyte => {
+            crate::ships::acolyte::attack_target_changed(u, id, target);
+            interceptor_attack(u, id, target, &c);
+        }
         AttackKind::Capital => {
             let tac = u.ships.ship(id).tactics;
             attack_passive(u, id, target, c.capital_range[tac], c.capital_min_range[tac]);
@@ -102,7 +106,7 @@ pub fn ship_attack_passive(u: &mut Universe, id: ShipId, target: ShipId, rotate:
         }
         PassiveKind::MultiBeam => ship_fire(u, id, target),
         PassiveKind::Unsupported => {
-            crate::ships::attack_passive(u, id, target);
+            crate::ships::attack_passive(u, id, target, rotate);
         }
         PassiveKind::None => {}
     }
@@ -113,11 +117,7 @@ pub fn ship_fire(u: &mut Universe, id: ShipId, target: ShipId) {
     let Some(c) = combat(u, id) else { return };
     match c.fire {
         FireKind::Interceptor => interceptor_fire(u, id, target),
-        FireKind::Acolyte => {
-            interceptor_fire(u, id, target);
-            // (Acolytes with the missile upgrade also launch missiles; not modelled.)
-            u.ships.ship_mut(id).ship_is_attacking = true;
-        }
+        FireKind::Acolyte => crate::ships::acolyte::fire(u, id, target),
         FireKind::Default => gun::default_fire(u, id, target),
         FireKind::GenericCapital => generic_capital_fire(u, id, target),
         FireKind::MultiBeam => multibeam_fire(u, id, target, &c),
@@ -178,7 +178,10 @@ fn target_class(u: &Universe, target: ShipId) -> usize {
 fn interceptor_can_fire(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeCombat) -> bool {
     let Some(ic) = c.interceptor.as_ref() else { return false };
     let s = u.ships.ship(id);
-    // (Mimic disguise and the gun-opening animation are not modelled.)
+    // A disguised Mimic holds fire. (The gun-opening animation is not modelled.)
+    if s.flags2 & crate::object::flags2::DISGUISED != 0 && crate::ships::mimic::is_disguised(u, id) {
+        return false;
+    }
     if !(ld(ic.fire_time) <= ld(u.total_time_elapsed) - ld(s.interceptor.last_time_fired)) {
         return false;
     }
@@ -223,7 +226,7 @@ fn interceptor_can_fire(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeCo
 }
 
 /// `GenericInterceptorFire` (0x5ace80): fire the active gun and move on to the next.
-fn interceptor_fire(u: &mut Universe, id: ShipId, target: ShipId) {
+pub fn interceptor_fire(u: &mut Universe, id: ShipId, target: ShipId) {
     let now = u.total_time_elapsed;
     let g = {
         let s = u.ships.ship_mut(id);
@@ -561,6 +564,27 @@ fn finish_ai_vec(u: &mut Universe, id: ShipId, v: Vector, target_pos: Vector) {
     s.interceptor.ai_vec = Vector::new(st(ld(target_pos.x) + ld(v.x)), st(ld(target_pos.y) + ld(v.y)), st(ld(target_pos.z) + ld(v.z)));
 }
 
+/// `GenericInterceptorAttack` for the ship modules that call it (Mimic, cloaked fighter).
+pub fn generic_interceptor_attack(u: &mut Universe, id: ShipId, target: ShipId) {
+    if let Some(c) = combat(u, id) {
+        interceptor_attack(u, id, target, &c);
+    }
+}
+
+/// `GenericInterceptorPassiveAttack` for the ship modules that call it.
+pub fn generic_interceptor_passive(u: &mut Universe, id: ShipId, target: ShipId, rotate: bool) {
+    if let Some(c) = combat(u, id) {
+        interceptor_passive(u, id, target, rotate, &c);
+    }
+}
+
+/// `attackSideStep` with the type's side-step statics, for the ship modules that call it.
+pub fn side_step_attack(u: &mut Universe, id: ShipId, target: ShipId) {
+    if let Some(c) = combat(u, id) {
+        attack_side_step(u, id, target, &c);
+    }
+}
+
 /// `attackSimple` (0x421b70): fire whatever guns bear, without moving.
 pub fn attack_simple(u: &mut Universe, id: ShipId, target: ShipId) {
     let s = u.ships.ship(id);
@@ -679,7 +703,10 @@ pub fn attack_passive(u: &mut Universe, id: ShipId, target: ShipId, max: f32, mi
             return;
         }
     }
-    // (A disguised Mimic holds fire; not modelled.)
+    // A disguised Mimic holds fire.
+    if u.ships.ship(id).flags2 & crate::object::flags2::DISGUISED != 0 && crate::ships::mimic::is_disguised(u, id) {
+        return;
+    }
     if u.ships.ship(id).attack.multiple_targets.is_some() {
         gun::shoot_guns_at_multiple_targets(u, id);
         return;
@@ -710,7 +737,7 @@ fn fire_guns(u: &mut Universe, id: ShipId, target: ShipId, range: f32, traj: Vec
 
 /// `attackSideStep` (0x421fb0): close in and fire, then slide sideways while turning to keep
 /// the target in front, and repeat.
-fn attack_side_step(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeCombat) {
+pub fn attack_side_step(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeCombat) {
     let p = c.side_step;
     let stat = u.statics.ship(u.ships.ship(id).ship_type).expect("statics").clone();
     let tstat = target_stat(u, target);

@@ -54,6 +54,7 @@ pub mod research;
 pub mod resource;
 pub mod salvage;
 pub mod ships;
+pub mod shockwave;
 pub mod statics;
 pub mod tactics;
 pub mod think;

@@ -64,11 +64,12 @@ pub fn is_cloaked(s: &Ship) -> bool {
     s.flags & SOF_CLOAKABLE != 0 && s.flags & SOF_CLOAKED != 0
 }
 
-/// The fade delay: `1 - 2^(-0.005 * r * 2^-30 * 100 / ln 2)` seconds from now, from the effects
-/// random stream.
-fn fade_start_time(u: &mut Universe) -> f32 {
+/// The fade delay: `1 - 2^(r * 2^-30 * -0.005 * log2(e))` seconds from now (stream 1), as
+/// `cloakToggle`, `cloakUpdate` and the Mimic morphs compute it (the x87 multiplies in this
+/// order, the two factors stored as floats).
+pub(crate) fn fade_start_time(u: &mut Universe) -> f32 {
     let r = u.randy.random(RAN_ETG);
-    let x = std::f64::consts::LOG2_E * f64::from(r) * ld(9.313_226e-8) * -0.005;
+    let x = f64::from(r) * ld(9.313_226e-8) * ld(-0.005f32) * std::f64::consts::LOG2_E;
     let y = x.exp2();
     st((1.0 - y) + ld(u.total_time_elapsed))
 }
@@ -130,8 +131,9 @@ pub fn update(u: &mut Universe, id: ShipId) {
             if c.power < MAX_POWER {
                 let s = u.ships.ship_mut(id);
                 let c = cloak_mut(s).expect("cloak");
-                let p = st(ld(c.recharge) + ld(c.power));
-                c.power = if MAX_POWER <= p { MAX_POWER } else { p };
+                // (The comparisons use the unrounded x87 sums.)
+                let p = ld(c.recharge) + ld(c.power);
+                c.power = if ld(MAX_POWER) <= p { MAX_POWER } else { st(p) };
             }
         }
         state::CLOAKED => {
@@ -171,10 +173,10 @@ pub fn update(u: &mut Universe, id: ShipId) {
                 return;
             }
             if c.fade_start < now {
-                let f = st(ld(c.fade) + ld(FADE_STEP));
+                let f = ld(c.fade) + ld(FADE_STEP);
                 let s = u.ships.ship_mut(id);
                 let cm = cloak_mut(s).expect("cloak");
-                cm.fade = f;
+                cm.fade = st(f);
                 if 1.0 <= f {
                     cm.state = state::CLOAKED;
                     cm.fade = 1.0;

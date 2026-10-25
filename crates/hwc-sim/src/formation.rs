@@ -2,8 +2,9 @@
 //! which slot (`formationArrageCrazyOptimum`), keeping wingmen on their slots while the leader
 //! flies (`processFormationToDo`) and the formation's travel speed.
 //!
-//! Implemented formation types: delta, broad, delta 3D ("Formation X"), claw, wall and custom.
-//! Sphere (5) and Cataclysm's Sentinel force-field wall (9, 10) are not.
+//! Implemented formation types: delta, broad, delta 3D ("Formation X"), claw, wall, custom and
+//! Cataclysm's sentinel field wall (9, laid out by [`crate::ships::sentinel::wall_layout`]).
+//! Sphere (5) and the sentinel field sphere (10) are not.
 
 use hwc_math::crt::qsort;
 use hwc_math::fastmath::fsqrt;
@@ -27,6 +28,9 @@ pub mod kind {
     pub const WALL: u32 = 4;
     pub const SPHERE: u32 = 5;
     pub const CUSTOM: u32 = 6;
+    /// Cataclysm: the sentinels' force-field wall and sphere.
+    pub const SENTINEL_WALL: u32 = 9;
+    pub const SENTINEL_SPHERE: u32 = 10;
 }
 
 /// The formations this slice implements, in the order `F` cycles through them.
@@ -190,6 +194,26 @@ pub fn calculate_offsets(u: &mut Universe, cid: CommandId) {
     let selection = cmd.selection.clone();
     let tactical = cmd.formation.tactical_state.min(1);
     if selection.is_empty() {
+        return;
+    }
+    // Cataclysm's sentinel formations: the field sphere (10) disables its ships (disable
+    // reason 5) and is laid out by `formationSpecificsSphere`, not modelled (it needs the
+    // protected ship); every other formation lifts that reason. The field wall (9), and a wall
+    // made of sentinels only, is `FUN_0047d460`.
+    if ftype == kind::SENTINEL_SPHERE {
+        for &id in &selection {
+            crate::base::set_disable_reason(u.ships.ship_mut(id), true, 5);
+        }
+        return;
+    }
+    for &id in &selection {
+        let s = u.ships.ship_mut(id);
+        if s.base.disable_reasons[5] {
+            crate::base::set_disable_reason(s, false, 5);
+        }
+    }
+    if ftype == kind::SENTINEL_WALL || (ftype == kind::WALL && crate::ships::sentinel::all_sentinels(u, &selection)) {
+        crate::ships::sentinel::wall_layout(u, &selection);
         return;
     }
     let tw = u.tweaks.clone();
@@ -632,7 +656,7 @@ pub fn process(u: &mut Universe, cid: CommandId, steady: bool, passive_attacked:
 
 /// Whether a command is a formation of a type this slice can fly.
 pub fn is_supported(cmd: &CommandToDo) -> bool {
-    cmd.attributes & attr::FORMATION != 0 && matches!(cmd.formation.formation_type, 0..=4 | 6)
+    cmd.attributes & attr::FORMATION != 0 && matches!(cmd.formation.formation_type, 0..=4 | 6 | kind::SENTINEL_WALL)
 }
 
 #[cfg(test)]

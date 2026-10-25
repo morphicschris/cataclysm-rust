@@ -1143,6 +1143,9 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
             if purpose_ == purpose::INSTANT || purpose_ == purpose::INSTANT_STAY {
                 base::remove_ship_from_outside(u, ship);
                 put_ship_inside(u, ship, dw);
+                if u.ships.ship(dw).ship_type != ShipType::dRKO {
+                    crate::ships::mimic::free_disguise(u, ship);
+                }
                 return true;
             }
             let range_limit = ld(dstat.dock_ship_range) + ld(dstat.header.coll.avoid_coll_sphere_size);
@@ -1294,6 +1297,8 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
                     if by_dock {
                         crate::upgrade::apply_upgrades(u, ship);
                     }
+                    crate::ships::acolyte::arm_link_missiles(u, ship);
+                    crate::ships::acv::reset_emp_counters(u, ship);
                     let max = statics.ship(upgrade).map_or(0.0, |s| s.health.max_health);
                     let s = u.ships.ship_mut(ship);
                     s.special_flags &= !0x80;
@@ -1502,7 +1507,9 @@ pub fn remove_ship_from_launching(u: &mut Universe, ship: ShipId) {
 pub fn initialize_dock_vars(u: &mut Universe, ship: ShipId, dw: ShipId, purpose_: i32) {
     if purpose_ == purpose::DOCK_STAY || purpose_ == purpose::INSTANT_STAY {
         u.ships.ship_mut(ship).special_flags |= special::DOCK_STAY;
-        // (Hive frigates reset their swarmers for purpose 9.)
+        if purpose_ == purpose::INSTANT_STAY && u.ships.get(dw).is_some_and(|d| crate::ships::hive::is_hive_type(d.ship_type)) {
+            crate::ships::hive::reset_swarmers(u, dw);
+        }
     }
     let s = u.ships.ship_mut(ship);
     s.base.dock_with = Some(dw);
@@ -1538,7 +1545,11 @@ pub fn cl_dock(u: &mut Universe, selection: &[ShipId], purpose_: i32, dw: Option
             return 0;
         }
     }
-    // (Ship-type dock callbacks may veto; none are modelled.)
+    // The ship types' dock hooks (slot 22) may keep ships out of the order.
+    sel.retain(|&s| crate::ships::dock_hook(u, s, dw));
+    if sel.is_empty() {
+        return 0;
+    }
     let existing = command::selection_already_doing_something(u, &sel);
     let mut collect_after = false;
     if let Some(cid) = existing {

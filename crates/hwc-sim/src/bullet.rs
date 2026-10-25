@@ -120,6 +120,7 @@ pub fn create(u: &mut Universe, id: ShipId, gi: usize, source: Option<ShipId>, t
         max_range: 0.0,
         dist_flown: 0.0,
         prev_position: position,
+        dfg_flags: 0,
     };
     let _ = speed;
     let bid = u.bullets.insert(bullet);
@@ -243,9 +244,7 @@ pub fn update_pos_vel(u: &mut Universe, bid: BulletId) -> bool {
             }
         }
         weapon::LASER => {}
-        weapon::BEASTINFECT => {
-            // (The beast cascade effect is not modelled.)
-        }
+        weapon::BEASTINFECT => crate::ships::beast::cascade_effect_update(u, bid),
         _ => {
             let v = b.posinfo.velocity;
             d = Vector::new(st(ld(dt) * ld(v.x)), st(ld(dt) * ld(v.y)), st(ld(dt) * ld(v.z)));
@@ -300,6 +299,7 @@ pub fn update_all(u: &mut Universe) {
 
 /// Removes a bullet from the universe.
 pub fn delete(u: &mut Universe, bid: BulletId) {
+    crate::ships::bullet_freed(u, bid);
     u.blobs.object_died(ObjRef::Bullet(bid));
     u.bullet_list.retain(|&b| b != bid);
     u.space_obj_list.retain(|&o| o != ObjRef::Bullet(bid));

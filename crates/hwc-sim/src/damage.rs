@@ -20,6 +20,8 @@ pub mod how {
     pub const KILLED_BY_PLAYER: i32 = 666;
     /// The shock wave of an exploding ship of a player.
     pub const KILLED_BY_SHOCKWAVE: i32 = 667;
+    /// A kamikaze ship of a player (`(who, 668)`).
+    pub const KILLED_BY_KAMIKAZE: i32 = 668;
     /// Collision damage.
     pub const KILLED_BY_COLLISION: i32 = 777;
     /// No player responsible.
@@ -51,7 +53,10 @@ pub const MAX_UPGRADE_LEVEL: u32 = 4;
 pub fn damage_multiplier(u: &Universe, s: &crate::object::Ship) -> Ext {
     let level = (s.speed_upgrade_level as usize).min(DAMAGE_UPGRADE_TABLE.len() - 1);
     let mut f = ld(DAMAGE_UPGRADE_TABLE[level]);
-    // (The P1 mothership adds its own modifier; it is not modelled.)
+    // The Beast mothership adds its damage-mode factor (`MothershipGetDamageModifier3`).
+    if s.ship_type == ShipType::bMothership {
+        f += ld(crate::ships::mothership::damage_modifier_damage(s));
+    }
     if u.single_player && u.sp_difficulty == 0 {
         f += f;
     }
@@ -69,12 +74,20 @@ pub fn weapon_damage(bullet_type: u32, armour: u32) -> f32 {
 pub fn bullet_collided_with_target(u: &mut Universe, apply: bool, tid: ShipId, bid: crate::object::BulletId, t: f32, side: i32) {
     let statics = u.statics.clone();
     let Some(b) = u.bullets.get(bid).cloned() else { return };
+    // A big-gun shell detonates on whatever it hits (`MothershipBigGunBulletHit2`).
+    if b.bullet_type == crate::ships::mothership::BIG_GUN_BULLET_TYPE {
+        crate::ships::mothership::big_gun_bullet_hit(u, bid, b.posinfo.position);
+    }
+    if !apply || u.ships.get(tid).is_none() {
+        return;
+    }
+    // A sentinel whose force field is up: the field takes the hit instead.
+    if crate::ships::sentinel::absorbs_hit(u, tid, &b) {
+        return;
+    }
     let Some(ship) = u.ships.get(tid) else { return };
     let Some(stat) = statics.ship(ship.ship_type) else { return };
     let mut damage = st(ld(weapon_damage(b.bullet_type, ship.armour_level)) * ld(b.damage));
-    if !apply {
-        return;
-    }
     let tw = u.tweaks.combat.clone();
     if !stat.header.immobile && ship.flags & sof::NOT_BUMPABLE == 0 && ship.special_flags & 0x1000_0000 == 0 {
         let k = ld(b.mass) / ld(u.phys_time_elapsed);
@@ -150,10 +163,15 @@ pub fn apply_damage_to_target(u: &mut Universe, tid: ShipId, damage: f32, bullet
     let victim_player = s.player;
     let victim_class = class_index(stat.ship_class);
     if let Some(k) = killer {
+        let hive = crate::ships::hive::swarmer_hive(u, k);
         if let Some(ks) = u.ships.get_mut(k) {
             if ks.flags & sof::DEAD == 0 && ks.player != victim_player {
                 if matches!(ks.ship_type, ShipType::sSwarmer | ShipType::bSwarmer) {
-                    // (Swarmers credit their carrier, which is not tracked yet.)
+                    // Swarmers credit their hive frigate (`+0x644`).
+                    if let Some(h) = hive.filter(|&h| u.ships.get(h).is_some()) {
+                        u.ships.ship_mut(h).kills[victim_class] += 1;
+                        announce_upgrade(u, h);
+                    }
                 } else {
                     ks.kills[victim_class] += 1;
                     announce_upgrade(u, k);
@@ -195,10 +213,13 @@ pub fn announce_upgrade(u: &mut Universe, id: ShipId) {
 pub fn add_ship_to_delete_list(u: &mut Universe, id: ShipId, bullet_type: i32) {
     let statics = u.statics.clone();
     let tw = u.tweaks.combat.clone();
-    let Some(s) = u.ships.get_mut(id) else { return };
-    let Some(stat) = statics.ship(s.ship_type) else { return };
-    // (The P1 mothership's own death sequence is not modelled.)
-    s.flags |= sof::DEAD;
+    let Some(t) = u.ships.get(id).map(|s| s.ship_type) else { return };
+    let Some(stat) = statics.ship(t) else { return };
+    // The Somtaaw mothership dies in its own time (`MothershipHouseKeep`).
+    if t == ShipType::sMothership && crate::ships::mothership::start_dying(u, id, bullet_type) {
+        return;
+    }
+    u.ships.ship_mut(id).flags |= sof::DEAD;
     if !stat.header.immobile {
         let r0 = u.randy.frandom_between_ext(RAN_GAME, tw.careen_rock[0][0], tw.careen_rock[0][1]);
         let s = u.ships.ship_mut(id);
@@ -210,10 +231,26 @@ pub fn add_ship_to_delete_list(u: &mut Universe, id: ShipId, bullet_type: i32) {
         let s = u.ships.ship_mut(id);
         s.rotinfo.torque.z = st(r2 + ld(s.rotinfo.torque.z));
     }
+    queue_for_deletion(u, id, bullet_type == -1);
+}
+
+/// The second half of the Somtaaw mothership's death (`MothershipHouseKeep`, state 2): it is
+/// dead now and goes like any other ship, without the careen.
+pub fn finish_ship_death(u: &mut Universe, id: ShipId, bullet_type: i32) {
+    let _ = bullet_type;
+    let Some(s) = u.ships.get_mut(id) else { return };
+    s.flags |= sof::DEAD;
+    queue_for_deletion(u, id, false);
+}
+
+/// The explosion, its shock wave and the place on the delete list.
+fn queue_for_deletion(u: &mut Universe, id: ShipId, scuttle: bool) {
+    let statics = u.statics.clone();
+    let Some(stat) = u.ships.get(id).and_then(|s| statics.ship(s.ship_type)) else { return };
     let s = u.ships.ship(id);
     let explosion_type = stat.custom_entries.iter().find(|(k, _)| k == "explosionType").map(|(_, v)| v.split_whitespace().next().unwrap_or("").to_string());
     u.events.push(SimEvent::ShipDied { ship: id, ship_type: s.ship_type, position: s.posinfo.position, radius: stat.header.coll.coll_sphere_size, explosion_type });
-    shockwave(u, id, bullet_type == -1);
+    shockwave(u, id, scuttle);
     u.dead_ships.push(id);
 }
 
@@ -348,6 +385,7 @@ fn delete_dead_ship(u: &mut Universe, id: ShipId) {
         if s.queued_attack == Some(id) {
             s.queued_attack = None;
         }
+        crate::ships::beast::ship_gone(u, o, id);
         crate::ships::remove_ship_refs(u, o, id);
     }
     crate::missile::remove_ship_references(u, id);
@@ -498,6 +536,7 @@ mod tests {
                 max_range: 0.0,
                 dist_flown: 0.0,
                 prev_position: Vector::ZERO,
+                dfg_flags: 0,
             });
             bullet_collided_with_target(&mut u, true, tid, bid, 0.0, c.side);
             let s = u.ships.ship(tid);

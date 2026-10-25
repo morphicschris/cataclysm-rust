@@ -26,7 +26,14 @@ pub struct PhysContext {
     /// Half-extents of the world (`universe` size, 0x888c58..0x888c60).
     pub world_bounds: Vector,
     pub max_vel: MaxVelocityContext,
+    /// `universe.totaltimeelapsed` (the field slow-down's stopwatch).
+    pub now: f32,
 }
+
+/// Speed a ship flung by a field (`+0x550`) may keep (0x883664); the cap falls back to the
+/// ship's own over the first half of the slow-down (0x883668).
+const FLUNG_SPEED: f32 = 1400.0;
+const FLUNG_RAMP: f64 = 0.5;
 
 /// The integer "is any component non-zero" test the original makes on a vector's bit
 /// patterns (so `-0.0` counts as non-zero).
@@ -114,7 +121,8 @@ pub fn update_ship(ship: &mut Ship, stat: &ShipStaticInfo, tw: &SimTweaks, ctx: 
     let ax = st(one_over_mass * ld(force.x) * dt);
     let ay = st(ld(st(one_over_mass * ld(force.y))) * dt);
     let az = st(ld(st(one_over_mass * ld(force.z))) * dt);
-    if ship.push_state == 0 {
+    // (+0x550: a ship slowed by a field keeps its velocity; forces do not change it.)
+    if !ship.disable.slowed {
         let v = &mut ship.posinfo.velocity;
         v.x += ax;
         v.y += ay;
@@ -123,8 +131,20 @@ pub fn update_ship(ship: &mut Ship, stat: &ShipStaticInfo, tw: &SimTweaks, ctx: 
 
     if bits_nonzero(ship.posinfo.velocity) {
         ship.posinfo.is_moving = ISMOVING_MOVING;
-        // (The push-state minimum speed ramp of the Ramming Frigate is not modelled.)
-        let cap = tactics::capped_speed(ship, stat, ctx.max_vel);
+        let mut cap = tactics::capped_speed(ship, stat, ctx.max_vel);
+        if ship.disable.slowed {
+            // A ship slowed by a field (`+0x550`, stopwatch `+0x560`) may go at 1400 m/s,
+            // falling back to its own top speed over the first half of the slow-down.
+            let own = cap;
+            if own < FLUNG_SPEED {
+                cap = FLUNG_SPEED;
+            }
+            let frac = ship.disable.slow_timer.fraction(ctx.now);
+            let span = ld(FLUNG_SPEED) - ld(own);
+            if frac < FLUNG_RAMP && span > 0.0 {
+                cap = st((1.0 - ld(st(frac))) * span + ld(own));
+            }
+        }
         ship.posinfo.velocity.cap_sloppy(cap);
         if !ctx.single_player {
             clamp_to_world_bounds(ship, ctx.world_bounds);
@@ -155,7 +175,7 @@ pub fn update_ship(ship: &mut Ship, stat: &ShipStaticInfo, tw: &SimTweaks, ctx: 
         if still(v.x) && still(v.y) && still(v.z) {
             ship.posinfo.is_moving = 0;
             ship.posinfo.velocity = Vector::ZERO;
-        } else if ship.ram_state != 1 && ship.push_state != 1 {
+        } else if !ship.disable.disabled && !ship.disable.slowed {
             let k = tw.ship_crazy_friction;
             let v = &mut ship.posinfo.velocity;
             v.x *= k;
@@ -317,6 +337,7 @@ mod tests {
                 single_player: false,
                 world_bounds: Vector::new(100_000.0, 100_000.0, 100_000.0),
                 max_vel: MaxVelocityContext::default(),
+                now: 0.0,
             };
             update_ship(&mut s, &stat, &tw, &ctx);
             assert_eq!(bits(s.posinfo.position), c.exp_pos, "case {i} position");

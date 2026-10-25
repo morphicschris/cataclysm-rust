@@ -75,6 +75,26 @@ pub struct BaseTweaks {
     /// `twNotifySalvagersNeededRate` / `twNotifySalvageTargetTooStrongRate`.
     pub notify_salvagers_needed_rate: f32,
     pub notify_salvage_target_too_strong_rate: f32,
+    /// `twRepairRate[class]` (0xa47f40): health per second workers and processor beams
+    /// restore (0: the class cannot be repaired). The binary has no `CLASS_Composite` entry.
+    pub repair_rate: [f32; 12],
+    /// `twProcessorAutoRepairDistance`, `...ConeAngle` (degrees), `...UpdateRate`,
+    /// `...UpdateDelay`, `...BeamWidth` (0x8a2310..0x8a2320).
+    pub processor_repair_distance: f32,
+    pub processor_repair_cone_angle: f32,
+    pub processor_repair_update_rate: f32,
+    pub processor_repair_update_delay: f32,
+    pub processor_repair_beam_width: f32,
+
+    // --- RACE_BEAST/beastweapon.script (0xaf7484..0xaf7498)
+    /// `beastAttackCascadePoints`, `beastAttackCascadeDelay`, `beastAttackCascadeDistance`,
+    /// `beastAttackTimeSpentStunned`, `beastAttackTimeToCompleteAttacks`, `stunnedSpinRate`.
+    pub beast_cascade_points: f32,
+    pub beast_cascade_delay: f32,
+    pub beast_cascade_distance: f32,
+    pub beast_time_spent_stunned: f32,
+    pub beast_time_to_complete_attacks: f32,
+    pub beast_stunned_spin_rate: f32,
 }
 
 impl Default for BaseTweaks {
@@ -113,6 +133,18 @@ impl Default for BaseTweaks {
             crystal_processing_time: 10.0,
             notify_salvagers_needed_rate: 15.0,
             notify_salvage_target_too_strong_rate: 5.0,
+            repair_rate: [0.0; 12],
+            processor_repair_distance: 2000.0,
+            processor_repair_cone_angle: 90.0,
+            processor_repair_update_rate: 5.0,
+            processor_repair_update_delay: 0.5,
+            processor_repair_beam_width: 250.0,
+            beast_cascade_points: 0.0,
+            beast_cascade_delay: 0.0,
+            beast_cascade_distance: 0.0,
+            beast_time_spent_stunned: 0.0,
+            beast_time_to_complete_attacks: 0.0,
+            beast_stunned_spin_rate: 0.0,
         }
     }
 }
@@ -180,6 +212,34 @@ const TWEAK_KEYS: &[(&str, Slot)] = &[
     ("twCrystalProcessingTime", F(|t| &mut t.crystal_processing_time)),
     ("twNotifySalvagersNeededRate", F(|t| &mut t.notify_salvagers_needed_rate)),
     ("twNotifySalvageTargetTooStrongRate", F(|t| &mut t.notify_salvage_target_too_strong_rate)),
+    ("twRepairRate[CLASS_Mothership]", F(|t| &mut t.repair_rate[0])),
+    ("twRepairRate[CLASS_HeavyCruiser]", F(|t| &mut t.repair_rate[1])),
+    ("twRepairRate[CLASS_Carrier]", F(|t| &mut t.repair_rate[2])),
+    ("twRepairRate[CLASS_Destroyer]", F(|t| &mut t.repair_rate[3])),
+    ("twRepairRate[CLASS_Frigate]", F(|t| &mut t.repair_rate[4])),
+    ("twRepairRate[CLASS_Corvette]", F(|t| &mut t.repair_rate[5])),
+    ("twRepairRate[CLASS_Fighter]", F(|t| &mut t.repair_rate[6])),
+    ("twRepairRate[CLASS_Resource]", F(|t| &mut t.repair_rate[7])),
+    ("twRepairRate[CLASS_NonCombat]", F(|t| &mut t.repair_rate[8])),
+    ("twRepairRate[CLASS_MonsterShip]", F(|t| &mut t.repair_rate[9])),
+    ("twRepairRate[CLASS_Component]", F(|t| &mut t.repair_rate[10])),
+    ("twRepairRate[CLASS_Micro]", F(|t| &mut t.repair_rate[11])),
+    ("twProcessorAutoRepairDistance", F(|t| &mut t.processor_repair_distance)),
+    ("twProcessorAutoRepairConeAngle", F(|t| &mut t.processor_repair_cone_angle)),
+    ("twProcessorAutoRepairUpdateRate", F(|t| &mut t.processor_repair_update_rate)),
+    ("twProcessorAutoRepairUpdateDelay", F(|t| &mut t.processor_repair_update_delay)),
+    ("twProcessorAutoRepairBeamWidth", F(|t| &mut t.processor_repair_beam_width)),
+];
+
+const FILE_BEAST_WEAPON: &str = "RACE_BEAST/beastweapon.script";
+
+const BEAST_WEAPON_KEYS: &[(&str, Slot)] = &[
+    ("beastAttackCascadePoints", F(|t| &mut t.beast_cascade_points)),
+    ("beastAttackCascadeDelay", F(|t| &mut t.beast_cascade_delay)),
+    ("beastAttackCascadeDistance", F(|t| &mut t.beast_cascade_distance)),
+    ("beastAttackTimeSpentStunned", F(|t| &mut t.beast_time_spent_stunned)),
+    ("beastAttackTimeToCompleteAttacks", F(|t| &mut t.beast_time_to_complete_attacks)),
+    ("stunnedSpinRate", F(|t| &mut t.beast_stunned_spin_rate)),
 ];
 
 const LIMIT_KEYS: &[(&str, Slot)] = lims! {
@@ -202,7 +262,7 @@ impl BaseTweaks {
     /// Compiled defaults overwritten by `Resource.script` and `Tweak.script` from `src`.
     pub fn load(src: &dyn DataSource) -> Self {
         let mut t = BaseTweaks::default();
-        for file in [FILE_RESOURCE, FILE_TWEAK] {
+        for file in [FILE_RESOURCE, FILE_TWEAK, FILE_BEAST_WEAPON] {
             if let Some(script) = src.read(file).and_then(|b| ScriptFile::parse_bytes(&b).ok()) {
                 t.apply(file, &script);
             }
@@ -212,7 +272,11 @@ impl BaseTweaks {
 
     /// Applies one script.
     pub fn apply(&mut self, file: &str, script: &ScriptFile) {
-        let tables: &[&[(&str, Slot)]] = if file == FILE_RESOURCE { &[RESOURCE_KEYS] } else { &[TWEAK_KEYS, LIMIT_KEYS] };
+        let tables: &[&[(&str, Slot)]] = match file {
+            FILE_RESOURCE => &[RESOURCE_KEYS],
+            FILE_BEAST_WEAPON => &[BEAST_WEAPON_KEYS],
+            _ => &[TWEAK_KEYS, LIMIT_KEYS],
+        };
         for e in script.entries() {
             for table in tables {
                 for (name, slot) in table.iter() {

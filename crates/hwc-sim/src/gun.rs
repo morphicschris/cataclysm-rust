@@ -547,12 +547,10 @@ pub fn default_fire(u: &mut Universe, id: ShipId, target: ShipId) {
             Some(GunType::Fixed) | Some(GunType::Gimble) | Some(GunType::NewGimble) => {
                 shoot(u, id, gi, Some(target));
             }
-            Some(GunType::MissileLauncher) | Some(GunType::MineLauncher) => {
-                if u.ships.ship(id).guns[gi].num_missiles > 0 {
-                    shoot_missile(u, id, gi, Some(target));
-                }
+            Some(GunType::MissileLauncher) | Some(GunType::MineLauncher) if u.ships.ship(id).guns[gi].num_missiles > 0 => {
+                shoot_missile(u, id, gi, Some(target));
             }
-            None => {}
+            _ => {}
         }
     }
 }

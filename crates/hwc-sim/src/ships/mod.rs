@@ -51,6 +51,7 @@ pub mod proximity;
 pub mod ramming;
 pub mod repair_droid;
 pub mod sentinel;
+pub mod worker_repair;
 
 /// The ship module a type uses (which `CustShipHeader`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -260,7 +261,10 @@ pub fn init(u: &mut Universe, id: ShipId) {
         Module::Processor => processor::init(u, id),
         Module::RepairDroid => repair_droid::init(u, id),
         Module::Sentinel => sentinel::init(u, id),
-        Module::Mothership => mothership::init(u, id),
+        Module::Mothership => {
+            mothership::init(u, id);
+            beast::mothership_init(u, id);
+        }
         Module::CloakedFighter | Module::IonArray => cloaker::init(u, id),
         Module::Dfg => dfg::init(u, id),
         Module::GravWell => gravwell::init(u, id),
@@ -270,6 +274,7 @@ pub fn init(u: &mut Universe, id: ShipId) {
         Module::NomadMoon => nomad::init(u, id),
         Module::Crystal => crystal::init(u, id),
         Module::HeavyCruiser | Module::Carrier | Module::BeastMothership => beast::init(u, id),
+        Module::Worker => worker_repair::init(u, id),
         _ => {}
     }
 }
@@ -295,23 +300,33 @@ pub fn fire(u: &mut Universe, id: ShipId, target: ShipId) -> bool {
         Module::Acv => acv::fire(u, id, target),
         Module::Hive => hive::fire(u, id, target),
         Module::CloakedFighter => cloaker::fire(u, id, target),
+        Module::IonArray => crate::gun::default_fire(u, id, target),
+        Module::Mimic | Module::Mcv => crate::attack::interceptor_fire(u, id, target),
+        Module::P1StandardCorvette => crate::gun::default_fire(u, id, target),
         Module::Minelayer => minelayer::fire(u, id, target),
         Module::NomadMoon => nomad::fire(u, id, target),
+        Module::Mothership => crate::gun::default_fire(u, id, target),
         _ => return false,
     }
     true
 }
 
-/// Slot 6, `CustShipAttackPassive`, for module routines (false: shared routine).
-pub fn attack_passive(u: &mut Universe, id: ShipId, target: ShipId) -> bool {
+/// Slot 6, `CustShipAttackPassive`, for module routines (false: shared routine). `rotate`:
+/// the ship may turn to retaliate (the caller's flag and the type's `rotateToRetaliate`).
+pub fn attack_passive(u: &mut Universe, id: ShipId, target: ShipId, rotate: bool) -> bool {
     let Some(m) = module(u, id) else { return false };
     match m {
-        Module::Mimic => mimic::attack_passive(u, id, target),
-        Module::Mcv | Module::P1StandardCorvette => mimic::mcv_attack_passive(u, id, target),
+        Module::Mimic => mimic::attack_passive(u, id, target, rotate),
+        Module::Mcv | Module::P1StandardCorvette => mimic::mcv_attack_passive(u, id, target, rotate),
         Module::Ramming => {}
-        Module::Hive => hive::attack_passive(u, id, target),
-        Module::Sentinel => sentinel::attack_passive(u, id, target),
-        Module::CloakedFighter | Module::IonArray => cloaker::attack_passive(u, id, target),
+        Module::Hive => hive::attack_passive(u, id, target, rotate),
+        Module::Sentinel => sentinel::attack_passive(u, id, target, rotate),
+        Module::CloakedFighter => cloaker::attack_passive(u, id, target, rotate),
+        Module::IonArray => cloaker::ion_array_attack_passive(u, id, target, rotate),
+        Module::Processor => processor::attack_passive(u, id, target),
+        Module::Carrier => crate::attack::attack_simple(u, id, target),
+        // RKOAttackPassive.
+        Module::Mothership => crate::attack::attack_simple(u, id, target),
         _ => return false,
     }
     true
@@ -330,7 +345,8 @@ pub fn attack(u: &mut Universe, id: ShipId, target: ShipId) -> bool {
         Module::Processor => processor::attack(u, id, target),
         Module::Sentinel => sentinel::attack(u, id, target),
         Module::Mothership => mothership::attack(u, id, target),
-        Module::CloakedFighter | Module::IonArray => cloaker::attack(u, id, target),
+        Module::CloakedFighter => cloaker::attack(u, id, target),
+        Module::IonArray => cloaker::ion_array_attack(u, id, target),
         Module::Dfg => dfg::attack(u, id, target),
         Module::CruiseMissile => missile_ships::cruise_missile_attack(u, id, target),
         Module::MissileCorvette => missile_ships::corvette_attack(u, id, target),
@@ -406,14 +422,17 @@ pub fn special_target(u: &mut Universe, id: ShipId, cid: crate::object::CommandI
         Module::Acolyte => acolyte::special_target(u, id, targets),
         Module::Acv => acv::special_target(u, id, targets),
         Module::Mimic => mimic::special_target(u, id, targets),
-        Module::Mcv | Module::P1StandardCorvette => mimic::mcv_special_target(u, id, targets),
+        Module::Mcv => mimic::mcv_special_target(u, id, targets),
+        Module::P1StandardCorvette => mimic::p1_special_target(u, id, cid, targets),
         Module::Leech => leech::special_target(u, id, targets),
         Module::Ramming => ramming::special_target(u, id, targets),
         Module::Hive => hive::special_target(u, id, targets),
         Module::Dreadnought => true,
         Module::Sentinel => true,
         Module::Mothership | Module::HeavyCruiser | Module::BeastMothership => beast::special_target(u, id, targets),
+        Module::Carrier => beast::carrier_special_target(u, id, targets),
         Module::MissileCorvette | Module::MissileDestroyer => missile_ships::special_target(u, id, targets),
+        Module::Worker if worker_repair::is_repairing(u, id) => worker_repair::special_target(u, id, cid, targets),
         Module::Worker | Module::SalCap => crate::salvage::special_target_pub(u, id, cid, targets),
         _ => true,
     }
@@ -424,9 +443,11 @@ pub fn order_changed(u: &mut Universe, id: ShipId) {
     let Some(m) = module(u, id) else { return };
     match m {
         Module::Leech => leech::order_changed(u, id),
+        Module::P1StandardCorvette => mimic::p1_order_changed(u, id),
         Module::Hive => hive::order_changed(u, id),
         Module::Minelayer => minelayer::order_changed(u, id),
         Module::Mothership | Module::HeavyCruiser | Module::BeastMothership | Module::Carrier => beast::order_changed(u, id),
+        Module::Worker => worker_repair::order_changed(u, id),
         _ => {}
     }
 }
@@ -449,6 +470,7 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
         Module::CloakedFighter | Module::IonArray => cloaker::housekeep(u, id),
         Module::Dfg => dfg::housekeep(u, id),
         Module::HeavyCruiser | Module::Carrier | Module::BeastMothership => beast::housekeep(u, id),
+        Module::Worker => worker_repair::housekeep(u, id),
         Module::MissileCorvette | Module::MissileDestroyer => missile_ships::housekeep(u, id),
         Module::Minelayer => minelayer::housekeep(u, id),
         Module::GravWell => gravwell::housekeep(u, id),
@@ -475,8 +497,12 @@ pub fn remove_ship_refs(u: &mut Universe, id: ShipId, gone: ShipId) {
         Module::Dreadnought => dreadnought::remove_ship_refs(u, id, gone),
         Module::Processor => processor::remove_ship_refs(u, id, gone),
         Module::Sentinel => sentinel::remove_ship_refs(u, id, gone),
-        Module::Mothership => mothership::remove_ship_refs(u, id, gone),
+        Module::Mothership => {
+            mothership::remove_ship_refs(u, id, gone);
+            beast::remove_ship_refs(u, id, gone);
+        }
         Module::HeavyCruiser | Module::Carrier | Module::BeastMothership => beast::remove_ship_refs(u, id, gone),
+        Module::Worker => worker_repair::remove_ship_refs(u, id, gone),
         Module::GravWell => gravwell::remove_ship_refs(u, id, gone),
         Module::NomadMoon => nomad::remove_ship_refs(u, id, gone),
         _ => {}
@@ -499,10 +525,21 @@ pub fn remove_target_ref(u: &mut Universe, id: ShipId, gone: ShipId) {
     }
 }
 
-/// Slot 14: Beast cascade references.
-pub fn cascade_remove_refs(u: &mut Universe, id: ShipId, gone: ShipId) {
+/// Slot 14: a bullet is freed; the Beast cascades drop their references to it.
+pub fn cascade_remove_refs(u: &mut Universe, id: ShipId, bullet: crate::object::BulletId) {
     if matches!(module(u, id), Some(Module::HeavyCruiser | Module::Carrier | Module::Mothership | Module::BeastMothership)) {
-        beast::cascade_remove_refs(u, id, gone);
+        beast::cascade_remove_refs(u, id, bullet);
+    }
+}
+
+/// `univRemoveBulletRefsFromSpecialShips` / the slot-14 loop of `univFreeBulletContents`:
+/// every ship hears that `bullet` is going.
+pub fn bullet_freed(u: &mut Universe, bullet: crate::object::BulletId) {
+    let ships = u.ship_list.clone();
+    for s in ships {
+        if u.ships.get(s).is_some_and(|x| x.beast.cascade.is_some()) {
+            cascade_remove_refs(u, s, bullet);
+        }
     }
 }
 
@@ -517,8 +554,12 @@ pub fn died(u: &mut Universe, id: ShipId) {
         Module::Hive => hive::died(u, id),
         Module::Dreadnought => dreadnought::died(u, id),
         Module::Processor => processor::died(u, id),
-        Module::Mothership => mothership::died(u, id),
+        Module::Mothership => {
+            mothership::died(u, id);
+            beast::died(u, id);
+        }
         Module::HeavyCruiser | Module::Carrier | Module::BeastMothership => beast::died(u, id),
+        Module::Worker => worker_repair::died(u, id),
         Module::Minelayer => minelayer::died(u, id),
         Module::GravWell => gravwell::died(u, id),
         Module::Crystal => crystal::died(u, id),
@@ -533,17 +574,50 @@ pub fn cancel_special(u: &mut Universe, id: ShipId) {
         Module::Acolyte => acolyte::cancel_link_attack(u, id),
         Module::Acv => acv::cancel_emp_target(u, id),
         Module::Mimic | Module::Mcv | Module::P1StandardCorvette => mimic::cancel_disguise(u, id),
-        Module::Ramming => ramming::cancel_ram(u, id),
+        Module::Ramming => {
+            ramming::cancel_ram(u, id);
+        }
         Module::Hive => hive::cancel_special(u, id),
         Module::Mothership => mothership::cancel_big_gun(u, id),
         _ => {}
     }
 }
 
-/// Slot 34: a sentinel's formation changed.
-pub fn formation_changed(u: &mut Universe, id: ShipId) {
+/// Slot 34, `clFormation`'s per-ship hook: the ship is put into a formation of
+/// `formation_type`. Returns whether it joins (types without the hook always do).
+pub fn formation_changed(u: &mut Universe, id: ShipId, formation_type: u32) -> bool {
     if module(u, id) == Some(Module::Sentinel) {
-        sentinel::formation_changed(u, id);
+        return sentinel::formation_changed(u, id, formation_type);
+    }
+    true
+}
+
+/// Slot 20, `clMove`'s per-ship hook. Returns whether the ship takes the move order (types
+/// without the hook always do).
+pub fn move_hook(u: &mut Universe, id: ShipId) -> bool {
+    match module(u, id) {
+        Some(Module::Ramming) => ramming::cancel_ram(u, id),
+        Some(Module::Hive) => hive::move_hook(u, id),
+        _ => true,
+    }
+}
+
+/// Slot 22, `clDock`'s per-ship hook (`dw`: the ship to dock with, if given). Returns whether
+/// the ship takes the dock order.
+pub fn dock_hook(u: &mut Universe, id: ShipId, dw: Option<ShipId>) -> bool {
+    match module(u, id) {
+        Some(Module::Ramming) => ramming::cancel_ram(u, id),
+        Some(Module::Hive) => hive::dock_hook(u, id, dw),
+        _ => true,
+    }
+}
+
+/// Slot 27, `clHalt`'s per-ship hook. Returns whether the ship takes the halt order.
+pub fn halt_hook(u: &mut Universe, id: ShipId) -> bool {
+    match module(u, id) {
+        Some(Module::Ramming) => ramming::cancel_ram(u, id),
+        Some(Module::Hive) => hive::halt_hook(u, id),
+        _ => true,
     }
 }
 

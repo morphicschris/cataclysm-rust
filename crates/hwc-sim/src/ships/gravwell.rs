@@ -1,51 +1,343 @@
-//! Gravity well generators (`GravWellGenerator` module, 0x5aeab0..0x5af7f0): kGravWellGenerator, tGravWellGenerator.
+//! Gravity well generators (`GravWellGenerator` module, 0x5aeab0..0x5af7f0): kGravWellGenerator,
+//! tGravWellGenerator.
 //!
-//! (Stub: to be filled in.)
+//! The special switches the well on or off. While it is on, every `scanrate`-th frame (the
+//! update counter masked by `scanrate`) it catches the strike craft within `GravWellRadius`
+//! (fighters, corvettes, micro craft and workers; not salvage corvettes) whatever their owner:
+//! a caught ship cannot fire (`specialFlags` 0x10000000) and its engines stop
+//! (`dontapplyforceever`); the well brakes it (velocity times `EffectConstant` per frame) until
+//! it is slow, then sets it tumbling (random spins up to `xrot/yrot/zrot`) and pushes it out
+//! with `repulseForce` until it leaves the radius. A well that has used up its
+//! `OperationTime` collapses: it lets everything go, turns derelict and blows up 3.5 seconds
+//! later (only ownerless wells use up time in Cataclysm).
 
-use crate::object::ShipId;
-use crate::statics::ShipStaticInfo;
+use hwc_math::fastmath::fsqrt;
+use hwc_math::fpu::{ld, st};
+use hwc_math::random::RAN_GAME;
+use hwc_math::Vector;
+
+use crate::object::{sof, special, ShipId};
+use crate::statics::{ShipClass, ShipStaticInfo, ShipType};
 use crate::universe::Universe;
 
-/// Per-ship state.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct GravWellSpec {}
+use super::ShipSpec;
 
-/// Per-type statics (`CustShipStaticInit`).
+/// Seconds between a well's collapse and its explosion.
+const TIME_BEFORE_EXPLODE: f32 = 3.5;
+/// Squared speed under which a caught ship stops braking and starts tumbling.
+const STOPPED_SPEED_SQ: f32 = 2500.0;
+/// A caught ship is set spinning about an axis only while its spin about it is below this.
+const SPIN_LIMIT: f32 = 0.7;
+
+/// A ship the well holds (`GravStruct`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Held {
+    pub ship: ShipId,
+    /// 0: braking, 1: tumbling and pushed out.
+    pub state: u32,
+    /// The spins it is given.
+    pub spin: Vector,
+}
+
+/// Per-ship state (+0x638..+0x65c).
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct GravWellStatics {}
+pub struct GravWellSpec {
+    /// +0x638: the field is on.
+    pub field_on: bool,
+    /// +0x63c: the well has been fired (nothing sets it in Cataclysm).
+    pub fired: bool,
+    /// +0x640: the ships held.
+    pub held: Vec<Held>,
+    /// +0x64c: seconds the field has been on.
+    pub time_on: f32,
+    /// +0x654: ready.
+    pub ready: bool,
+    /// +0x658: the well has collapsed.
+    pub derelict: bool,
+}
+
+/// Per-type statics (`GravWellGeneratorStaticInit` 0x5aeab0).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GravWellStatics {
+    pub radius: f32,
+    pub radius_sq: f32,
+    pub operation_time: f32,
+    pub effect_constant: f32,
+    pub scan_rate: u32,
+    pub repulse_force: f32,
+    pub warmup_down_time: f32,
+    pub rot: Vector,
+}
 
 impl GravWellStatics {
     pub fn parse(stat: &ShipStaticInfo) -> Self {
-        let _ = stat;
-        Self {}
+        use crate::statics::cscan::{scan_f32, scan_i32};
+        let mut s = Self::default();
+        for (k, v) in &stat.custom_entries {
+            let f = scan_f32(v);
+            match k.as_str() {
+                "GravWellRadius" => s.radius = f.unwrap_or(s.radius),
+                "OperationTime" => s.operation_time = f.unwrap_or(s.operation_time),
+                "EffectConstant" => s.effect_constant = f.unwrap_or(s.effect_constant),
+                "scanrate" => s.scan_rate = scan_i32(v).map_or(s.scan_rate, |x| x as u32),
+                "repulseForce" => s.repulse_force = f.unwrap_or(s.repulse_force),
+                "warmupdowntime" => s.warmup_down_time = f.unwrap_or(s.warmup_down_time),
+                "xrot" => s.rot.x = f.unwrap_or(s.rot.x),
+                "yrot" => s.rot.y = f.unwrap_or(s.rot.y),
+                "zrot" => s.rot.z = f.unwrap_or(s.rot.z),
+                _ => {}
+            }
+        }
+        s.radius_sq = st(ld(s.radius) * ld(s.radius));
+        s
     }
 }
 
+fn statics(u: &Universe, t: ShipType) -> GravWellStatics {
+    match super::type_statics(u, t) {
+        super::TypeStatics::GravWell(g) => g.clone(),
+        _ => GravWellStatics::default(),
+    }
+}
+
+fn spec(u: &Universe, id: ShipId) -> Option<&GravWellSpec> {
+    match &u.ships.get(id)?.spec {
+        ShipSpec::GravWell(g) => Some(g),
+        _ => None,
+    }
+}
+
+fn spec_mut(u: &mut Universe, id: ShipId) -> Option<&mut GravWellSpec> {
+    match &mut u.ships.get_mut(id)?.spec {
+        ShipSpec::GravWell(g) => Some(g),
+        _ => None,
+    }
+}
+
+/// Whether a type is a gravity well generator.
+pub fn is_grav_well(t: ShipType) -> bool {
+    matches!(t, ShipType::kGravWellGenerator | ShipType::tGravWellGenerator)
+}
+
+/// Whether a well holds `ship`.
+pub fn holds(u: &Universe, well: ShipId, ship: ShipId) -> bool {
+    spec(u, well).is_some_and(|g| g.held.iter().any(|h| h.ship == ship))
+}
+
+/// `GravWellGeneratorInit` (0x5aeb00).
 pub fn init(u: &mut Universe, id: ShipId) {
-    let _ = (u, id);
+    let g = GravWellSpec { ready: true, ..Default::default() };
+    u.ships.ship_mut(id).spec = ShipSpec::GravWell(g);
 }
 
+/// A held ship goes free: its engines, rotation and guns work again.
+fn release(u: &mut Universe, ship: ShipId) {
+    if let Some(s) = u.ships.get_mut(ship) {
+        s.dont_apply_force_ever &= !1;
+        s.dont_rotate_ever = false;
+        s.special_flags &= !special::CANT_FIRE;
+    }
+}
+
+fn release_all(u: &mut Universe, id: ShipId) {
+    let held = spec_mut(u, id).map(|g| std::mem::take(&mut g.held)).unwrap_or_default();
+    for h in held {
+        release(u, h.ship);
+    }
+}
+
+/// `GravWellClose` (0x5af1d0).
 pub fn close(u: &mut Universe, id: ShipId) {
-    let _ = (u, id);
+    if let Some(g) = spec_mut(u, id) {
+        g.held.clear();
+    }
 }
 
+/// `GravWellAttack` (0x5af7f0).
 pub fn attack(u: &mut Universe, id: ShipId, target: ShipId) {
-    let _ = (u, id, target);
+    crate::attack::attack_passive(u, id, target, 4000.0, 3000.0);
 }
 
+/// `turnoffGravwell` (0x5aed00).
+pub fn turn_off(u: &mut Universe, id: ShipId) {
+    if let Some(g) = spec_mut(u, id) {
+        g.field_on = false;
+    }
+    release_all(u, id);
+}
+
+/// `GravWellGeneratorSpecialActivate` (0x5aee40): the special toggles the field (it can only
+/// come on while operating time is left).
 pub fn special_activate(u: &mut Universe, id: ShipId) -> bool {
-    let _ = (u, id);
+    let st_ = statics(u, u.ships.ship(id).ship_type);
+    let Some(g) = spec_mut(u, id) else { return true };
+    if g.fired {
+        return true;
+    }
+    g.ready = false;
+    if g.field_on {
+        turn_off(u, id);
+        return true;
+    }
+    if g.time_on < st_.operation_time {
+        g.field_on = true;
+        // (The opening animation, speech and the field effect are presentation.)
+    }
     true
 }
 
+/// `GravWellGeneratorJustDisabled` (0x5aef60): a disabled well switches off.
+pub fn just_disabled(u: &mut Universe, id: ShipId) {
+    if spec(u, id).is_some_and(|g| g.field_on) {
+        special_activate(u, id);
+    }
+}
+
+/// `GravWellGeneratorAddObj` (0x5aef80): catch a ship (a ship already held only has its guns
+/// locked again). The tumble spins are drawn now.
+pub fn add_obj(u: &mut Universe, id: ShipId, ship: ShipId) {
+    let Some(s) = u.ships.get(ship) else { return };
+    if s.flags & sof::DEAD != 0 {
+        return;
+    }
+    if holds(u, id, ship) {
+        u.ships.ship_mut(ship).special_flags |= special::CANT_FIRE;
+        return;
+    }
+    let rot = statics(u, u.ships.ship(id).ship_type).rot;
+    let mut r = |m: f32| st(u.randy.frandom_between_ext(RAN_GAME, -m, m));
+    let spin = Vector::new(r(rot.x), r(rot.y), r(rot.z));
+    if let Some(g) = spec_mut(u, id) {
+        g.held.push(Held { ship, state: 0, spin });
+    }
+    u.ships.ship_mut(ship).special_flags |= special::CANT_FIRE;
+}
+
+/// `GravAddObjectsInProximity` (0x5af0d0).
+pub fn add_objects_in_proximity(u: &mut Universe, id: ShipId) {
+    let r2 = statics(u, u.ships.ship(id).ship_type).radius_sq;
+    let me = u.ships.ship(id).posinfo.position;
+    let list = u.ship_list.clone();
+    for sid in list {
+        let Some(s) = u.ships.get(sid) else { continue };
+        let class = u.statics.ship(s.ship_type).and_then(|st| st.ship_class);
+        let caught = matches!(class, Some(ShipClass::Corvette | ShipClass::Fighter | ShipClass::Micro)) || s.ship_type == ShipType::sWorker;
+        if !caught || matches!(s.ship_type, ShipType::kSalCapCorvette | ShipType::tSalCapCorvette) {
+            continue;
+        }
+        let p = s.posinfo.position;
+        let (dx, dy, dz) = (st(ld(p.x) - ld(me.x)), st(ld(p.y) - ld(me.y)), st(ld(p.z) - ld(me.z)));
+        if ((ld(dx) * ld(dx) + ld(dy) * ld(dy)) + ld(dz) * ld(dz)) <= ld(r2) {
+            add_obj(u, id, sid);
+        }
+    }
+}
+
+/// `GravWellGeneratorHouseKeep` (0x5af1f0).
 pub fn housekeep(u: &mut Universe, id: ShipId) {
-    let _ = (u, id);
+    let Some(g) = spec(u, id) else { return };
+    if g.derelict || !g.field_on {
+        return;
+    }
+    let now = u.total_time_elapsed;
+    let st_ = statics(u, u.ships.ship(id).ship_type);
+    {
+        let g = spec_mut(u, id).expect("spec");
+        g.ready = true;
+        // Only a well without an owner uses up its operating time (every ship here has one).
+    }
+    if spec(u, id).is_some_and(|g| g.time_on < st_.operation_time) {
+        if st_.scan_rate & u.update_counter == st_.scan_rate {
+            add_objects_in_proximity(u, id);
+        }
+    } else {
+        release_all(u, id);
+        let g = spec_mut(u, id).expect("spec");
+        g.field_on = false;
+        g.derelict = true;
+        let s = u.ships.ship_mut(id);
+        s.death_time = st(ld(now) + ld(TIME_BEFORE_EXPLODE));
+        s.flags = (s.flags & !sof::SELECTABLE) | sof::DISABLED;
+    }
+    let me = u.ships.ship(id).posinfo.position;
+    let held = spec(u, id).map(|g| g.held.clone()).unwrap_or_default();
+    for h in held {
+        let Some(s) = u.ships.get(h.ship) else { continue };
+        let p = s.posinfo.position;
+        let (dx, dy, dz) = (st(ld(p.x) - ld(me.x)), st(ld(p.y) - ld(me.y)), st(ld(p.z) - ld(me.z)));
+        let dsq = st((ld(dx) * ld(dx) + ld(dy) * ld(dy)) + ld(dz) * ld(dz));
+        if !(dsq < st_.radius_sq) || s.flags & sof::DEAD != 0 {
+            remove_ship_refs(u, id, h.ship);
+            continue;
+        }
+        // (The caught-ship effect is presentation.)
+        let s = u.ships.ship_mut(h.ship);
+        s.dont_apply_force_ever |= 1;
+        match h.state {
+            0 => {
+                let k = ld(st_.effect_constant);
+                let v = &mut s.posinfo.velocity;
+                v.x = st(k * ld(v.x));
+                v.y = st(k * ld(v.y));
+                v.z = st(k * ld(v.z));
+                let slow = (ld(v.x) * ld(v.x) + ld(v.y) * ld(v.y)) + ld(v.z) * ld(v.z) < ld(STOPPED_SPEED_SQ);
+                if slow {
+                    if let Some(x) = spec_mut(u, id).and_then(|g| g.held.iter_mut().find(|x| x.ship == h.ship)) {
+                        x.state = 1;
+                    }
+                }
+            }
+            _ => {
+                s.autostabilize_ship = false;
+                let t = s.rotinfo.torque;
+                if t.x == 0.0 && t.y == 0.0 && t.z == 0.0 {
+                    let rs = s.rotinfo.rotspeed;
+                    let within = |x: f32| x < SPIN_LIMIT && -SPIN_LIMIT < x;
+                    if within(rs.x) {
+                        s.rotinfo.torque.x = h.spin.x;
+                    }
+                    if within(rs.y) {
+                        s.rotinfo.torque.y = h.spin.y;
+                    }
+                    if within(rs.z) {
+                        s.rotinfo.torque.z = h.spin.z;
+                    }
+                }
+                let inv = 1.0 / fsqrt(ld(dsq));
+                let k = ld(st_.repulse_force);
+                s.posinfo.force = Vector::new(st(k * ld(st(inv * ld(dx)))), st(k * ld(st(ld(dy) * inv))), st(k * inv * ld(dz)));
+            }
+        }
+    }
 }
 
+/// `GravWellGeneratorRemoveShipReferences` (0x5af170): a held ship goes free.
 pub fn remove_ship_refs(u: &mut Universe, id: ShipId, gone: ShipId) {
-    let _ = (u, id, gone);
+    let Some(g) = spec_mut(u, id) else { return };
+    let Some(i) = g.held.iter().position(|h| h.ship == gone) else { return };
+    g.held.remove(i);
+    release(u, gone);
 }
 
+/// `GravWellGeneratorDied` (0x5aebf0).
 pub fn died(u: &mut Universe, id: ShipId) {
-    let _ = (u, id);
+    release_all(u, id);
+}
+
+/// `gravwellIsShipStuckForHyperspaceing` (0x5aec70): a gravity well with its field on, in the
+/// ship's collision blob, has the ship inside its radius (it cannot jump).
+pub fn is_ship_stuck_for_hyperspace(u: &Universe, id: ShipId) -> bool {
+    let Some(s) = u.ships.get(id) else { return false };
+    let Some(b) = s.coll_my_blob else { return false };
+    let Some(blob) = u.blobs.blobs.get(b.0 as usize) else { return false };
+    let p = s.posinfo.position;
+    blob.ships.iter().any(|&w| {
+        let Some(ws) = u.ships.get(w) else { return false };
+        if !is_grav_well(ws.ship_type) || !spec(u, w).is_some_and(|g| g.field_on) {
+            return false;
+        }
+        let q = ws.posinfo.position;
+        let (dx, dy, dz) = (st(ld(p.x) - ld(q.x)), st(ld(p.y) - ld(q.y)), st(ld(p.z) - ld(q.z)));
+        ((ld(dx) * ld(dx) + ld(dy) * ld(dy)) + ld(dz) * ld(dz)) < ld(statics(u, ws.ship_type).radius_sq)
+    })
 }

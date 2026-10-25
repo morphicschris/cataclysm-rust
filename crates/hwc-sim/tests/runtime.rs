@@ -65,7 +65,11 @@ fn cloned_universe_continues_identically() {
 /// layer changed them again: the scenario's mothership now comes with its three starting module
 /// ships clamped to it (`univCreateMothershipModules`), which take part in collision blobs and
 /// avoidance; with the modules left out the previous values and hash are reproduced exactly.
-/// The hash also covers the base state now.)
+/// The hash also covers the base state now. The ship modules changed the hash again but no
+/// position: the hive frigate now creates its six swarmers inside it (new ship-table entries,
+/// which also shift the numbers of later ships) and `Ship::spec` (the Acolytes', hive's and
+/// rammer's own state) is hashed; hashing without the swarmers and the special state gives the
+/// previous value, `GOLDEN_FLEET_HASH_400_BEFORE_MODULES`, exactly.)
 #[test]
 fn golden_trajectories() {
     let Some((hashes, run)) = run("fleet", 400) else { return };
@@ -78,6 +82,17 @@ fn golden_trajectories() {
     println!("fleet 400: hash {:#018x} ships {got:x?}", hashes[399]);
     let fleet_hash = hashes[399];
     let fleet = got;
+    let swarmers: Vec<_> = run
+        .universe
+        .ships
+        .iter()
+        .filter(|s| matches!(s.ship_type, hwc_sim::statics::ShipType::sSwarmer | hwc_sim::statics::ShipType::bSwarmer))
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(swarmers.len(), 6);
+    let view = hwc_sim::harness::HashView { skip: swarmers, no_specials: true };
+    let before_modules = hwc_sim::harness::world_hash_with(&run.universe, &view);
+    println!("fleet 400 without swarmers and special state: {before_modules:#018x}");
 
     let (hashes, run) = run_named("patrol", 800);
     let s = run.universe.ship(run.ids[7]).unwrap();
@@ -85,6 +100,7 @@ fn golden_trajectories() {
     let got = [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
     println!("patrol 800: hash {:#018x} frigate {got:x?}", hashes[799]);
     assert_eq!(fleet, GOLDEN_FLEET_400);
+    assert_eq!(before_modules, GOLDEN_FLEET_HASH_400_BEFORE_MODULES);
     assert_eq!(fleet_hash, GOLDEN_FLEET_HASH_400);
     assert_eq!(got, GOLDEN_PATROL_800);
 }
@@ -99,7 +115,8 @@ const GOLDEN_FLEET_400: [[u32; 3]; 4] = [
     [0xc52d845c, 0xc542513e, 0xc3c5e02a],
     [0xc53038cf, 0xc4d0709c, 0xc4073b96],
 ];
-const GOLDEN_FLEET_HASH_400: u64 = 0x66c5_3d31_855b_3940;
+const GOLDEN_FLEET_HASH_400: u64 = 0x6b8a_0113_a215_1559;
+const GOLDEN_FLEET_HASH_400_BEFORE_MODULES: u64 = 0x66c5_3d31_855b_3940;
 const GOLDEN_PATROL_800: [u32; 3] = [0x454cc8f4, 0x44ce9e83, 0x435ba23f];
 
 #[test]

@@ -804,6 +804,8 @@ dependencies = [
  "bytemuck",
  "glam",
  "hwc-formats",
+ "hwc-fx",
+ "hwc-math",
  "png",
  "pollster",
  "wgpu",

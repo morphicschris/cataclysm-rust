@@ -334,11 +334,13 @@ pub struct GameStats {
     /// `[type + player * 8]` while the getter reads `[player * 145 + type]`; both are kept as
     /// in the original (see [`GameStats::add_ship_salvaged`]).
     pub salvaged: Vec<i32>,
+    /// 0x912df8: ships beastified, written and read like [`GameStats::salvaged`].
+    pub beastified: Vec<i32>,
 }
 
 impl Default for GameStats {
     fn default() -> Self {
-        Self { players: Vec::new(), ru_collected_all: 0, sp_ru_collected: 0, salvaged: vec![0; 8 * NUM_SHIP_TYPES] }
+        Self { players: Vec::new(), ru_collected_all: 0, sp_ru_collected: 0, salvaged: vec![0; 8 * NUM_SHIP_TYPES], beastified: vec![0; 8 * NUM_SHIP_TYPES] }
     }
 }
 
@@ -356,6 +358,23 @@ impl GameStats {
     /// The salvage-count getter (0x53b0e0): `[player * 145 + type]`.
     pub fn ships_salvaged(&self, ship_type: ShipType, player: usize) -> i32 {
         self.salvaged.get(player * NUM_SHIP_TYPES + ship_type.index()).copied().unwrap_or(0)
+    }
+
+    /// The beastified count of `univCheckBeastInfectionComplete` (0x53e8f0): the cell at
+    /// `type + player * 8`, as for the salvage counts.
+    pub fn add_ship_beastified(&mut self, ship_type: ShipType, player: usize) {
+        if let Some(c) = self.beastified.get_mut(ship_type.index() + player * 8) {
+            *c += 1;
+        }
+    }
+
+    /// `gameStatsGetShipsBeastified` (0x53b130): `[player * 145 + type]`, or the player's sum
+    /// over all types for `None`.
+    pub fn ships_beastified(&self, ship_type: Option<ShipType>, player: usize) -> i32 {
+        match ship_type {
+            Some(t) => self.beastified.get(player * NUM_SHIP_TYPES + t.index()).copied().unwrap_or(0),
+            None => (0..NUM_SHIP_TYPES).map(|t| self.beastified.get(player * NUM_SHIP_TYPES + t).copied().unwrap_or(0)).sum(),
+        }
     }
 
     fn player(&mut self, p: usize) -> &mut PlayerStats {
@@ -383,6 +402,9 @@ pub struct GameOptions {
     /// interval (0x87bfa0) and lump-sum frame (0x87bfa8).
     pub injection_interval: u32,
     pub lump_sum_frame: u32,
+    /// The "repair bots" video option (0xaf76b4): ships' repair droids are updated (purely
+    /// visual; off in the headless simulation).
+    pub repair_bots: bool,
 }
 
 impl Default for GameOptions {
@@ -394,6 +416,7 @@ impl Default for GameOptions {
             mission: 0,
             injection_interval: 0,
             lump_sum_frame: 0,
+            repair_bots: false,
         }
     }
 }

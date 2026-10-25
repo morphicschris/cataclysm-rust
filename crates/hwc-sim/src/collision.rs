@@ -273,6 +273,9 @@ pub fn check_all_bullet_collisions(u: &mut Universe) {
     }
 }
 
+/// The side code of a hit on a sentinel's force field (the walks' internal marker).
+const FIELD_HIT: i32 = -2;
+
 /// `collCheckBulletTargetColl` (0x438880). A bullet that hits is deleted, which removes it from
 /// the list being walked, so the index does not advance.
 fn check_bullets_in_blob(u: &mut Universe, bi: usize) {
@@ -328,6 +331,11 @@ fn check_bullets_in_blob(u: &mut Universe, bi: usize) {
                 if !(diff <= ld(maxd) || diff.is_nan()) {
                     break;
                 }
+                // An enemy sentinel's raised force field stops the bullet where it crosses it.
+                if let Some(ft) = crate::ships::sentinel::bullet_hits_field(u, tid, &b) {
+                    hit = Some((tid, ft, FIELD_HIT));
+                    break 'passes;
+                }
                 let Some(tstat) = statics.ship(t.ship_type) else { continue };
                 let ad = ld(st(diff)).abs();
                 let reach = ld(tstat.header.coll.coll_sphere_size) + ld(b.travel_dist);
@@ -351,6 +359,11 @@ fn check_bullets_in_blob(u: &mut Universe, bi: usize) {
             }
         }
         match hit {
+            Some((tid, tt, FIELD_HIT)) => {
+                crate::ships::sentinel::field_take_damage(u, tid, &b);
+                crate::damage::bullet_collided_with_target(u, false, tid, bid, tt, 6);
+                crate::bullet::delete(u, bid);
+            }
             Some((tid, tt, side)) => {
                 crate::damage::bullet_collided_with_target(u, true, tid, bid, tt, side);
                 crate::bullet::delete(u, bid);
@@ -370,6 +383,13 @@ fn beam_against_blob(u: &Universe, beam: &Bullet, bi: usize, len: f32, best: &mu
         for &tid in list {
             if beam.owner == Some(tid) {
                 continue;
+            }
+            // An enemy sentinel's raised field nearer than the best hit so far stops the beam.
+            if let Some(ft) = crate::ships::sentinel::beam_hits_field(u, tid, beam) {
+                if ld(ft) < ld(best.0) {
+                    *best = (ft, Some(tid), FIELD_HIT);
+                    continue;
+                }
             }
             let t = u.ships.ship(tid);
             let Some(tstat) = u.statics.ship(t.ship_type) else { continue };
@@ -437,7 +457,12 @@ fn check_beam(u: &mut Universe, own_blob: usize, bid: BulletId) {
             u.bullets.bullet_mut(bid).beam_travel_dist = beam.length_mag;
         }
         Some(tid) => {
-            crate::damage::bullet_collided_with_target(u, true, tid, bid, best.0, best.2);
+            if best.2 == FIELD_HIT {
+                crate::ships::sentinel::field_take_damage(u, tid, &beam);
+                crate::damage::bullet_collided_with_target(u, false, tid, bid, best.0, 1);
+            } else {
+                crate::damage::bullet_collided_with_target(u, true, tid, bid, best.0, best.2);
+            }
             if let Some(b) = u.bullets.get_mut(bid) {
                 b.beam_travel_dist = best.0;
             }
@@ -564,6 +589,10 @@ fn pair_touches(a: &Ship, astat: &ShipStaticInfo, b: &Ship, bstat: &ShipStaticIn
     if (a.flags | b.flags) & sof::HIDE != 0 {
         return false;
     }
+    // `FUN_004367b0`: nothing bumps through a sentinel's raised force field.
+    if crate::ships::sentinel::field_prevents_bump(a, b) {
+        return false;
+    }
     let d = Vector::new(
         st(ld(b.coll.coll_position.x) - ld(a.coll.coll_position.x)),
         st(ld(b.coll.coll_position.y) - ld(a.coll.coll_position.y)),
@@ -598,9 +627,103 @@ fn bump(u: &mut Universe, a: ShipId, b: ShipId, ra: f32, rb: f32) {
         dsq = 100.0;
     }
     let dist = st(fsqrt(ld(dsq)));
-    // (Kamikaze, ramming, salvage, leech and the killer-collision damage are not modelled;
-    // `FUN_005405e0` does nothing for ordinary ships.)
     let sum = st(ld(ra) + ld(rb));
+    // Kamikaze ships (both ways): each side's damage, how and who.
+    let mut dmg = [0f32; 2];
+    let mut cause = [(crate::damage::how::KILLED_BY_COLLISION, 99i32); 2];
+    let ka = kamikaze_check(u, a, b, &mut dmg, &mut cause, 0);
+    let kb = kamikaze_check(u, b, a, &mut dmg, &mut cause, 1);
+    if !ka && !kb {
+        crate::ships::ramming::collide(u, a, b);
+        // (`ApplyDamageToCollidingObjects` only damages ships with the killer-collision
+        // attribute; the salvage, leech and RKO exclusions guard that path.)
+        killer_collision(u, a, b);
+    } else {
+        crate::damage::apply_damage_to_target(u, a, dmg[0], 0, cause[0].0, cause[0].1, Some(b));
+        crate::damage::apply_damage_to_target(u, b, dmg[1], 0, cause[1].0, cause[1].1, Some(a));
+    }
+    if u.ships.get(a).is_some() && u.ships.get(b).is_some() {
+        response(u, a, b, sum, d, dist);
+    }
+}
+
+/// The kamikaze part of the bump (`FUN_00436470`): a kamikaze ship (`SPECIAL_Kamikaze`) that
+/// rams an enemy (or its attack target's structure) destroys itself (its maximum health x
+/// 9999) and does its `kamikazeDamage` to the other ship (x the disguise factor of a disguised
+/// Mimic); a Beast cruise missile with the infection upgrade infects infectable ships instead.
+/// `side` is the kamikaze's index into `dmg`/`cause` (the other ship's is `1 - side`).
+fn kamikaze_check(u: &mut Universe, k: ShipId, other: ShipId, dmg: &mut [f32; 2], cause: &mut [(i32, i32); 2], side: usize) -> bool {
+    let Some(s) = u.ships.get(k) else { return false };
+    if s.special_flags & crate::object::special::KAMIKAZE == 0 {
+        return false;
+    }
+    let target = s.attack.target;
+    if !crate::ships::ramming::same_structure(u, target, other) {
+        let o = u.ships.ship(other);
+        if o.flags2 & crate::object::flags2::DISGUISED != 0 || o.player == s.player {
+            return false;
+        }
+    }
+    let statics = u.statics.clone();
+    let kt = s.ship_type;
+    let kplayer = s.player;
+    let o = u.ships.ship(other);
+    let ostat = statics.ship(o.ship_type);
+    let infectable = ostat.and_then(crate::ships::beast::infection_stats);
+    let sp = u.single_player;
+    let mut to_other = u.tweaks.combat.kamikaze_damage[kt.index()];
+    if kt == crate::statics::ShipType::bCruiseMissile
+        && infectable.is_some()
+        && (sp || (crate::upgrade::has_upgrade(s, 0x10000) && kplayer != o.player))
+    {
+        let o = u.ships.ship_mut(other);
+        o.beast.missile_hits = o.beast.missile_hits.wrapping_add(1);
+        let hits = o.beast.missile_hits;
+        let required = infectable.map_or(0, |x| x.1);
+        if !sp || o.ship_type != crate::statics::ShipType::dPrisonShip || required <= i32::from(hits) {
+            crate::ships::beast::infect_ship(u, other, k);
+            to_other = 0.0;
+        } else {
+            to_other = st(ld(o.health) * 0.1);
+        }
+    }
+    if u.ships.ship(k).flags2 & crate::object::flags2::DISGUISED != 0 {
+        to_other = st(ld(crate::ships::mimic::kamikaze_damage_scale(u, k)) * ld(to_other));
+    }
+    let max = statics.ship(kt).map_or(0.0, |st_| st_.health.max_health);
+    dmg[side] = st(ld(max) * 9999.0);
+    dmg[1 - side] = to_other;
+    cause[1 - side] = (crate::damage::how::KILLED_BY_KAMIKAZE, kplayer as i32);
+    u.ships.ship_mut(k).posinfo.velocity = Vector::ZERO;
+    true
+}
+
+/// `ApplyDamageToCollidingObjects` (0x5405e0): when exactly one of the two ships has the
+/// killer-collision attribute (`attributes & 0x200`), both take the smaller health as damage.
+fn killer_collision(u: &mut Universe, a: ShipId, b: ShipId) {
+    let (Some(sa), Some(sb)) = (u.ships.get(a), u.ships.get(b)) else { return };
+    if sa.player == sb.player || (sa.flags | sb.flags) & sof::DISABLED != 0 {
+        return;
+    }
+    if [sa, sb].iter().any(|s| s.ship_type == crate::statics::ShipType::dRKO) {
+        return;
+    }
+    if (sa.attributes ^ sb.attributes) & 0x200 == 0 {
+        return;
+    }
+    let d = if sa.health <= sb.health { sa.health } else { sb.health };
+    crate::damage::apply_damage_to_target(u, a, d, 0, crate::damage::how::KILLED_BY_COLLISION, 99, Some(b));
+    crate::damage::apply_damage_to_target(u, b, d, 0, crate::damage::how::KILLED_BY_COLLISION, 99, Some(a));
+}
+
+/// `collCheckRectBumpCollision` for the ship modules.
+pub(crate) fn rect_bump_pub(a: &Ship, astat: &ShipStaticInfo, b: &Ship, bstat: &ShipStaticInfo) -> bool {
+    rect_bump(a, astat, b, bstat)
+}
+
+/// `ObjectsCollided` (0x540770) for the ship modules: the bump response between `a` and `b`
+/// (`sum` of their radii, `d` from `a` to `b`, `dist` its length).
+pub(crate) fn objects_collided(u: &mut Universe, a: ShipId, b: ShipId, sum: f32, d: Vector, dist: f32) {
     response(u, a, b, sum, d, dist);
 }
 

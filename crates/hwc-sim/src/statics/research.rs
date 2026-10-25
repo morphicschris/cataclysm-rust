@@ -43,6 +43,9 @@ pub struct ResearchTable {
     pub tech_depend: [TechSet; Technology::COUNT],
     /// Research time per technology (seconds as given in the file).
     pub tech_time: [i32; Technology::COUNT],
+    /// The ship dependency sets' mode (`rmTechSetSetMode`, set by `rmEnableShip`): -2 when the
+    /// level or the mission disabled the type; absent types are 0.
+    pub ship_mode: BTreeMap<ShipType, i32>,
 }
 
 impl Default for ResearchTable {
@@ -51,6 +54,7 @@ impl Default for ResearchTable {
             ship_depend: BTreeMap::new(),
             tech_depend: [TechSet::default(); Technology::COUNT],
             tech_time: [0; Technology::COUNT],
+            ship_mode: BTreeMap::new(),
         }
     }
 }

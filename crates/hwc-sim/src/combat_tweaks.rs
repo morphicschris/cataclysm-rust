@@ -285,6 +285,9 @@ pub struct CombatTweaks {
     pub careen_rock: [[f32; 2]; 3],
     /// `YAWCRAZYLO`.. (0x8a2144): the spin of a disabled ship.
     pub crazy_rock: [[f32; 2]; 3],
+    /// `kamikazeDamage[type]` (Tactics.script, 0xa58640): damage a kamikaze ship of the type
+    /// does to what it rams.
+    pub kamikaze_damage: Vec<f32>,
     /// Missile target loss (Tweak.script): frame mask, checks per missile, distance,
     /// miss chance by the target's tactics, bonus when it dodges or manoeuvres.
     pub missile_target_loss_rate: u32,
@@ -367,6 +370,7 @@ impl Default for CombatTweaks {
             bullet_rock: [[-100.0, 100.0]; 3],
             careen_rock: [[-100.0, 100.0]; 3],
             crazy_rock: [[-10.0, 10.0]; 3],
+            kamikaze_damage: vec![0.0; ShipType::COUNT],
             missile_target_loss_rate: 0,
             missile_num_times_check: 0,
             missile_min_dist_before_target_loss: 0.0,
@@ -690,6 +694,14 @@ impl CombatTweaks {
     pub fn apply(&mut self, file: &str, script: &ScriptFile) {
         for e in script.entries() {
             let (key, raw) = (e.key.as_str(), e.raw.as_str());
+            if file == FILE_TACTICS {
+                if let Some(t) = key.strip_prefix("kamikazeDamage[").and_then(|k| k.strip_suffix(']')).and_then(ShipType::from_name) {
+                    if let Some(v) = scan_f32(raw) {
+                        self.kamikaze_damage[t.index()] = v;
+                    }
+                    continue;
+                }
+            }
             if file == FILE_AISHIP && key == "rowDetails" {
                 if let Some((t, _, avoid)) = parse_row_details(raw) {
                     self.row_avoid_by[t.index()] = avoid;

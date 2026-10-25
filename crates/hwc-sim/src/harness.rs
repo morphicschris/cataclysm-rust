@@ -52,11 +52,41 @@ impl Fnv64 {
 
 /// Hash of everything the movement simulation owns (exact bit patterns).
 pub fn world_hash(u: &Universe) -> u64 {
+    world_hash_with(u, &HashView::default())
+}
+
+/// What [`world_hash_with`] leaves out: some ships (with the numbers of later ships closed up,
+/// as if those ships had never been created) and the special-ability state. Used to show that a
+/// change of the hash comes only from new state.
+#[derive(Debug, Clone, Default)]
+pub struct HashView {
+    /// Ships not hashed.
+    pub skip: Vec<ShipId>,
+    /// Leave out missiles, `Ship::spec`, the generic special state and the fog of war.
+    pub no_specials: bool,
+}
+
+impl HashView {
+    fn keep(&self, id: ShipId) -> bool {
+        !self.skip.contains(&id)
+    }
+
+    fn id(&self, id: ShipId) -> u32 {
+        u32::from(id.0) - self.skip.iter().filter(|s| s.0 < id.0).count() as u32
+    }
+
+    fn opt(&self, id: Option<ShipId>) -> u32 {
+        id.map_or(u32::MAX, |s| self.id(s))
+    }
+}
+
+/// [`world_hash`] seen through a [`HashView`].
+pub fn world_hash_with(u: &Universe, view: &HashView) -> u64 {
     let mut h = Fnv64::default();
     h.u32(u.update_counter);
     h.f32(u.total_time_elapsed);
-    for s in u.ships.iter() {
-        h.u32(u32::from(s.id.0));
+    for s in u.ships.iter().filter(|s| view.keep(s.id)) {
+        h.u32(view.id(s.id));
         h.u32(s.flags);
         h.vector(s.posinfo.position);
         h.vector(s.posinfo.velocity);
@@ -77,8 +107,8 @@ pub fn world_hash(u: &Universe) -> u64 {
         h.f32(s.health);
         h.vector(s.rotinfo.torque);
         h.u32(u32::from(s.ai_state_attack) | (s.tactics as u32) << 8 | s.flightman << 16);
-        h.u32(s.attack.target.map_or(u32::MAX, |t| u32::from(t.0)));
-        h.u32(s.attack.leader.map_or(u32::MAX, |t| u32::from(t.0)) | s.attack.wingman.map_or(0xffff, |t| u32::from(t.0)) << 16);
+        h.u32(view.opt(s.attack.target));
+        h.u32(view.opt(s.attack.leader) | s.attack.wingman.map_or(0xffff, |t| view.id(t)) << 16);
         h.u32(u32::from(s.attack.flightmans_left) | u32::from(s.attack.situation) << 16);
         h.u32(s.speed_upgrade_level | u32::from(s.recently_attacked) << 8 | u32::from(s.row_state) << 16);
         h.vector(s.interceptor.ai_vec);
@@ -95,17 +125,19 @@ pub fn world_hash(u: &Universe) -> u64 {
         h.vector(b.heading);
         h.f32(b.time_lived);
         h.f32(b.beam_travel_dist);
-        h.u32(b.owner.map_or(u32::MAX, |o| u32::from(o.0)));
-        h.u32(b.target.map_or(u32::MAX, |o| u32::from(o.0)));
+        h.u32(view.opt(b.owner));
+        h.u32(view.opt(b.target));
     }
-    hash_base(&mut h, u);
-    hash_specials(&mut h, u);
+    hash_base(&mut h, u, view);
+    if !view.no_specials {
+        hash_specials(&mut h, u);
+    }
     h.u32(u.randy.number_get(hwc_math::random::RAN_GAME));
     for c in u.commands.iter() {
         h.u32(c.id.0);
         h.u32(u32::from(c.order) | u32::from(c.attributes) << 16);
-        for id in &c.selection {
-            h.u32(u32::from(id.0));
+        for &id in &c.selection {
+            h.u32(view.id(id));
         }
         h.u32(c.waypoint_index as u32);
         h.f32(c.formation.travel_vel);
@@ -150,11 +182,11 @@ fn hash_specials(h: &mut Fnv64, u: &Universe) {
 
 /// The base layer's state: docking, clamping, cargo and construction per ship, players'
 /// resources and research, factory jobs and the resources.
-fn hash_base(h: &mut Fnv64, u: &Universe) {
-    let opt = |s: Option<ShipId>| s.map_or(u32::MAX, |s| u32::from(s.0));
-    for s in u.ships.iter() {
+fn hash_base(h: &mut Fnv64, u: &Universe, view: &HashView) {
+    let opt = |s: Option<ShipId>| view.opt(s);
+    for s in u.ships.iter().filter(|s| view.keep(s.id)) {
         let b = &s.base;
-        h.u32(u32::from(s.id.0));
+        h.u32(view.id(s.id));
         h.u32(b.dock_state | (b.dock_point as u32) << 8);
         h.u32(opt(b.dock_with));
         h.f32(b.dock_dist);

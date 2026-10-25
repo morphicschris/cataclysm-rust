@@ -124,7 +124,7 @@ pub fn build_jobs_add(u: &mut Universe, factory: ShipId, t: ShipType, count: i32
 
 /// The build-manager tables (0x7499e0..): `(flag, type)`, flag 0 = class header, 1 = buildable,
 /// 2 = buildable once acquired (Beast). Small factories / big factories per race.
-fn build_table(race: ShipRace, big: bool) -> &'static [(u8, u8)] {
+pub fn build_table(race: ShipRace, big: bool) -> &'static [(u8, u8)] {
     const S_SMALL: &[(u8, u8)] = &[(0, 6), (1, 0), (1, 1), (1, 133), (1, 2), (0, 5), (1, 4), (1, 5), (0, 4), (1, 6), (1, 7), (1, 8), (0, 11), (1, 3), (1, 17), (0, 8), (1, 14), (0, 10), (1, 13)];
     const S_BIG: &[(u8, u8)] = &[
         (0, 6), (1, 0), (1, 1), (1, 133), (1, 2), (0, 5), (1, 4), (1, 5), (0, 4), (1, 6), (1, 7), (1, 8), (0, 3), (1, 25), (1, 10),
@@ -379,10 +379,10 @@ fn build_time_raw(u: &Universe, t: ShipType) -> i32 {
     u.statics.ship(t).map_or(0, |s| s.build_time)
 }
 
-/// `MothershipGetDamageModifier5`: the Beast mothership builds slower when damaged. Its
-/// damage modes are not modelled; full speed.
-fn beast_build_rate(_u: &Universe, _ship: ShipId) -> i32 {
-    1
+/// `MothershipGetDamageModifier5`: the Beast mothership builds twice as fast in its build
+/// damage mode.
+fn beast_build_rate(u: &Universe, ship: ShipId) -> i32 {
+    crate::ships::mothership::damage_modifier_build(u, ship)
 }
 
 /// `cmShipBuildComplete` (0x44f490): a job finished one ship.

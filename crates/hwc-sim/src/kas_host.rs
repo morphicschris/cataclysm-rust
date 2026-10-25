@@ -746,22 +746,30 @@ impl KasRuntime for SimHost<'_> {
     }
 
     fn get_world_resources(&mut self, _cx: &Cx) -> i32 {
-        // univGetResourceStatistics: the resource units left in the world's resources.
-        let statics = self.u.statics.clone();
-        self.g
-            .level
+        // univGetResourceStatistics: the resource units left in the harvestable resources (the
+        // smallest asteroids are minor objects and not in that list).
+        self.u
+            .base
             .resources
+            .list
             .iter()
-            .map(|r| match r.kind {
-                level::ResourceKind::Asteroid(t) => statics.asteroids.get(usize::from(t)).and_then(|a| a.as_ref()).map_or(0, |a| a.info.resource_value),
-                level::ResourceKind::DustCloud(t) => statics.dust_clouds.get(usize::from(t)).and_then(|a| a.as_ref()).map_or(0, |a| a.info.resource_value),
-                level::ResourceKind::GasCloud(_) => 0,
-            })
+            .filter(|r| r.kind != crate::resource::ResourceKind::Asteroid(0))
+            .map(|r| r.resource_value)
             .sum()
     }
 
     fn tech_set(&mut self, _cx: &Cx, tech_name: Str<'_>) {
+        // PlayerAcquiredTechnology: the trader marks it known and the current player has it
+        // (rmAddTechToPlayer: add, then suPlayerUpdateFromResearch).
         let t = Self::str_text(tech_name);
+        if let Some(tech) = crate::statics::Technology::from_name(&t) {
+            if let Some(p) = self.u.base.players.get_mut(HUMAN_PLAYER) {
+                p.tech.add(tech.index());
+            }
+            crate::upgrade::player_update_from_research(self.u, HUMAN_PLAYER);
+        } else {
+            self.log(LogKind::Warning, format!("TechSet: unknown technology {t:?}"));
+        }
         self.g.techs.push(t);
     }
 
@@ -771,8 +779,13 @@ impl KasRuntime for SimHost<'_> {
     }
 
     fn enable_ship_construction(&mut self, _cx: &Cx, ship_type: Str<'_>, ship_race: Str<'_>, b_enabled: i32) {
+        // kasfEnableShipConstruction: rmEnableShip(StrToShipRace, StrToShipType, enabled), then
+        // the construction manager refreshes (it reads the tables when drawn).
         let (t, r) = (Self::str_text(ship_type), Self::str_text(ship_race));
-        let _ = ShipRace::from_name(&r);
+        match (ShipType::from_name(&t), ShipRace::from_name(&r)) {
+            (Some(ty), Some(race)) => level::enable_ship(self.u, race.index(), ty, b_enabled != 0),
+            _ => self.log(LogKind::Warning, format!("EnableShipConstruction: unknown {t:?} / {r:?}")),
+        }
         self.g.construction.push((t, r, b_enabled));
     }
 
@@ -855,6 +868,168 @@ impl KasRuntime for SimHost<'_> {
         let time = self.u.total_time_elapsed;
         self.g.presentation.push(crate::mission::Presentation::LocationCard { text: location.text().unwrap_or("").to_string(), milliseconds, time });
         self.g.intel_ended = false;
+    }
+
+    // ---- special abilities -------------------------------------------------------------
+
+    /// `kasfSpecialToggle`: the team uses its special.
+    fn special_toggle(&mut self, cx: &Cx) {
+        let sel = self.team_ships(cx);
+        if !sel.is_empty() {
+            crate::ships::cl_special(self.u, &sel, &[]);
+        }
+    }
+
+    /// `kasfShipsSpecialToggle`.
+    fn ships_special_toggle(&mut self, _cx: &Cx, ships: Ships) {
+        let sel = self.ships(ships);
+        if !sel.is_empty() {
+            crate::ships::cl_special(self.u, &sel, &[]);
+        }
+    }
+
+    /// `kasfSpecialOn`: the team uses its special on the ships.
+    fn special_on(&mut self, cx: &Cx, ships: Ships) -> i32 {
+        let sel = self.team_ships(cx);
+        let t = self.ships(ships);
+        if !sel.is_empty() && ships != Ships::Null {
+            crate::ships::cl_special(self.u, &sel, &t);
+        }
+        0
+    }
+
+    /// `kasfSpecialOff` (does nothing in Cataclysm).
+    fn special_off(&mut self, _cx: &Cx) -> i32 {
+        0
+    }
+
+    /// `kasfShipsSpecialOn`.
+    fn ships_special_on(&mut self, _cx: &Cx, src_ships: Ships, dest_ships: Ships) -> i32 {
+        let sel = self.ships(src_ships);
+        let t = self.ships(dest_ships);
+        if src_ships != Ships::Null && dest_ships != Ships::Null {
+            crate::ships::cl_special(self.u, &sel, &t);
+        }
+        0
+    }
+
+    /// `kasfShipsSpecialOff`: the special toggled off (clWrapSpecial without targets).
+    fn ships_special_off(&mut self, _cx: &Cx, ships: Ships) -> i32 {
+        let sel = self.ships(ships);
+        if ships != Ships::Null {
+            crate::ships::cl_special(self.u, &sel, &[]);
+        }
+        0
+    }
+
+    /// `kasfMimic` (0x4935f0): disguise as a ship type, or as asteroid `A<n>`.
+    fn mimic(&mut self, _cx: &Cx, ships: Ships, ship_name: Str<'_>, player_index: i32) {
+        let name = ship_name.text().unwrap_or("");
+        let o = if let Some(n) = name.strip_prefix(['A', 'a']) {
+            let k = n.bytes().next().map_or(-0x30, |c| i32::from(c) - 0x30);
+            crate::ships::mimic::DisguiseOrder { kind: 2, ship_type: 0, player: player_index, asteroid: k }
+        } else {
+            let t = ShipType::from_name(name).map_or(-1, |t| t.index() as i32);
+            crate::ships::mimic::DisguiseOrder { kind: 1, ship_type: t, player: player_index, asteroid: 0 }
+        };
+        for id in self.ships(ships) {
+            if self.u.ships.get(id).is_some() {
+                crate::ships::mimic::do_disguise_command(self.u, id, o);
+            }
+        }
+    }
+
+    /// `kasfUnmimic` (0x4936a0).
+    fn unmimic(&mut self, _cx: &Cx, ships: Ships) {
+        for id in self.ships(ships) {
+            if self.u.ships.get(id).is_some() {
+                crate::ships::mimic::end_disguise(self.u, id, true);
+            }
+        }
+    }
+
+    /// `kasfSetStayMimicked` (0x495e70): keep the disguise when docking.
+    fn set_stay_mimicked(&mut self, _cx: &Cx, p_ships: Ships, b_stay_mimicked: i32) {
+        for id in self.ships(p_ships) {
+            if let Some(s) = self.u.ships.get_mut(id) {
+                s.special_flags2 = (s.special_flags2 & !0x0800_0000) | ((b_stay_mimicked as u32 & 1) << 27);
+            }
+        }
+    }
+
+    /// `kasfShipsBeastify` (0x493d10): infect the ships (by the originator's first ship); the
+    /// others are scuttled (self-destruct timers are not simulated).
+    fn ships_beastify(&mut self, _cx: &Cx, ships: Ships, originator: Ships) {
+        let sel = self.ships(ships);
+        let Some(&by) = self.ships(originator).first() else { return };
+        let rest = crate::ships::beast::kas_ships_beastify(self.u, &sel, by);
+        if !rest.is_empty() {
+            self.log(LogKind::Flow, format!("ShipsBeastify: {} ships scuttled (not simulated)", rest.len()));
+        }
+    }
+
+    /// `kasfShipsSetBeastInfectionUnlimited`.
+    fn ships_set_beast_infection_unlimited(&mut self, _cx: &Cx, ships: Ships, enable: i32) {
+        let sel = self.ships(ships);
+        crate::ships::beast::kas_set_infection_unlimited(self.u, &sel, enable != 0);
+    }
+
+    /// `kasfShipsSelectBeastified`: the newly beastified ships of the original selection.
+    fn ships_select_beastified(&mut self, _cx: &Cx, new_ships: Ships, original_ships: Ships) -> i32 {
+        let sel = self.ships(original_ships);
+        let out = crate::ships::beast::kas_select_beastified(self.u, &sel);
+        let n = out.len() as i32;
+        self.set_ships(new_ships, out);
+        n
+    }
+
+    /// `kasfGetShipCountBeastified`.
+    fn get_ship_count_beastified(&mut self, _cx: &Cx, ship_type: Str<'_>, player: i32) -> i32 {
+        let t = ship_type.text().and_then(ShipType::from_name);
+        crate::ships::beast::ships_beastified(self.u, t, player.max(0) as usize)
+    }
+
+    /// `kasfShipInfectionTerminal`.
+    fn ship_infection_terminal(&mut self, _cx: &Cx, ships: Ships) -> i32 {
+        let sel = self.ships(ships);
+        i32::from(crate::ships::beast::kas_infection_terminal(self.u, &sel))
+    }
+
+    /// `kasfEnableBeastWeaponAutoAttack`.
+    fn enable_beast_weapon_auto_attack(&mut self, _cx: &Cx, p_beast_ships: Ships, b_enable: i32) {
+        let sel = self.ships(p_beast_ships);
+        crate::ships::beast::kas_enable_weapon_auto_attack(self.u, &sel, b_enable != 0);
+    }
+
+    /// `kasfIsBeastReady`.
+    fn is_beast_ready(&mut self, _cx: &Cx, ships: Ships) -> i32 {
+        let sel = self.ships(ships);
+        i32::from(crate::ships::beast::kas_is_beast_ready(self.u, &sel))
+    }
+
+    /// `kasfTimesHitByEMP`: EMP hits taken by the ships.
+    fn times_hit_by_emp(&mut self, _cx: &Cx, ships: Ships) -> i32 {
+        self.ships(ships).iter().filter_map(|&id| self.u.ships.get(id)).map(|s| s.disable.emp_count).sum()
+    }
+
+    /// `kasfIsForceFieldActive`: some sentinel's field is up.
+    fn is_force_field_active(&mut self, _cx: &Cx, ships: Ships) -> i32 {
+        i32::from(self.ships(ships).iter().any(|&id| crate::ships::sentinel::field_is_up(self.u, id)))
+    }
+
+    /// `kasfIsEMPReady`: some ACV's EMP is charged.
+    fn is_emp_ready(&mut self, _cx: &Cx, ships: Ships) -> i32 {
+        i32::from(self.ships(ships).iter().any(|&id| 1.0 <= crate::ships::acv::emp_charge_fraction(self.u, id)))
+    }
+
+    /// `kasfSalvage` (0x492d60 area): the team's salvage-capable ships salvage the targets.
+    fn salvage(&mut self, cx: &Cx, ships: Ships) {
+        let sel: Vec<ShipId> = self.team_ships(cx).into_iter().filter(|&id| self.u.ships.get(id).is_some_and(|s| crate::salvage::is_salvager(s.ship_type))).collect();
+        let t = self.ships(ships);
+        if sel.is_empty() {
+            return;
+        }
+        crate::ships::cl_special(self.u, &sel, &t);
     }
 
     fn music_play(&mut self, _cx: &Cx, track_num: i32) {

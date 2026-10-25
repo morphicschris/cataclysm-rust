@@ -373,10 +373,6 @@ pub struct Ship {
     pub speed_cap: f32,
     /// Cataclysm: engine upgrade level (+0x5f8), index into the speed table (1.0 .. 1.4).
     pub speed_upgrade_level: u32,
-    /// Cataclysm: ramming state (+0x530) and push state (+0x550). Only their "inactive" value 0
-    /// is produced by this slice; the physics code keeps their branches.
-    pub ram_state: i32,
-    pub push_state: i32,
 
     // --- combat state
     /// `lasttimecollided` (+0x178): last bump collision.
@@ -446,6 +442,16 @@ pub struct Ship {
     pub flicker: crate::disable::Flicker,
     /// Beast infection of this ship (+0x4e4 and around), see [`crate::ships::beast`].
     pub beast: crate::ships::beast::Infection,
+    /// The repair droids crawling over the hull (+0x4c0), see [`crate::ships::repair_droid`].
+    pub droids: Option<Box<crate::ships::repair_droid::DroidArray>>,
+    /// Worker repair: the counts of workers that picked this ship (+0x600 / +0x604) and, for a
+    /// worker, its repair state (+0x63c..+0x67c), see [`crate::ships::worker_repair`].
+    pub worker_repair: crate::ships::worker_repair::WorkerRepairState,
+    /// `+0x2fc`: when set, the time at which `univCheckShipState` blows the ship up (a spent
+    /// gravity well, modules of a dead mothership).
+    pub death_time: f32,
+    /// `+0x394`: players whose proximity sensors have sensed the ship (bit per player).
+    pub sensed_by: u32,
 }
 
 impl Ship {
@@ -496,8 +502,6 @@ impl Ship {
             color_scheme: 0,
             speed_cap: 0.0,
             speed_upgrade_level: 0,
-            ram_state: 0,
-            push_state: 0,
             last_time_collided: 0.0,
             row_get_out_of_way: None,
             row_original_point: Vector::ZERO,
@@ -536,6 +540,10 @@ impl Ship {
             queued_attack: None,
             flicker: crate::disable::Flicker::default(),
             beast: crate::ships::beast::Infection::default(),
+            droids: None,
+            worker_repair: Default::default(),
+            death_time: 0.0,
+            sensed_by: 0,
         }
     }
 
@@ -677,6 +685,8 @@ pub struct Bullet {
     pub dist_flown: f32,
     /// +0x158: position at the start of the frame.
     pub prev_position: Vector,
+    /// +0x140: bit 0 set once a DFG field has had its go at the bullet.
+    pub dfg_flags: u32,
 }
 
 /// Bullets by slot; slots are reused (in a fixed order, so runs stay deterministic).

@@ -30,6 +30,8 @@ pub mod order {
     pub const MILITARY_PARADE: u16 = 9;
     pub const LINK: u16 = 0xb;
     pub const UNLINK: u16 = 0xc;
+    /// The Mimic disguise order (`FUN_00449520`), carried out once by `clProcess`.
+    pub const DISGUISE: u16 = 0xf;
 }
 
 /// Order attributes (`COMMAND_IS_*`).
@@ -81,6 +83,8 @@ pub struct CommandToDo {
     pub special_targets: Vec<ShipId>,
     /// Link orders: the partner ship.
     pub link_with: Option<ShipId>,
+    /// Disguise orders (+0x2e8..+0x2f4): see [`crate::ships::mimic::DisguiseOrder`].
+    pub disguise: Option<crate::ships::mimic::DisguiseOrder>,
 }
 
 /// The dock part of a command.
@@ -186,6 +190,7 @@ fn new_command(selection: Vec<ShipId>) -> CommandToDo {
         collect: CollectInfo::default(),
         special_targets: Vec::new(),
         link_with: None,
+        disguise: None,
     }
 }
 
@@ -412,6 +417,12 @@ fn remove_from_formation(cmd: &mut CommandToDo, id: ShipId) -> Option<usize> {
 /// formation); the rest get new move commands.
 pub fn cl_move(u: &mut Universe, selection: &[ShipId], mode: u32, from: Vector, waypoints: &[Vector]) {
     if selection.is_empty() || waypoints.is_empty() {
+        return;
+    }
+    // The ship types' move hooks (slot 20) may keep ships out of the order.
+    let filtered: Vec<ShipId> = selection.iter().copied().filter(|&s| u.ships.get(s).is_none() || crate::ships::move_hook(u, s)).collect();
+    let selection = &filtered[..];
+    if selection.is_empty() {
         return;
     }
     let waypoints = &waypoints[..waypoints.len().min(MAX_WAYPOINTS)];
@@ -688,6 +699,16 @@ fn majority_moving(u: &Universe, selection: &[ShipId]) -> Option<CommandId> {
 
 /// `clFormation` (0x480380): put the selection into a formation (or change its type).
 pub fn cl_formation(u: &mut Universe, selection: &[ShipId], formation_type: u32) {
+    // The ship types' formation hooks (slot 34); sentinel fields take at most 24 (wall) or 12
+    // (sphere) ships.
+    let mut filtered: Vec<ShipId> =
+        selection.iter().copied().filter(|&s| u.ships.get(s).is_none() || crate::ships::formation_changed(u, s, formation_type)).collect();
+    match formation_type {
+        10 => filtered.truncate(12),
+        9 => filtered.truncate(24),
+        _ => {}
+    }
+    let selection = &filtered[..];
     if selection.is_empty() {
         return;
     }
@@ -736,6 +757,9 @@ pub fn cl_formation(u: &mut Universe, selection: &[ShipId], formation_type: u32)
 /// `clHalt`: stop the selection where it is (the command is replaced by a halt order that
 /// ends once the ships are steady).
 pub fn cl_halt(u: &mut Universe, selection: &[ShipId]) {
+    // The ship types' halt hooks (slot 27) may keep ships out of the order.
+    let filtered: Vec<ShipId> = selection.iter().copied().filter(|&s| u.ships.get(s).is_none() || crate::ships::halt_hook(u, s)).collect();
+    let selection = &filtered[..];
     if selection.is_empty() {
         return;
     }
@@ -957,6 +981,14 @@ pub fn cl_process(u: &mut Universe) {
                 if crate::link::process_unlink_to_do(u, cid) {
                     delete_command(u, cid);
                 }
+            }
+            order::DISGUISE => {
+                crate::ships::mimic::process_disguise_to_do(u, cid);
+                delete_command(u, cid);
+            }
+            crate::ships::mothership::ORDER_BIG_GUN => {
+                crate::ships::mothership::big_gun_order(u, cid);
+                delete_command(u, cid);
             }
             order::HALT => {
                 run_passive_attack(u, cid);
@@ -1384,7 +1416,8 @@ fn attack_target_list(targets: &[ShipId]) -> Vec<ShipId> {
 
 /// Ships in `sel` that have an attack routine (`MakeShipsAttackCapable`).
 pub fn attack_capable(u: &Universe, sel: &[ShipId]) -> Vec<ShipId> {
-    sel.iter().copied().filter(|&id| crate::attack::can_attack(u, id)).collect()
+    // `MakeShipsAttackCapable` (0x50ce40): sentinels holding a field formation are left out.
+    sel.iter().copied().filter(|&id| crate::attack::can_attack(u, id) && !crate::ships::sentinel::in_sentinel_formation(u, id)).collect()
 }
 
 /// `clAttack` (0x4444b0): order `selection` to attack `targets`. Commands covered by the
@@ -1989,8 +2022,37 @@ pub fn remove_invisible_target(u: &mut Universe, gone: ShipId) {
             }
         }
         let c = u.commands.get_mut(cid).expect("command");
-        if c.order == order::SPECIAL {
-            remove_from_selection(&mut c.special_targets, gone);
+        if c.order == order::SPECIAL && remove_from_selection(&mut c.special_targets, gone) {
+            // Salvagers working on it let go (`salvShipDied`).
+            let sel = c.selection.clone();
+            for id in sel {
+                if u.ships.get(id).is_some_and(|s| s.base.salvage.target == Some(gone)) {
+                    u.ships.ship_mut(id).base.salvage.dock_point = None;
+                    crate::salvage::reset(u, id);
+                }
+            }
+        }
+    }
+    // The order cases that do not depend on visibility (flag 8 clear): ships docking with it
+    // stop docking, a launch from it is cancelled.
+    let todo = u.commands.todo.clone();
+    for cid in todo {
+        let Some(c) = u.commands.get(cid).cloned() else { continue };
+        match c.order {
+            order::DOCK => {
+                for id in c.selection {
+                    if u.ships.get(id).is_some_and(|s| s.base.dock_with == Some(gone)) {
+                        crate::dock::remove_ship_from_docking(u, id);
+                    }
+                }
+            }
+            order::LAUNCH_SHIP if c.launch_from == Some(gone) => {
+                if let Some(&first) = c.selection.first() {
+                    crate::dock::remove_ship_from_launching(u, first);
+                }
+                delete_command(u, cid);
+            }
+            _ => {}
         }
     }
 }

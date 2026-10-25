@@ -80,6 +80,10 @@ pub fn regenerate_health(u: &mut Universe, id: ShipId) {
     if !able || !(0.0 < amount) || s.special_flags2 & crate::base::special2::UNDER_CONSTRUCTION != 0 {
         return;
     }
+    if u.base.options.repair_bots && stat.ship_race == ShipRace::Somtaaw {
+        crate::ships::repair_droid::update_for_ship(u, id);
+    }
+    let s = u.ships.ship(id);
     let component = stat.ship_class == Some(crate::statics::ShipClass::Component);
     if component || (stat.health.max_health <= s.health && s.ship_type != ShipType::sMothership) {
         u.ships.ship_mut(id).base.last_regen = now;

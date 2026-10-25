@@ -72,21 +72,21 @@ pub fn set_visible(u: &mut Universe, id: ShipId, player: usize, visible: bool, q
         return;
     }
     let was = s.visible_to[player];
-    let mut v = visible;
-    if is_mimic(t) && !visible {
-        let fooled = crate::ships::mimic::is_disguised_as_player(u, id, player)
-            || crate::ships::mimic::fools_player_as_resource(u, id, player)
-            || crate::ships::mimic::fools_player_as_derelict(u, id, player);
-        v = !fooled;
-    }
     let announce = !was && visible && !quiet && match t {
         ShipType::sLeech => true,
         ShipType::bCloakedFighter | ShipType::bIonArrayFrigate | ShipType::p1IonArrayFrigate => crate::cloak::is_cloaked(u.ships.ship(id)),
         _ => crate::ships::mimic::is_disguised(u, id),
     };
-    u.ships.ship_mut(id).visible_to[player] = v;
     if announce {
         u.special_events.push(SpecialEvent::EnemyShipSighted { ship: id, player });
+    }
+    u.ships.ship_mut(id).visible_to[player] = visible;
+    // The disguise checks read the flag just stored (they need the ship hidden from the player).
+    if is_mimic(t) && !visible {
+        let fooled = crate::ships::mimic::is_disguised_as_player(u, id, player)
+            || crate::ships::mimic::fools_player_as_resource(u, id, player)
+            || crate::ships::mimic::fools_player_as_derelict(u, id, player);
+        u.ships.ship_mut(id).visible_to[player] = !fooled;
     }
 }
 

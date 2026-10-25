@@ -64,9 +64,14 @@ pub fn table_for(u: &Universe, kind: ResearchTableKind) -> &ResearchTable {
     }
 }
 
-/// The ship-dependency set of a type (empty, mode 0, when the table has no line for it).
+/// The ship-dependency set of a type (empty, mode 0, when the table has no line for it), with
+/// the mode `rmEnableShip` gave it (-2: disabled).
 pub fn depend_set(table: &ResearchTable, t: ShipType) -> Techs {
-    table.ship_depend.get(&t).map_or_else(Techs::default, |s| Techs::from_set(*s))
+    let mut d = table.ship_depend.get(&t).map_or_else(Techs::default, |s| Techs::from_set(*s));
+    if let Some(&mode) = table.ship_mode.get(&t) {
+        d.mode = mode;
+    }
+    d
 }
 
 /// The lab a technology is researched in (-1: any lab).
@@ -299,7 +304,16 @@ pub fn update_research(u: &mut Universe) {
         }
         let ids: Vec<u32> = u.base.players[player].topics.iter().map(|t| t.id).collect();
         for id in ids {
-            let step = if u.base.options.tutorial { 8.0 } else { 1.0 };
+            // A Beast mothership in its research damage mode researches twice as fast
+            // (`MothershipGetDamageModifier4`).
+            let beast_ms = u.base.players[player].mothership.filter(|_| u.players.get(player).is_some_and(|p| p.race == crate::statics::ShipRace::Beast));
+            let step = if u.base.options.tutorial {
+                8.0
+            } else if let Some(ms) = beast_ms {
+                f64::from(crate::ships::mothership::damage_modifier_research(u, ms))
+            } else {
+                1.0
+            };
             let p = &mut u.base.players[player];
             let Some(t) = p.topics.iter_mut().find(|t| t.id == id) else { continue };
             t.time_left = (f64::from(t.time_left) - step) as f32;

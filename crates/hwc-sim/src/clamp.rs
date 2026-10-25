@@ -115,6 +115,7 @@ pub fn update_clamped_object(u: &mut Universe, host: ShipId) {
             single_player: u.single_player,
             world_bounds: u.world_bounds,
             max_vel: u.max_velocity_context(u.ships.ship(sid)),
+            now: u.total_time_elapsed,
         };
         let tw = u.tweaks.clone();
         crate::physics::update_ship(u.ships.ship_mut(sid), stat, &tw, &ctx);

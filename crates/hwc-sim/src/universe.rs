@@ -175,6 +175,8 @@ pub struct Universe {
     pub kas_naggarok_emp: Option<i32>,
     /// The mine formations of minelayers (see [`crate::ships::minelayer`]).
     pub mine_formations: Vec<crate::ships::minelayer::MineFormation>,
+    /// Shock waves in flight and the big-gun shells they push (see [`crate::shockwave`]).
+    pub shockwaves: crate::shockwave::Shockwaves,
 }
 
 impl Universe {
@@ -220,6 +222,7 @@ impl Universe {
             multiplayer_game: false,
             kas_naggarok_emp: None,
             mine_formations: Vec::new(),
+            shockwaves: Default::default(),
         };
         crate::base::init(&mut u);
         u
@@ -295,6 +298,7 @@ impl Universe {
         if !self.universe_paused {
             crate::resource::update_all_pos_vel(self);
             self.update_all_pos_vel_ships();
+            crate::shockwave::update_all(self);
         }
         // (Effects update here.)
         crate::damage::delete_dead_ships(self);
@@ -332,6 +336,7 @@ impl Universe {
                 single_player: self.single_player,
                 world_bounds: self.world_bounds,
                 max_vel: self.max_velocity_context(ship),
+                now: self.total_time_elapsed,
             };
             let tw = &self.tweaks;
             let old = ship.posinfo.position;
@@ -428,7 +433,8 @@ impl Universe {
         if !s.ship_idle {
             let moving = cmd.is_some_and(|c| matches!(c.order, command::order::MOVE | command::order::DOCK));
             let rate = tw.check_passive_attack_whilemoving_rate;
-            if counter & rate == num & rate && zone != 0.0 && stat.is_capital_ship && moving {
+            let stealthy = crate::cloak::is_cloaked(s) || crate::ships::mimic::is_disguised(self, id);
+            if counter & rate == num & rate && zone != 0.0 && stat.is_capital_ship && moving && !stealthy {
                 let enemies = crate::tactics::enemies_within_proximity(self, id, zone);
                 crate::tactics::retaliate(self, id, enemies);
             }
@@ -444,7 +450,9 @@ impl Universe {
             }
         }
         let rate = tw.check_passive_attack_rate;
-        if counter & rate == num & rate && zone != 0.0 && s.flags & sof::SELECTABLE != 0 {
+        // Cloaked ships and disguised Mimics do not give themselves away.
+        let stealthy = crate::cloak::is_cloaked(s) || crate::ships::mimic::is_disguised(self, id);
+        if counter & rate == num & rate && zone != 0.0 && !stealthy && s.flags & sof::SELECTABLE != 0 {
             let enemies = crate::tactics::enemies_within_proximity(self, id, zone);
             crate::tactics::retaliate(self, id, enemies);
         }
