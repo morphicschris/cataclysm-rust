@@ -510,7 +510,7 @@ impl Sensors {
         if self.open.is_some() {
             return None;
         }
-        let sm = world.run.game.level.sm.clone();
+        let sm = world.level().sm.clone();
         let main = world.camera;
         let initial = self
             .initial_distance
@@ -546,7 +546,7 @@ impl Sensors {
             focus: None,
             transition: false,
         });
-        world.run.game.sensors_open = true;
+        world.run_mut().game.sensors_open = true;
         Some(SOUND_INTRO)
     }
 
@@ -660,8 +660,8 @@ impl Sensors {
                     world.camera = main;
                     world.follow_focus = true;
                     world.update_focus();
-                    world.run.game.sensors_open = false;
-                    world.run.game.sensors_kas_flag = 0;
+                    world.run_mut().game.sensors_open = false;
+                    world.run_mut().game.sensors_kas_flag = 0;
                     self.open = None;
                 }
                 return sounds;
@@ -686,6 +686,7 @@ impl Sensors {
         if pan[3] {
             dy += px(self.tweaks.cursor_pan_y);
         }
+        let size = world.level().sm.universe_size;
         let cam = &mut world.camera;
         if dx != 0 || dy != 0 {
             let look = cam.look_at - cam.eye();
@@ -693,7 +694,6 @@ impl Sensors {
                 * (self.tweaks.pan_speed_multiplier * cam.distance);
             let right = Vec3::new(fwd.y, -fwd.x, 0.0);
             o.pan_target += -(dy as f32) * fwd + dx as f32 * right;
-            let size = world.run.game.level.sm.universe_size;
             o.pan_target = clip_to_universe(o.pan_target, v3(size));
         }
         let d = (cam.look_at - o.pan_target).abs();
@@ -779,6 +779,30 @@ pub fn project_sphere(world: &World, size: (u32, u32), p: Vec3, radius: f32) -> 
 /// `primRingFade2`: a filled regular polygon of radius `r0` whose edge fades out to `r1`,
 /// with a vertex straight below the centre, alpha blended.
 pub fn ring_fade(canvas: &mut Canvas, cx: f32, cy: f32, r0: f32, r1: f32, segments: i32, c: Color) {
+    ring_fade_under(canvas, cx, cy, r0, r1, segments, c, None);
+}
+
+/// The radius inside which [`ring_fade`] fills every pixel whatever its angle (the inscribed
+/// circle of the inner polygon, with a margin so that pixels near the edge take the exact path).
+fn ring_inner_radius(r0: f32, segments: i32) -> f32 {
+    let half = TAU / segments.max(3) as f32 * 0.5;
+    r0 * half.cos() * (1.0 - 1e-4)
+}
+
+/// [`ring_fade`], leaving out the pixels a later ring fills anyway: `cover` holds, per pixel,
+/// one more than the index of the last ring whose inner circle covers it, and this is ring
+/// `index`.
+#[allow(clippy::too_many_arguments)]
+fn ring_fade_under(
+    canvas: &mut Canvas,
+    cx: f32,
+    cy: f32,
+    r0: f32,
+    r1: f32,
+    segments: i32,
+    c: Color,
+    cover: Option<(&[u16], u16)>,
+) {
     let n = segments.max(3) as f32;
     let step = TAU / n;
     let half = step * 0.5;
@@ -787,11 +811,26 @@ pub fn ring_fade(canvas: &mut Canvas, cx: f32, cy: f32, r0: f32, r1: f32, segmen
     let x1 = ((cx + r1).ceil() as i32).min(w - 1);
     let y0 = ((cy - r1).floor() as i32).max(0);
     let y1 = ((cy + r1).ceil() as i32).min(h - 1);
+    // Inside the polygon's inscribed circle every pixel is filled whatever its angle: those
+    // skip the angle work (with a margin, so pixels near the edge take the exact path and the
+    // picture is the same).
+    let inner = ring_inner_radius(r0, segments);
+    let inner2 = inner * inner;
     for y in y0..=y1 {
         let fy = y as f32 + 0.5 - cy;
         for x in x0..=x1 {
+            if let Some((cover, index)) = cover {
+                if cover[(y * w + x) as usize] > index + 1 {
+                    continue;
+                }
+            }
             let fx = x as f32 + 0.5 - cx;
-            let d = (fx * fx + fy * fy).sqrt();
+            let d2 = fx * fx + fy * fy;
+            if d2 < inner2 {
+                canvas.put(x, y, c);
+                continue;
+            }
+            let d = d2.sqrt();
             if d > r1 {
                 continue;
             }
@@ -807,6 +846,40 @@ pub fn ring_fade(canvas: &mut Canvas, cx: f32, cy: f32, r0: f32, r1: f32, segmen
                 canvas.blend(x, y, [c[0], c[1], c[2], (alpha * 255.0) as u8]);
             }
         }
+    }
+}
+
+/// Rings (`primRingFade2`) drawn in order: centre and inner radius, outer radius, segments,
+/// colour. A ring drawn later fills its inside opaquely, so what earlier rings would draw there
+/// is never seen and is not drawn (the picture is the same as drawing every ring whole).
+fn draw_rings(canvas: &mut Canvas, rings: Vec<(Circle, f32, i32, Color)>) {
+    if rings.len() >= usize::from(u16::MAX) {
+        for (c, outer, segments, col) in rings {
+            ring_fade(canvas, c.x, c.y, c.r, outer, segments, col);
+        }
+        return;
+    }
+    let (w, ht) = (canvas.width, canvas.height);
+    let mut cover = vec![0u16; (w.max(0) * ht.max(0)) as usize];
+    for (i, (c, _, segments, _)) in rings.iter().enumerate() {
+        let r = ring_inner_radius(c.r, *segments);
+        let r2 = r * r;
+        let y0 = ((c.y - r).floor() as i32).max(0);
+        let y1 = ((c.y + r).ceil() as i32).min(ht - 1);
+        let x0 = ((c.x - r).floor() as i32).max(0);
+        let x1 = ((c.x + r).ceil() as i32).min(w - 1);
+        for y in y0..=y1 {
+            let fy = y as f32 + 0.5 - c.y;
+            for x in x0..=x1 {
+                let fx = x as f32 + 0.5 - c.x;
+                if fx * fx + fy * fy < r2 {
+                    cover[(y * w + x) as usize] = i as u16 + 1;
+                }
+            }
+        }
+    }
+    for (i, (c, outer, segments, col)) in rings.into_iter().enumerate() {
+        ring_fade_under(canvas, c.x, c.y, c.r, outer, segments, col, Some((&cover, i as u16)));
     }
 }
 
@@ -977,6 +1050,7 @@ impl Sensors {
         let (bg, _) = self.background();
         let f = self.factor();
         let h = inp.size.1 as f32;
+        let mut rings = Vec::new();
         for d in &discs {
             let _ = d.id;
             let Some(c) = project_sphere(inp.world, inp.size, d.pos, d.range) else {
@@ -989,8 +1063,9 @@ impl Sensors {
             let segments = ((outer as i32) * 30 / h.max(1.0) as i32 + 8).min(30);
             let t = ((d.dist - near) / (far - near)).clamp(0.0, 1.0);
             let col = col_blend(col_blend(RANGE_FAR, RANGE_NEAR, t), bg, f);
-            ring_fade(canvas, c.x, c.y, c.r, outer, segments, col);
+            rings.push((c, outer, segments, col));
         }
+        draw_rings(canvas, rings);
     }
 
     /// `smUniverseBoundsDraw`: brackets at the universe box's corners.
@@ -1000,7 +1075,7 @@ impl Sensors {
             return;
         }
         let col = col_scale(BOUNDS_COLOR, f);
-        let s = v3(inp.world.run.game.level.sm.universe_size);
+        let s = v3(inp.world.level().sm.universe_size);
         let corner = |i: u32| {
             Vec3::new(
                 if i & 1 != 0 { s.x } else { -s.x },
@@ -1422,6 +1497,29 @@ mod tests {
         for (a, b, _) in &lines[..12] {
             assert!(((*b - *a).length() - 6.0).abs() < 1e-3);
         }
+    }
+
+    #[test]
+    fn rings_drawn_under_later_ones_are_the_same_picture() {
+        let rings: Vec<(Circle, f32, i32, Color)> = (0..12)
+            .map(|i| {
+                let f = i as f32;
+                (
+                    Circle { x: 30.0 + f * 7.3, y: 40.0 + (f * 1.7).sin() * 20.0, r: 10.0 + f * 2.1 },
+                    (10.0 + f * 2.1) * RANGE_FADE,
+                    8 + i * 2,
+                    [(20 * i) as u8, 100, 200 - (10 * i) as u8, 255],
+                )
+            })
+            .collect();
+        let mut a = Canvas::new(160, 100);
+        a.clear([5, 6, 7, 255]);
+        let mut b = a.clone();
+        for (c, outer, seg, col) in &rings {
+            ring_fade(&mut a, c.x, c.y, c.r, *outer, *seg, *col);
+        }
+        draw_rings(&mut b, rings);
+        assert!(a.pixels == b.pixels, "the covered rings changed the picture");
     }
 
     #[test]

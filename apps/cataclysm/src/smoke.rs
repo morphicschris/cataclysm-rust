@@ -120,7 +120,7 @@ impl Rig {
 fn setup() -> Option<(Rc<GameData>, Rig)> {
     let dir = PathBuf::from(std::env::var_os("HWC_GAME_DIR")?);
     let data = Rc::new(GameData::open(&dir).ok()?);
-    let (device, queue) = hwc_render::headless_device().ok()?;
+    let (device, queue) = crate::test_gpu::device()?;
     let renderer = Renderer::new(&device, &queue, hwc_render::OFFSCREEN_FORMAT);
     let read = |name: &str| {
         data.install_file(name)
@@ -198,7 +198,7 @@ fn mission_one_plays_through_the_game_path() {
     rig.render(g, "03_hyperspace_arrival");
     rig.frames(g, 140);
     assert!(
-        g.world.run.game.ships_have_arrived,
+        g.world.run().game.ships_have_arrived,
         "fleet still in hyperspace"
     );
     let ms = g.world.universe().base.players[0]
@@ -379,7 +379,7 @@ fn sensors_manager_and_pointers() {
     };
     let g = &mut *game;
     rig.frames(g, 270);
-    assert!(g.world.run.game.ships_have_arrived);
+    assert!(g.world.run().game.ships_have_arrived);
     // The fleet, without the mothership.
     let ms = g.world.universe().base.players[0]
         .mothership
@@ -585,4 +585,318 @@ fn sensors_manager_and_pointers() {
     }
     rig.frames(g, 2);
     rig.shot(g, "31_back_in_main_view");
+}
+
+/// A small deterministic generator for the stress test's input.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u32 {
+        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 33) as u32
+    }
+
+    fn below(&mut self, n: u32) -> u32 {
+        self.next() % n.max(1)
+    }
+}
+
+/// Mission 1 played for a long time through the game path with random input (clicks, band
+/// boxes, the managers, sensors, pause, Ctrl/Alt/Shift cursors, focus, speech skip), the
+/// sound engine mixing as a device would and a frame drawn every few updates. Looks for
+/// panics anywhere in the game. Slow: `HWC_STRESS_FRAMES` sets its length (default about 20
+/// minutes of game time). Run with `--ignored --release`.
+#[test]
+#[ignore]
+fn mission_one_random_play() {
+    let Some((data, mut rig)) = setup() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let total: u32 = std::env::var("HWC_STRESS_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16 * 60 * 20);
+    let seed: u64 = std::env::var("HWC_STRESS_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let mut rng = Lcg(seed);
+    let load = |rig: &mut Rig| {
+        let mut l = Loading::new(data.clone(), &rig.session, 1, 2, SIZE).expect("loading");
+        l.opening_nis = false;
+        for _ in 0..20 {
+            if let Progress::Ready(g) = l.advance(&rig.session, Some(&mut rig.renderer), DT) {
+                return g;
+            }
+        }
+        panic!("loading never finished");
+    };
+    let mut game = load(&mut rig);
+    const KEYS: [u16; 16] = [
+        0x20, 0x1b, 0x42, 0x52, 0x53, 0x4d, 0x46, 0x48, 0x50, 0x13, 0x09, 0x31, 0x32, 0x44, 0x4b,
+        0x5a,
+    ];
+    const MODS: [u16; 3] = [0x10, 0x11, 0x12];
+    let mut held: Option<u16> = None;
+    for frame in 0..total {
+        let g = &mut *game;
+        match rng.below(40) {
+            0..=9 => {
+                let (x, y) = (rng.below(SIZE.0 as u32) as i32, rng.below(SIZE.1 as u32) as i32);
+                g.input(InputEvent::MouseMove { x, y }, &mut rig.audio);
+            }
+            10..=12 => {
+                let left = rng.below(4) != 0;
+                g.input(InputEvent::MouseButton { left, down: true }, &mut rig.audio);
+                g.input(InputEvent::MouseButton { left, down: false }, &mut rig.audio);
+            }
+            13 => {
+                let a = (rng.below(SIZE.0 as u32) as i32, rng.below(SIZE.1 as u32) as i32);
+                let b = (rng.below(SIZE.0 as u32) as i32, rng.below(SIZE.1 as u32) as i32);
+                g.input(InputEvent::MouseMove { x: a.0, y: a.1 }, &mut rig.audio);
+                g.input(InputEvent::MouseButton { left: true, down: true }, &mut rig.audio);
+                g.input(InputEvent::MouseMove { x: b.0, y: b.1 }, &mut rig.audio);
+                g.input(InputEvent::MouseButton { left: true, down: false }, &mut rig.audio);
+            }
+            14 => {
+                let k = KEYS[rng.below(KEYS.len() as u32) as usize];
+                g.input(InputEvent::KeyDown(k), &mut rig.audio);
+                g.input(InputEvent::KeyUp(k), &mut rig.audio);
+            }
+            15 => match held.take() {
+                Some(m) => g.input(InputEvent::KeyUp(m), &mut rig.audio),
+                None => {
+                    let m = MODS[rng.below(3) as usize];
+                    g.input(InputEvent::KeyDown(m), &mut rig.audio);
+                    held = Some(m);
+                }
+            },
+            16 => {
+                // Right-drag: camera rotation.
+                g.input(InputEvent::MouseButton { left: false, down: true }, &mut rig.audio);
+                let (x, y) = (rng.below(SIZE.0 as u32) as i32, rng.below(SIZE.1 as u32) as i32);
+                g.input(InputEvent::MouseMove { x, y }, &mut rig.audio);
+                g.input(InputEvent::MouseButton { left: false, down: false }, &mut rig.audio);
+            }
+            _ => {}
+        }
+        let out = g.update(DT, &mut rig.audio);
+        if let Some(a) = rig.audio.as_mut() {
+            a.pump(6);
+        }
+        if frame % 4 == 0 {
+            g.render(&mut rig.renderer, SIZE).expect("render");
+            g.draw_cursor();
+        }
+        let mut reload = false;
+        for o in out {
+            match o {
+                crate::game::Outcome::Animatic(_) => g.movie_finished(),
+                crate::game::Outcome::ApplyOptions => {}
+                _ => reload = true,
+            }
+        }
+        if frame % (16 * 60) == 0 {
+            eprintln!(
+                "stress: frame {frame}, update {}, {} ships",
+                g.world.universe().update_counter,
+                g.world.universe().ship_list.len()
+            );
+        }
+        if reload {
+            eprintln!("stress: mission left at frame {frame}; starting again");
+            game = load(&mut rig);
+        }
+    }
+}
+
+/// Mission 1 played by the simulation's autoplay (the fleet arrives, builds, harvests and
+/// fights the Taiidan raiders in the asteroid field) through the game path with every frame
+/// drawn, the camera kept on the fighting, effects and sounds live and the mixer pumped as a
+/// device would. Looks for panics in combat: hits on ships and asteroids, explosions, hulks,
+/// asteroid break-up and many sounds at once. `HWC_STRESS_FRAMES` sets its length. Run with
+/// `--ignored --release`.
+#[test]
+#[ignore]
+fn mission_one_autoplay_combat() {
+    let Some((data, mut rig)) = setup() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let total: u32 = std::env::var("HWC_STRESS_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16 * 60 * 15);
+    // `HWC_STRESS_SIZE` (WxH): the picture size.
+    let size = std::env::var("HWC_STRESS_SIZE")
+        .ok()
+        .and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        })
+        .unwrap_or(SIZE);
+    let mut slowest = 0.0f64;
+    // `HWC_RENDER_FROM`: draw only from this frame on (the simulation runs the same).
+    let render_from: u32 = std::env::var("HWC_RENDER_FROM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut l = Loading::new(data.clone(), &rig.session, 1, 2, SIZE).expect("loading");
+    l.opening_nis = false;
+    let mut game = loop {
+        if let Progress::Ready(g) = l.advance(&rig.session, Some(&mut rig.renderer), DT) {
+            break g;
+        }
+    };
+    let g = &mut *game;
+    let mut play = hwc_sim::autoplay::Autoplay::new(16 * 60 * 30);
+    let mut rng = Lcg(7);
+    let (mut most_fx, mut most_ships) = (0usize, 0usize);
+    for frame in 0..total {
+        if g.nis.is_none() {
+            play.tick(g.world.run_mut());
+        }
+        // Every few seconds the camera goes to a ship that is being shot at.
+        if frame % 48 == 0 && g.nis.is_none() {
+            let u = g.world.universe();
+            let fighting: Vec<_> = u
+                .ship_list
+                .iter()
+                .copied()
+                .filter(|&id| u.ship(id).is_some_and(|s| s.recently_attacked != 0))
+                .collect();
+            if !fighting.is_empty() {
+                let id = fighting[rng.below(fighting.len() as u32) as usize];
+                let p = u.ship(id).map(|s| s.posinfo.position).unwrap();
+                g.world.follow_focus = false;
+                g.world.camera.look_at = glam::Vec3::new(p.x, p.y, p.z);
+                g.world.camera.distance = 2000.0 + rng.below(6000) as f32;
+            }
+        }
+        let (x, y) = (rng.below(SIZE.0 as u32) as i32, rng.below(SIZE.1 as u32) as i32);
+        g.input(InputEvent::MouseMove { x, y }, &mut rig.audio);
+        let out = g.update(DT, &mut rig.audio);
+        for o in out {
+            match o {
+                crate::game::Outcome::Animatic(_) => g.movie_finished(),
+                crate::game::Outcome::ApplyOptions => {}
+                o => {
+                    eprintln!("combat: {o:?} at frame {frame}");
+                }
+            }
+        }
+        if let Some(a) = rig.audio.as_mut() {
+            a.pump(6);
+        }
+        if frame >= render_from {
+            let t = std::time::Instant::now();
+            g.render(&mut rig.renderer, size).expect("render");
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            slowest = slowest.max(ms);
+            if ms > 120.0 {
+                let h = crate::draw_check::history();
+                eprintln!("slow frame {frame}: {ms:.0} ms; {}", h.lines().last().unwrap_or(""));
+            }
+        }
+        let u = g.world.universe();
+        let fx = u.effects.as_ref().map_or(0, |e| e.world.effects.len());
+        most_fx = most_fx.max(fx);
+        most_ships = most_ships.max(u.ship_list.len());
+        if frame % (16 * 30) == 0 {
+            crate::crash::gpu_report(rig.renderer.device());
+            eprintln!(
+                "combat: frame {frame}, update {}, {} ships, {} effects, {} resources",
+                u.update_counter,
+                u.ship_list.len(),
+                fx,
+                u.base.resources.list.len()
+            );
+        }
+        if g.world.mission_run().is_some_and(|r| r.mission_complete() || r.game.mission_failed) {
+            eprintln!("combat: mission over at frame {frame}");
+            break;
+        }
+    }
+    eprintln!("combat: at most {most_fx} effects and {most_ships} ships; slowest frame {slowest:.0} ms");
+}
+
+
+/// Hot-key groups: Ctrl+1 makes the selection group 1, 1 selects it again.
+#[test]
+fn hot_key_groups() {
+    let Some((data, mut rig)) = setup() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut loading = Loading::new(data.clone(), &rig.session, 1, 2, SIZE).expect("loading");
+    loading.opening_nis = false;
+    loading.loader.play_nislets = false;
+    let mut game = loop {
+        if let Progress::Ready(g) = loading.advance(&rig.session, Some(&mut rig.renderer), DT) {
+            break g;
+        }
+    };
+    let g = &mut *game;
+    rig.frames(g, 260);
+    rig.drag(g, (2, 2), (SIZE.0 - 3, SIZE.1 - 3));
+    let fleet = g.selection.clone();
+    assert!(!fleet.is_empty(), "nothing selected");
+    rig.input(g, InputEvent::KeyDown(0x11));
+    rig.key(g, 0x31);
+    rig.input(g, InputEvent::KeyUp(0x11));
+    rig.frame(g);
+    // Clicking empty space clears the selection.
+    rig.click(g, 3, SIZE.1 / 2, true);
+    rig.settle(g);
+    g.selection.clear();
+    rig.key(g, 0x31);
+    let mut got = g.selection.clone();
+    let mut want = fleet.clone();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want, "1 did not select group 1");
+}
+
+/// Frame times of the sensors manager in Mission 1 (printed; `--ignored`).
+#[test]
+#[ignore]
+fn sensors_frame_times() {
+    let Some((data, mut rig)) = setup() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let size = (1600, 900);
+    let mut loading = Loading::new(data.clone(), &rig.session, 1, 2, size).expect("loading");
+    loading.opening_nis = false;
+    loading.loader.play_nislets = false;
+    let mut game = loop {
+        if let Progress::Ready(g) = loading.advance(&rig.session, Some(&mut rig.renderer), DT) {
+            break g;
+        }
+    };
+    let g = &mut *game;
+    rig.frames(g, 16 * 30);
+    let time = |g: &mut Game, rig: &mut Rig, n: usize| {
+        let mut v = Vec::new();
+        for _ in 0..n {
+            let t = std::time::Instant::now();
+            g.update(DT, &mut rig.audio);
+            let u = t.elapsed();
+            g.render(&mut rig.renderer, size).expect("render");
+            v.push((u, t.elapsed()));
+        }
+        let total: Vec<f64> = v.iter().map(|x| x.1.as_secs_f64() * 1e3).collect();
+        let upd: f64 = v.iter().map(|x| x.0.as_secs_f64() * 1e3).sum::<f64>() / n as f64;
+        let mean = total.iter().sum::<f64>() / n as f64;
+        let max = total.iter().cloned().fold(0.0, f64::max);
+        (upd, mean, max)
+    };
+    let main = time(g, &mut rig, 64);
+    rig.key(g, 0x20);
+    rig.frames(g, 40);
+    assert!(g.sensors.is_open(), "sensors did not open");
+    let sensors = time(g, &mut rig, 64);
+    eprintln!("main view: update {:.1} ms, frame {:.1} ms (max {:.1})", main.0, main.1, main.2);
+    eprintln!("sensors:   update {:.1} ms, frame {:.1} ms (max {:.1})", sensors.0, sensors.1, sensors.2);
 }

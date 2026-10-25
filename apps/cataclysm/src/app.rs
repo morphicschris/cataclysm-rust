@@ -102,8 +102,12 @@ struct App {
     movie_volumes: Option<hwc_audio::system::Volumes>,
     /// `--rollcall-below-subtitles`.
     rollcall_below_band: bool,
+    /// How the movies (intro and animatics, with their subtitles) fill the window.
+    movie_scale: ScaleMode,
     /// `--debug-keys`.
     debug_keys: bool,
+    /// `--autoplay`: the simulation's test player plays each mission.
+    autoplay: bool,
 }
 
 pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), String> {
@@ -161,7 +165,11 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         game_movie: false,
         movie_volumes: None,
         rollcall_below_band: args.rollcall_below_band,
+        // User request: movies stretch to the window unless `--scale` says otherwise (the
+        // original draws them unscaled).
+        movie_scale: if args.scale_given { args.scale } else { ScaleMode::Stretch },
         debug_keys: args.debug_keys,
+        autoplay: args.autoplay,
     };
     if app.intro.is_none() {
         app.front_end_start();
@@ -178,7 +186,10 @@ impl Gpu {
             .create_surface(window.clone())
             .map_err(|e| format!("surface: {e}"))?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
+            // The game's 3D view wants the faster GPU when there are two (`WGPU_POWER_PREF`
+            // = low or high chooses); the integrated one also shares memory with the desktop.
+            power_preference: wgpu::PowerPreference::from_env()
+                .unwrap_or(wgpu::PowerPreference::HighPerformance),
             compatible_surface: Some(&surface),
             ..Default::default()
         }))
@@ -186,6 +197,28 @@ impl Gpu {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                 .map_err(|e| format!("no GPU device: {e}"))?;
+        let info = adapter.get_info();
+        eprintln!(
+            "cataclysm: GPU {} ({:?}, driver {} {})",
+            info.name, info.backend, info.driver, info.driver_info
+        );
+        // GPU errors and a lost device go to the crash log instead of passing unseen.
+        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| {
+            crate::crash::log(&format!("wgpu error: {e}"));
+        }));
+        device.set_device_lost_callback(|reason, message| {
+            // Dropping the device at exit reports `Destroyed`.
+            if reason != wgpu::DeviceLostReason::Destroyed {
+                crate::crash::set_gpu_lost();
+                crate::crash::log(&format!(
+                    "wgpu device lost ({reason:?}): {message}
+
+the last frames drawn:
+{}",
+                    crate::draw_check::history()
+                ));
+            }
+        });
         let size = window.inner_size();
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
@@ -259,6 +292,35 @@ fn exclusive_mode(window: &Window, size: (u32, u32)) -> Option<Fullscreen> {
             )
         })
         .map(Fullscreen::Exclusive)
+}
+
+/// Engine key code (a Windows virtual-key code, as the original reads) for a key event. The
+/// digit keys come from their place on the keyboard, as virtual-key codes do: with Ctrl or
+/// Shift held the character they type is no digit (Ctrl+1 types nothing, Shift+1 a `!`), which
+/// lost the hot-key groups. Other keys are read without the modifiers' effect.
+fn event_code(event: &winit::event::KeyEvent) -> Option<u16> {
+    use winit::keyboard::{KeyCode, PhysicalKey};
+    use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+    if let PhysicalKey::Code(c) = event.physical_key {
+        let digit = [
+            KeyCode::Digit0,
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
+            KeyCode::Digit9,
+        ]
+        .iter()
+        .position(|&d| d == c);
+        if let Some(n) = digit {
+            return Some(0x30 + n as u16);
+        }
+    }
+    key_code(&event.key_without_modifiers())
 }
 
 /// Engine key code for a winit key.
@@ -356,9 +418,13 @@ impl App {
     /// loading screen of the next mission), or after the last one the game ends.
     fn next_mission(&mut self) {
         let Some(g) = self.game.take() else { return };
-        let run = &g.world.run;
+        let run = g.world.run();
         let (mission, skill) = (run.game.config.mission, run.game.config.skill);
         let carry = run.carry();
+        // `singlePlayerStartNis` reads these from the mission that has just ended.
+        let centre = run
+            .var(None, "G_NisCentreDerelict")
+            .map(|t| (t, run.var(None, "G_NisCentreInstance")));
         drop(g);
         let next = mission + 1;
         let carry = match carry {
@@ -373,9 +439,29 @@ impl App {
         }
         let size = self.session.placement.canvas;
         match Loading::new(self.data.clone(), &self.session, next, skill, size) {
-            Ok(l) => self.loading = Some(Box::new(l.with_carry(carry))),
+            Ok(l) => self.loading = Some(Box::new(l.with_carry(carry, centre))),
             Err(e) => {
                 eprintln!("cataclysm: cannot start mission {next}: {e}");
+                self.back_to_menu();
+            }
+        }
+    }
+
+    /// The NIS level's NIS has stopped: the mission loads from it behind a loading screen
+    /// of its own (`singlePlayerNisStoppedCB` -> `singlePlayerLoadNewLevel(0, 0)`).
+    fn after_nis_level(&mut self) {
+        let Some(g) = self.game.take() else { return };
+        let skill = g.world.skill();
+        let crate::world::Sim::NisLevel(nis) = g.world.into_sim() else {
+            self.back_to_menu();
+            return;
+        };
+        let size = self.session.placement.canvas;
+        let mission = nis.mission;
+        match Loading::after_nis_level(self.data.clone(), &self.session, *nis, skill, size) {
+            Ok(l) => self.loading = Some(Box::new(l)),
+            Err(e) => {
+                eprintln!("cataclysm: cannot start mission {mission}: {e}");
                 self.back_to_menu();
             }
         }
@@ -455,13 +541,16 @@ impl App {
                 Progress::Ready(mut game) => {
                     self.loading = None;
                     game.debug_keys |= self.debug_keys;
+                    if self.autoplay {
+                        game.autoplay = Some(hwc_sim::autoplay::Autoplay::new(16 * 60 * 30));
+                    }
                     game.rollcall_below_band = self.rollcall_below_band;
                     if let Some(a) = &mut self.audio {
                         a.stop_music(0.0);
                         a.set_in_game(true);
                     }
                     // `singlePlayerPostInit`: a new game shows Animatic01 before the opening.
-                    let new_game = game.world.run.game.config.mission == 1 && game.has_queued_nis();
+                    let new_game = game.world.mission() == 1 && game.has_queued_nis();
                     self.game = Some(game);
                     if new_game {
                         self.play_animatic(1);
@@ -481,6 +570,7 @@ impl App {
         let mut restart = false;
         let mut animatic = None;
         let mut next = false;
+        let mut nis_level_done = false;
         for o in g.update(dt, &mut self.audio) {
             match o {
                 game::Outcome::Leave => leave = true,
@@ -492,7 +582,12 @@ impl App {
                 }
                 game::Outcome::Animatic(n) => animatic = Some(n),
                 game::Outcome::NextMission => next = true,
+                game::Outcome::NisLevelDone => nis_level_done = true,
             }
+        }
+        if nis_level_done {
+            self.after_nis_level();
+            return Ok(true);
         }
         if let Some(n) = animatic {
             if !self.play_animatic(n) {
@@ -510,10 +605,7 @@ impl App {
             return Ok(true);
         };
         if leave || restart {
-            let (mission, difficulty) = (
-                g.world.run.game.config.mission,
-                g.world.run.game.config.skill,
-            );
+            let (mission, difficulty) = (g.world.mission(), g.world.skill());
             self.back_to_menu();
             if restart {
                 self.start_loading(mission, difficulty);
@@ -566,7 +658,7 @@ impl App {
                 }
                 Cue::Script(action) => {
                     let (subs, mission) = match self.game.as_mut() {
-                        Some(g) => (g.subtitles.as_mut(), g.world.run.game.config.mission),
+                        Some(g) => (g.subtitles.as_mut(), g.world.mission()),
                         None => (None, 0),
                     };
                     crate::movie_script::present(action, &mut self.audio, subs, mission);
@@ -595,6 +687,14 @@ impl App {
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
+        // A lost device (a driver reset) cannot draw again: the game stops with a message
+        // rather than failing in the next GPU call.
+        if crate::crash::gpu_lost() {
+            return Err(format!(
+                "the graphics device was lost (the driver reset the GPU); details are in {}",
+                crate::crash::LOG_NAME
+            ));
+        }
         let now = Instant::now();
         let dt = (now - self.last).as_secs_f32().min(0.25);
         self.last = now;
@@ -624,6 +724,16 @@ impl App {
         if self.intro.is_none() && (self.loading.is_some() || self.game.is_some()) {
             self.game_frame(dt)?;
             self.frames += 1;
+            // The draw counts of the last frames, on disk in case a GPU reset ends the process.
+            if self.frames.is_multiple_of(8) {
+                crate::draw_check::write_history();
+            }
+            // Development (`HWC_GPU_REPORT`): the GPU allocations every 600 frames.
+            if self.frames.is_multiple_of(600) && std::env::var_os("HWC_GPU_REPORT").is_some() {
+                if let Some(gpu) = &self.gpu {
+                    crate::crash::gpu_report(&gpu.device);
+                }
+            }
             if self
                 .exit_after
                 .is_some_and(|t| self.started.elapsed().as_secs_f32() >= t)
@@ -672,7 +782,7 @@ impl App {
                 let s = gpu.window.inner_size();
                 let placement = intro.render(
                     &mut self.movie_canvas,
-                    self.session.scale,
+                    self.movie_scale,
                     (s.width, s.height),
                 );
                 if let (Some(t), true) = (intro.script_clock(), self.game_movie) {
@@ -830,6 +940,7 @@ impl ApplicationHandler for App {
                                 ScaleMode::Stretch => ScaleMode::Original,
                             };
                             self.session.set_scale(next);
+                            self.movie_scale = next;
                             eprintln!("cataclysm: scaling {next:?}");
                             return;
                         }
@@ -849,7 +960,7 @@ impl ApplicationHandler for App {
                     return;
                 }
                 if let Some(g) = &mut self.game {
-                    if let Some(code) = key_code(&event.logical_key) {
+                    if let Some(code) = event_code(&event) {
                         g.input(
                             if down {
                                 InputEvent::KeyDown(code)
@@ -869,7 +980,7 @@ impl ApplicationHandler for App {
                     return;
                 }
                 if let Some(p) = &mut self.preview {
-                    if let Some(code) = key_code(&event.logical_key) {
+                    if let Some(code) = event_code(&event) {
                         p.input(if down {
                             InputEvent::KeyDown(code)
                         } else {
@@ -885,7 +996,7 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
-                if let Some(code) = key_code(&event.logical_key) {
+                if let Some(code) = event_code(&event) {
                     if down {
                         if !event.repeat {
                             self.session.key_down(code);

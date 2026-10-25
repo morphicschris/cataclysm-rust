@@ -7,7 +7,9 @@ mod app;
 mod audio;
 #[cfg(test)]
 mod campaign_shots;
+mod crash;
 mod data;
+mod draw_check;
 mod game;
 mod host;
 mod intro;
@@ -25,6 +27,8 @@ mod sensors;
 mod smoke;
 #[cfg(test)]
 mod speech;
+#[cfg(test)]
+mod test_gpu;
 mod tour;
 mod world;
 
@@ -50,7 +54,9 @@ options:
   --skip-intro          start at the main menu (the original's hidden /disableAVI)
   --scale <mode>        original (default: 1:1 and centred, like the engine), fit
                         (aspect-correct scaling), integer (whole-number scaling), stretch;
-                        also applies to the movies
+                        also applies to the movies, which otherwise stretch to fill
+                        the window (a user-requested change: the original shows them
+                        unscaled)
   --filter <f>          nearest (default) or linear, when the picture is scaled
   --size <WxH>          window size (default: the configured resolution)
   --config <file>       options file (default: <data>/config/hwc-options.cfg, or
@@ -65,6 +71,8 @@ options:
                         retail game): C forces the jump to the next mission
   --ingame-preview      starting a game opens the in-game interface (managers, overlay,
                         menus, keys) on a stand-in fleet instead of returning to the menu
+  --autoplay            (development) the simulation's test player plays the missions:
+                        builds, harvests, fights and jumps when the mission allows
   --rollcall-below-subtitles
                         open the hyperspace roll call below the speech band (the original
                         keeps it in the top-left corner, under the band and portrait)
@@ -77,6 +85,8 @@ keys: Escape (released) stops the movie playing; F11 toggles borderless full scr
 pub struct Args {
     pub data: Option<PathBuf>,
     pub scale: ScaleMode,
+    /// `--scale` was given (it then applies to the movies too).
+    pub scale_given: bool,
     pub linear: bool,
     pub size: Option<(u32, u32)>,
     pub config: Option<PathBuf>,
@@ -89,12 +99,14 @@ pub struct Args {
     pub mission: Option<u32>,
     pub debug_keys: bool,
     pub rollcall_below_band: bool,
+    pub autoplay: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args {
         data: None,
         scale: ScaleMode::Original,
+        scale_given: false,
         linear: false,
         size: None,
         config: None,
@@ -107,6 +119,7 @@ fn parse_args() -> Result<Args, String> {
         mission: None,
         debug_keys: false,
         rollcall_below_band: false,
+        autoplay: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -135,6 +148,7 @@ fn parse_args() -> Result<Args, String> {
             "--no-sound" => a.sound = false,
             "--ingame-preview" => a.ingame_preview = true,
             "--debug-keys" => a.debug_keys = true,
+            "--autoplay" => a.autoplay = true,
             "--rollcall-below-subtitles" => a.rollcall_below_band = true,
             "--mission" => {
                 a.mission = Some(value("--mission")?.parse().map_err(|_| "bad --mission")?)
@@ -142,6 +156,7 @@ fn parse_args() -> Result<Args, String> {
             "--scale" => {
                 let v = value("--scale")?;
                 a.scale = ScaleMode::parse(&v).ok_or_else(|| format!("unknown scale mode {v}"))?;
+                a.scale_given = true;
             }
             "--filter" => a.linear = value("--filter")?.eq_ignore_ascii_case("linear"),
             "--size" => {
@@ -213,6 +228,7 @@ fn open_session(args: &Args, data: Rc<GameData>) -> Result<Session, String> {
 }
 
 fn main() -> ExitCode {
+    crash::install();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -241,7 +257,8 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("cataclysm: {e}");
+            // Every way out on an error goes into the crash log too.
+            crash::log(&format!("the game stopped: {e}"));
             ExitCode::FAILURE
         }
     }

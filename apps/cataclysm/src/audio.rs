@@ -57,6 +57,16 @@ pub fn slider_level(value: i32) -> f32 {
 }
 
 impl Audio {
+    /// Mixes `blocks` blocks as the output device would (tests without a device).
+    #[cfg(test)]
+    pub fn pump(&mut self, blocks: usize) {
+        let mut out = [0i16; 2 * hwc_audio::codec::BLOCK_FRAMES];
+        let mut m = self.system.mixer();
+        for _ in 0..blocks {
+            m.process_block(&mut out);
+        }
+    }
+
     /// Loads the sound data and opens the default output device (`play` false: no device, for
     /// the screenshot tour and tests).
     pub fn open(game: GameData, play: bool) -> Result<Audio, String> {

@@ -28,9 +28,14 @@ fn save(canvas: &Canvas, name: &str) {
 }
 
 fn start() -> Option<(Box<Game>, Renderer, Option<crate::audio::Audio>)> {
+    start_with(false)
+}
+
+/// Mission 1 without its opening NIS; `nislets` plays the NISlets the mission asks for.
+fn start_with(nislets: bool) -> Option<(Box<Game>, Renderer, Option<crate::audio::Audio>)> {
     let dir = PathBuf::from(std::env::var_os("HWC_GAME_DIR")?);
     let data = Rc::new(GameData::open(&dir).ok()?);
-    let (device, queue) = hwc_render::headless_device().ok()?;
+    let (device, queue) = crate::test_gpu::device()?;
     let mut renderer = Renderer::new(&device, &queue, hwc_render::OFFSCREEN_FORMAT);
     let read = |name: &str| {
         data.install_file(name)
@@ -57,7 +62,7 @@ fn start() -> Option<(Box<Game>, Renderer, Option<crate::audio::Audio>)> {
         .ok();
     let mut loading = Loading::new(data, &session, 1, 2, SIZE).ok()?;
     loading.opening_nis = false;
-    loading.loader.play_nislets = false;
+    loading.loader.play_nislets = nislets;
     for _ in 0..20 {
         match loading.advance(&session, Some(&mut renderer), DT) {
             Progress::Working => {}
@@ -104,7 +109,7 @@ fn mission_one_speech_and_letterbox() {
         let out = g.update(DT, &mut audio);
         assert!(out.is_empty(), "unexpected outcome {out:?}");
         frames += 1;
-        if g.world.run.game.intel_ended {
+        if g.world.run().game.intel_ended {
             ended += 1;
         }
         let cards = letterbox_cards(g);
@@ -154,7 +159,7 @@ fn mission_one_speech_and_letterbox() {
         s.update(now);
     }
     g.ui.fleet_intel = true;
-    g.world.run.game.sensors_kas_flag = 1;
+    g.world.run_mut().game.sensors_kas_flag = 1;
     g.input(InputEvent::KeyDown(0x1b), &mut audio);
     g.update(DT, &mut audio);
     g.input(InputEvent::KeyUp(0x1b), &mut audio);
@@ -198,7 +203,7 @@ fn mission_one_effects() {
         most = most.max(live);
         let arriving = g
             .world
-            .run
+            .run()
             .game
             .arriving
             .iter()
@@ -225,4 +230,110 @@ fn mission_one_effects() {
     }
     eprintln!("frames {frames}: hyperspace shot {hyper}, combat shots {shots}, most live effects {most}");
     assert!(most > 0, "no effects ever ran");
+}
+
+/// Mission 1's scripted opening with its NISlet and the fleet-intel event that shows the
+/// proximity sensors in the sensors manager: afterwards the letterbox goes and the controls
+/// come back. A timeline of the presentation state is printed.
+#[test]
+fn mission_one_intro_hands_over_control() {
+    let Some((mut game, _r, mut audio)) = start_with(true) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let g = &mut *game;
+    let mut last = String::new();
+    let mut sensors_seen = false;
+    let mut free_at = None;
+    for frame in 0..16 * 600 {
+        let out = g.update(DT, &mut audio);
+        for o in out {
+            if let crate::game::Outcome::Animatic(_) = o {
+                g.movie_finished();
+            }
+        }
+        let run = g.world.run();
+        let state = format!(
+            "nis {:?} kas_sensors {} intel_flag {} wide {} lb_fully {} lb_fade {:.2} sensors_open {} ui_intel {} intel_ended {} sp_state {}",
+            g.nis.as_ref().map(|n| n.kind),
+            run.game.sensors_open,
+            run.game.sensors_kas_flag,
+            run.game.wide_screen,
+            g.letterbox.fully,
+            g.letterbox.fade,
+            g.sensors.is_open(),
+            g.ui.fleet_intel,
+            run.game.intel_ended,
+            run.game.sp_state,
+        );
+        if state != last {
+            eprintln!("intro {frame:5} ({:6.1}s): {state}", run.universe.total_time_elapsed);
+            last = state;
+        }
+        sensors_seen |= run.game.sensors_open;
+        let free = sensors_seen
+            && g.nis.is_none()
+            && !run.game.sensors_open
+            && !g.letterbox.fully
+            && !g.letterbox.active()
+            && !g.ui.fleet_intel;
+        if free {
+            free_at = Some(frame);
+            break;
+        }
+    }
+    assert!(sensors_seen, "the intro never showed the sensors manager");
+    // The first fleet-intel event ends (`IntelEventEnded`) and its `wideScreenOut` takes the
+    // NISlet's bars away: well before the second event (about 350 s in).
+    let t = free_at.map(|f| f as f32 * DT);
+    assert!(
+        t.is_some_and(|t| t < 330.0),
+        "the letterbox stayed after the first fleet-intel event (free at {t:?})"
+    );
+}
+
+/// The Kuun-Lan coming out of hyperspace in Mission 1: the blue window (`hsEnd`) over the
+/// HyperWindow effect (`screenshots/game-effects/05_kuun_lan_arrival.png`).
+#[test]
+fn kuun_lan_arrival_window() {
+    let Some((mut game, mut r, mut audio)) = start() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let g = &mut *game;
+    let mut seen = false;
+    for _ in 0..16 * 60 {
+        g.update(DT, &mut audio);
+        let ms = g.world.universe().base.players[0].mothership;
+        let window = g
+            .world
+            .run()
+            .hyperspace_windows()
+            .into_iter()
+            .find(|&(id, state, clipt)| {
+                use hwc_render::effects::hs_state::{SLICING_INTO, SLICING_OUTOF};
+                Some(id) == ms && matches!(state, SLICING_INTO | SLICING_OUTOF) && clipt > 0.4 && clipt < 0.6
+            });
+        if let (Some((id, _, _)), Some(_)) = (window, ms) {
+            let s = g.world.universe().ship(id).unwrap();
+            let p = s.posinfo.position;
+            let heading = s.rotinfo.coordsys.col(2);
+            g.world.follow_focus = false;
+            g.world.camera.look_at = glam::Vec3::new(p.x, p.y, p.z);
+            g.world.camera.distance = 5000.0;
+            // From the side, a little ahead.
+            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/game-effects");
+            std::fs::create_dir_all(&dir).expect("screenshot dir");
+            for k in 0..4 {
+                g.world.camera.angle = heading.y.atan2(heading.x) + 0.6 + k as f32 * std::f32::consts::FRAC_PI_2;
+                g.world.camera.declination = -0.3;
+                g.render(&mut r, SIZE).expect("render");
+                let name = if k == 0 { "05_kuun_lan_arrival.png".to_string() } else { format!("05_kuun_lan_arrival_{k}.png") };
+                g.canvas().save_png(&dir.join(name)).expect("png");
+            }
+            seen = true;
+            break;
+        }
+    }
+    assert!(seen, "the Kuun-Lan never came half out of its hyperspace window");
 }

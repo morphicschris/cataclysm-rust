@@ -7,7 +7,6 @@
 //! KAS mission.
 
 use hwc_sim::base::{lab_status, Techs, SOF_MODULE};
-use hwc_sim::mission::MissionRun;
 use hwc_sim::object::sof;
 use hwc_sim::statics::{ShipClass, ShipRace, ShipType, Technology, WeaponType};
 use hwc_sim::{construction, research, ShipId, Universe};
@@ -32,7 +31,8 @@ pub fn sim_id(id: u32) -> ShipId {
 
 /// Everything the host reads, borrowed for one call into the UI.
 pub struct SimHost<'a> {
-    pub run: &'a MissionRun,
+    /// The universe on view: the mission's, or the NIS level's before it.
+    pub world: &'a crate::world::World,
     pub strings: &'a Strings,
     pub selection: &'a [ShipId],
     pub selecting: &'a [ShipId],
@@ -49,13 +49,18 @@ pub struct SimHost<'a> {
 
 impl SimHost<'_> {
     fn u(&self) -> &Universe {
-        &self.run.universe
+        self.world.universe()
+    }
+
+    /// The mission's game state (`None` while its NIS level plays).
+    fn game(&self) -> Option<&hwc_sim::mission::Game> {
+        self.world.mission_run().map(|r| &r.game)
     }
 
     /// `spMissionEndLabelGet`: "End Mission" in the missions without a roll call, else
     /// "Hyperspace".
     pub fn mission_end_label(&self) -> String {
-        mission_end_label(self.strings, self.run.game.config.mission)
+        mission_end_label(self.strings, self.world.mission())
     }
 
     fn race(&self) -> ShipRace {
@@ -260,7 +265,7 @@ impl GameUiHost for SimHost<'_> {
             paused: self.paused,
             in_sensors: self.in_sensors,
             tutorial: false,
-            mission: self.run.game.config.mission as i32,
+            mission: self.world.mission() as i32,
         }
     }
 
@@ -518,9 +523,8 @@ impl GameUiHost for SimHost<'_> {
                         && hwc_sim::modules::is_module(s.ship_type)
                         && (s.base.clamp.as_ref().and_then(|c| c.host) == Some(ms)
                             || self
-                                .run
-                                .game
-                                .level
+                                .world
+                                .level()
                                 .clamps
                                 .iter()
                                 .any(|(m, h)| *m == id && *h == ms))
@@ -608,7 +612,7 @@ impl GameUiHost for SimHost<'_> {
         // `moObjectiveAddFirst`: the "hyperspace" objective goes to the top and shows the
         // jump's label (`spMissionEndLabelGet`).
         let mut v: Vec<Objective> = Vec::new();
-        for o in &self.run.game.objectives {
+        for o in self.game().map_or(&[][..], |g| &g.objectives) {
             let hyperspace = o.label.eq_ignore_ascii_case("hyperspace");
             let obj = Objective {
                 text: if hyperspace {
@@ -632,25 +636,21 @@ impl GameUiHost for SimHost<'_> {
 
     fn hyperspace_label(&self) -> Option<String> {
         // `singlePlayerCanHyperspaceGet`.
-        self.run
-            .game
+        self.game()?
             .hyper
             .player_can_hyperspace
             .then(|| self.mission_end_label())
     }
 
     fn roll_call(&self) -> Option<hwc_ui::ingame::host::RollCall> {
-        let h = &self.run.game.hyper;
+        let game = self.game()?;
+        let h = &game.hyper;
         let up = h.rollcall_screen
-            && self.run.game.sp_state == hwc_sim::mission::sp_state::WAITING_ROLLCALL;
-        let u = self.u();
+            && game.sp_state == hwc_sim::mission::sp_state::WAITING_ROLLCALL;
         up.then(|| hwc_ui::ingame::host::RollCall {
             docked: h.rollcall_docked,
             remaining: h.rollcall_remaining,
-            go_now_disabled: u.ship_list.iter().any(|&id| {
-                u.ship(id)
-                    .is_some_and(|s| s.player == PLAYER && s.attack.target.is_some())
-            }),
+            go_now_disabled: hwc_sim::campaign::rollcall_go_now_disabled(self.u()),
         })
     }
 
@@ -659,9 +659,8 @@ impl GameUiHost for SimHost<'_> {
     }
 
     fn fleet_intel(&self) -> String {
-        self.run
-            .game
-            .objectives
+        self.game()
+            .map_or(&[][..], |g| &g.objectives)
             .iter()
             .map(|o| o.full.clone())
             .collect::<Vec<_>>()

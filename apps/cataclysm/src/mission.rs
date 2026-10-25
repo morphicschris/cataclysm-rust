@@ -3,16 +3,16 @@
 //!
 //! Speech, location cards and music come from the mission's presentation queue
 //! (`Game::presentation`, drained after each update); a failed mission from
-//! `Game::mission_failed`. `MissionCompleted` has no host implementation yet and is read from
-//! the mission log's `Unimplemented` lines.
+//! `Game::mission_failed`, a won one from `Game::mission_completed`.
 
 use std::sync::Arc;
 
 use hwc_sim::campaign::Carry;
 use hwc_sim::level::LevelState;
 use hwc_sim::mission::{
-    load_kas_mission, mission_script_name, LogKind, MissionConfig, MissionRun, Presentation,
+    load_kas_mission, mission_script_name, MissionConfig, MissionRun, Presentation,
 };
+use hwc_sim::nis_level::NisLevelRun;
 use hwc_sim::statics::{LoadOptions, StaticWorld};
 use hwc_sim::SimTweaks;
 
@@ -36,10 +36,10 @@ pub enum Cue {
     Failed,
 }
 
-/// Reads the mission's presentation queue and log into [`Cue`]s.
+/// Reads the mission's presentation queue and end flags into [`Cue`]s.
 #[derive(Debug, Default)]
 pub struct CueReader {
-    seen: usize,
+    completed: bool,
     failed: bool,
 }
 
@@ -63,16 +63,10 @@ impl CueReader {
                 Presentation::Music { track, .. } => Cue::Music(track),
             })
             .collect();
-        let log = &run.game.log;
-        for e in &log[self.seen.min(log.len())..] {
-            if e.kind == LogKind::Unimplemented {
-                let name = e.text.split([' ', '(']).next().unwrap_or("");
-                if name == "MissionCompleted" || name == "GameEnd" {
-                    out.push(Cue::Completed);
-                }
-            }
+        if run.game.mission_completed && !self.completed {
+            self.completed = true;
+            out.push(Cue::Completed);
         }
-        self.seen = log.len();
         if run.game.mission_failed && !self.failed {
             self.failed = true;
             out.push(Cue::Failed);
@@ -141,6 +135,72 @@ impl Loader {
         self.tweaks = Some(SimTweaks::load(assets));
     }
 
+    /// The mission's KAS script and configuration.
+    fn script_and_config(
+        &self,
+        assets: &Assets,
+    ) -> Result<(hwc_kas::Mission, MissionConfig), String> {
+        let name = mission_script_name(self.mission);
+        let script = load_kas_mission(assets.data(), &name).map_err(|e| e.to_string())?;
+        let mut config = MissionConfig::new(self.mission);
+        config.skill = self.skill;
+        // The game plays the NIS and NISlets and reports their end.
+        config.hold_nis = self.play_nislets;
+        Ok((script, config))
+    }
+
+    /// The fleet coming into the mission: the one carried over, or for a mission after the
+    /// first started directly the `warp.script` fleet (none for mission 1 from the start).
+    fn take_carry(&mut self, assets: &Assets) -> Result<Option<Carry>, String> {
+        if self.mission == 1 && self.carry.is_none() {
+            return Ok(None);
+        }
+        match self.carry.take() {
+            Some(c) => Ok(Some(c)),
+            None => {
+                let statics = self.statics.clone().expect("statics");
+                let tweaks = self.tweaks.clone().expect("tweaks");
+                Carry::warp(statics, tweaks, assets, self.mission)
+                    .map(Some)
+                    .ok_or_else(|| format!("no warp fleet for mission {}", self.mission))
+            }
+        }
+    }
+
+    /// The NIS level before the mission (`singlePlayerStartNis(.., load level)`), with the
+    /// fleet waiting in hyperspace. `centre` is the mission before's `G_NisCentreDerelict` and
+    /// `G_NisCentreInstance`.
+    pub fn start_nis_level(
+        &mut self,
+        assets: &Assets,
+        centre: Option<(i32, Option<i32>)>,
+    ) -> Result<NisLevelRun, String> {
+        if !supported(self.mission) {
+            return Err(format!("mission {} is not part of the campaign", self.mission));
+        }
+        self.load_statics(assets);
+        let statics = self.statics.clone().expect("statics");
+        let tweaks = self.tweaks.clone().expect("tweaks");
+        let carry = self.take_carry(assets)?;
+        let mut run =
+            NisLevelRun::start(statics, tweaks, assets, self.mission, carry.as_ref(), centre)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("mission {} has no NIS level", self.mission))?;
+        run.universe.sp_difficulty = self.skill.max(0) as u32;
+        Ok(run)
+    }
+
+    /// The mission after its NIS level has played (`NisLevelRun::finish`: the mission's
+    /// level with the fleet the NIS level held, `G_Nis<n>Complete` set).
+    pub fn finish(&mut self, nis: NisLevelRun, assets: &Assets) -> Result<MissionRun, String> {
+        self.load_statics(assets);
+        let statics = self.statics.clone().expect("statics");
+        let tweaks = self.tweaks.clone().expect("tweaks");
+        let (script, config) = self.script_and_config(assets)?;
+        nis.finish(statics, tweaks, assets, script, config)
+            .map_err(|e| e.to_string())
+    }
+
     /// The level and the KAS script (`singlePlayerLoadNewLevel`).
     pub fn start(&mut self, assets: &Assets) -> Result<MissionRun, String> {
         if !supported(self.mission) {
@@ -149,12 +209,7 @@ impl Loader {
         self.load_statics(assets);
         let statics = self.statics.clone().expect("statics");
         let tweaks = self.tweaks.clone().expect("tweaks");
-        let name = mission_script_name(self.mission);
-        let script = load_kas_mission(assets.data(), &name).map_err(|e| e.to_string())?;
-        let mut config = MissionConfig::new(self.mission);
-        config.skill = self.skill;
-        // The game plays the NIS and NISlets and reports their end.
-        config.hold_nis = self.play_nislets;
+        let (script, config) = self.script_and_config(assets)?;
         if self.mission == 1 && self.carry.is_none() {
             return MissionRun::start(statics, tweaks, assets, script, config)
                 .map_err(|e| e.to_string());

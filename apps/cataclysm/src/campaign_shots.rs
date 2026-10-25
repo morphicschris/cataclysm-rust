@@ -42,7 +42,7 @@ struct Rig {
 fn rig() -> Option<Rig> {
     let dir = PathBuf::from(std::env::var_os("HWC_GAME_DIR")?);
     let data = Rc::new(GameData::open(&dir).ok()?);
-    let (device, queue) = hwc_render::headless_device().ok()?;
+    let (device, queue) = crate::test_gpu::device()?;
     let renderer = Renderer::new(&device, &queue, hwc_render::OFFSCREEN_FORMAT);
     let read = |name: &str| {
         data.install_file(name)
@@ -90,6 +90,17 @@ impl Rig {
             }
         }
         panic!("loading never finished");
+    }
+
+    /// The NIS level's NIS has stopped: the mission loads from it on its own loading screen.
+    fn after_nis_level(&mut self, game: Box<Game>) -> Box<Game> {
+        let skill = game.world.skill();
+        let crate::world::Sim::NisLevel(nis) = game.world.into_sim() else {
+            panic!("not an NIS level");
+        };
+        let l = Loading::after_nis_level(self.data.clone(), &self.session, *nis, skill, SIZE)
+            .expect("loading");
+        self.load(l)
     }
 
     fn loading(&self, mission: u32, nis: bool) -> Loading {
@@ -172,19 +183,19 @@ fn mission_one_to_two_with_the_forced_jump() {
     let mut game = rig.load(l);
     let g = &mut *game;
     rig.frames_until(g, 16 * 60, "the fleet arriving in mission 1", |g| {
-        g.world.run.game.ships_have_arrived && g.world.run.game.sp_state == sp_state::NONE
+        g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE
     });
     // Not offered yet: J does nothing; the debug key forces it.
-    assert!(!g.world.run.game.hyper.player_can_hyperspace);
+    assert!(!g.world.run().game.hyper.player_can_hyperspace);
     rig.key(g, 0x4a);
     rig.frame(g);
     assert_eq!(
-        g.world.run.game.sp_state,
+        g.world.run().game.sp_state,
         sp_state::NONE,
         "J jumped before the mission allowed it"
     );
     rig.key(g, 0x43);
-    assert_eq!(g.world.run.game.sp_state, sp_state::WAITING_ROLLCALL);
+    assert_eq!(g.world.run().game.sp_state, sp_state::WAITING_ROLLCALL);
     // Mission 1 has no roll call: five seconds of letterbox, then the fleet jumps.
     assert_ne!(g.ui.manager(), Some(Manager::RollCall));
     let mut whiteout_shots = 0;
@@ -194,7 +205,7 @@ fn mission_one_to_two_with_the_forced_jump() {
         let out = rig.frame(g);
         frames += 1;
         assert!(frames < 16 * 120, "the jump never finished");
-        let h = g.world.run.game.hyper.clone();
+        let h = g.world.run().game.hyper.clone();
         // The five seconds before a jump without roll call fade to black; then the whiteout
         // (opaque at its start).
         if !h.whiteout && whiteout_shots == 0 && h.fade > 0.5 {
@@ -214,21 +225,21 @@ fn mission_one_to_two_with_the_forced_jump() {
         }
     }
     assert_eq!(movie, Some(2), "Animatic02 was not asked for");
-    assert!(g.world.run.mission_complete());
-    let carry = g.world.run.carry().expect("carry");
+    assert!(g.world.run().mission_complete());
+    let carry = g.world.run().carry().expect("carry");
     assert_eq!(carry.mission, 1);
     let ships = carry.fleet.len();
     assert!(ships >= 2, "the fleet did not jump: {ships}");
     drop(game);
 
     // Mission 2: the loading screen, then the fleet arrives through its windows.
-    let l = rig.loading(2, true).with_carry(carry);
+    let l = rig.loading(2, true).with_carry(carry, None);
     let mut game = rig.load(l);
     let g = &mut *game;
-    assert_eq!(g.world.run.game.config.mission, 2);
+    assert_eq!(g.world.run().game.config.mission, 2);
     let mut window_shot = false;
     let mut frames = 0;
-    while !g.world.run.game.ships_have_arrived {
+    while !g.world.run().game.ships_have_arrived {
         let out = rig.frame(g);
         assert!(out.is_empty(), "unexpected {out:?}");
         frames += 1;
@@ -236,7 +247,7 @@ fn mission_one_to_two_with_the_forced_jump() {
         let ms = g.world.universe().base.players[0].mothership;
         let slicing = g
             .world
-            .run
+            .run()
             .hyperspace_windows()
             .iter()
             .any(|&(id, _, clipt)| Some(id) == ms && clipt > 0.3 && clipt < 0.7);
@@ -268,7 +279,7 @@ fn roll_call_below_the_band() {
     let g = &mut *game;
     g.rollcall_below_band = true;
     rig.frames_until(g, 16 * 90, "the fleet arriving in mission 3", |g| {
-        g.world.run.game.ships_have_arrived && g.world.run.game.sp_state == sp_state::NONE
+        g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE
     });
     // A render places the screen for this resolution.
     g.render(&mut rig.renderer, SIZE).expect("render");
@@ -303,7 +314,7 @@ fn mission_three_roll_call() {
     let mut game = rig.load(l);
     let g = &mut *game;
     rig.frames_until(g, 16 * 90, "the fleet arriving in mission 3", |g| {
-        g.world.run.game.ships_have_arrived && g.world.run.game.sp_state == sp_state::NONE
+        g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE
     });
     // Launch what is docked so that the roll call has ships to count.
     for _ in 0..16 * 5 {
@@ -311,7 +322,7 @@ fn mission_three_roll_call() {
     }
     rig.key(g, 0x43);
     rig.frame(g);
-    assert_eq!(g.world.run.game.sp_state, sp_state::WAITING_ROLLCALL);
+    assert_eq!(g.world.run().game.sp_state, sp_state::WAITING_ROLLCALL);
     rig.frame(g);
     assert_eq!(
         g.ui.manager(),
@@ -321,7 +332,7 @@ fn mission_three_roll_call() {
     for _ in 0..16 {
         rig.frame(g);
     }
-    let h = &g.world.run.game.hyper;
+    let h = &g.world.run().game.hyper;
     eprintln!(
         "roll call: {} docked, {} remaining",
         h.rollcall_docked, h.rollcall_remaining
@@ -353,7 +364,7 @@ fn mission_three_roll_call() {
         Some(Manager::RollCall),
         "the button did not close the roll call"
     );
-    assert!(!g.world.run.game.hyper.rollcall_screen);
+    assert!(!g.world.run().game.hyper.rollcall_screen);
     // The fleet leaves through its windows; the last ship's slice drives the whiteout.
     let mut frames = 0;
     let mut shots = 0;
@@ -362,8 +373,8 @@ fn mission_three_roll_call() {
         frames += 1;
         assert!(frames < 16 * 240, "the fleet of mission 3 never left");
         let (white, t) = (
-            g.world.run.game.hyper.whiteout,
-            g.world.run.game.hyper.whiteout_t,
+            g.world.run().game.hyper.whiteout,
+            g.world.run().game.hyper.whiteout_t,
         );
         if white && t < 0.5 && t > 0.1 && shots == 0 {
             rig.shot(g, "07b_m3_whiteout_flash");
@@ -400,7 +411,7 @@ fn mission_six_nebula() {
         "mission 6 has no nebula"
     );
     rig.frames_until(g, 16 * 90, "the fleet arriving in mission 6", |g| {
-        g.world.run.game.ships_have_arrived
+        g.world.run().game.ships_have_arrived
     });
     for _ in 0..16 * 2 {
         rig.frame(g);
@@ -439,12 +450,14 @@ fn banked_nis_camera() {
     l.loader.play_nislets = false;
     let mut game = rig.load(l);
     let g = &mut *game;
+    assert_eq!(g.world.nis_level().map(|n| n.nis), Some(2));
     rig.frame(g);
     let mut best = (0.0f32, 0u32);
+    let mut done = false;
     let mut frames = 0;
     let mut shot = false;
     while g.nis.as_ref().is_some_and(|n| n.kind.in_own_level()) {
-        rig.frame(g);
+        done |= rig.frame(g).contains(&Outcome::NisLevelDone);
         frames += 1;
         let Some(n) = g.nis.as_ref() else { break };
         let time = n.player.time;
@@ -472,13 +485,22 @@ fn banked_nis_camera() {
     }
     eprintln!("largest bank {:.1} degrees at frame {}", best.0, best.1);
     assert!(shot, "no banked camera in NIS 2");
-    // The mission level takes over and its script starts.
-    assert_eq!(g.world.run.game.config.mission, 4);
+    // The mission level loads behind its own loading screen and its script starts.
+    let mut frames = 0;
+    while !done {
+        done = rig.frame(g).contains(&Outcome::NisLevelDone);
+        frames += 1;
+        assert!(frames < 16, "the NIS level did not hand over");
+    }
+    let mut game = rig.after_nis_level(game);
+    let g = &mut *game;
+    assert_eq!(g.world.run().game.config.mission, 4);
+    assert_eq!(g.world.run().var(None, "G_Nis2Complete"), Some(1));
     for _ in 0..4 {
         rig.frame(g);
     }
     assert!(
-        g.world.run.game.sp_state != sp_state::START_KAS,
+        g.world.run().game.sp_state != sp_state::START_KAS,
         "mission 4 did not start after its NIS"
     );
     rig.shot(g, "11_m4_after_nis");

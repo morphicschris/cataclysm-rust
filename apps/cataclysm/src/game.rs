@@ -78,6 +78,9 @@ pub enum Outcome {
     /// The fleet has jumped: the next mission is due (`singlePlayerLoadNewLevel`) with
     /// `MissionRun::carry`.
     NextMission,
+    /// The NIS of the NIS level has stopped (`singlePlayerNisStoppedCB`): the mission loads
+    /// (`NisLevelRun::finish`) from the world's NIS level.
+    NisLevelDone,
 }
 
 /// What is under the pointer (`mouseCursorObjPtr`).
@@ -162,6 +165,10 @@ pub struct Game {
     bink_pending: bool,
     /// [`Outcome::NextMission`] was reported.
     next_mission: bool,
+    /// The NIS level's NIS has stopped ([`Outcome::NisLevelDone`]).
+    nis_level_done: bool,
+    /// Development (`--autoplay`): the simulation's test player gives the orders.
+    pub autoplay: Option<hwc_sim::autoplay::Autoplay>,
     /// An NIS set up on the loading screen, started on the first frame.
     queued_nis: Option<(NisRun, Vec<Fired>)>,
 }
@@ -246,7 +253,11 @@ impl Game {
             movie: false,
             bink_pending: false,
             next_mission: false,
+            nis_level_done: false,
+            autoplay: None,
         };
+        // Mission 1's start sets the flag that keeps the letterbox of its first NIS.
+        g.keep_letterbox_after_nis = g.world.mission_run().is_some_and(|r| r.game.config.mission == 1);
         g.world.lens_flares = options.get("enableLensFlare") != 0;
         let mut subs = Subtitles::load(&res, true, &g.world.team_schemes());
         if let Some(s) = subs.as_mut() {
@@ -279,7 +290,7 @@ impl Game {
         let world = &self.world;
         let pos = move |id: ShipId| Game::screen_pos(world, size, id);
         let host = SimHost {
-            run: &world.run,
+            world,
             strings: &self.strings,
             selection: &self.selection,
             selecting: &self.selecting,
@@ -303,7 +314,7 @@ impl Game {
 
     /// One input event in canvas pixels.
     pub fn input(&mut self, ev: InputEvent, audio: &mut Option<Audio>) {
-        if self.nis.is_some() {
+        if self.nis.is_some() || self.world.nis_level().is_some() {
             // The NIS locks the controls out (`mrDisable`, `mouseDisable`); Escape skips to
             // its end (`kbcbEscape` -> `nisGoToEnd`) once the letterbox is in.
             match ev {
@@ -314,7 +325,7 @@ impl Game {
             return;
         }
         if self.debug_keys && ev == InputEvent::KeyDown(DEBUG_HYPERSPACE_KEY) {
-            let r = self.world.run.force_hyperspace();
+            let r = self.world.run_mut().force_hyperspace();
             eprintln!("cataclysm: debug hyperspace: {r:?}");
             return;
         }
@@ -873,10 +884,10 @@ impl Game {
             GameRequest::Command(Command::Hyperspace) => self.hyperspace_button(),
             GameRequest::Command(c) => self.command(c, audio),
             GameRequest::HyperspaceGoNow => {
-                self.world.run.hyperspace_go_now();
+                self.world.run_mut().hyperspace_go_now();
             }
             GameRequest::EmergencyHyperspace => {
-                self.world.run.emergency_hyperspace();
+                self.world.run_mut().emergency_hyperspace();
             }
             GameRequest::AbortHyperspace => self.abort_hyperspace(),
             GameRequest::SelectType { ship_type, owner } => {
@@ -940,11 +951,11 @@ impl Game {
     /// `HyperspaceRollCallBegin`): nothing while paused or before the mission allows it; a
     /// ship under construction refuses it with a message.
     fn hyperspace_button(&mut self) {
-        if self.paused || !self.world.run.game.hyper.player_can_hyperspace {
+        if self.paused || !self.world.run().game.hyper.player_can_hyperspace {
             return;
         }
         if let Err(hwc_sim::campaign::HyperspaceRefused::ShipUnderConstruction) =
-            self.world.run.hyperspace_button()
+            self.world.run_mut().hyperspace_button()
         {
             let text = self
                 .strings
@@ -962,20 +973,10 @@ impl Game {
     }
 
     /// The roll call's "cancel docking" (`spAbortHyperspaceCB`): back to the mission, the
-    /// small ships stop docking, the jump can be started again. The auto-launch setting is
-    /// not restored (as in the original).
+    /// small ships stop docking, the jump can be started again, and the "hyperspace aborted"
+    /// speech is queued. The auto-launch setting is not restored (as in the original).
     fn abort_hyperspace(&mut self) {
-        let run = &mut self.world.run;
-        if run.game.sp_state != hwc_sim::mission::sp_state::WAITING_ROLLCALL {
-            return;
-        }
-        run.game.sp_state = hwc_sim::mission::sp_state::NONE;
-        run.game.hyper.rollcall_screen = false;
-        run.game.hyper.player_can_hyperspace = true;
-        let small = hwc_sim::campaign::non_hyperspacing_ships(&run.universe);
-        command::cl_halt(&mut run.universe, &small);
-        run.game
-            .log(hwc_sim::mission::LogKind::Flow, "hyperspace roll call: cancelled");
+        self.world.run_mut().abort_hyperspace();
     }
 
     fn job_mut(
@@ -1210,7 +1211,7 @@ impl Game {
             }
         }
         // The sensors manager: a mission opening or closing it, the zoom, panning.
-        let kas_open = self.world.run.game.sensors_open;
+        let kas_open = self.world.mission_run().is_some_and(|r| r.game.sensors_open);
         if kas_open != self.sensors.is_open() && !self.sensors.zooming() {
             if kas_open {
                 self.toggle_sensors(audio);
@@ -1237,17 +1238,24 @@ impl Game {
                     self.ships_in_box([a.0 as f32, a.1 as f32], [b.0 as f32, b.1 as f32]);
             }
         }
-        self.world.paused = (self.paused && self.nis.is_none()) || self.movie || self.next_mission;
+        self.world.paused = (self.paused && self.nis.is_none())
+            || self.movie
+            || self.next_mission
+            || self.nis_level_done;
         self.world.sensors_open = self.sensors.is_open() && self.nis.is_none();
         let steps = self.world.due_steps(f64::from(dt));
         for _ in 0..steps {
-            if self.movie || self.next_mission {
+            if self.movie || self.next_mission || self.nis_level_done {
                 break;
             }
-            let opening = self.nis.as_ref().is_some_and(|n| n.kind.in_own_level());
+            // An NIS level has no mission yet: only its universe updates.
+            let opening = self.world.nis_level().is_some();
             if opening {
                 self.world.step_universe();
             } else {
+                if let (Some(a), None) = (self.autoplay.as_mut(), &self.nis) {
+                    a.tick(self.world.run_mut());
+                }
                 self.world.step();
             }
             if let Some(a) = audio.as_mut() {
@@ -1277,10 +1285,13 @@ impl Game {
                 eye.to_array(),
                 at.to_array(),
                 !self.paused,
-                &self.world.run.universe,
+                self.world.universe(),
             );
         }
         self.update_presentation(dt, audio);
+        if self.nis_level_done {
+            out.push(Outcome::NisLevelDone);
+        }
         if let Some(End::Complete { at }) = self.end {
             if self.real_time - at > COMPLETE_TIME {
                 out.push(Outcome::Leave);
@@ -1291,8 +1302,8 @@ impl Game {
 
     /// The jump's movie and the next mission (`singlePlayerGameUpdate` state 5).
     fn campaign_step(&mut self, audio: &mut Option<Audio>, out: &mut Vec<Outcome>) {
-        let h = &self.world.run.game.hyper;
-        let mission = self.world.run.game.config.mission;
+        let h = &self.world.run().game.hyper;
+        let mission = self.world.run().game.config.mission;
         if self.bink_pending && !h.bink_pending && h.whiteout_t > 0.0 {
             // `animBinkPlay(m, m + 1)`: music and sound stop, the game waits for the movie.
             self.movie = true;
@@ -1302,7 +1313,7 @@ impl Game {
             out.push(Outcome::Animatic(mission + 1));
         }
         self.bink_pending = h.bink_pending;
-        if self.world.run.mission_complete() && !self.next_mission {
+        if self.world.run().mission_complete() && !self.next_mission {
             self.next_mission = true;
             out.push(Outcome::NextMission);
         }
@@ -1314,7 +1325,7 @@ impl Game {
     }
 
     fn after_step(&mut self, audio: &mut Option<Audio>) {
-        let u = &self.world.run.universe;
+        let u = &self.world.run().universe;
         self.selection.retain(|&id| selectable(u, id));
         for g in self.groups.values_mut() {
             g.retain(|&id| u.ship(id).is_some());
@@ -1356,7 +1367,7 @@ impl Game {
             let n = self.messages.len() - 50;
             self.messages.drain(..n);
         }
-        for cue in self.cues.poll(&mut self.world.run) {
+        for cue in self.cues.poll(self.world.run_mut()) {
             match cue {
                 Cue::Music(track) => {
                     self.music = Some(track);
@@ -1392,7 +1403,7 @@ impl Game {
         let spoken = audio
             .as_mut()
             .and_then(|a| a.mission_speech(event, variable));
-        let mission = self.world.run.game.config.mission;
+        let mission = self.world.mission();
         let actor = subtitle::actor_for_speech(0, event, true, mission);
         if let (Some(s), Some(actor), Some(subs)) = (spoken, actor, self.subtitles.as_mut()) {
             let n = s.subtitles.len().max(1) as f32;
@@ -1442,18 +1453,9 @@ impl Game {
         self.queued_nis = Some((run, fired));
     }
 
-    /// Uploads the art of the world and of the mission's world waiting behind the opening.
+    /// Uploads the art of the world.
     pub fn prepare(&mut self, renderer: &mut Renderer) {
         self.world.prepare(renderer);
-        let waiting = self
-            .queued_nis
-            .as_mut()
-            .map(|q| &mut q.0)
-            .or(self.nis.as_mut())
-            .and_then(|n| n.pending.as_mut());
-        if let Some(w) = waiting {
-            w.prepare(renderer);
-        }
     }
 
     /// Escape during an NIS: to its end, unless the letterbox is still coming in.
@@ -1486,35 +1488,37 @@ impl Game {
     /// `G_PlayNis` / `G_PlayNislet`: the request the simulation holds for the game
     /// (`MissionConfig::hold_nis`) starts playing.
     fn nis_requests(&mut self, audio: &mut Option<Audio>) {
-        let mission = self.world.run.game.config.mission;
-        let kind = match self.world.run.game.pending_nis {
+        let Some(run) = self.world.mission_run() else {
+            return;
+        };
+        let mission = run.game.config.mission;
+        let kind = match run.game.pending_nis {
             Some(hwc_sim::mission::NisRequest::Nis(n)) => NisKind::Mission(n.max(0) as u32),
             Some(hwc_sim::mission::NisRequest::Nislet(n)) => NisKind::Nislet(n.max(0) as u32),
             None => return,
         };
-        let point = self
-            .world
-            .run
+        let point = run
             .game
             .level
             .point(hwc_kas::kas_hash("StartPointPlayer"))
             .unwrap_or([0.0; 4]);
         let modules = hwc_sim::nis_support::hyperspace_ship_types_attached_to_mothership(
-            self.world.universe(),
-            &self.world.run.game.hyper.in_hyperspace,
+            &run.universe,
+            &run.game.hyper.in_hyperspace,
         );
         let assets = self.world.assets().clone();
         match nis::load(&assets, kind, mission) {
             Ok(data) => {
+                let at = nis::placement(point);
                 let (run, fired) =
-                    NisRun::start(&mut self.world, data, kind, point, mission, &modules);
+                    NisRun::start(&mut self.world, data, kind, at, mission, &modules);
                 self.world.load_new_art();
                 self.begin_nis(run, fired, audio);
             }
             Err(e) => {
                 // Without its files the NIS counts as played.
                 eprintln!("cataclysm: {e}");
-                self.world.run.nis_finished(false);
+                self.world.run_mut().nis_finished(false);
             }
         }
     }
@@ -1542,6 +1546,13 @@ impl Game {
         // The bars go when the NIS ends, unless mission 1's start asked to keep them.
         if self.keep_letterbox_after_nis {
             self.keep_letterbox_after_nis = false;
+            // The bars stay as the mission's widescreen: its next `wideScreenOut` takes them
+            // away (Mission 1 calls it when the first fleet-intel event ends, without a
+            // `wideScreenIn` of its own).
+            if let Some(r) = self.world.mission_run_mut() {
+                r.game.wide_screen = true;
+            }
+            self.wide_screen = true;
         } else {
             self.letterbox.fully = false;
         }
@@ -1552,19 +1563,11 @@ impl Game {
             self.world.lighting = l;
         }
         match run.kind {
-            NisKind::Opening | NisKind::Level(_) => {
-                if let Some(w) = run.pending.take() {
-                    self.world = w;
-                    self.wide_screen = self.world.run.game.wide_screen;
-                    // Mission 1's start sets the flag that keeps the next NIS's letterbox.
-                    if self.world.run.game.config.mission == 1 {
-                        self.keep_letterbox_after_nis = true;
-                    }
-                }
-            }
+            // `singlePlayerNisStoppedCB` + `singlePlayerLoadNewLevel`: the mission loads.
+            NisKind::Opening | NisKind::Level(_) => self.nis_level_done = true,
             // `singlePlayerNisStoppedCB`: the completion variable.
             NisKind::Nislet(_) | NisKind::Mission(_) => {
-                self.world.run.nis_finished(false);
+                self.world.run_mut().nis_finished(false);
             }
         }
     }
@@ -1729,7 +1732,10 @@ impl Game {
     /// The end of `mrRegionDraw`: the single-player fade to black (not while an NIS plays)
     /// and the hyperspace whiteout, both over the whole screen.
     fn draw_hyperspace_fades(&mut self) {
-        let h = &self.world.run.game.hyper;
+        let Some(run) = self.world.mission_run() else {
+            return;
+        };
+        let h = &run.game.hyper;
         let (w, ht) = (self.canvas.width, self.canvas.height);
         let full = Rect::new(0, 0, w, ht);
         if h.fade > 0.0 && self.nis.is_none() {
@@ -1793,7 +1799,7 @@ impl Game {
         // Over everything: the letterbox bars, then the subtitles (`rndRenderTask`).
         self.letterbox.draw(&mut self.canvas);
         if let Some(s) = self.subtitles.as_mut() {
-            let now = self.world.run.universe.total_time_elapsed;
+            let now = self.world.universe().total_time_elapsed;
             let state = subtitle::DrawState {
                 letterbox_fading: self.letterbox.fade != 0.0,
                 letterboxed: self.letterbox.fully,
@@ -1802,7 +1808,9 @@ impl Game {
             s.resize(self.canvas.width, self.canvas.height);
             s.draw(&mut self.canvas, now, None, state);
             if s.take_message_ended() != 0 {
-                self.world.run.game.intel_ended = true;
+                if let Some(run) = self.world.mission_run_mut() {
+                    run.game.intel_ended = true;
+                }
             }
             // `moSetTop`: the HUD's top panels go below a portrait (next frame's overlay).
             self.ui.subtitle_top(s.hud_top());
@@ -1861,7 +1869,7 @@ impl Game {
 
     /// The letterbox and the subtitles, once a frame after the universe updates.
     fn update_presentation(&mut self, dt: f32, audio: &mut Option<Audio>) {
-        let wide = self.world.run.game.wide_screen;
+        let wide = self.world.mission_run().is_some_and(|r| r.game.wide_screen);
         if wide != self.wide_screen {
             self.wide_screen = wide;
             if wide {
@@ -1875,7 +1883,10 @@ impl Game {
         }
         self.letterbox.update(dt);
         // Fleet intel holds the keyboard (`smFleetIntel`).
-        self.ui.fleet_intel = self.world.run.game.sensors_kas_flag != 0;
+        self.ui.fleet_intel = self
+            .world
+            .mission_run()
+            .is_some_and(|r| r.game.sensors_kas_flag != 0);
         let now = self.world.universe().total_time_elapsed;
         if let Some(s) = self.subtitles.as_mut() {
             s.update(now);

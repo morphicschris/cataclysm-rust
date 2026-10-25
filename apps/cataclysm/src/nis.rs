@@ -5,12 +5,12 @@
 //!   campaign's opening (`nis\n01.nis` in `Mission01_NIS01`, from `singlePlayerStartGame`) and
 //!   the NIS between missions (`nis\n02.nis` in `Mission04_NIS02` before mission 4, `n04` in
 //!   `Mission06_NIS04` before mission 6...: `singlePlayerStartNis` with a level of its own,
-//!   from the jump's state 5). The NIS plays at the origin of its level; when it stops the
-//!   mission level is loaded and KAS starts. Here the NIS level gets a universe and a
-//!   [`World`] of its own, built on the loading screen next to the mission's; the mission's
-//!   world waits ([`NisRun::pending`]) without updating, which holds the mission start
-//!   (`MissionRun`'s first step starts KAS) until the NIS ends. An NIS mothership gets the
-//!   modules the fleet carries into the mission.
+//!   from the jump's state 5). The NIS level is loaded on its own loading screen
+//!   (`hwc_sim::nis_level::NisLevelRun::start`, with the carried fleet in hyperspace) into a
+//!   [`World`] of its own; the NIS plays centred on the level's start point (or a centre
+//!   derelict, [`level_placement`]); when it stops, the mission is loaded on a second loading
+//!   screen (`NisLevelRun::finish`) and its KAS starts. An NIS mothership gets the modules the
+//!   fleet carries into the mission.
 //! * NISlets (`G_PlayNislet`) and mission NIS (`G_PlayNis`): the mission is started with
 //!   `MissionConfig::hold_nis`, so the request waits in `Game::pending_nis`; it is played in
 //!   the mission's universe at `StartPointPlayer`, turned by its heading, while the mission
@@ -20,17 +20,15 @@
 //! While an NIS plays the mouse and keys do nothing except Escape, which skips to its end once
 //! the letterbox is in (`kbcbEscape` -> `nisGoToEnd`).
 
-use std::sync::Arc;
-
 use glam::Vec3;
 use hwc_math::{Matrix, Vector};
 use hwc_nis::data::Category;
 use hwc_nis::{Fired, NisData, NisPlayer, Stage};
 use hwc_render::lighting::Light;
-use hwc_sim::level::{self, LevelContext, LevelState, ResourceTweaks};
-use hwc_sim::mission::MissionRun;
-use hwc_sim::statics::{ShipRace, StaticWorld};
-use hwc_sim::{SimTweaks, Universe};
+use hwc_sim::level::LevelState;
+use hwc_sim::nis_level::{NisLevelRun, NisPlacement};
+use hwc_sim::statics::{DerelictType, ShipType};
+use hwc_sim::Universe;
 
 use crate::data::Assets;
 use crate::world::World;
@@ -60,8 +58,6 @@ pub struct NisRun {
     pub kind: Kind,
     pub player: NisPlayer,
     pub stage: Stage,
-    /// The mission's world while the opening plays in the NIS level's.
-    pub pending: Option<World>,
     /// Volumes when the NIS started (restored when it stops).
     pub volumes: Option<hwc_audio::system::Volumes>,
     /// The game camera and lighting while a NISlet or mission NIS plays in the mission's
@@ -85,9 +81,14 @@ pub fn files(kind: Kind, mission: u32) -> Option<(String, String)> {
 /// Reads and loads an NIS.
 pub fn load(assets: &Assets, kind: Kind, mission: u32) -> Result<NisData, String> {
     let (nis, script) = files(kind, mission).ok_or_else(|| format!("no NIS for {kind:?} in mission {mission}"))?;
+    load_files(assets, &nis, &script)
+}
+
+/// Reads and loads the NIS `nis` with its script `script`.
+pub fn load_files(assets: &Assets, nis: &str, script: &str) -> Result<NisData, String> {
     let read = |p: &str| hwc_render::AssetSource::read(assets, p).ok_or_else(|| format!("{p} not found"));
-    let n = read(&nis)?;
-    let s = read(&script)?;
+    let n = read(nis)?;
+    let s = read(script)?;
     let d = NisData::load(&n, Some(&s)).map_err(|e| format!("{nis}: {e}"))?;
     for (line, what) in &d.ignored {
         eprintln!("note: {script}:{line}: {what} (ignored, as by the original)");
@@ -100,9 +101,15 @@ pub fn load(assets: &Assets, kind: Kind, mission: u32) -> Result<NisData, String
 pub fn placement(point: [f32; 4]) -> (Vector, Matrix) {
     use hwc_math::fpu::{ld, st};
     let a = st(ld(point[3]) * ld(0.017_453_292f32));
-    let (s, c) = (hwc_math::trig::fsin(ld(a)), hwc_math::trig::fcos(ld(a)));
+    placement_radians(Vector::new(point[0], point[1], point[2]), a)
+}
+
+/// A position with the NIS turned about +z by `angle` radians.
+fn placement_radians(position: Vector, angle: f32) -> (Vector, Matrix) {
+    use hwc_math::fpu::{ld, st};
+    let (s, c) = (hwc_math::trig::fsin(ld(angle)), hwc_math::trig::fcos(ld(angle)));
     let rot = Matrix::rot_about_z(st(c), st(s));
-    (Vector::new(point[0], point[1], point[2]), Matrix::IDENTITY.mul_mat(&rot))
+    (position, Matrix::IDENTITY.mul_mat(&rot))
 }
 
 fn v3(v: Vector) -> Vec3 {
@@ -120,7 +127,6 @@ impl NisRun {
             kind,
             player,
             stage,
-            pending: None,
             volumes: None,
             saved_camera: None,
             saved_lighting: None,
@@ -129,18 +135,18 @@ impl NisRun {
         }
     }
 
-    /// Starts an NIS in `world`'s universe at `point` (`nisStart`, then
+    /// Starts an NIS in `world`'s universe at `at` (`nisStart`, then
     /// `nisNewObjectCreate` for every path). `modules` are the mothership modules the fleet
     /// carries into the mission. Returns the time-0 events.
     pub fn start(
         world: &mut World,
         data: NisData,
         kind: Kind,
-        point: [f32; 4],
+        at: (Vector, Matrix),
         mission: u32,
-        modules: &[hwc_sim::statics::ShipType],
+        modules: &[ShipType],
     ) -> (NisRun, Vec<Fired>) {
-        let (position, matrix) = placement(point);
+        let (position, matrix) = at;
         let eye = world.camera.eye();
         let (player, step) = NisPlayer::start(data, position, matrix, Vector::new(eye.x, eye.y, eye.z));
         let stage = Stage::create(world.universe_mut(), &player, mission, modules);
@@ -226,73 +232,66 @@ impl NisRun {
     }
 }
 
-/// The universe of an NIS level (`singlePlayerLoadNewLevel` for `MissionNN_NISKK`), built
-/// like the mission's.
-pub fn level_universe(
-    assets: &Assets,
-    statics: Arc<StaticWorld>,
-    tweaks: SimTweaks,
-    skill: i32,
-    mission: u32,
-    nis: u32,
-) -> Result<(Universe, LevelState), String> {
-    let mut u = Universe::new(statics, tweaks, &[ShipRace::Somtaaw, ShipRace::Taiidan]);
-    u.single_player = true;
-    u.sp_difficulty = skill.max(0) as u32;
-    hwc_sim::base::init(&mut u);
-    u.base.options.mission = mission as i32;
-    let ctx = LevelContext {
-        single_player: true,
-        mission,
-        fleet_modifier: 0.0,
-        resources: ResourceTweaks::load(assets),
+/// `singlePlayerStartNis`' centring of an NIS level's NIS. Without a centre object the NIS
+/// plays at the level's `StartPointPlayer`, turned about +z by its angle. With one (the derelict
+/// of type `G_NisCentreDerelict`, else the ship of `NisCentreShip`) it plays at that object:
+/// when the NIS has an object to match (`nisShipStartPosition`: the path flagged as the centre,
+/// else the first of the race, type and `G_NisCentreInstance` instance) the NIS is moved and
+/// turned so that object starts where the real one is; otherwise it is turned by the centre's
+/// heading on the xy plane.
+pub fn level_placement(data: &NisData, p: &NisPlacement, u: &Universe, level: &LevelState) -> (Vector, Matrix) {
+    let instance = p.centre_derelict.and_then(|(_, i, _)| i);
+    // A derelict asked for but not in the level leaves no centre at all.
+    let centre = match p.centre_derelict {
+        Some((t, _, found)) => found.and_then(|i| level.derelicts.get(i)).map(|d| {
+            let name = usize::try_from(t).ok().and_then(DerelictType::from_index).map(DerelictType::name);
+            (d.position, d.coordsys, Some(DERELICT_RACE), name)
+        }),
+        None => p.centre_ship.and_then(|id| u.ship(id)).map(|s| (s.posinfo.position, s.rotinfo.coordsys, None, Some(s.ship_type.name()))),
     };
-    let (dir, file) = level::mission_paths(mission, Some(nis));
-    let mut state = LevelState::default();
-    level::load_level(&mut u, assets, &dir, &file, &ctx, &mut state).map_err(|e| e.0)?;
-    Ok((u, state))
+    let Some((position, coordsys, race, type_name)) = centre else {
+        return placement_radians(p.position, p.angle);
+    };
+    let heading = Vector::new(coordsys.m[6], coordsys.m[7], 0.0).normalized();
+    let turn = (heading.x as f64).acos() as f32;
+    let angle = if heading.y >= 0.0 { turn } else { std::f32::consts::TAU - turn };
+    let Some(index) = data.centre_object(race, type_name, instance) else {
+        return placement_radians(position, angle);
+    };
+    let (start, start_matrix) = data.start_position(index);
+    let matrix = coordsys.mul_mat(&start_matrix.transpose());
+    let offset = matrix.mul_vec(start);
+    (Vector::new(position.x - offset.x, position.y - offset.y, position.z - offset.z), matrix)
 }
 
-/// The NIS that plays in its own level before `mission` (table 0x88a3f4 with its NIS from
-/// 0x88a440), if any.
-pub fn level_nis(mission: u32) -> Option<u32> {
-    hwc_nis::tables::mission_nis(mission).filter(|_| hwc_nis::tables::nis_level_first(mission))
+/// `NSR_Derelict`: the race of the derelict paths.
+const DERELICT_RACE: u32 = 11;
+
+/// The modules the carried fleet brings into the NIS level (`spGetHyperspaceShipTypesAttachedToType12`
+/// over the fleet waiting in hyperspace: the fleet's modules after `spWipeUnavailableModulesInHyperspace`,
+/// in fleet order). The opening of mission 1 has no fleet in hyperspace.
+pub fn level_modules(run: &NisLevelRun) -> Vec<ShipType> {
+    run.carry.as_ref().map_or_else(Vec::new, |c| {
+        hwc_sim::campaign::wipe_unavailable_modules(&c.fleet, run.mission)
+            .iter()
+            .filter(|f| f.module)
+            .map(|f| f.ship_type)
+            .collect()
+    })
 }
 
-/// The opening (mission 1) or another NIS level: the NIS level's world with the NIS started
-/// in it, and the mission's world waiting. `mission` is the started mission (its first step
-/// will start KAS).
-pub fn opening(
-    assets: &Assets,
-    statics: Arc<StaticWorld>,
-    tweaks: SimTweaks,
-    mission: World,
-    colors: Option<([u8; 3], [u8; 3])>,
-) -> Result<(World, NisRun, Vec<Fired>), String> {
-    let m = mission.run.game.config.mission;
-    let nis = level_nis(m).ok_or_else(|| format!("mission {m} has no NIS level"))?;
-    let kind = if m == 1 { Kind::Opening } else { Kind::Level(nis) };
-    let data = load(assets, kind, m)?;
-    let skill = mission.run.game.config.skill;
-    // spGetHyperspaceShipTypesAttachedToType12: the modules the fleet brings.
-    let mut modules = hwc_sim::nis_support::hyperspace_ship_types_attached_to_mothership(
-        &mission.run.universe,
-        &mission.run.game.hyper.in_hyperspace,
-    );
-    if modules.is_empty() {
-        // The carried modules may be held by the level's clamps rather than the ships' own
-        // clamp record: the fleet list says which entries are modules.
-        modules = mission.run.game.fleet.iter().filter(|f| f.module).map(|f| f.ship_type).collect();
-    }
-    let (u, state) = level_universe(assets, statics, tweaks, skill, m, nis)?;
-    let mut nis_run: MissionRun = mission.run.clone();
-    nis_run.universe = u;
-    nis_run.game.level = state;
-    let mut world = World::new(assets.clone(), nis_run, colors)?;
-    world.follow_focus = false;
-    let (mut run, fired) = NisRun::start(&mut world, data, kind, [0.0; 4], m, &modules);
+/// The NIS of the NIS level in `world` (`NisLevelRun::nis_files`) started at the level's
+/// placement. Returns the run and its time-0 events.
+pub fn start_level(world: &mut World) -> Result<(NisRun, Vec<Fired>), String> {
+    let run = world.nis_level().ok_or("the world holds no NIS level")?;
+    let (mission, n) = (run.mission, run.nis);
+    let kind = if mission == 1 { Kind::Opening } else { Kind::Level(n) };
+    let (nis, script) = run.nis_files();
+    let data = load_files(world.assets(), &nis, &script)?;
+    let modules = level_modules(run);
+    let (position, matrix) = level_placement(&data, &run.placement, &run.universe, &run.level);
+    let (run, fired) = NisRun::start(world, data, kind, (position, matrix), mission, &modules);
     // The NIS objects need their art before the first frame.
     world.load_new_art();
-    run.pending = Some(mission);
-    Ok((world, run, fired))
+    Ok((run, fired))
 }

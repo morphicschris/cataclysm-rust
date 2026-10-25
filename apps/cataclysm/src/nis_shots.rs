@@ -27,10 +27,37 @@ fn save(g: &Game, name: &str) {
     g.canvas().save_png(&dir.join(format!("{name}.png"))).expect("png");
 }
 
-fn start() -> Option<(Box<Game>, Renderer, Option<crate::audio::Audio>)> {
+struct Rig {
+    data: Rc<GameData>,
+    session: Session,
+}
+
+impl Rig {
+    /// The NIS level has handed over: the mission loads from it.
+    fn mission(&self, game: Box<Game>, renderer: &mut Renderer) -> Box<Game> {
+        let skill = game.world.skill();
+        let crate::world::Sim::NisLevel(nis) = game.world.into_sim() else {
+            panic!("not an NIS level");
+        };
+        let mut l = Loading::after_nis_level(self.data.clone(), &self.session, *nis, skill, SIZE)
+            .expect("loading");
+        for _ in 0..20 {
+            match l.advance(&self.session, Some(&mut *renderer), DT) {
+                Progress::Working => {}
+                Progress::Ready(g) => return g,
+                Progress::Abandon(e) => panic!("mission did not start after its NIS: {e}"),
+            }
+        }
+        panic!("loading never finished");
+    }
+}
+
+type Started = (Box<Game>, Renderer, Option<crate::audio::Audio>, Rig);
+
+fn start() -> Option<Started> {
     let dir = PathBuf::from(std::env::var_os("HWC_GAME_DIR")?);
     let data = Rc::new(GameData::open(&dir).ok()?);
-    let (device, queue) = hwc_render::headless_device().ok()?;
+    let (device, queue) = crate::test_gpu::device()?;
     let mut renderer = Renderer::new(&device, &queue, hwc_render::OFFSCREEN_FORMAT);
     let read = |name: &str| {
         data.install_file(name)
@@ -55,12 +82,12 @@ fn start() -> Option<(Box<Game>, Renderer, Option<crate::audio::Audio>)> {
         .map_err(|e| e.to_string())
         .and_then(|g| crate::audio::Audio::open(g, false))
         .ok();
-    let mut loading = Loading::new(data, &session, 1, 2, SIZE).ok()?;
+    let mut loading = Loading::new(data.clone(), &session, 1, 2, SIZE).ok()?;
     loading.opening_nis = true;
     for _ in 0..20 {
         match loading.advance(&session, Some(&mut renderer), DT) {
             Progress::Working => {}
-            Progress::Ready(g) => return Some((g, renderer, audio)),
+            Progress::Ready(g) => return Some((g, renderer, audio, Rig { data, session })),
             Progress::Abandon(e) => panic!("mission 1 did not start: {e}"),
         }
     }
@@ -109,7 +136,7 @@ fn brightness(g: &Game) -> f32 {
 
 #[test]
 fn opening_nis_then_nislet_then_mission() {
-    let Some((mut game, mut r, mut audio)) = start() else {
+    let Some((mut game, mut r, mut audio, rig)) = start() else {
         eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
         return;
     };
@@ -120,9 +147,9 @@ fn opening_nis_then_nislet_then_mission() {
         let n = g.nis.as_ref().unwrap();
         assert_eq!(n.player.data.objects.len(), 46);
         assert!((n.player.length() - 110.633).abs() < 0.01);
-        // The mission waits behind it, its script not started.
-        let pending = n.pending.as_ref().expect("mission world");
-        assert_eq!(pending.run.game.sp_state, hwc_sim::mission::sp_state::START_KAS);
+        // It plays in its own level; the mission is not loaded yet.
+        assert_eq!(g.world.nis_level().map(|l| (l.mission, l.nis)), Some((1, 1)));
+        assert!(g.world.mission_run().is_none());
     }
     // Faded from black at the start (fadeSet 100%, fadeTo 0% over 60 frames).
     g.render(&mut r, SIZE).expect("render");
@@ -155,14 +182,18 @@ fn opening_nis_then_nislet_then_mission() {
     assert!(bright > dark, "no fade in: {dark} -> {bright}");
     assert!(g.letterbox.fully, "the letterbox is not in during the NIS");
     // The location card from `subtitle 0 4000` at frame 300 (10 s).
-    // The NIS ends, the mission starts and asks for NISlet 1.
+    // The NIS ends; the mission loads behind its own loading screen, starts and asks for
+    // NISlet 1.
     let mut guard = 0;
-    while kind(g) == Some(Kind::Opening) {
-        g.update(DT, &mut audio);
+    while !g.update(DT, &mut audio).contains(&crate::game::Outcome::NisLevelDone) {
         guard += 1;
         assert!(guard < 16 * 10, "the opening did not end");
     }
-    assert!(g.world.run.game.config.mission == 1);
+    assert_eq!(kind(g), None);
+    let mut game = rig.mission(game, &mut r);
+    let g = &mut *game;
+    assert_eq!(g.world.run().var(None, "G_Nis1Complete"), Some(1));
+    assert!(g.world.run().game.config.mission == 1);
     let mut guard = 0;
     while kind(g) != Some(Kind::Nislet(1)) {
         g.update(DT, &mut audio);
@@ -187,10 +218,10 @@ fn opening_nis_then_nislet_then_mission() {
         guard += 1;
         assert!(guard < 16 * 200, "NISlet 1 did not end");
     }
-    assert_eq!(g.world.run.var(None, "G_Nislet1Complete"), Some(1));
+    assert_eq!(g.world.run().var(None, "G_Nislet1Complete"), Some(1));
     // Then the mission goes on: the fleet comes in from hyperspace.
     let mut guard = 0;
-    while !g.world.run.game.ships_have_arrived {
+    while !g.world.run().game.ships_have_arrived {
         g.update(DT, &mut audio);
         guard += 1;
         assert!(guard < 16 * 120, "the fleet never arrived");
@@ -201,7 +232,7 @@ fn opening_nis_then_nislet_then_mission() {
 
 #[test]
 fn escape_skips_the_opening() {
-    let Some((mut game, _r, mut audio)) = start() else {
+    let Some((mut game, _r, mut audio, _rig)) = start() else {
         eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
         return;
     };
@@ -217,3 +248,48 @@ fn escape_skips_the_opening() {
     assert_ne!(kind(g), Some(Kind::Opening), "Escape did not end the opening");
 }
 
+
+/// Escape pressed again and again from the first frame: the opening ends, the mission loads
+/// behind its own loading screen, NISlet 1 is skipped the same way and the mission goes on.
+#[test]
+fn rapid_escape_through_the_opening_and_nislet() {
+    let Some((mut game, mut r, mut audio, rig)) = start() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let esc = |g: &mut Game, audio: &mut Option<crate::audio::Audio>| {
+        g.input(InputEvent::KeyDown(hwc_ui::consts::key::ESCAPE), audio);
+        g.input(InputEvent::KeyUp(hwc_ui::consts::key::ESCAPE), audio);
+    };
+    let mut guard = 0;
+    loop {
+        esc(&mut game, &mut audio);
+        let out = game.update(DT, &mut audio);
+        game.render(&mut r, SIZE).expect("render");
+        if out.contains(&crate::game::Outcome::NisLevelDone) {
+            break;
+        }
+        guard += 1;
+        assert!(guard < 16 * 30, "Escape did not end the opening");
+    }
+    let mut game = rig.mission(game, &mut r);
+    let g = &mut *game;
+    let mut nislet = false;
+    for _ in 0..16 * 60 {
+        for _ in 0..3 {
+            esc(g, &mut audio);
+        }
+        let out = g.update(DT, &mut audio);
+        assert!(
+            out.iter().all(|o| matches!(o, crate::game::Outcome::ApplyOptions | crate::game::Outcome::Animatic(_))),
+            "unexpected {out:?}"
+        );
+        g.render(&mut r, SIZE).expect("render");
+        nislet |= kind(g) == Some(Kind::Nislet(1));
+        if nislet && kind(g).is_none() && g.world.run().game.ships_have_arrived {
+            break;
+        }
+    }
+    assert!(nislet, "NISlet 1 never started");
+    assert_eq!(g.world.run().var(None, "G_Nislet1Complete"), Some(1));
+}

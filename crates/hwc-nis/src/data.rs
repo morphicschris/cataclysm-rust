@@ -136,6 +136,9 @@ impl Curves {
     }
 }
 
+/// `NIS_CentreShip`: the race-field bit that marks the centre object.
+const CENTRE_SHIP: u32 = 0x8000;
+
 /// One animated object.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjectPath {
@@ -146,6 +149,9 @@ pub struct ObjectPath {
     /// The instance number (0 when the name has none).
     pub instance: i32,
     pub category: Category,
+    /// `NIS_CentreShip` (bit 15 of the race field): the NIS plays around this object when it
+    /// is centred on a ship or derelict ([`NisData::centre_object`]).
+    pub centre: bool,
     /// Index of the parent path, if any (unused by Cataclysm's update).
     pub parent: Option<usize>,
     /// The start delay field (the times already include it; the game ignores it).
@@ -331,7 +337,9 @@ impl NisData {
             let raw_name = string_at(strings, image.u32_at(rec + 4))
                 .ok_or_else(|| err(format!("object {k}: bad name")))?;
             let (base, instance) = split_name(&raw_name);
-            let race = image.u32_at(rec + 0xc);
+            let race_field = image.u32_at(rec + 0xc);
+            let centre = race_field & CENTRE_SHIP != 0;
+            let race = race_field & !CENTRE_SHIP;
             let category = match race {
                 0..=6 if base.eq_ignore_ascii_case("Missile") => Category::Missile(race),
                 0..=6 => Category::Ship(race),
@@ -361,6 +369,7 @@ impl NisData {
                 type_name: base,
                 instance,
                 category,
+                centre,
                 parent,
                 time_offset: image.f32_at(rec + 0x14),
                 curves: Curves {
@@ -437,6 +446,25 @@ impl NisData {
                 && o.category.race() == race
                 && o.type_name.eq_ignore_ascii_case(name)
         })
+    }
+
+    /// The object `nisShipStartPosition` centres the NIS on: the first path flagged
+    /// [`ObjectPath::centre`], else the first whose race, type and instance match (`None`
+    /// matches anything; `type_name` without regard to case).
+    pub fn centre_object(&self, race: Option<u32>, type_name: Option<&str>, instance: Option<i32>) -> Option<usize> {
+        let mut first = None;
+        for (i, o) in self.objects.iter().enumerate() {
+            if o.centre {
+                return Some(i);
+            }
+            let matches = instance.is_none_or(|n| o.instance == n)
+                && race.is_none_or(|r| o.category.race() == r)
+                && type_name.is_none_or(|t| o.type_name.eq_ignore_ascii_case(t));
+            if matches && first.is_none() {
+                first = Some(i);
+            }
+        }
+        first
     }
 
     /// `nisShipStartPosition`: where an object starts, in NIS space (the position swizzled

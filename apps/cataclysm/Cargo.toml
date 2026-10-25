@@ -9,7 +9,7 @@ description = "Homeworld: Cataclysm recreation: the game executable"
 [dependencies]
 hwc-formats = { path = "../../crates/hwc-formats" }
 hwc-ui = { path = "../../crates/hwc-ui" }
-wgpu = "30"
+wgpu = { version = "30", features = ["counters"] }
 winit = "0.30"
 pollster = "0.4"
 hwc-audio = { path = "../../crates/hwc-audio" }

@@ -2,12 +2,17 @@
 //! level loading -> `horseRaceShutdown`): the loading screen is drawn, then one piece of the
 //! work is done per frame and the bar moves on, until the [`Game`] is ready. The window and the
 //! headless tests go through the same steps.
+//!
+//! A mission that starts with an NIS level (`hwc_sim::nis_level`) loads twice, each behind a
+//! loading screen of its own as `singlePlayerLoadNewLevel` shows one for each: first the NIS
+//! level, whose [`Game`] plays the NIS; when it stops ([`crate::game::Outcome::NisLevelDone`])
+//! [`Loading::after_nis_level`] loads the mission itself from it (`NisLevelRun::finish`).
 
 use std::rc::Rc;
 
 use hwc_formats::GameData;
 use hwc_render::Renderer;
-use hwc_sim::mission::MissionRun;
+use hwc_sim::nis_level::NisLevelRun;
 use hwc_ui::cataclysm::unpack_color;
 use hwc_ui::session::Session;
 use hwc_ui::AssetSource;
@@ -16,7 +21,7 @@ use crate::data::Assets;
 use crate::game::Game;
 use crate::loading::LoadingScreen;
 use crate::mission::{self, Loader};
-use crate::world::World;
+use crate::world::{Sim, World};
 
 /// How long the "not playable yet" note stays before the menu comes back.
 pub const UNSUPPORTED_TIME: f32 = 4.0;
@@ -43,15 +48,21 @@ pub enum Progress {
 pub struct Loading {
     pub screen: LoadingScreen,
     pub mission: u32,
+    language: u32,
+    difficulty: i32,
     source: Rc<dyn AssetSource>,
     assets: Assets,
     pub loader: Loader,
-    run: Option<MissionRun>,
+    sim: Option<Sim>,
     world: Option<World>,
-    /// The opening NIS, set up next to the mission.
+    /// The NIS of the NIS level, started in its world.
     nis: Option<(crate::nis::NisRun, Vec<hwc_nis::Fired>)>,
-    /// Play the opening NIS before mission 1 (the original always does).
+    /// Play the NIS level before the missions that have one (the original always does).
     pub opening_nis: bool,
+    /// The NIS level that has just played: the mission loads from it.
+    after_nis: Option<Box<NisLevelRun>>,
+    /// `G_NisCentreDerelict` / `G_NisCentreInstance` of the mission before.
+    centre: Option<(i32, Option<i32>)>,
     game: Option<Game>,
     step: Step,
 }
@@ -82,13 +93,17 @@ impl Loading {
         Ok(Loading {
             screen,
             mission,
+            language,
+            difficulty,
             source,
             assets: Assets(data),
             loader: Loader::new(mission, difficulty),
-            run: None,
+            sim: None,
             world: None,
             nis: None,
             opening_nis: std::env::var_os("HWC_SKIP_NIS").is_none(),
+            after_nis: None,
+            centre: None,
             game: None,
             step: Step::Start,
         })
@@ -96,9 +111,39 @@ impl Loading {
 
     /// The next mission of the campaign: the fleet that jumped out of the mission before
     /// arrives in it (`singlePlayerLoadNewLevel`).
-    pub fn with_carry(mut self, carry: hwc_sim::campaign::Carry) -> Self {
+    /// `centre` is the mission before's `G_NisCentreDerelict` and `G_NisCentreInstance`, which
+    /// centre an NIS level's NIS on a derelict.
+    pub fn with_carry(
+        mut self,
+        carry: hwc_sim::campaign::Carry,
+        centre: Option<(i32, Option<i32>)>,
+    ) -> Self {
         self.loader.carry = Some(carry);
+        self.centre = centre;
         self
+    }
+
+    /// The second loading of a mission with an NIS level: its NIS has stopped, and the
+    /// mission's own level loads (`singlePlayerLoadNewLevel(0, 0)` behind a new loading
+    /// screen) with the fleet the NIS level held.
+    pub fn after_nis_level(
+        data: Rc<GameData>,
+        session: &Session,
+        nis: NisLevelRun,
+        difficulty: i32,
+        size: (i32, i32),
+    ) -> Result<Loading, String> {
+        let mut l = Loading::new(data, session, nis.mission, difficulty, size)?;
+        // The statics stay loaded from the NIS level.
+        l.loader.statics = Some(nis.universe.statics.clone());
+        l.loader.tweaks = Some(nis.universe.tweaks.clone());
+        l.after_nis = Some(Box::new(nis));
+        Ok(l)
+    }
+
+    /// The NIS level runs before this mission.
+    fn plays_nis_level(&self) -> bool {
+        self.opening_nis && hwc_sim::nis_level::nis_level_before(self.mission).is_some()
     }
 
     /// The note shown instead of loading, if loading failed.
@@ -119,6 +164,22 @@ impl Loading {
     ) -> Progress {
         let next = match std::mem::replace(&mut self.step, Step::Start) {
             Step::Start => {
+                // The NIS level's own loading picture.
+                if self.after_nis.is_none() && self.plays_nis_level() {
+                    let nis = hwc_sim::nis_level::nis_level_before(self.mission);
+                    let size = (self.screen.canvas.width, self.screen.canvas.height);
+                    match LoadingScreen::for_level(
+                        self.source.clone(),
+                        self.language,
+                        self.mission,
+                        nis,
+                        self.difficulty,
+                        size,
+                    ) {
+                        Ok(s) => self.screen = s,
+                        Err(e) => eprintln!("cataclysm: {e}"),
+                    }
+                }
                 if mission::supported(self.mission) {
                     self.screen.set_progress(0.05);
                     Step::Statics
@@ -134,17 +195,29 @@ impl Loading {
                 self.screen.set_progress(0.4);
                 Step::Level
             }
-            Step::Level => match self.loader.start(&self.assets) {
-                Ok(run) => {
-                    self.run = Some(run);
-                    self.screen.set_progress(0.55);
-                    Step::Art
+            Step::Level => {
+                // `singlePlayerStartNis(.., load level)` for an NIS level, else (or after it)
+                // `singlePlayerLoadNewLevel` for the mission.
+                let sim = match self.after_nis.take() {
+                    Some(n) => self.loader.finish(*n, &self.assets).map(Sim::Mission),
+                    None if self.plays_nis_level() => self
+                        .loader
+                        .start_nis_level(&self.assets, self.centre)
+                        .map(|n| Sim::NisLevel(Box::new(n))),
+                    None => self.loader.start(&self.assets).map(Sim::Mission),
+                };
+                match sim {
+                    Ok(sim) => {
+                        self.sim = Some(sim);
+                        self.screen.set_progress(0.55);
+                        Step::Art
+                    }
+                    Err(e) => Step::Failed(e, UNSUPPORTED_TIME),
                 }
-                Err(e) => Step::Failed(e, UNSUPPORTED_TIME),
-            },
+            }
             Step::Art => {
-                let run = self.run.take().expect("run");
-                match World::new(self.assets.clone(), run, player_colors(session)) {
+                let sim = self.sim.take().expect("sim");
+                match World::new(self.assets.clone(), sim, player_colors(session)) {
                     Ok(w) => {
                         self.world = Some(w);
                         self.screen.set_progress(0.7);
@@ -154,18 +227,13 @@ impl Loading {
                 }
             }
             Step::Nis => {
-                // `singlePlayerStartGame` / `singlePlayerStartNis`: mission 1 starts with the
-                // opening NIS in its own level, and so do the missions of table 0x88a3f4 with
-                // theirs; the mission waits behind it.
-                if crate::nis::level_nis(self.mission).is_some() && self.opening_nis {
-                    let mission = self.world.take().expect("world");
-                    let statics = self.loader.statics.clone().expect("statics");
-                    let tweaks = self.loader.tweaks.clone().expect("tweaks");
-                    match crate::nis::opening(&self.assets, statics, tweaks, mission, player_colors(session)) {
-                        Ok((w, run, fired)) => {
-                            self.world = Some(w);
-                            self.nis = Some((run, fired));
-                        }
+                // `singlePlayerStartNis`: the NIS level's NIS starts (mission 1's opening, or
+                // the NIS before a mission of table 0x88a3f4).
+                let world = self.world.as_mut().expect("world");
+                if world.nis_level().is_some() {
+                    world.follow_focus = false;
+                    match crate::nis::start_level(world) {
+                        Ok(n) => self.nis = Some(n),
                         Err(e) => return self.fail(e),
                     }
                 }

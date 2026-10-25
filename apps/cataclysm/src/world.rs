@@ -36,7 +36,9 @@ use hwc_render::{
     ShipInstance, ShipModel, ShipRenderState, TeamColors, TeamPaint, ANIM_STOP_AT_END,
 };
 use hwc_sim::harness::group_centre;
+use hwc_sim::level::LevelState;
 use hwc_sim::mission::{hs_effect, MissionRun};
+use hwc_sim::nis_level::NisLevelRun;
 use hwc_sim::resource::ResourceKind;
 use hwc_sim::statics::ShipType;
 use hwc_sim::universe::SimEvent;
@@ -64,11 +66,6 @@ const EXPLOSION_COLOR: [f32; 4] = [1.0, 0.6, 0.25, 1.0];
 const HIT_TIME: f32 = 0.25;
 const EXPLOSION_TIME: f32 = 1.5;
 const BEAM_COLOR: [f32; 4] = [0.6, 1.0, 0.9, 0.8];
-/// The hyperspace window (`hsRectangle`: colour 70,90,255 at alpha 90, outline +40).
-const HS_WINDOW: [f32; 4] = [70.0 / 255.0, 90.0 / 255.0, 1.0, 90.0 / 255.0];
-const HS_OUTLINE: [f32; 4] = [110.0 / 255.0, 130.0 / 255.0, 1.0, 90.0 / 255.0];
-/// `HS_DIST / 2`: how far beyond the bounding box the window reaches.
-const HS_DIST_2: f32 = 1.08 / 2.0;
 /// One universe update in seconds.
 const TICK: f32 = 1.0 / 16.0;
 /// The lens-flare set the game loads (`lensflare\\ps-50-300mm-zoom`).
@@ -165,9 +162,51 @@ struct Item {
 }
 
 /// The mission's universe and everything needed to draw it.
+/// What the world's universe belongs to.
+// The mission is the common case and is used in place; the NIS level is short-lived.
+#[allow(clippy::large_enum_variant)]
+pub enum Sim {
+    /// A running mission.
+    Mission(MissionRun),
+    /// The NIS level before a mission (`singlePlayerStartNis` with a level of its own): the
+    /// mission is not loaded until its NIS has stopped.
+    NisLevel(Box<NisLevelRun>),
+}
+
+impl Sim {
+    pub fn universe(&self) -> &Universe {
+        match self {
+            Sim::Mission(r) => &r.universe,
+            Sim::NisLevel(n) => &n.universe,
+        }
+    }
+
+    pub fn universe_mut(&mut self) -> &mut Universe {
+        match self {
+            Sim::Mission(r) => &mut r.universe,
+            Sim::NisLevel(n) => &mut n.universe,
+        }
+    }
+
+    pub fn level(&self) -> &LevelState {
+        match self {
+            Sim::Mission(r) => &r.game.level,
+            Sim::NisLevel(n) => &n.level,
+        }
+    }
+
+    /// The mission being played or led into.
+    pub fn mission(&self) -> u32 {
+        match self {
+            Sim::Mission(r) => r.game.config.mission,
+            Sim::NisLevel(n) => n.mission,
+        }
+    }
+}
+
 pub struct World {
     src: Assets,
-    pub run: MissionRun,
+    sim: Sim,
     previous: BTreeMap<ShipId, (Vec3, Mat4)>,
     art: BTreeMap<ShipType, ShipArt>,
     team_colors: TeamColors,
@@ -206,6 +245,8 @@ pub struct World {
     /// The main view is not drawn (the sensors manager is open): the nebulae take no camera
     /// and are not drawn.
     pub sensors_open: bool,
+    /// Frames built so far (the draw-check history's numbering).
+    frames_drawn: u64,
 }
 
 /// Engine vector to render vector.
@@ -228,13 +269,12 @@ impl World {
     /// (the player's) with the colours picked in the front end.
     pub fn new(
         src: Assets,
-        run: MissionRun,
+        sim: Sim,
         player_colors: Option<([u8; 3], [u8; 3])>,
     ) -> Result<Self, String> {
-        let (bg, light) = crate::mission::level_presentation(&run.game.level);
-        let start = run
-            .game
-            .level
+        let (bg, light) = crate::mission::level_presentation(sim.level());
+        let start = sim
+            .level()
             .point(hwc_kas::kas_hash("StartPointPlayer"))
             .map_or(Vec3::ZERO, |p| Vec3::new(p[0], p[1], p[2]));
         let ctweaks = read_script(&src, "camera.script")
@@ -270,7 +310,7 @@ impl World {
         );
         let mut w = Self {
             src,
-            run,
+            sim,
             previous: BTreeMap::new(),
             art: BTreeMap::new(),
             team_colors,
@@ -299,6 +339,7 @@ impl World {
             lens_flares: true,
             neb_renderer: None,
             sensors_open: false,
+            frames_drawn: 0,
         };
         w.attach_effects();
         w.set_lighting(&lighting);
@@ -336,11 +377,70 @@ impl World {
     }
 
     pub fn universe(&self) -> &Universe {
-        &self.run.universe
+        self.sim.universe()
     }
 
     pub fn universe_mut(&mut self) -> &mut Universe {
-        &mut self.run.universe
+        self.sim.universe_mut()
+    }
+
+    /// The level the universe was loaded from.
+    pub fn level(&self) -> &LevelState {
+        self.sim.level()
+    }
+
+    /// The mission being played, or the one the NIS level leads into.
+    pub fn mission(&self) -> u32 {
+        self.sim.mission()
+    }
+
+    /// The difficulty the mission is played at.
+    pub fn skill(&self) -> i32 {
+        match &self.sim {
+            Sim::Mission(r) => r.game.config.skill,
+            Sim::NisLevel(n) => n.universe.sp_difficulty as i32,
+        }
+    }
+
+    /// The running mission (`None` while its NIS level plays).
+    pub fn mission_run(&self) -> Option<&MissionRun> {
+        match &self.sim {
+            Sim::Mission(r) => Some(r),
+            Sim::NisLevel(_) => None,
+        }
+    }
+
+    /// The running mission, mutably (`None` while its NIS level plays).
+    pub fn mission_run_mut(&mut self) -> Option<&mut MissionRun> {
+        match &mut self.sim {
+            Sim::Mission(r) => Some(r),
+            Sim::NisLevel(_) => None,
+        }
+    }
+
+    /// The running mission. Only for the mission's own paths: panics while an NIS level
+    /// plays (callers that can run then use [`World::mission_run`]).
+    pub fn run(&self) -> &MissionRun {
+        self.mission_run().expect("the mission is not loaded while its NIS level plays")
+    }
+
+    /// [`World::run`], mutably.
+    pub fn run_mut(&mut self) -> &mut MissionRun {
+        self.mission_run_mut().expect("the mission is not loaded while its NIS level plays")
+    }
+
+    /// The NIS level playing in this world, if it is one.
+    pub fn nis_level(&self) -> Option<&NisLevelRun> {
+        match &self.sim {
+            Sim::NisLevel(n) => Some(n),
+            Sim::Mission(_) => None,
+        }
+    }
+
+    /// The simulation, giving up the world (the NIS level's universe goes on into
+    /// [`NisLevelRun::finish`]).
+    pub fn into_sim(self) -> Sim {
+        self.sim
     }
 
     fn set_lighting(&mut self, path: &str) {
@@ -531,7 +631,10 @@ impl World {
     pub fn step(&mut self) {
         self.snapshot();
         self.set_nebula_camera();
-        self.run.step();
+        match &mut self.sim {
+            Sim::Mission(r) => r.step(),
+            Sim::NisLevel(n) => n.universe.update(),
+        }
         self.after_update();
     }
 
@@ -540,7 +643,7 @@ impl World {
     pub fn step_universe(&mut self) {
         self.snapshot();
         self.set_nebula_camera();
-        self.run.universe.update();
+        self.sim.universe_mut().update();
         self.after_update();
     }
 
@@ -548,7 +651,7 @@ impl World {
     /// build depend on the main camera.
     fn set_nebula_camera(&mut self) {
         if !self.sensors_open {
-            crate::nebula_view::set_camera(&mut self.run.universe, &self.camera);
+            crate::nebula_view::set_camera(self.sim.universe_mut(), &self.camera);
         }
     }
 
@@ -599,7 +702,7 @@ impl World {
             }
         }
         self.update_ship_fx();
-        let u = &self.run.universe;
+        let u = self.sim.universe();
         self.focus.retain(|id| u.ship(*id).is_some());
         self.camera_start();
         self.update_focus();
@@ -610,7 +713,7 @@ impl World {
         if !self.camera_pending || !self.follow_focus {
             return;
         }
-        let u = &self.run.universe;
+        let u = self.sim.universe();
         let ms = u.base.players.first().and_then(|p| p.mothership);
         if let Some(s) = ms.and_then(|id| u.ship(id)) {
             if s.flags & hwc_sim::object::sof::HIDE == 0 {
@@ -644,7 +747,7 @@ impl World {
             fx.anim.play(clip, index, 0);
             fx.last_mad = index as i32;
         }
-        if let Some(s) = self.run.universe.ships.get_mut(id) {
+        if let Some(s) = self.sim.universe_mut().ships.get_mut(id) {
             s.base.mad_anim = index as i32;
         }
         true
@@ -663,8 +766,11 @@ impl World {
 
     /// Hyperspace window state of every ship arriving or leaving: `(state, clipt)`.
     fn hyperspace(&self) -> BTreeMap<ShipId, (u32, f32)> {
-        self.run
-            .hyperspace_windows()
+        // The NIS level's fleet waits in hyperspace with no window open.
+        let Some(run) = self.mission_run() else {
+            return BTreeMap::new();
+        };
+        run.hyperspace_windows()
             .into_iter()
             .map(|(id, state, clipt)| (id, (state, clipt)))
             .collect()
@@ -672,7 +778,7 @@ impl World {
 
     /// Animations triggered by the simulation's state, and the trail ring update, once per tick.
     fn update_ship_fx(&mut self) {
-        let u = &self.run.universe;
+        let u = self.sim.universe();
         // Dead ships stay (as hulks) until their explosion deletes them.
         let live: Vec<ShipId> = u.ship_list.iter().chain(&u.hulks).copied().collect();
         self.fx.retain(|id, _| live.contains(id));
@@ -838,9 +944,8 @@ impl World {
             effects: EffectBatch::default(),
             fx_list: hwc_fx::RenderList::default(),
         };
-        let effects_on = self.effects_on;
         let transforms = self.render_transforms();
-        let u = &self.run.universe;
+        let u = self.sim.universe();
         for (id, t, transform, age) in transforms {
             let Some(s) = u.ship(id) else { continue };
             let Some(art) = self.art.get(&t) else {
@@ -871,7 +976,7 @@ impl World {
             // clamped to a host (the mothership's modules) has no window of its own
             // (`hsShouldDisplayEffect`) and is cut by the host's plane while the host is in
             // hyperspace; the host's window is sized to cover them (`hyperspaceBoxScale`).
-            let host = clamp_host(&self.run, s);
+            let host = clamp_host(self.sim.level(), s);
             let hs = hyper.get(&id).copied();
             let clip = match host {
                 Some(h) => hyper.get(&h).and_then(|&(state, clipt)| {
@@ -889,8 +994,8 @@ impl World {
                     hs_plane(state, clipt, fl)
                 }),
             };
-            // (With effects the window is the original's HyperWindow effect.)
-            if let (Some((state, clipt)), Some(st), None, false) = (hs, st, host, effects_on) {
+            // `hsEnd` draws the window on top of the HyperWindow effect, effects or not.
+            if let (Some((state, clipt)), Some(st), None) = (hs, st, host) {
                 hyperspace_window(&mut frame.effects, transform, st, state, clipt);
             }
             let max_velocity = if s.max_velocity_copy > 0.0 {
@@ -983,6 +1088,23 @@ impl World {
         if self.effects_on {
             hwc_sim::effects::draw(self.universe_mut(), &mut frame.fx_list);
         }
+        // Nothing unbounded goes to the GPU; the counts go to the crash log's history.
+        let mut stats = crate::draw_check::Stats::default();
+        let keep: Vec<bool> = frame.items.iter().map(|i| i.transform.is_finite()).collect();
+        if keep.iter().any(|k| !k) {
+            stats.not_finite += keep.iter().filter(|k| !**k).count();
+            let mut k = keep.iter();
+            frame.items.retain(|_| *k.next().unwrap_or(&true));
+            let mut k = keep.iter();
+            frame.ids.retain(|_| *k.next().unwrap_or(&true));
+            let mut k = keep.iter();
+            frame.poses.retain(|_| *k.next().unwrap_or(&true));
+        }
+        stats.ships = frame.items.len();
+        crate::draw_check::check_effects(&mut frame.fx_list, &mut stats);
+        crate::draw_check::check_batch(&mut frame.effects, &mut stats);
+        self.frames_drawn += 1;
+        crate::draw_check::record(self.frames_drawn, &stats);
         frame
     }
 
@@ -1003,15 +1125,15 @@ impl World {
         });
         let view = hwc_render::FxView::from_orbit(&self.camera, size.0, size.1);
         fx.prepare(renderer, &self.src, &frame.fx_list, &view, &self.lighting);
-        let Some(world) = self.run.universe.effects.as_mut() else {
+        let Some(world) = self.sim.universe_mut().effects.as_mut() else {
             return true;
         };
         let mut flares = std::mem::take(&mut world.world.lens_flares);
-        let u = &self.run.universe;
+        let u = self.sim.universe();
         let occluded = |pos: Vec3, dir: Vec3, dist: f32| flare_occluded(u, pos, dir, dist);
         let sun = Some(&mut self.nis_sun).filter(|s| s.listed);
         fx.prepare_lens_flares_with_nis_sun(&mut flares, sun, &view, Some(&occluded));
-        if let Some(world) = self.run.universe.effects.as_mut() {
+        if let Some(world) = self.sim.universe_mut().effects.as_mut() {
             world.world.lens_flares = flares;
         }
         true
@@ -1146,7 +1268,7 @@ impl World {
             && crate::nebula_view::prepare(
                 &mut self.neb_renderer,
                 renderer,
-                &self.run.universe,
+                self.sim.universe(),
                 &self.camera,
                 (target.width, target.height),
             );
@@ -1362,10 +1484,9 @@ impl World {
     }
 }
 /// The ship a ship is clamped to: its clamp host, or for a mission, the level's module clamps.
-fn clamp_host(run: &MissionRun, s: &hwc_sim::Ship) -> Option<ShipId> {
+fn clamp_host(level: &LevelState, s: &hwc_sim::Ship) -> Option<ShipId> {
     s.base.clamp.as_ref().and_then(|c| c.host).or_else(|| {
-        run.game
-            .level
+        level
             .clamps
             .iter()
             .find(|(m, _)| *m == s.id)
@@ -1395,53 +1516,8 @@ fn fx_pose(art: &ShipArt, fx: &ShipFx, level: usize) -> Option<Vec<Option<Mat4>>
     clip.pose(&fx.anim, binding)
 }
 
-/// The hyperspace window's corners in ship space (`hsEnd` / `hsRectangle`): centred on the
-/// collision sphere's axis at the clip plane, `HS_DIST` times the bounding box across, scaled by
-/// the ship's `hyperspaceBoxScale` (the Kuun-Lan's spine window covers its modules too). The up
-/// extent opens and closes with `clipt` while popping up and collapsing.
-fn hyperspace_window_corners(
-    st: &hwc_sim::statics::ShipStaticInfo,
-    state: u32,
-    clipt: f32,
-) -> Option<[Vec3; 4]> {
-    let c = &st.header.coll;
-    let (z, open) = match state {
-        hs_effect::POPUP_OUTOF | hs_effect::POPUP_INTO => (c.forward_length, 1.0 - clipt),
-        hs_effect::SLICING_OUTOF | hs_effect::SLICING_INTO => (clipt * c.forward_length, 1.0),
-        hs_effect::COLLAPSE_OUTOF | hs_effect::COLLAPSE_INTO => (-c.forward_length, clipt),
-        _ => return None,
-    };
-    let box_scale = st.hyperspace_box_scale;
-    let half_x = HS_DIST_2 * c.up_length * box_scale * open.clamp(0.0, 1.0);
-    let half_y = HS_DIST_2 * c.right_length * box_scale;
-    let o = Vec3::new(c.coll_sphere_offset.x, c.coll_sphere_offset.y, z);
-    Some(
-        [
-            Vec3::new(-half_x, -half_y, 0.0),
-            Vec3::new(-half_x, half_y, 0.0),
-            Vec3::new(half_x, half_y, 0.0),
-            Vec3::new(half_x, -half_y, 0.0),
-        ]
-        .map(|p| o + p),
-    )
-}
-
-/// The window's fill and outline colours: the ship's `hyperspaceColor` unless black, else the
-/// default blue; alpha 90, the outline 40 brighter in red and green (wrapping as bytes do).
-fn hyperspace_colors(st: &hwc_sim::statics::ShipStaticInfo) -> ([f32; 4], [f32; 4]) {
-    let [r, g, b, _] = st.hyperspace_color;
-    if [r, g, b] == [0, 0, 0] {
-        return (HS_WINDOW, HS_OUTLINE);
-    }
-    let f = |v: u8| f32::from(v) / 255.0;
-    let a = 90.0 / 255.0;
-    (
-        [f(r), f(g), f(b), a],
-        [f(r.wrapping_add(40)), f(g.wrapping_add(40)), f(b), a],
-    )
-}
-
-/// The hyperspace window (`hsRectangle`) at the clip plane of an arriving ship.
+/// The hyperspace window (`hsEnd`, drawn by [`hwc_render::effects::hyperspace_window`]) of a
+/// ship in hyperspace state `state`; `transform` is its model matrix.
 fn hyperspace_window(
     out: &mut EffectBatch,
     transform: Mat4,
@@ -1449,23 +1525,17 @@ fn hyperspace_window(
     state: u32,
     clipt: f32,
 ) {
-    let Some(corners) = hyperspace_window_corners(st, state, clipt) else {
-        return;
+    let c = &st.header.coll;
+    let [r, g, b, _] = st.hyperspace_color;
+    let shape = hwc_render::effects::HyperspaceWindowShape {
+        forward_length: c.forward_length,
+        up_length: c.up_length,
+        right_length: c.right_length,
+        coll_sphere_offset: Vec3::new(c.coll_sphere_offset.x, c.coll_sphere_offset.y, c.coll_sphere_offset.z),
+        box_scale: st.hyperspace_box_scale,
+        color: [r, g, b],
     };
-    let corners = corners.map(|p| transform.transform_point3(p));
-    let (fill, outline) = hyperspace_colors(st);
-    out.quad(corners.map(|p| (p, fill)), Blend::Alpha);
-    for i in 0..4 {
-        out.lines.push(FxLine {
-            from: corners[i],
-            to: corners[(i + 1) % 4],
-            from_color: outline,
-            to_color: outline,
-
-            width: 2.0,
-            blend: Blend::Additive,
-        });
-    }
+    hwc_render::effects::hyperspace_window(out, transform, &shape, state, clipt);
 }
 
 /// Whether a ship's collision box hides a lens flare at `pos` (looking along `dir` towards the

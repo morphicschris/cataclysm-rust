@@ -484,6 +484,7 @@ mod tests {
                 type_name: "sRecon".into(),
                 instance: 1,
                 category: Category::Ship(0),
+                centre: false,
                 parent: None,
                 time_offset: -1.0,
                 curves: curves(),

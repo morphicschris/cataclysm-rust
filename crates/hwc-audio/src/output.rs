@@ -167,22 +167,38 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let channels = usize::from(config.channels);
+    let mut failed = false;
     device
         .build_output_stream(
             config,
             move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-                for frame in data.chunks_mut(channels) {
-                    let [l, r] = feeder.next_frame();
-                    match frame.len() {
-                        1 => frame[0] = T::from_sample(0.5 * (l + r)),
-                        _ => {
-                            frame[0] = T::from_sample(l);
-                            frame[1] = T::from_sample(r);
-                            for s in &mut frame[2..] {
-                                *s = T::from_sample(0.0);
+                // The device calls this from its own thread: a panic must not unwind into the
+                // driver. After one, the output falls silent (the panic hook has reported it).
+                if failed {
+                    data.fill(T::from_sample(0.0));
+                    return;
+                }
+                let fill = std::panic::AssertUnwindSafe(|| {
+                    for frame in data.chunks_mut(channels) {
+                        let [l, r] = feeder.next_frame();
+                        match frame.len() {
+                            1 => frame[0] = T::from_sample(0.5 * (l + r)),
+                            _ => {
+                                frame[0] = T::from_sample(l);
+                                frame[1] = T::from_sample(r);
+                                for s in &mut frame[2..] {
+                                    *s = T::from_sample(0.0);
+                                }
                             }
                         }
                     }
+                });
+                if std::panic::catch_unwind(fill).is_err() {
+                    eprintln!("audio: the mixer panicked; sound is off");
+                    // The game thread goes on using the mixer.
+                    feeder.mixer.clear_poison();
+                    failed = true;
+                    data.fill(T::from_sample(0.0));
                 }
             },
             |e| eprintln!("audio stream error: {e}"),

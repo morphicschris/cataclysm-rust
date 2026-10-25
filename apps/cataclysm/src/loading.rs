@@ -160,6 +160,20 @@ impl LoadingScreen {
         difficulty: i32,
         size: (i32, i32),
     ) -> Result<Self, String> {
+        Self::for_level(source, language, mission, None, difficulty, size)
+    }
+
+    /// The loading screen of mission `mission`'s level, or with `nis` of its NIS level
+    /// (`hrChooseSinglePlayerBitmap`: `SinglePlayer\missionNN_NisKK\loading.jpg`, no picture
+    /// when there is none; the bar colour is the mission's either way).
+    pub fn for_level(
+        source: Rc<dyn AssetSource>,
+        language: u32,
+        mission: u32,
+        nis: Option<u32>,
+        difficulty: i32,
+        size: (i32, i32),
+    ) -> Result<Self, String> {
         let mut res = Resources::new(source.clone());
         res.set_language(Language::from_index(language));
         let lang_file = format!("{:?}.script", res.language()).to_ascii_lowercase();
@@ -173,8 +187,12 @@ impl LoadingScreen {
             .to_string();
         let font = res.font("Arial_12.hff");
         let dir = format!("SinglePlayer\\mission{mission:02}");
+        let picture = match nis {
+            Some(n) => format!("SinglePlayer\\mission{mission:02}_Nis{n:02}\\loading.jpg"),
+            None => format!("{dir}\\loading.jpg"),
+        };
         let background = source
-            .read(&format!("{dir}\\loading.jpg"))
+            .read(&picture)
             .and_then(|d| decode_jpeg(&d))
             .map(|i| resample_640x480(&i));
         let bar_color = read_text(&*source, &format!("{dir}\\loading.script"))
