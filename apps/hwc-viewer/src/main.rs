@@ -71,8 +71,9 @@ of an install, because the mission script comes from cataclysm.exe):
   --autoplay              scripted test orders play the mission and press hyperspace
     --budget <s>          seconds after the fleet arrives before autoplay forces the jump
   --shots <names>         with --screenshot: images when these first happen: arrival,
-                          launch, combat, subtitle, objective, asteroids (within --ticks max,
-                          default 4000)
+                          launch, combat, subtitle, objective, asteroids, jump (within --ticks
+                          max, default 4000); `objectives` takes one per completed objective
+                          and one when the jump is offered
 
 controls:
   right-drag (or left-drag) rotate, both buttons drag or wheel zoom, +/- zoom
@@ -525,11 +526,14 @@ fn mission_shots(mut sb: sandbox::Sandbox, o: &Options, out: &str) -> Result<(),
     let mut launched_at = None;
     let mut combat_at: Option<(u32, glam::Vec3)> = None;
     let mut kuunlan_done: Vec<&'static str> = Vec::new();
+    let mut log_seen = 0usize;
+    let mut done_count = 0usize;
     while !wanted.is_empty() && sb.universe().update_counter < max {
         sb.step();
         let tick = sb.universe().update_counter;
         let Some(run) = sb.sim.mission() else { break };
         let want = |w: &str| wanted.iter().any(|x| x == w);
+        let want_objectives = want("objectives");
         let mut take = None;
         if want("arrival")
             && run.game.arriving.iter().any(|a| {
@@ -552,14 +556,31 @@ fn mission_shots(mut sb: sandbox::Sandbox, o: &Options, out: &str) -> Result<(),
         if take.is_none() && want("objective") && !run.game.objectives.is_empty() {
             take = Some("objective");
         }
+        // Every objective the mission completes (destroys or sets), and the jump it offers.
+        let mut done_tags: Vec<String> = Vec::new();
+        if want_objectives {
+            for e in &run.game.log[log_seen.min(run.game.log.len())..] {
+                if e.kind != hwc_sim::mission::LogKind::Objective {
+                    continue;
+                }
+                let label = e.text.split('"').nth(1).unwrap_or("").to_owned();
+                if e.text.starts_with("ObjectiveDestroy ") || (e.text.starts_with("ObjectiveSet ") && e.text.ends_with("= 1")) {
+                    done_tags.push(format!("done_{:02}_{label}", done_tags.len() + done_count));
+                } else if e.text.starts_with("ObjectiveCreate \"Hyperspace\"") {
+                    done_tags.push(format!("done_{:02}_hyperspace_offered", done_tags.len() + done_count));
+                }
+            }
+            log_seen = run.game.log.len();
+            done_count += done_tags.len();
+        }
         // The fleet leaving at the end of the mission: the mothership in its window.
         if take.is_none()
             && want("jump")
-            && run.game.hyper.ships.iter().any(|(id, r)| {
+            && (run.game.hyper.ships.iter().any(|(id, r)| {
                 Some(*id) == run.universe.base.players[0].mothership
                     && r.hs_state == hs_effect::SLICING_INTO
                     && r.clipt < 0.3
-            })
+            }) || run.game.hyper.whiteout)
         {
             take = Some("jump");
         }
@@ -611,6 +632,12 @@ fn mission_shots(mut sb: sandbox::Sandbox, o: &Options, out: &str) -> Result<(),
         if let Some(tag) = take {
             cap.shoot(&mut sb, None, &shot_path(out, tag, true))?;
             wanted.retain(|w| w != tag);
+        }
+        for tag in done_tags {
+            cap.shoot(&mut sb, None, &shot_path(out, &tag, true))?;
+        }
+        if want_objectives && sb.sim.mission().is_some_and(|r| r.mission_complete()) {
+            wanted.retain(|w| w != "objectives");
         }
         if let Some((tag, p, heading)) = kuunlan {
             // From the side and from ahead of the ship, a little off its axis.

@@ -998,6 +998,11 @@ pub fn wipe_inside_ship(u: &mut Universe, id: ShipId) {
     if let Some(host) = find_ship_i_am_inside(u, id) {
         crate::dock::remove_ship_from_inside(u, id, host);
     }
+    if u.ships.get(id).is_none() {
+        return;
+    }
+    // A ship still outside (one arriving from hyperspace, say) leaves its collision blob too.
+    u.blobs.object_died(ObjRef::Ship(id));
     crate::command::cl_ship_died(u, id);
     crate::construction::unit_cap_delete_ship(u, id);
     crate::construction::remove_ship_support_units(u, id);

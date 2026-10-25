@@ -183,9 +183,78 @@ Headless: `cargo run --release -p hwc-sim --example campaign -- <install> [--fro
 Viewer: `hwc-viewer <install> --mission N [--carry FILE] [--save-carry FILE] [--autoplay
 [--budget S]]` (J is the hyperspace button / roll call "go now").
 
-Known differences: the military parade is not modelled (ships keep their offsets as they are when
-the jump starts; warp fleets are lined up beside the mothership); carried ships get new ship
-numbers when the level loads; NIS levels between missions and the movies are not played.
+Known differences: carried ships get new ship numbers when the level loads; the movies are not
+played.
+
+## Guard, team moves, slipgates, parade, scuttle (`command.rs`, `aimove.rs`, `parade.rs`)
+
+* **Protect orders** (`clProtect` 0x4469c0, `ChangeOrderToProtect`, `clWrapProtect`): a null order
+  with the protecting attribute and a protect list (`CommandToDo::protect`). `clProcess` runs
+  `protectShip` / `protectShipsAvg` (Cataclysm's versions: guard distance
+  `PROTECT_GET_THIS_CLOSE_CAP/STRIKE` + both sizes, keep pace above `PROTECT_STILL_VELOCITY`,
+  resource controllers follow behind) and the formation variant; `clPostProcess` (right after
+  `clProcess`) sends the attack-capable guards, less the non-combat types, at whatever hits a
+  protected ship, keeping the guard order. Circular guard chains set special flag 0x40000000.
+  Dead ships leave protect lists; an empty list ends the order. KAS `Guard`
+  (`kasfGuardShips`: deletes the team's AI moves, `makeShipsControllable` on the team list in
+  place), `ShipsGuardShips`, `IsGuarding`, `ShipsSelectGuarding` read and write them. The player's
+  protect order is `command::cl_wrap_protect`.
+* **AI team moves** (`aimove.rs`, `kas_host/moves.rs`): `MoveTo` and `Intercept` create moves
+  (`aimCreateMoveTeam`, `aimCreateIntercept`) that the computer player's pass (`aitExecute`, at
+  `univUpdateCounter & 15 == 1`, not while an NIS plays) carries out: `aimProcessMove`
+  (`aiuWrapMove`, finished within 1300 of the destination or when the first ship has nowhere to
+  go), `aimProcessIntercept` (a move to the target or halfway to where it is going, re-aimed every
+  2 s when it moved off, done within 4 km of the team's first ship: `AIM_INTERCEPT_FINISH_DISTSQ`
+  16e6, `RECALC` 2e6), next-move tactics and formation, removal. Direct orders (`Attack`, `Guard`,
+  `Stop`, docking, launching, patrols, kamikaze) delete the team's moves first. `ThisTeamIdle` /
+  `IsTeamIdle` are `aitTeamIsIdle` (no current move, or a done / get-ships move).
+* **Slipgates** (`scriptSetSlipgateCB` 0x49c680, `ships/slipgate.rs`): `Slipgate x,y,z,n/m,angle,type`
+  lines create the gate ships (sphere's player, yawed, not targetable or bumpable, disable reason
+  6), paired in file order. A ship docking with purpose slipgate opens both gates
+  (`SlipgateOpen`: opening 2.25 s, open; closing 0.625 s, 4 s after the last use), waits 1.5 s,
+  goes inside the partner gate and launches from it (`ShipDocksAtShip` states 0x10, 0xd, 10,
+  0x11, 0xe). Guards and parade followers of a ship that enters are sent after it
+  (`SlipgateDockShip`). `FindSlipgate`, `SlipgateDock`, `EnteringSlipgate` work on them.
+* **Mines and meteors in selections**: `FindMinesInside`, `FindMinesNearTeam` and `FindMeteors`
+  fill their selections (mine missiles and meteor-storm asteroids under ids of the ranges
+  `ShipId::MINE_RANGE` / `METEOR_RANGE`); selection positions, counts and
+  `HasShipBeenDiscovered` see them; gone ones leave the selections before each KAS pass.
+* **Military parade** (`parade.rs`, `Parade_*.script` tables, `GetShipSlot` 0x481230,
+  `CreateMilitaryGroupAroundShip`, `processMilitaryParadeToDo` 0x480980, `setMilitaryParade`):
+  `order::MILITARY_PARADE` commands; the jump (both kinds), the go-now / emergency buttons and the
+  fade-in arrival group the capital ships around the mothership and `clPresetShipsToPosition`
+  snaps them to their slots, so carried offsets are parade slots. KAS `ForceParadeFormation`
+  and `ShipsSetFormation(.., 8)` use it.
+* **Scuttle** (`clScuttle` 0x445bf0): the self-destruct timer (+0x2fc, now + `SCUTTLE_SHIPDEATHTIMEMIN`
+  .. `MAX`, stream 10); `univCheckShipState` blows the ship up when it runs out (spent gravity
+  wells too).
+* **NIS levels** (`nis_level.rs`): `NisLevelRun::start` loads `MissionNN_NISMM` for a mission that
+  has one (table 0x88a3f4, number 0x88a440: before missions 1, 4, 6, 7, 10, 12, 14-17) with the
+  carried fleet in hyperspace and the `singlePlayerStartNis` placement (`StartPointPlayer` and
+  angle, `G_NisCentreDerelict` / `G_NisCentreInstance`); `finish` loads the mission (clock carried)
+  and sets `G_Nis<NN>Complete`.
+* Ships are created neutral (`univCreateShip` sets `tacticstype` +0x2b8 to 1); they were evasive.
+* `MissionCompleted` sets `Game::mission_completed`; the roll call queues its speech events
+  (`campaign::SPEECH_ROLLCALL_DOCK/COMPLETE`, `SPEECH_HYPERSPACE_ABORTED`) in `game.presentation`;
+  `campaign::abort_hyperspace` is the cancel button, `campaign::rollcall_go_now_disabled` says
+  which jump button the original greys out (+0x35a / +0x35b: recently attacked / fired upon).
+
+## Scripted player (`autoplay.rs`)
+
+Per-mission plans read the objectives and give a player's orders: mission 1 (build workers,
+ramming frigates and Acolytes, strike in groups of 8 at the bombers, resourcers, proximity
+attackers and the cruiser, recons to the unexplored region) and mission 2 (recons search the
+quadrants, Engineering module, research repair and salvage, the fleet guards the Bushan-Re while
+workers repair it, upgraded workers salvage the pod, the fleet clears the raiders) complete for
+real and jump without the override (`tests/campaign.rs`, `missions_1_and_2_complete_for_real`);
+mission 4 (hangar module, ten Acolytes guarding the Clee-San, the infection research) completes
+for real from the `warp.script` fleet (`mission4_from_warp_completes_for_real`). Still ending
+with the forced jump: mission 3 (the Clee-San, handed to the player when found, is killed within
+seconds by missiles of the pirate missile corvettes that attack the player's ships in its 60 km
+`NearCleesan` box: the missiles' target ends up being the Clee-San), mission 5 (reaches
+"Destroy Beast fleet"; the helpless Caal-Shto is then killed by Beast Acolytes despite half the
+fleet guarding it) and mission 6 (fails at about 890 s from the warp fleet; the Caal-Shto or the
+mothership is lost before the nav points are scouted).
 
 ## Known differences from the original
 
@@ -196,16 +265,18 @@ numbers when the level loads; NIS levels between missions and the movies are not
 * Docked ships (the fleet's recons and workers, KAS `DockInstant`, `ShipsCreateLaunch`) are
   hidden and frozen inside their host; launching puts them beside the host at once (no launch
   path, no docking AI); launches therefore finish immediately.
-* `Guard` (protect) and `Harvest` have no simulation behind them yet and only log; `UpgradeShips`
-  does nothing (no research upgrades yet); `MoveTo`/`PatrolPath` issue the move at once instead
-  of through the AI move layer (`aimCreateMoveTeam` processed per AI tick).
+* `UpgradeShips` does nothing (no research upgrades yet); `PatrolPath`, docking and launching
+  orders are issued at once instead of through the AI move layer (only `MoveTo` and `Intercept`
+  create team moves).
 * `HasShipBeenDiscovered` uses the human player's ships' `fowRadius` instead of the fog-of-war
   grid; enemy selection treats every ship as visible (no cloaking, no Mimic disguise).
 * `IntelEventEnded` only ends by the safety timeout unless `--speech` simulates the subtitle;
   real speech/subtitle lengths are not known headless.
-* Resource objects, derelicts, meteor storms, mines and slipgates are records, not simulation
-  objects; `GetWorldResources` sums the static resource values of the recorded asteroids and
-  dust clouds.
+* Derelicts and meteor storms are records, not simulation objects; `GetWorldResources` sums the
+  static resource values of the recorded asteroids and dust clouds.
+* `HasShipBeenDiscovered` uses the player's ships' `fowRadius`; the original asks the local
+  player's fog-of-war grid (`levelFogOfWarCreate` runs in `singlePlayerLoadNewLevel`), which
+  the mission run does not create.
 * Mothership modules are kept at the mothership's position and orientation and out of physics
   and bumps (not through the clamp code); the computer player's AI (`aifFleetCommand`), research,
   construction and unit caps do not run.

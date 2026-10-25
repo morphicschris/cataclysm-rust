@@ -465,3 +465,8 @@ pub fn is_ship_stuck_for_hyperspace(u: &Universe, id: ShipId) -> bool {
         ((ld(dx) * ld(dx) + ld(dy) * ld(dy)) + ld(dz) * ld(dz)) < ld(statics(u, ws.ship_type).radius_sq)
     })
 }
+
+/// The well has collapsed (`GravDerelict`, +0x658): its self-destruct timer may blow it up.
+pub fn is_derelict(u: &Universe, id: ShipId) -> bool {
+    spec(u, id).is_some_and(|g| g.derelict)
+}

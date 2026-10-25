@@ -69,7 +69,10 @@ fn cloned_universe_continues_identically() {
 /// position: the hive frigate now creates its six swarmers inside it (new ship-table entries,
 /// which also shift the numbers of later ships) and `Ship::spec` (the Acolytes', hive's and
 /// rammer's own state) is hashed; hashing without the swarmers and the special state gives the
-/// previous value, `GOLDEN_FLEET_HASH_400_BEFORE_MODULES`, exactly.)
+/// previous value, `GOLDEN_FLEET_HASH_400_BEFORE_MODULES`, exactly. Both hashes changed again,
+/// with every position unchanged, when new ships became neutral (`univCreateShip` sets
+/// `tacticstype` +0x2b8 to 1; they were evasive before): the hash covers each ship's tactics,
+/// and the scenario's ships without a tactics order are now neutral.)
 #[test]
 fn golden_trajectories() {
     let Some((hashes, run)) = run("fleet", 400) else { return };
@@ -115,8 +118,8 @@ const GOLDEN_FLEET_400: [[u32; 3]; 4] = [
     [0xc52d845c, 0xc542513e, 0xc3c5e02a],
     [0xc53038cf, 0xc4d0709c, 0xc4073b96],
 ];
-const GOLDEN_FLEET_HASH_400: u64 = 0x6b8a_0113_a215_1559;
-const GOLDEN_FLEET_HASH_400_BEFORE_MODULES: u64 = 0x66c5_3d31_855b_3940;
+const GOLDEN_FLEET_HASH_400: u64 = 0x6cdf_7642_da8e_9d36;
+const GOLDEN_FLEET_HASH_400_BEFORE_MODULES: u64 = 0x2048_6b27_41fe_e98b;
 const GOLDEN_PATROL_800: [u32; 3] = [0x454cc8f4, 0x44ce9e83, 0x435ba23f];
 
 #[test]

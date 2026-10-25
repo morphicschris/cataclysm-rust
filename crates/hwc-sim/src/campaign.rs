@@ -347,12 +347,49 @@ pub fn hyperspace_button(u: &mut Universe, game: &mut Game) -> Result<(), Hypers
     cancel_launch_orders(u);
     if crate::dock::cl_dock(u, &small, crate::dock::purpose::DOCK_STAY, None) > 0 {
         game.log(LogKind::Flow, "hyperspace: fleet ordered to dock");
+        speech(u, game, SPEECH_ROLLCALL_DOCK);
     }
     tell_hyperspacing_ships_to_ready(u, game);
     game.hyper.rollcall_screen = true;
     calculate_roll_call(u, game);
     game.log(LogKind::Flow, format!("hyperspace roll call: {} docked, {} remaining", game.hyper.rollcall_docked, game.hyper.rollcall_remaining));
     Ok(())
+}
+
+/// Roll-call speech events (`speechEventQueue`): the small ships are told to dock
+/// (`HyperspaceRollCallBegin`), the roll call is complete (state 2 to 3), the jump is called
+/// off (`spAbortHyperspaceCB`).
+pub const SPEECH_ROLLCALL_DOCK: i32 = 0x0200_101f;
+pub const SPEECH_ROLLCALL_COMPLETE: i32 = 0x0200_1020;
+pub const SPEECH_HYPERSPACE_ABORTED: i32 = 0x0400_1021;
+
+/// Queues a speech event for the front end (as KAS `SpeechEvent` does).
+fn speech(u: &Universe, game: &mut Game, event: i32) {
+    let time = u.total_time_elapsed;
+    game.presentation.push(crate::mission::Presentation::Speech { event, variable: 0, time });
+}
+
+/// `spAbortHyperspaceCB` (0x5124f0): the roll call's cancel button: the jump is off, the small
+/// ships stop docking, and the hyperspace button is offered again.
+pub fn abort_hyperspace(u: &mut Universe, game: &mut Game) -> bool {
+    if game.sp_state != sp_state::WAITING_ROLLCALL {
+        return false;
+    }
+    speech(u, game, SPEECH_HYPERSPACE_ABORTED);
+    game.sp_state = sp_state::NONE;
+    let small = non_hyperspacing_ships(u);
+    crate::command::cl_halt(u, &small);
+    game.hyper.rollcall_screen = false;
+    game.hyper.player_can_hyperspace = true;
+    game.log(LogKind::Flow, "hyperspace roll call: cancelled");
+    true
+}
+
+/// Which roll-call jump button the original disables (`HyperspaceRollCallBegin`): while any of
+/// the player's ships was recently attacked or fired upon (+0x35a / +0x35b), "go now" is off
+/// and only the emergency jump is offered; otherwise the emergency jump is off.
+pub fn rollcall_go_now_disabled(u: &Universe) -> bool {
+    u.ship_list.iter().any(|&id| u.ships.get(id).is_some_and(|s| s.player == HUMAN_PLAYER && (s.recently_attacked != 0 || s.recently_fired_upon != 0)))
 }
 
 /// `spGoNowHyperspaceCB` (0x512570): the roll call's "go now": the small ships dock instantly
@@ -371,6 +408,7 @@ pub fn go_now(u: &mut Universe, game: &mut Game) -> bool {
             let r = game.hyper.rec(id);
             r.in_range = true;
             r.in_parade = true;
+            join_parade(u, id);
         }
     }
     game.hyper.rollcall_screen = false;
@@ -395,6 +433,7 @@ pub fn emergency_hyperspace(u: &mut Universe, game: &mut Game) -> bool {
             let r = game.hyper.rec(id);
             r.in_range = true;
             r.in_parade = true;
+            join_parade(u, id);
         }
     }
     game.hyper.rollcall_screen = false;
@@ -627,6 +666,20 @@ fn add_ship_to_hyperspace(u: &mut Universe, game: &mut Game, id: ShipId) {
     }
 }
 
+/// `GroupShipIntoMilitaryParade` around the player's mothership (the ship's own modules,
+/// clamped to it, stay where they are).
+fn join_parade(u: &mut Universe, id: ShipId) {
+    let Some(ms) = u.base.players[HUMAN_PLAYER].mothership.filter(|&m| m != id && u.ships.get(m).is_some()) else { return };
+    let Some(s) = u.ships.get(id) else { return };
+    if s.flags & crate::base::SOF_MODULE != 0 || s.base.clamp.as_ref().is_some_and(|c| c.host.is_some()) {
+        return;
+    }
+    crate::command::group_ship_into_military_parade(u, id, ms);
+    if let Some(s) = u.ships.get_mut(id) {
+        s.special_flags |= 0x8000;
+    }
+}
+
 /// Into hyperspace at once (the skipped roll call, `InstantlyHyperspaceOut`'s effect).
 fn jump_now(u: &mut Universe, game: &mut Game, id: ShipId) {
     let ms = u.base.players[HUMAN_PLAYER].mothership;
@@ -634,6 +687,7 @@ fn jump_now(u: &mut Universe, game: &mut Game, id: ShipId) {
     crate::aitrack::force_steady_ship(u.ships.ship_mut(id));
     if Some(id) != ms {
         game.hyper.rec(id).in_parade = true;
+        join_parade(u, id);
     }
     crate::level::preset_ships_to_position(u);
     calculate_hyperspace_time(u, game, id, ms);
@@ -749,6 +803,7 @@ pub(crate) fn update(u: &mut Universe, game: &mut Game) {
     if ms.is_none() {
         if game.sp_state == sp_state::WAITING_ROLLCALL {
             // The mothership died during the roll call: the jump is off.
+            speech(u, game, SPEECH_HYPERSPACE_ABORTED);
             game.sp_state = sp_state::NONE;
             let small = non_hyperspacing_ships(u);
             crate::command::cl_halt(u, &small);
@@ -795,6 +850,7 @@ pub(crate) fn update(u: &mut Universe, game: &mut Game) {
                 game.hyper.substate = 0;
                 game.hyper.timestamp = now;
                 game.hyper.fleet_command_time = st(ld(now) + 2.5);
+                speech(u, game, SPEECH_ROLLCALL_COMPLETE);
                 game.log(LogKind::Flow, "hyperspace roll call complete (state 3)");
             }
         }
@@ -886,7 +942,7 @@ fn finish_jump(u: &mut Universe, game: &mut Game) {
     if std::env::var_os("HWC_DEBUG_JUMP").is_some() {
         for s in u.ships.iter().filter(|s| s.player == 0 && matches!(s.ship_type, ShipType::sRecon | ShipType::sWorker)) {
             let host = crate::base::find_ship_i_am_inside(u, s.id);
-            eprintln!("{:?} {} dock_with {:?} state {} inside {:?} in_list {} cmd {:?}", s.ship_type, s.id.0, s.base.dock_with, s.base.dock_state, host, u.ship_list.contains(&s.id), s.command);
+            eprintln!("{:?} {} dock_with {:?} state {} inside {:?} in_list {} cmd {:?} {:?} paused {} flags {:x}", s.ship_type, s.id.0, s.base.dock_with, s.base.dock_state, host, u.ship_list.contains(&s.id), s.command, s.command.and_then(|c| u.commands.get(c)).map(|c| (c.order, c.attributes, c.dock.purpose, c.selection.len())), u.universe_paused, s.flags);
         }
     }
     game.hyper.level_complete = true;
@@ -928,6 +984,7 @@ pub(crate) fn fade_in_arrival(u: &mut Universe, game: &mut Game, sp: [f32; 4]) -
         crate::aitrack::force_steady_ship(u.ships.ship_mut(id));
         if Some(id) != ms {
             game.hyper.rec(id).in_parade = true;
+            join_parade(u, id);
         }
         if u.ships.ship(id).base.inside.as_ref().is_some_and(|i| !i.ships.is_empty()) {
             launch_docked_on_arrival(u, game, id);
@@ -982,7 +1039,17 @@ pub(crate) fn arrival_complete(u: &mut Universe, game: &mut Game) {
             r.in_range = false;
         }
     }
-    game.hyper.in_hyperspace.clear();
+    // Only the player's (and allied) ships leave the hyperspace list: ships the mission sent
+    // to hyperspace at its start (`TeamHyperspaceOut` in an FSM's INIT) stay there until KAS
+    // brings them in.
+    let keep: Vec<ShipId> = game
+        .hyper
+        .in_hyperspace
+        .iter()
+        .copied()
+        .filter(|&id| u.ships.get(id).is_some() && !crate::shockwave::is_ally(u, id, HUMAN_PLAYER))
+        .collect();
+    game.hyper.in_hyperspace = keep;
 }
 
 /// A carried ship back in the universe (`univCreateShip` without the mission's starting

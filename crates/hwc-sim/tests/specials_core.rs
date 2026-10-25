@@ -57,6 +57,8 @@ fn fog_of_war_explores_and_discovers() {
         ],
         orders: vec![
             (0, Order::FogOfWar { player: 0 }),
+            // (New ships are neutral and fire back; the frigate is evasive so the recon lives.)
+            (0, Order::Tactics { ships: vec![1], tactics: hwc_sim::object::tactics::EVASIVE }),
             (1, Order::Move { ships: vec![0], mode: 0, waypoints: vec![Vector::new(-20000.0, 0.0, 0.0)] }),
         ],
         resources: Vec::new(),

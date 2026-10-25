@@ -127,6 +127,8 @@ pub struct SimTweaks {
     pub combat: crate::combat_tweaks::CombatTweaks,
     /// Base-building tunables (Resource.script and the base entries of Tweak.script).
     pub base: crate::base_tweaks::BaseTweaks,
+    /// The military parade tables (`Parade_*.script`).
+    pub parade: crate::parade::ParadeTables,
 }
 
 impl Default for SimTweaks {
@@ -215,6 +217,7 @@ impl Default for SimTweaks {
             },
             combat: crate::combat_tweaks::CombatTweaks::default(),
             base: crate::base_tweaks::BaseTweaks::default(),
+            parade: crate::parade::ParadeTables::default(),
         }
     }
 }
@@ -340,6 +343,7 @@ impl SimTweaks {
         t.precalculate();
         t.combat = crate::combat_tweaks::CombatTweaks::load(src);
         t.base = crate::base_tweaks::BaseTweaks::load(src);
+        t.parade = crate::parade::ParadeTables::load(src);
         t
     }
 

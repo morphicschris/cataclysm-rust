@@ -254,6 +254,13 @@ pub struct CombatTweaks {
     pub fighter_break_angle_max: i32,
     pub fighter_break_vertical_angle_min: i32,
     pub fighter_break_vertical_angle_max: i32,
+    /// `PROTECT_GET_THIS_CLOSE_CAP` / `_STRIKE` (0x749030, 0x749034): how close guards stay.
+    pub protect_get_this_close_cap: f32,
+    pub protect_get_this_close_strike: f32,
+    /// `PROTECT_STILL_VELOCITY` (0x749038): below this a protected ship counts as still.
+    pub protect_still_velocity: f32,
+    /// `RESCONTROLLER_FOLLOW_BEHIND` (0x749070).
+    pub rescontroller_follow_behind: f32,
 
     // --- Tactics.script
     pub enemy_near_zone: f32,
@@ -278,6 +285,9 @@ pub struct CombatTweaks {
     pub blast_constant_scuttle: f32,
     pub blast_radius_scuttle_bonus: f32,
     pub blast_damage_max_percent_scuttle: f32,
+    /// `SCUTTLE_SHIPDEATHTIMEMIN` / `MAX` (0x911990, 0x8a21fc): the self-destruct delay range.
+    pub scuttle_death_time_min: f32,
+    pub scuttle_death_time_max: f32,
     /// Yaw/pitch/roll ranges (lo, hi) of the spin an explosion, a bullet hit and a dying ship
     /// add.
     pub explosion_rock: [[f32; 2]; 3],
@@ -349,6 +359,10 @@ impl Default for CombatTweaks {
             fighter_break_angle_max: 45,
             fighter_break_vertical_angle_min: 10,
             fighter_break_vertical_angle_max: 30,
+            protect_get_this_close_cap: 2000.0,
+            protect_get_this_close_strike: 2000.0,
+            protect_still_velocity: 20.0,
+            rescontroller_follow_behind: 1.5,
             enemy_near_zone: 0.0,
             passive_retaliation_fire_time_modifier_lo: 0.0,
             passive_retaliation_fire_time_modifier_hi: 0.0,
@@ -366,6 +380,8 @@ impl Default for CombatTweaks {
             blast_constant_scuttle: 150_000.0,
             blast_radius_scuttle_bonus: f32::from_bits(0x3faa_3d71),
             blast_damage_max_percent_scuttle: 0.75,
+            scuttle_death_time_min: 0.0,
+            scuttle_death_time_max: 1.0,
             explosion_rock: [[-100.0, 100.0]; 3],
             bullet_rock: [[-100.0, 100.0]; 3],
             careen_rock: [[-100.0, 100.0]; 3],
@@ -497,6 +513,10 @@ const BINDINGS: &[(&str, &str, Conv, Target)] = &[
     (FILE_CL, "MULTIPLETARGETS_RETARGET_RATE", Int, U(|t| &mut t.multipletargets_retarget_rate)),
     (FILE_CL, "FIGHTER_BREAK_ANGLE_MIN", Int, I(|t| &mut t.fighter_break_angle_min)),
     (FILE_CL, "FIGHTER_BREAK_ANGLE_MAX", Int, I(|t| &mut t.fighter_break_angle_max)),
+    (FILE_CL, "PROTECT_GET_THIS_CLOSE_CAP", Real, F(|t| &mut t.protect_get_this_close_cap)),
+    (FILE_CL, "PROTECT_GET_THIS_CLOSE_STRIKE", Real, F(|t| &mut t.protect_get_this_close_strike)),
+    (FILE_CL, "PROTECT_STILL_VELOCITY", Real, F(|t| &mut t.protect_still_velocity)),
+    (FILE_CL, "RESCONTROLLER_FOLLOW_BEHIND", Real, F(|t| &mut t.rescontroller_follow_behind)),
     (FILE_CL, "FIGHTER_BREAK_VERTICAL_ANGLE_MIN", Int, I(|t| &mut t.fighter_break_vertical_angle_min)),
     (FILE_CL, "FIGHTER_BREAK_VERTICAL_ANGLE_MAX", Int, I(|t| &mut t.fighter_break_vertical_angle_max)),
     (FILE_TACTICS, "EnemyNearZone", Real, F(|t| &mut t.enemy_near_zone)),
@@ -518,6 +538,8 @@ const BINDINGS: &[(&str, &str, Conv, Target)] = &[
     (FILE_TWEAK, "BLAST_CONSTANT_SCUTTLE", Real, F(|t| &mut t.blast_constant_scuttle)),
     (FILE_TWEAK, "BLAST_RADIUS_SCUTTLE_BONUS", Real, F(|t| &mut t.blast_radius_scuttle_bonus)),
     (FILE_TWEAK, "BLAST_DAMAGE_MAX_PERCENT_SCUTTLE", Real, F(|t| &mut t.blast_damage_max_percent_scuttle)),
+    (FILE_TWEAK, "SCUTTLE_SHIPDEATHTIMEMIN", Real, F(|t| &mut t.scuttle_death_time_min)),
+    (FILE_TWEAK, "SCUTTLE_SHIPDEATHTIMEMAX", Real, F(|t| &mut t.scuttle_death_time_max)),
     (FILE_TWEAK, "YAWEXPLOSIONROCKLO", Real, F(|t| &mut t.explosion_rock[0][0])),
     (FILE_TWEAK, "YAWEXPLOSIONROCKHI", Real, F(|t| &mut t.explosion_rock[0][1])),
     (FILE_TWEAK, "PITCHEXPLOSIONROCKLO", Real, F(|t| &mut t.explosion_rock[1][0])),

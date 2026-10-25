@@ -23,6 +23,7 @@ use crate::statics::{ShipRace, ShipType};
 use crate::universe::Universe;
 
 mod ai_ui;
+mod moves;
 mod orders;
 mod select;
 
@@ -93,8 +94,26 @@ impl SimHost<'_> {
         self.team(cx).map(|t| t.ships.clone()).unwrap_or_default()
     }
 
+    /// The position of a selection entry (a ship, mine or meteor).
     fn pos(&self, id: ShipId) -> Option<Vector> {
+        if let Some(m) = id.mine() {
+            return self.u.missiles.get(m).map(|m| m.posinfo.position);
+        }
+        if let Some(r) = id.meteor() {
+            return self.u.base.resources.get(r).map(|r| r.position);
+        }
         self.u.ships.get(id).map(|s| s.posinfo.position)
+    }
+
+    /// The position and the hidden flag of a selection entry still in the universe.
+    fn object_state(&self, id: ShipId) -> Option<(Vector, bool)> {
+        if let Some(m) = id.mine() {
+            return self.u.missiles.get(m).map(|m| (m.posinfo.position, m.flags & sof::HIDE != 0));
+        }
+        if let Some(r) = id.meteor() {
+            return self.u.base.resources.get(r).map(|r| (r.position, r.flags & sof::HIDE != 0));
+        }
+        self.u.ships.get(id).map(|s| (s.posinfo.position, s.flags & sof::HIDE != 0))
     }
 
     /// `selCentrePointComputeGeneral`: the centre of the bounding box of the ships' positions.
@@ -249,6 +268,7 @@ impl KasRuntime for SimHost<'_> {
         if t.is_empty() {
             return;
         }
+        self.delete_all_team_moves(cx);
         let sel = self.team_ships(cx);
         command::cl_attack(self.u, &sel, &t);
     }
@@ -258,14 +278,10 @@ impl KasRuntime for SimHost<'_> {
             self.log(LogKind::Warning, "MoveTo: NULL destination");
             return;
         };
-        let sel = self.team_ships(cx);
-        if sel.is_empty() {
-            return;
-        }
-        // aimCreateMoveTeam: the team's move is processed by the AI move layer, which orders a
-        // move of the team from its centre (issued here at once).
-        let from = self.centre(&sel);
-        command::cl_move(self.u, &sel, command::waypoint_mode::ONCE, from, &[dest]);
+        // kasfMoveTo (0x48f7c0): the team's moves are replaced by a move-team move (same
+        // formation, no waiting, removed when done) that the next AI pass carries out.
+        self.delete_all_team_moves(cx);
+        self.add_team_move(cx, crate::aimove::TeamMove::move_team(dest, crate::aimove::SAME_FORMATION, false, true));
     }
 
     fn patrol_path(&mut self, cx: &Cx, path: Option<Hash>) {
@@ -273,6 +289,7 @@ impl KasRuntime for SimHost<'_> {
             self.log(LogKind::Warning, "PatrolPath: unknown path");
             return;
         };
+        self.delete_all_team_moves(cx);
         let sel = self.team_ships(cx);
         if sel.is_empty() || p.points.is_empty() {
             return;
@@ -283,17 +300,29 @@ impl KasRuntime for SimHost<'_> {
     }
 
     fn stop(&mut self, cx: &Cx) {
+        self.delete_all_team_moves(cx);
         let sel = self.team_ships(cx);
         command::cl_halt(self.u, &sel);
     }
 
+    /// `kasfGuardShips` (0x48df80): the team drops its AI moves and guards the ships
+    /// (`clWrapProtect` with the team's own ship list, which loses its docking ships).
     fn guard(&mut self, cx: &Cx, ships: Ships) {
         let s = self.ships(ships);
         if s.is_empty() {
             return;
         }
-        let team = cx.team.map(|t| self.g.name(t)).unwrap_or_default();
-        self.log(LogKind::Unimplemented, format!("Guard (team {team}): protect orders are not modelled"));
+        self.delete_all_team_moves(cx);
+        if let Some(t) = cx.team.and_then(|h| self.g.level.team_mut(h)) {
+            let mut list = std::mem::take(&mut t.ships);
+            command::make_ships_controllable(self.u, &mut list);
+            if let Some(t) = cx.team.and_then(|h| self.g.level.team_mut(h)) {
+                t.ships = list.clone();
+            }
+            if !list.is_empty() {
+                command::cl_wrap_protect(self.u, &list, &s);
+            }
+        }
     }
 
     fn formation_delta(&mut self, cx: &Cx) {
@@ -317,6 +346,7 @@ impl KasRuntime for SimHost<'_> {
     }
 
     fn dock_instant(&mut self, cx: &Cx, with_team: Team) {
+        self.delete_all_team_moves(cx);
         let host = with_team.and_then(|h| self.g.level.team(h)).and_then(|t| t.ships.first().copied()).filter(|&id| {
             self.u.ships.get(id).is_some_and(|s| s.flags & (sof::HYPERSPACE | sof::DISABLED) == 0)
         });
@@ -328,6 +358,7 @@ impl KasRuntime for SimHost<'_> {
     }
 
     fn launch(&mut self, cx: &Cx) {
+        self.delete_all_team_moves(cx);
         let sel = self.team_ships(cx);
         for &id in &sel {
             if let Some(s) = self.u.ships.get_mut(id) {
@@ -615,11 +646,11 @@ impl KasRuntime for SimHost<'_> {
             .map(|s| (s.posinfo.position, self.u.statics.ship(s.ship_type).map_or(0.0, |st| st.fow_radius)))
             .collect();
         for id in v {
-            let Some(s) = self.u.ships.get(id) else { continue };
-            if s.flags & sof::HIDE != 0 {
+            let Some((pos, hidden)) = self.object_state(id) else { continue };
+            if hidden {
                 continue;
             }
-            if viewers.iter().any(|&(p, r)| distance_squared(p, s.posinfo.position) <= ld(r) * ld(r)) {
+            if viewers.iter().any(|&(p, r)| distance_squared(p, pos) <= ld(r) * ld(r)) {
                 return 1;
             }
         }
@@ -850,6 +881,13 @@ impl KasRuntime for SimHost<'_> {
     fn mission_failed(&mut self, _cx: &Cx) {
         self.g.mission_failed = true;
         self.log(LogKind::Flow, "MissionFailed");
+    }
+
+    /// `kasfMissionCompleted` (0x48d290): in the tutorial the tutorial is over; otherwise the
+    /// game is won (`singlePlayerMissionCompleteCB`: the game ends, the closing movie plays).
+    fn mission_completed(&mut self, _cx: &Cx) {
+        self.g.mission_completed = true;
+        self.log(LogKind::Flow, "MissionCompleted");
     }
 
     fn r_us_set(&mut self, _cx: &Cx, player: i32, r_us: i32) {

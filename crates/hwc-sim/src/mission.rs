@@ -367,6 +367,8 @@ pub struct Game {
     pub resource_units: Vec<i32>,
     pub pending_save: Option<(i32, String)>,
     pub mission_failed: bool,
+    /// `MissionCompleted` was called (the campaign is won, or the tutorial is over).
+    pub mission_completed: bool,
     pub delete_when_mission_ends: Vec<ShipId>,
     /// Repair modifiers set by KAS (+0x3dc), by ship.
     pub repair_modifiers: Vec<(ShipId, f32)>,
@@ -431,6 +433,22 @@ impl Game {
 
     /// A ship left the universe: out of every selection (`kasShipDied`) and team
     /// (`aitShipDied`), swapping the last entry into its place as the original does.
+    /// Mines and meteors that have left the universe leave the selections (the original
+    /// removes them as they are deleted; here before each KAS pass).
+    pub fn purge_gone_objects(&mut self, u: &Universe) {
+        let gone = |id: ShipId| match (id.mine(), id.meteor()) {
+            (Some(m), _) => u.missiles.get(m).is_none(),
+            (_, Some(r)) => u.base.resources.get(r).is_none(),
+            _ => false,
+        };
+        for (_, s) in &mut self.selections {
+            let dead: Vec<ShipId> = s.iter().copied().filter(|&id| gone(id)).collect();
+            for id in dead {
+                swap_remove_all(s, id);
+            }
+        }
+    }
+
     pub fn ship_removed(&mut self, id: ShipId) {
         for (_, s) in &mut self.selections {
             swap_remove_all(s, id);
@@ -607,46 +625,10 @@ impl MissionRun {
         }
         let sp_tweaks = SpTweaks::load(src);
 
-        let mut game = Game {
-            config,
-            sp_tweaks,
-            level: LevelState::default(),
-            selections: Vec::new(),
-            objectives: Vec::new(),
-            pings: Vec::new(),
-            pointers: Vec::new(),
-            tut_flags: Vec::new(),
-            sensors_open: false,
-            sensors_kas_flag: 0,
-            sensors_look_at: Vector::ZERO,
-            wide_screen: false,
-            camera: CameraState::default(),
-            presentation: Vec::new(),
-            music: None,
-            techs: Vec::new(),
-            research_allowed: Vec::new(),
-            construction: Vec::new(),
-            resource_units: vec![0; 2],
-            pending_save: None,
-            mission_failed: false,
-            delete_when_mission_ends: Vec::new(),
-            repair_modifiers: Vec::new(),
-            docked: Vec::new(),
-            intel_ended: false,
-            intel_stamp: 0.0,
-            speech_end: None,
-            sp_state: sp_state::NONE,
-            fleet,
-            arriving: Vec::new(),
-            nislet: None,
-            ships_have_arrived: false,
-            pending_nis: None,
-            hyper: crate::campaign::HyperState::default(),
-            names: script.names.iter().map(|(h, n)| (*h, n.clone())).collect(),
-            log: Vec::new(),
-            frame: 0,
-            time: 0.0,
-        };
+        let mut game = empty_game(config);
+        game.sp_tweaks = sp_tweaks;
+        game.fleet = fleet;
+        game.names = script.names.iter().map(|(h, n)| (*h, n.clone())).collect();
         match carry {
             None => game.log(LogKind::Flow, format!("mission {mission}: opening NIS skipped (nis\\n01.nis); fleet in hyperspace: {}", fleet_summary(&game.fleet))),
             Some(c) => {
@@ -772,6 +754,11 @@ impl MissionRun {
         crate::campaign::emergency_hyperspace(&mut self.universe, &mut self.game)
     }
 
+    /// The roll call's cancel button ([`crate::campaign::abort_hyperspace`]).
+    pub fn abort_hyperspace(&mut self) -> bool {
+        crate::campaign::abort_hyperspace(&mut self.universe, &mut self.game)
+    }
+
     /// The fleet has jumped and the next mission is due.
     pub fn mission_complete(&self) -> bool {
         self.game.hyper.level_complete
@@ -864,11 +851,64 @@ impl crate::universe::UpdateHooks for Hooks<'_> {
             return;
         }
         if kas_frame_due(u.update_counter, SP_KAS_UPDATE_RATE, 0) {
+            self.game.purge_gone_objects(u);
             let mut host = crate::kas_host::SimHost { u, g: self.game };
             self.kas.execute(&mut host);
         }
+        // The computer player's own pass (player 1: `univUpdateCounter & 15 == 1`, not while an
+        // NIS plays): `aifFleetCommand` runs the team moves (`aitExecute`). Its attack, defence
+        // and resource managers only run with fleet control, which single player does not give.
+        if kas_frame_due(u.update_counter, SP_KAS_UPDATE_RATE, 1) && self.game.pending_nis.is_none() {
+            let mut host = crate::kas_host::SimHost { u, g: self.game };
+            host.ai_teams_execute();
+        }
         // `ShipApplyEMP` reads the mission variable `G_NaggarokEMP` (`kasVarFind`).
         u.kas_naggarok_emp = self.kas.var(None, var_hash("G_NaggarokEMP"));
+    }
+}
+
+/// A game state with nothing in it yet for `config`.
+pub(crate) fn empty_game(config: MissionConfig) -> Game {
+    Game {
+        config,
+        sp_tweaks: SpTweaks::default(),
+        level: LevelState::default(),
+        selections: Vec::new(),
+        objectives: Vec::new(),
+        pings: Vec::new(),
+        pointers: Vec::new(),
+        tut_flags: Vec::new(),
+        sensors_open: false,
+        sensors_kas_flag: 0,
+        sensors_look_at: Vector::ZERO,
+        wide_screen: false,
+        camera: CameraState::default(),
+        presentation: Vec::new(),
+        music: None,
+        techs: Vec::new(),
+        research_allowed: Vec::new(),
+        construction: Vec::new(),
+        resource_units: vec![0; 2],
+        pending_save: None,
+        mission_failed: false,
+        mission_completed: false,
+        delete_when_mission_ends: Vec::new(),
+        repair_modifiers: Vec::new(),
+        docked: Vec::new(),
+        intel_ended: false,
+        intel_stamp: 0.0,
+        speech_end: None,
+        sp_state: sp_state::NONE,
+        fleet: Vec::new(),
+        arriving: Vec::new(),
+        nislet: None,
+        ships_have_arrived: false,
+        pending_nis: None,
+        hyper: crate::campaign::HyperState::default(),
+        names: std::collections::HashMap::new(),
+        log: Vec::new(),
+        frame: 0,
+        time: 0.0,
     }
 }
 

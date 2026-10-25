@@ -307,8 +307,8 @@ impl Universe {
         hooks.computer_players(self);
         if !self.universe_paused {
             command::cl_process(self);
+            command::cl_post_process(self);
         }
-        // (clPostProcess handles guard/protect retaliation; not modelled.)
         crate::ships::minelayer::update_mine_wall_formations(self);
         crate::collision::check_all_bump_collisions(self);
         crate::bullet::update_all(self);
@@ -413,6 +413,22 @@ impl Universe {
         let dt = self.phys_time_elapsed;
         if self.ships.ship(id).flags & sof::DEAD != 0 {
             return;
+        }
+        // The self-destruct timer (scuttling, spent gravity wells): the ship blows up.
+        let dt_ = self.ships.ship(id).death_time;
+        if dt_ != 0.0 && dt_ <= self.total_time_elapsed {
+            let s = self.ships.ship(id);
+            let blow = match s.ship_type.index() {
+                0x40 | 0x4f => crate::ships::gravwell::is_derelict(self, id),
+                _ => s.flags2 & crate::object::flags2::DISGUISED == 0 || !crate::ships::mimic::is_disguised(self, id),
+            };
+            if blow {
+                self.ships.ship_mut(id).health = 0.0;
+                crate::damage::add_ship_to_delete_list(self, id, -1);
+                if self.ships.ship(id).flags & sof::DEAD != 0 {
+                    return;
+                }
+            }
         }
         if self.ships.ship(id).special_flags & crate::object::special::ROW_GETTING_OUT_OF_WAY != 0 {
             crate::aiship::row_fly_out_of_way(self, id);

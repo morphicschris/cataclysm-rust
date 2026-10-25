@@ -28,6 +28,40 @@ pub enum ObjType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ShipId(pub u16);
 
+impl ShipId {
+    /// KAS selections hold space objects, not only ships: mines (`FindMinesInside`) and
+    /// meteors (`FindMeteors`) are kept in a selection under ids of these two ranges, which
+    /// ship numbers never reach.
+    pub const MINE_RANGE: u16 = 0xC000;
+    pub const METEOR_RANGE: u16 = 0x8000;
+    const INDEX_MASK: u16 = 0x3FFF;
+
+    /// The selection entry of a mine (`None` past the range).
+    pub fn from_mine(m: MissileId) -> Option<ShipId> {
+        (m.0 <= u32::from(Self::INDEX_MASK)).then_some(ShipId(Self::MINE_RANGE | m.0 as u16))
+    }
+
+    /// The selection entry of a meteor (an asteroid of a meteor storm).
+    pub fn from_meteor(r: crate::resource::ResourceId) -> Option<ShipId> {
+        (r.0 <= Self::INDEX_MASK).then_some(ShipId(Self::METEOR_RANGE | r.0))
+    }
+
+    /// The mine a selection entry stands for.
+    pub fn mine(self) -> Option<MissileId> {
+        (self.0 & 0xC000 == Self::MINE_RANGE).then_some(MissileId(u32::from(self.0 & Self::INDEX_MASK)))
+    }
+
+    /// The meteor a selection entry stands for.
+    pub fn meteor(self) -> Option<crate::resource::ResourceId> {
+        (self.0 & 0xC000 == Self::METEOR_RANGE).then_some(crate::resource::ResourceId(self.0 & Self::INDEX_MASK))
+    }
+
+    /// The entry is a ship (not a mine or meteor).
+    pub fn is_ship(self) -> bool {
+        self.0 & 0x8000 == 0
+    }
+}
+
 /// A bullet's identity (slot in the bullet store; slots are reused once a bullet is gone).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BulletId(pub u32);
@@ -221,6 +255,9 @@ pub mod special {
     pub const IS_A_SALVAGER: u32 = 0x0008_0000;
     /// Cleared every tick by the post-physics housekeeping.
     pub const TRANSIENT_8000000: u32 = 0x0800_0000;
+    /// The ship's guard chain comes back to itself (`FindShipsWereGuarding`): it does not
+    /// try to keep pace with the ship it protects.
+    pub const CIRCULAR_GUARD: u32 = 0x4000_0000;
 }
 
 /// `PosInfo` (+0x58).
@@ -507,7 +544,7 @@ impl Ship {
             row_original_point: Vector::ZERO,
             row_out_of_way_point: Vector::ZERO,
             row_state: 0,
-            tactics: tactics::EVASIVE,
+            tactics: tactics::NEUTRAL,
             tactics_talk: 0,
             tactics_need_to_flightman: 0,
             getting_rocked: None,

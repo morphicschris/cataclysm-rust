@@ -108,11 +108,13 @@ pub struct KasTeam {
     /// `kasTactics` (+0x74) and `kasFormation` (+0x78), set by `kasFSMCreate` (1 and 7).
     pub kas_tactics: i32,
     pub kas_formation: i32,
+    /// The team's AI moves (`moves`, `curMove`, `teamDelay`): see [`crate::aimove`].
+    pub moves: crate::aimove::TeamMoves,
 }
 
 impl KasTeam {
     pub fn new(label: Hash) -> Self {
-        KasTeam { label, ships: Vec::new(), orig_count: 0, orig_type: None, new_ships: 0, kas_tactics: 0, kas_formation: 0 }
+        KasTeam { label, ships: Vec::new(), orig_count: 0, orig_type: None, new_ships: 0, kas_tactics: 0, kas_formation: 0, moves: crate::aimove::TeamMoves::default() }
     }
 }
 
@@ -309,6 +311,8 @@ pub struct LevelState {
     pub warnings: Vec<String>,
     /// Label texts seen (teams, points, volumes, paths), for logs.
     pub names: Vec<(Hash, String)>,
+    /// The last slipgate created without a partner yet (0xadb61c): gates pair in file order.
+    pub unpaired_slipgate: Option<ShipId>,
 }
 
 impl LevelState {
@@ -743,9 +747,46 @@ fn mission_sphere(u: &mut Universe, src: &dyn DataSource, dir: &str, field: &str
                     crate::missile::add_level_mine(u, Vector::new(v[0], v[1], v[2]));
                 }
             }
-            "meteorstorm" | "slipgate" => state.unmodelled.push((k.clone(), value.clone())),
+            "slipgate" => slipgate_line(u, &value, info, ctx, state)?,
+            "meteorstorm" => state.unmodelled.push((k.clone(), value.clone())),
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// `scriptSetSlipgateCB` (0x49c680): `x, y, z, n/m, angle, type`. The gate belongs to the
+/// sphere's player, is yawed by the angle, cannot be targeted or bumped, and is disabled
+/// (reason 6); consecutive gates are each other's partners.
+fn slipgate_line(u: &mut Universe, field: &str, info: SphereInfo, ctx: &LevelContext, state: &mut LevelState) -> Result<(), LevelError> {
+    let f = decomma(field);
+    let v = scan(&f, "%f %f %f %d/%d %f %s");
+    let fl = |i: usize| v.get(i).and_then(Scanned::float).unwrap_or(0.0);
+    let Some(type_s) = v.get(6).and_then(Scanned::str) else {
+        return Err(LevelError(format!("Bad Slipgate point definition: {field}")));
+    };
+    let ship_type = ShipType::from_name(type_s).ok_or_else(|| LevelError(format!("Bad shiptype in {field}")))?;
+    let mut angle = st(ld(fl(5)) * ld(DEG_TO_RAD));
+    let p = info.place(state.mission_man, Vector::new(fl(0), fl(1), fl(2)));
+    if !state.mission_man {
+        angle = st(ld(angle) + ld(info.rotz));
+    }
+    if u.statics.ship(ship_type).is_none() {
+        state.warnings.push(format!("no statics for {ship_type}; slipgate skipped"));
+        return Ok(());
+    }
+    let id = create_ship(u, state, ctx.mission, ship_type, info.player, p)?;
+    rotate_yaw(u, id, angle);
+    match state.unpaired_slipgate.take() {
+        Some(other) => {
+            crate::ships::slipgate::set_partner(u, id, other);
+            crate::ships::slipgate::set_partner(u, other, id);
+        }
+        None => state.unpaired_slipgate = Some(id),
+    }
+    if let Some(s) = u.ships.get_mut(id) {
+        s.flags = (s.flags & !crate::object::sof::TARGETABLE) | crate::object::sof::NOT_BUMPABLE;
+        crate::base::set_disable_reason(s, true, 6);
     }
     Ok(())
 }
@@ -1216,6 +1257,10 @@ fn spin_asteroid(u: &mut Universe, res: &mut LevelResource, t: u8, tw: &Resource
 /// Puts the ships of every formation command at their formation slots
 /// (`clPresetShipsToPosition` / `setFormationToDo`, run once after a level is loaded).
 pub fn preset_ships_to_position(u: &mut Universe) {
+    let parades: Vec<_> = u.commands.iter().filter(|c| c.order == command::order::MILITARY_PARADE).filter_map(|c| c.parade.clone()).collect();
+    for p in parades {
+        crate::parade::set_parade(u, &p);
+    }
     let statics = u.statics.clone();
     let cmds: Vec<_> = u.commands.iter().filter(|c| c.attributes & command::attr::FORMATION != 0).cloned().collect();
     for c in cmds {

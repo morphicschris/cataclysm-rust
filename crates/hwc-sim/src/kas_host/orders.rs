@@ -345,6 +345,7 @@ macro_rules! orders_methods {
 
         /// `kasfStopInstant`: the team halts and loses all its motion at once.
         fn stop_instant(&mut self, cx: &Cx) {
+            self.delete_all_team_moves(cx);
             let sel = self.team_ships(cx);
             command::cl_halt(self.u, &sel);
             for id in sel {
@@ -357,26 +358,14 @@ macro_rules! orders_methods {
             }
         }
 
-        /// `kasfIntercept` (`aimCreateIntercept`): the team flies from its centre to the first
-        /// target, or to halfway between it and where it is going. (The original re-aims the
-        /// move every 2 seconds until the team is close; the AI move layer is not modelled, so
-        /// the move is issued once.)
+        /// `kasfIntercept` (0x48db00): the team's moves are replaced by an intercept of the
+        /// first target (re-aimed every 2 s, same formation, the team's KAS tactics), which
+        /// the AI passes carry out until the team is close (`aimProcessIntercept`).
         fn intercept(&mut self, cx: &Cx, targets: Ships) {
             let Some(&t) = self.ships(targets).first() else { return };
-            let Some(ts) = self.u.ships.get(t) else { return };
-            let (p, m) = (ts.posinfo.position, ts.move_to);
-            let dest = if m.x == 0.0 && m.y == 0.0 && m.z == 0.0 {
-                p
-            } else {
-                let h = |a: f32, b: f32| st(ld(st(ld(a) + ld(b))) * 0.5);
-                Vector::new(h(p.x, m.x), h(m.y, p.y), h(m.z, p.z))
-            };
-            let sel = self.team_ships(cx);
-            if sel.is_empty() {
-                return;
-            }
-            let from = self.centre(&sel);
-            command::cl_move(self.u, &sel, command::waypoint_mode::ONCE, from, &[dest]);
+            self.delete_all_team_moves(cx);
+            let tactics = self.team(cx).map_or(1, |tm| tm.kas_tactics);
+            self.add_team_move(cx, crate::aimove::TeamMove::intercept(t, 2.0, crate::aimove::SAME_FORMATION, tactics, true, true));
         }
 
         /// `kasfKamikaze` (`aimProcessKamikaze`): aggressive tactics, attack the targets, then
@@ -386,6 +375,7 @@ macro_rules! orders_methods {
             if t.is_empty() {
                 return;
             }
+            self.delete_all_team_moves(cx);
             let sel = self.team_ships(cx);
             if sel.is_empty() || !self.wrap_set_tactics(&sel, 2) {
                 return;
@@ -430,13 +420,19 @@ macro_rules! orders_methods {
             crate::ships::worker_repair::cl_repair(self.u, &workers, &targets);
         }
 
-        /// `kasfShipsGuardShips` (`clWrapProtect`): protect orders need the command layer's
-        /// protect list, which is not modelled.
+        /// `kasfShipsGuardShips` (0x48dfc0): `clWrapProtect` (the guard selection loses its
+        /// docking and launching ships, in place).
         fn ships_guard_ships(&mut self, _cx: &Cx, guard: Ships, ships: Ships) {
-            if self.ships(guard).is_empty() || self.ships(ships).is_empty() {
+            let protect = self.ships(ships);
+            let mut sel = self.ships(guard);
+            if sel.is_empty() || protect.is_empty() {
                 return;
             }
-            self.log(LogKind::Unimplemented, "ShipsGuardShips: protect orders are not modelled");
+            command::make_ships_controllable(self.u, &mut sel);
+            self.set_ships(guard, sel.clone());
+            if !sel.is_empty() {
+                command::cl_wrap_protect(self.u, &sel, &protect);
+            }
         }
 
         // ---- docking -----------------------------------------------------------------------
@@ -444,11 +440,13 @@ macro_rules! orders_methods {
         /// `kasfDockSupportWith`: dock (for support) with the team's first ship, or the
         /// nearest.
         fn dock_support_with(&mut self, cx: &Cx, with_team: Team) {
+            self.delete_all_team_moves(cx);
             self.team_dock(cx, with_team, 0);
         }
 
         /// `kasfDockStay`: dock and stay with the team's first ship, or the nearest.
         fn dock_stay(&mut self, cx: &Cx, with_team: Team) {
+            self.delete_all_team_moves(cx);
             self.team_dock(cx, with_team, 2);
         }
 
@@ -503,31 +501,36 @@ macro_rules! orders_methods {
             self.team_formation(cx, crate::formation::kind::SPHERE);
         }
 
-        /// `kasfShipsSetFormation`: formation 8 is the military parade (not modelled).
+        /// `kasfShipsSetFormation` (0x48dd60): formation 8 is the military parade
+        /// (`clWrapSetMilitaryParade`), any other a formation.
         fn ships_set_formation(&mut self, _cx: &Cx, ships: Ships, formation: i32) {
             let sel = self.ships(ships);
             if formation == orders::PARADE_FORMATION {
-                if !sel.is_empty() {
-                    self.log(LogKind::Flow, "ShipsSetFormation: military parade is not modelled");
-                }
+                let ok = self.wrap_filter(&sel);
+                command::cl_set_military_parade(self.u, &ok);
                 return;
             }
             command::cl_formation(self.u, &sel, formation as u32);
         }
 
-        /// `kasfForceParadeFormation`: the fleet stops what it is doing and joins the
-        /// mothership's parade. The parade itself is not modelled: the ships are left idle.
+        /// `kasfForceParadeFormation` (0x495c10): every ship of the fleet stops what it is doing,
+        /// joins the parade around the first ship of `mothership` and is put at its slot at once
+        /// (`setMilitaryParade`).
         fn force_parade_formation(&mut self, _cx: &Cx, mothership: Ships, fleet: Ships) {
             let (ms, fl) = (self.ships(mothership), self.ships(fleet));
-            if ms.is_empty() || fl.is_empty() {
-                return;
-            }
+            let (Some(&around), false) = (ms.first(), fl.is_empty()) else { return };
             for id in fl {
                 if self.live(id) {
                     command::remove_ships_from_doing_stuff(self.u, &[id]);
+                    if let Some(s) = self.u.ships.get_mut(id) {
+                        crate::aitrack::force_steady_ship(s);
+                    }
+                    command::group_ship_into_military_parade(self.u, id, around);
                 }
             }
-            self.log(LogKind::Flow, "ForceParadeFormation: military parade is not modelled (fleet left idle)");
+            if let Some(p) = command::military_group_around(self.u, around).and_then(|c| self.u.commands.get(c)).and_then(|c| c.parade.clone()) {
+                crate::parade::set_parade(self.u, &p);
+            }
         }
 
         // ---- tactics -----------------------------------------------------------------------
@@ -663,30 +666,33 @@ macro_rules! orders_methods {
             }
         }
 
-        /// `kasfShipsScuttle` (`clScuttle`). The original arms each ship's self-destruct timer
-        /// (now plus a random delay) and the universe update blows it up when the timer runs
-        /// out; the timer is not modelled, so the ships are scuttled at once (the random draw
-        /// is still taken). Disguised Mimics drop their disguise.
+        /// `kasfShipsScuttle` (0x493890, `clScuttle` 0x445bf0): each ship's self-destruct
+        /// timer is armed (now plus a random delay between `SCUTTLE_SHIPDEATHTIMEMIN` and `MAX`,
+        /// stream 10) and `univCheckShipState` blows it up when the time comes; disguised Mimics
+        /// drop their disguise. (In the tutorial only with its scuttle flag, not modelled.)
         fn ships_scuttle(&mut self, _cx: &Cx, ships: Ships) {
             let sel = self.ships(ships);
             if sel.is_empty() {
                 return;
             }
             if self.u.base.options.tutorial {
-                // (The tutorial only scuttles when its flag allows; not modelled.)
                 self.log(LogKind::Flow, "ShipsScuttle: ignored in the tutorial");
                 return;
             }
+            let (lo, hi) = (self.u.tweaks.combat.scuttle_death_time_min, self.u.tweaks.combat.scuttle_death_time_max);
             for id in sel {
-                let Some(s) = self.u.ships.get(id) else { continue };
-                if s.flags & sof::DEAD != 0 {
+                if !self.live(id) {
                     continue;
                 }
-                let _ = self.u.randy.random(10);
+                let r = self.u.randy.random(10);
+                let now = self.u.total_time_elapsed;
+                let t = st((ld(hi) - ld(lo)) * ld(2.328_306_4e-10f32) * hwc_math::fpu::fild_u32(r) + ld(lo) + ld(now));
+                if let Some(s) = self.u.ships.get_mut(id) {
+                    s.death_time = t;
+                }
                 if self.u.ships.get(id).is_some_and(|s| s.flags2 & orders::DISGUISED != 0) {
                     crate::ships::mimic::end_disguise(self.u, id, false);
                 }
-                crate::damage::add_ship_to_delete_list(self.u, id, -1);
             }
         }
 

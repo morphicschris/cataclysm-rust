@@ -2,9 +2,9 @@
 //! script does into presentation cues (music, speech, location cards) and simple overlay text
 //! (objectives, subtitles, notes about NIS sequences that are not played).
 //!
-//! The KAS host records most presentation calls only in the mission log, so the cues are read
-//! back from the log's call lines (`team: Name(args) = result`); this needs the mission's
-//! `log_calls` option, which mission mode turns on.
+//! Music, speech and location cards come from the mission's presentation queue
+//! (`game.presentation`); notes come from the log (`team: Name(args) = result` call lines need
+//! the mission's `log_calls` option, which mission mode turns on).
 
 use std::sync::Arc;
 
@@ -28,21 +28,39 @@ pub enum Cue {
     Notice(String),
 }
 
-/// Reads new mission log lines into [`Cue`]s.
+/// Reads the mission's new presentation calls (music, speech, location cards, from
+/// `game.presentation`) and log lines (notes) into [`Cue`]s.
 #[derive(Debug, Default)]
 pub struct CueReader {
     seen: usize,
+    seen_presentation: usize,
 }
 
 impl CueReader {
     pub fn poll(&mut self, run: &MissionRun) -> Vec<Cue> {
-        let log = &run.game.log;
+        use hwc_sim::mission::Presentation;
         let mut out = Vec::new();
+        let pres = &run.game.presentation;
+        if self.seen_presentation > pres.len() {
+            self.seen_presentation = 0;
+        }
+        for p in &pres[self.seen_presentation..] {
+            out.push(match p {
+                Presentation::Music { track, .. } => Cue::Music(*track),
+                Presentation::Speech { event, variable, .. } => Cue::Speech { event: *event as u32, variable: *variable },
+                Presentation::LocationCard { text, milliseconds, .. } => Cue::LocationCard { milliseconds: *milliseconds, text: text.clone() },
+            });
+        }
+        self.seen_presentation = pres.len();
+        let log = &run.game.log;
         for e in &log[self.seen.min(log.len())..] {
             match e.kind {
                 LogKind::Call => {
+                    // Presentation calls come from `game.presentation` above.
                     if let Some(c) = parse_call(&e.text).and_then(|(name, args)| cue_from_call(name, &args)) {
-                        out.push(c);
+                        if matches!(c, Cue::Notice(_)) {
+                            out.push(c);
+                        }
                     }
                 }
                 LogKind::Flow => {

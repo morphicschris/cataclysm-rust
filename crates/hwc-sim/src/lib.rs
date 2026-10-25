@@ -16,6 +16,7 @@
 // deliberately where the binary tests "not less" (true for NaN).
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
+pub mod aimove;
 pub mod aiship;
 pub mod aitrack;
 pub mod attack;
@@ -51,8 +52,10 @@ pub mod missile;
 pub mod mission;
 pub mod modules;
 pub mod nebula;
+pub mod nis_level;
 pub mod nis_support;
 pub mod object;
+pub mod parade;
 pub mod physics;
 pub mod present;
 pub mod research;

@@ -132,7 +132,9 @@ fn acolyte_without_upgrade_keeps_link_missiles() {
         "acolyte no upgrade",
         vec![ShipRace::Somtaaw, ShipRace::Taiidan],
         vec![spawn(ShipType::sAcolyte, 0, v(-6000.0, 0.0, 0.0)), spawn(ShipType::tStandardFrigate, 1, v(2000.0, 0.0, 0.0))],
-        vec![(1, Order::Special { ships: vec![0], targets: vec![1] })],
+        // (New ships are neutral and fire back; the frigate is made evasive so the Acolyte's
+        // run is not cut short.)
+        vec![(0, Order::Tactics { ships: vec![1], tactics: hwc_sim::object::tactics::EVASIVE }), (1, Order::Special { ships: vec![0], targets: vec![1] })],
     );
     let mut link_fired = 0;
     let run = twice(d.statics.clone(), s, 400, &|_| {}, &mut |_, ev| {
@@ -159,7 +161,8 @@ fn acv_emp_disables_enemies_in_range() {
             spawn(ShipType::tStandardFrigate, 1, v(-1800.0, 0.0, 0.0)),
             spawn(ShipType::tStandardFrigate, 1, v(9000.0, 0.0, 0.0)),
         ],
-        vec![(2, Order::Special { ships: vec![0], targets: vec![] })],
+        // (The enemies are made evasive, as new ships used to be, so the ACV lives to recharge.)
+        vec![(0, Order::Tactics { ships: vec![1, 2, 3, 4], tactics: hwc_sim::object::tactics::EVASIVE }), (2, Order::Special { ships: vec![0], targets: vec![] })],
     );
     let setup = |run: &mut Run| upgrade(run, &[0], acv::UPGRADE_EMP);
     // (The EMP goes off while the order is issued, before the update that clears the events,
@@ -299,7 +302,8 @@ fn minelayer_attack_run_drops_mines() {
         "minelayer attack",
         vec![ShipRace::Taiidan, ShipRace::Somtaaw],
         vec![spawn(ShipType::tMinelayerCorvette, 0, v(-5000.0, 0.0, 0.0)), spawn(ShipType::sCarrier, 1, v(1000.0, 0.0, 0.0))],
-        vec![(1, Order::Attack { ships: vec![0], targets: vec![1] })],
+        // (The carrier is made evasive, as new ships used to be.)
+        vec![(0, Order::Tactics { ships: vec![1], tactics: hwc_sim::object::tactics::EVASIVE }), (1, Order::Attack { ships: vec![0], targets: vec![1] })],
     );
     let mut dropped = 0;
     let mut states = std::collections::BTreeSet::new();

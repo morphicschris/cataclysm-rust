@@ -95,10 +95,13 @@ pub(super) fn shuffle(v: &mut [ShipId], mut random: impl FnMut() -> u32) {
     }
 }
 
-/// The protect list of a guard order (`command+0x2b4`). Protect orders are not modelled by
-/// the command layer yet, so no command protects anything.
-pub(super) fn protect_list_of(_c: &CommandToDo) -> &[ShipId] {
-    &[]
+/// The protect list of a guard order (`command+0x2b4`), empty unless it is protecting.
+pub(super) fn protect_list_of(c: &CommandToDo) -> &[ShipId] {
+    if c.attributes & crate::command::attr::PROTECTING != 0 {
+        &c.protect
+    } else {
+        &[]
+    }
 }
 
 impl SimHost<'_> {
@@ -155,13 +158,6 @@ impl SimHost<'_> {
         crate::clamp::slaves_of(self.u, host).into_iter().filter(|&id| self.u.ships.get(id).is_some_and(|s| crate::salvage::is_salvager(s.ship_type))).collect()
     }
 
-    /// `aitTeamIsIdle` for a KAS team. The original asks the team's current AI move (none,
-    /// done or waiting for ships); KAS orders go straight to the command layer here, so a
-    /// team counts as idle when none of its ships has an order.
-    pub(super) fn team_ships_idle(&self, ships: &[ShipId]) -> bool {
-        ships.iter().all(|&id| self.u.ships.get(id).is_none_or(|s| s.command.and_then(|c| self.u.commands.get(c)).is_none_or(|c| c.order == order::NULL)))
-    }
-
     /// `kasfUnderAttackElsewhere` on a list: into `attackers` (cleared first), the ships of
     /// every attacking command (attack order, passive attack or attack-and-move) whose
     /// targets include one of `ships`, in command order without duplicates.
@@ -193,13 +189,14 @@ impl SimHost<'_> {
 
     /// The mines (`OBJ_MissileType` objects of type `MISSILE_Mine`) in missile-list order
     /// passing `pred` on their position.
-    pub(super) fn mines_where(&self, pred: impl Fn(Vector) -> bool) -> usize {
+    pub(super) fn mines_where(&self, pred: impl Fn(Vector) -> bool) -> Vec<ShipId> {
         self.u
             .missile_list
             .iter()
-            .filter_map(|&m| self.u.missiles.get(m))
-            .filter(|m| m.kind == crate::missile::kind::MINE && pred(m.posinfo.position))
-            .count()
+            .filter_map(|&m| self.u.missiles.get(m).map(|x| (m, x)))
+            .filter(|(_, m)| m.kind == crate::missile::kind::MINE && pred(m.posinfo.position))
+            .filter_map(|(id, _)| ShipId::from_mine(id))
+            .collect()
     }
 }
 
@@ -281,8 +278,7 @@ macro_rules! select_methods {
             self.filter(new_ships, old_ships, |_, id| clamped.contains(&id))
         }
 
-        /// `kasfShipsSelectGuarding`: ships whose order protects one of `guarding`. Protect
-        /// lists are not modelled, so nothing passes (the destination is still cleared).
+        /// `kasfShipsSelectGuarding`: ships whose order protects one of `guarding`.
         fn ships_select_guarding(&mut self, _cx: &Cx, new_ships: Ships, old_ships: Ships, guarding: Ships) -> i32 {
             self.filter_with(new_ships, old_ships, guarding, |h, id, list| {
                 h.u.ships.get(id).and_then(|s| s.command).and_then(|c| h.u.commands.get(c)).is_some_and(|c| {
@@ -393,22 +389,21 @@ macro_rules! select_methods {
             n
         }
 
-        /// `kasfFindMinesInside`: the mines in the volume. Selections hold ships only, so
-        /// the selection is left empty; the count is the original's. (Not logged: missions
-        /// poll this every second.)
+        /// `kasfFindMinesInside` (0x48e750): the mines in the volume, in missile-list order.
         fn find_mines_inside(&mut self, _cx: &Cx, volume: Option<Hash>, ships: Ships) -> i32 {
             if ships == Ships::Null {
                 return 0;
             }
             self.set_ships(ships, Vec::new());
             let Some(vol) = volume.and_then(|h| self.g.level.volume(h)).copied() else { return 0 };
-            let n = self.mines_where(|p| vol.contains(p)) as i32;
+            let v = self.mines_where(|p| vol.contains(p));
+            let n = v.len() as i32;
+            self.set_ships(ships, v);
             n
         }
 
         /// `kasfFindMinesNearTeam`: the mines near the team's first ship (an empty team
-        /// returns 0 and leaves the selection alone). The selection stays empty, as for
-        /// `FindMinesInside`.
+        /// returns 0 and leaves the selection alone).
         fn find_mines_near_team(&mut self, cx: &Cx, ships: Ships, radius: i32) -> i32 {
             if ships == Ships::Null {
                 return 0;
@@ -417,25 +412,26 @@ macro_rules! select_methods {
             self.set_ships(ships, Vec::new());
             let rp = self.pos(reference).unwrap_or(Vector::ZERO);
             let r2 = select::radius_squared(radius);
-            let n = self.mines_where(|p| distance_squared(rp, p) <= r2) as i32;
+            let v = self.mines_where(|p| distance_squared(rp, p) <= r2);
+            let n = v.len() as i32;
+            self.set_ships(ships, v);
             n
         }
 
-        /// `kasfFindMeteors`: the asteroids of meteor storms. They are resources, which
-        /// selections cannot hold: the selection is cleared and the count logged.
+        /// `kasfFindMeteors` (0x48e380): the asteroids of meteor storms (attribute 0x200), in
+        /// resource-list order.
         fn find_meteors(&mut self, _cx: &Cx, meteors: Ships) {
             self.set_ships(meteors, Vec::new());
-            let n = self
+            let v: Vec<ShipId> = self
                 .u
                 .base
                 .resources
                 .list
                 .iter()
                 .filter(|r| matches!(r.kind, crate::resource::ResourceKind::Asteroid(_)) && r.attributes & select::METEOR_ATTRIBUTE != 0)
-                .count();
-            if n > 0 {
-                self.log(LogKind::Flow, format!("FindMeteors: {n} meteors (not held in the selection)"));
-            }
+                .filter_map(|r| ShipId::from_meteor(r.id))
+                .collect();
+            self.set_ships(meteors, v);
         }
 
         /// `kasfFindSlipgate`: the visible ships in the volume, then those that are not
@@ -519,14 +515,18 @@ macro_rules! select_methods {
             lowest
         }
 
-        /// `kasfThisTeamIdle` (`aitTeamIsIdle` on the current team; see `team_ships_idle`).
+        /// `kasfThisTeamIdle` (0x494ee0): `aitTeamIsIdle` on the current team (no current AI
+        /// move, or a done / get-ships move).
         fn this_team_idle(&mut self, cx: &Cx) -> i32 {
-            let sel = self.team_ships(cx);
-            i32::from(self.team_ships_idle(&sel))
+            i32::from(self.team(cx).is_none_or(|t| t.moves.is_idle()))
+        }
+
+        /// `kasfIsTeamIdle` (0x494ed0): `aitTeamIsIdle` on the team.
+        fn is_team_idle(&mut self, _cx: &Cx, team: Team) -> i32 {
+            i32::from(team.and_then(|h| self.g.level.team(h)).is_none_or(|t| t.moves.is_idle()))
         }
 
         /// `kasfIsGuarding`: into `guarded`, the ships protected by guard orders of `ships`.
-        /// Protect lists are not modelled, so `guarded` ends up empty.
         fn is_guarding(&mut self, _cx: &Cx, ships: Ships, guarded: Ships) -> i32 {
             if guarded == Ships::Null {
                 return 0;

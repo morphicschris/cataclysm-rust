@@ -127,3 +127,49 @@ fn warp_fleet_starts_mission4() {
     // Mission 4's fleet fades in at the start point.
     assert!(run.game.ships_have_arrived);
 }
+
+/// Missions 1 and 2 are completed for real by the scripted player (no forced jump): every
+/// objective, the "Hyperspace" objective, and the jump; mission 2 starts from mission 1's
+/// carry-over.
+#[test]
+fn missions_1_and_2_complete_for_real() {
+    let Some(d) = data() else { return };
+    let mut carry: Option<Carry> = None;
+    for m in 1..=2u32 {
+        let mut run = start(d, m, carry.as_ref());
+        let mut ap = Autoplay::new(16 * 4500);
+        let ending = ap.play(&mut run, 16 * 6000);
+        assert_eq!(ending, Ending::Hyperspace, "mission {m}: {:?}", ap.notes);
+        assert!(!ap.forced, "mission {m}: the jump was forced");
+        assert!(
+            run.game.log.iter().any(|e| e.text.starts_with("ObjectiveCreate \"Hyperspace\"")),
+            "mission {m}: the mission offered the jump"
+        );
+        assert!(!run.game.mission_failed);
+        let c = run.carry().expect("carry-over");
+        if m == 1 {
+            // The small ships travel docked in the mothership.
+            let ms = c.fleet.iter().find(|f| f.ship_type == ShipType::sMothership).unwrap();
+            assert!(!ms.docked.is_empty(), "mission 1: small ships carried docked");
+        }
+        carry = Some(c);
+    }
+}
+
+/// Mission 4 from the `warp.script` fleet is completed for real: hangar module rebuilt, ten
+/// Acolytes guarding the Clee-San (protect orders, `ShipsSelectGuarding`), the infection
+/// researched, the pirate cruiser infected, the jump offered and taken.
+#[test]
+fn mission4_from_warp_completes_for_real() {
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    let c = Carry::warp(d.statics.clone(), d.tweaks.clone(), &src, 4).expect("warp.script level 4");
+    let mut run = start(d, 4, Some(&c));
+    let mut ap = Autoplay::new(16 * 3000);
+    let ending = ap.play(&mut run, 16 * 3500);
+    assert_eq!(ending, Ending::Hyperspace, "{:?}", ap.notes);
+    for label in ["Replace", "Escort"] {
+        assert!(run.game.log.iter().any(|e| e.text == format!("ObjectiveDestroy {label:?}")), "objective {label} completed");
+    }
+    assert!(run.game.log.iter().any(|e| e.text == "ObjectiveSet \"Research\" = 1"));
+}

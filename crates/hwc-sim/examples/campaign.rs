@@ -62,7 +62,7 @@ fn main() {
     for m in from..=to {
         let script = load_kas_mission(&gd, &mission_script_name(m)).expect("mission script");
         let mut config = MissionConfig::new(m);
-        config.log_calls = false;
+        config.log_calls = std::env::var_os("HWC_LOG_CALLS").is_some();
         config.speech_seconds = speech;
         let mut run = match &carry {
             None => MissionRun::start(statics.clone(), tweaks.clone(), &src, script, config),
@@ -71,12 +71,19 @@ fn main() {
         .unwrap_or_else(|e| panic!("mission {m}: {e}"));
         let mut ap = Autoplay::new((budget * 16.0) as u32);
         let ending = ap.play(&mut run, (limit * 16.0) as u32);
+        let config_calls = std::env::var_os("HWC_LOG_CALLS").is_some();
         let mut unimpl = std::collections::BTreeMap::new();
         for e in &run.game.log {
             match e.kind {
                 LogKind::Unimplemented => *unimpl.entry(e.text.split(" (").next().unwrap_or("").to_string()).or_insert(0) += 1,
                 LogKind::Flow | LogKind::Objective | LogKind::Warning if log => println!("  {e}"),
+                LogKind::Call if log && config_calls => println!("  {e}"),
                 _ => {}
+            }
+        }
+        if log {
+            for (t, n) in &ap.notes {
+                println!("  [{t:>6}] autoplay: {n}");
             }
         }
         let objectives: Vec<&str> = run.game.objectives.iter().map(|o| o.label.as_str()).collect();

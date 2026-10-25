@@ -85,6 +85,13 @@ pub struct CommandToDo {
     pub link_with: Option<ShipId>,
     /// Disguise orders (+0x2e8..+0x2f4): see [`crate::ships::mimic::DisguiseOrder`].
     pub disguise: Option<crate::ships::mimic::DisguiseOrder>,
+    /// The ships a guard order protects (+0x2b4); meaningful while [`attr::PROTECTING`] is
+    /// set (see [`cl_protect`]).
+    pub protect: Vec<ShipId>,
+    /// +0x2b8: protect flags (bit 0, `PROTECTFLAGS_JUST_FOLLOW`: never retaliate).
+    pub protect_flags: u32,
+    /// +0x2c0: the military parade of a [`order::MILITARY_PARADE`] command.
+    pub parade: Option<crate::parade::MilitaryParade>,
 }
 
 /// The dock part of a command.
@@ -191,6 +198,9 @@ fn new_command(selection: Vec<ShipId>) -> CommandToDo {
         special_targets: Vec::new(),
         link_with: None,
         disguise: None,
+        protect: Vec::new(),
+        protect_flags: 0,
+        parade: None,
     }
 }
 
@@ -364,6 +374,11 @@ pub fn remove_ships_from_doing_stuff(u: &mut Universe, ships: &[ShipId]) {
                         s.base.harvest_state2 = 0;
                     }
                     order::SPECIAL => crate::salvage::special_done(u, id),
+                    order::MILITARY_PARADE => {
+                        if let Some(p) = u.commands.get_mut(cid).and_then(|c| c.parade.as_mut()) {
+                            crate::parade::remove_ship(p, id);
+                        }
+                    }
                     _ => {}
                 }
                 if u.commands.get(cid).expect("command").selection.is_empty() {
@@ -507,6 +522,7 @@ pub fn change_order_to_move(u: &mut Universe, cid: CommandId, mode: u32, from: V
     }
     let Some(cmd) = u.commands.get_mut(cid) else { return };
     cmd.attributes &= !(attr::PROTECTING | attr::PASSIVE_ATTACKING);
+    cmd.protect.clear();
     let is_formation = cmd.attributes & attr::FORMATION != 0;
     let sel = cmd.selection.clone();
     if sel.len() > 1 && !is_formation {
@@ -841,6 +857,8 @@ pub fn cl_process(u: &mut Universe) {
                         } else {
                             formation::process(u, cid, attrs & attr::HOLDING_PATTERN == 0, false);
                         }
+                    } else {
+                        process_protect_formation(u, cid);
                     }
                 }
                 order::MOVE => {
@@ -911,7 +929,9 @@ pub fn cl_process(u: &mut Universe) {
                         u.ships.ship_mut(id).command = None;
                     }
                     u.commands.delete(cid);
-                } else if attrs & attr::PROTECTING == 0 && attrs & attr::PASSIVE_ATTACKING != 0 {
+                } else if attrs & attr::PROTECTING != 0 {
+                    process_protect(u, cid);
+                } else if attrs & attr::PASSIVE_ATTACKING != 0 {
                     run_passive_attack(u, cid);
                     let leader = cmd.selection[0];
                     let stat = statics.ship(u.ships.ship(leader).ship_type).expect("statics");
@@ -986,6 +1006,13 @@ pub fn cl_process(u: &mut Universe) {
             order::DISGUISE => {
                 crate::ships::mimic::process_disguise_to_do(u, cid);
                 delete_command(u, cid);
+            }
+            order::MILITARY_PARADE => {
+                let passive = cmd.attributes & attr::PASSIVE_ATTACKING != 0;
+                run_passive_attack(u, cid);
+                if let Some(p) = u.commands.get(cid).and_then(|c| c.parade.clone()) {
+                    crate::parade::process(u, &p, passive);
+                }
             }
             crate::ships::mothership::ORDER_BIG_GUN => {
                 crate::ships::mothership::big_gun_order(u, cid);
@@ -1139,6 +1166,11 @@ fn free_last_order(u: &mut Universe, cid: CommandId) {
                 crate::link::free_link_order(u, id);
             }
         }
+        order::MILITARY_PARADE => {
+            if let Some(c) = u.commands.get_mut(cid) {
+                c.parade = None;
+            }
+        }
         _ => {}
     }
     if let Some(c) = u.commands.get_mut(cid) {
@@ -1184,6 +1216,7 @@ pub fn clear_protecting_and_passive(u: &mut Universe, cid: CommandId) {
     if attrs & attr::PROTECTING != 0 {
         if let Some(c) = u.commands.get_mut(cid) {
             c.attributes &= !attr::PROTECTING;
+            c.protect.clear();
         }
     }
     if attrs & attr::PASSIVE_ATTACKING != 0 {
@@ -1434,6 +1467,9 @@ pub fn attack_capable(u: &Universe, sel: &[ShipId]) -> Vec<ShipId> {
 /// selection change their order (a moving command remembers its waypoints and resumes them
 /// afterwards); the rest get a new command.
 pub fn cl_attack(u: &mut Universe, selection: &[ShipId], targets: &[ShipId]) {
+    // (Only ships are attacked here: mines and meteors a KAS selection holds are left out.)
+    let targets: Vec<ShipId> = targets.iter().copied().filter(|&t| u.ships.get(t).is_some()).collect();
+    let targets = &targets[..];
     let mut sel: Vec<ShipId> = selection.iter().copied().filter(|&id| u.ships.get(id).is_some_and(|s| s.coll_my_blob.is_some() && s.flags & sof::HIDE == 0)).collect();
     sel = attack_capable(u, &sel);
     if targets.is_empty() || sel.is_empty() {
@@ -1449,6 +1485,7 @@ pub fn cl_attack(u: &mut Universe, selection: &[ShipId], targets: &[ShipId]) {
             }
             let c = u.commands.get_mut(cid).expect("command");
             c.attributes &= !attr::PROTECTING;
+            c.protect.clear();
             if c.order == order::MOVE && !c.waypoints.is_empty() {
                 c.resume_move = Some((c.waypoint_mode, c.waypoints.clone(), c.waypoint_index));
             }
@@ -1469,6 +1506,7 @@ fn cl_attack_these(u: &mut Universe, sel: &[ShipId], targets: &[ShipId]) {
     if let Some(cid) = found {
         let c = u.commands.get_mut(cid).expect("command");
         c.attributes &= !attr::PROTECTING;
+        c.protect.clear();
         change_order_to_attack(u, cid, targets);
         return;
     }
@@ -1986,6 +2024,24 @@ fn run_passive_attack(u: &mut Universe, cid: CommandId) {
 pub(crate) fn remove_ship_from_being_targeted(u: &mut Universe, dead: ShipId) {
     let todo = u.commands.todo.clone();
     for cid in todo {
+        // A parade whose host is gone halts (`ChangeOrderToHalt`).
+        if let Some(c) = u.commands.get_mut(cid) {
+            if c.order == order::MILITARY_PARADE && c.parade.as_ref().is_some_and(|p| p.around == dead) {
+                c.order = order::HALT;
+                c.parade = None;
+            }
+        }
+        // Guard orders lose the ship; a guard order with nothing left to protect ends (and the
+        // command goes when it has nothing else to do).
+        if let Some(c) = u.commands.get_mut(cid) {
+            if c.attributes & attr::PROTECTING != 0 && remove_from_selection(&mut c.protect, dead) && c.protect.is_empty() {
+                c.attributes &= !attr::PROTECTING;
+                if c.attributes == 0 && c.order == order::NULL {
+                    delete_command(u, cid);
+                    continue;
+                }
+            }
+        }
         let Some(c) = u.commands.get_mut(cid) else { continue };
         if (c.attributes & attr::PASSIVE_ATTACKING != 0 || c.order == order::ATTACK) && remove_from_selection(&mut c.attack_targets, dead) {
             {
@@ -2118,6 +2174,408 @@ pub fn cl_set_tactics(u: &mut Universe, selection: &[ShipId], tactics: usize) {
     }
 }
 
+// --- protect (guard) orders
+
+/// `PROTECTFLAGS_JUST_FOLLOW`: the guards follow and never retaliate.
+pub const PROTECTFLAGS_JUST_FOLLOW: u32 = 1;
+
+/// `FindShipsWereGuarding` (0x4466f0): whether the ships `cid`'s selection protects (directly
+/// or through the ships they guard, ten levels deep) include one of its own ships.
+fn guard_is_circular(u: &Universe, cid: CommandId, ships: &[ShipId], depth: u32) -> bool {
+    if depth > 10 {
+        return false;
+    }
+    let mut guarded: Vec<ShipId> = Vec::new();
+    for &id in ships {
+        let Some(c) = u.ships.get(id).and_then(|s| s.command).and_then(|c| u.commands.get(c)) else { continue };
+        if c.attributes & attr::PROTECTING != 0 {
+            for &g in &c.protect {
+                if !guarded.contains(&g) {
+                    guarded.push(g);
+                }
+            }
+        }
+    }
+    if guarded.is_empty() {
+        return false;
+    }
+    let own = u.commands.get(cid).map(|c| c.selection.clone()).unwrap_or_default();
+    if guarded.iter().any(|g| own.contains(g)) {
+        return true;
+    }
+    guard_is_circular(u, cid, &guarded, depth + 1)
+}
+
+/// The end of `clProtect` / `ChangeOrderToProtect`: the guards point at the command, and
+/// carry the circular-guard flag when the guard chain comes back to them.
+fn prepare_protect(u: &mut Universe, cid: CommandId) {
+    prepare_ships(u, cid);
+    let sel = u.commands.get(cid).map(|c| c.selection.clone()).unwrap_or_default();
+    let circular = guard_is_circular(u, cid, &sel, 0);
+    for id in sel {
+        if let Some(s) = u.ships.get_mut(id) {
+            if circular {
+                s.special_flags |= special::CIRCULAR_GUARD;
+            } else {
+                s.special_flags &= !special::CIRCULAR_GUARD;
+            }
+        }
+    }
+}
+
+/// `ChangeOrderToProtect` (0x4467f0).
+fn change_order_to_protect(u: &mut Universe, cid: CommandId, protect: &[ShipId]) {
+    let Some(c) = u.commands.get_mut(cid) else { return };
+    c.protect_flags = 0;
+    if c.attributes & attr::PROTECTING != 0 {
+        // `SelectionsAreTotallyEquivalent`: the same ships in the same order.
+        if c.protect == protect {
+            return;
+        }
+        c.attributes &= !attr::PROTECTING;
+        c.protect.clear();
+        // (A sphere formation re-forms around the protected ship: formationContentHasChanged
+        // is not modelled.)
+    }
+    free_last_order(u, cid);
+    let Some(c) = u.commands.get_mut(cid) else { return };
+    c.attributes |= attr::PROTECTING;
+    c.order = order::NULL;
+    c.protect = protect.to_vec();
+    prepare_protect(u, cid);
+}
+
+/// `clProtect` (0x4469c0): `selection` guards `protect`. A command whose selection is the
+/// same set of ships changes its order; otherwise the ships leave what they were doing and get
+/// a new null order with the protecting attribute. Returns the command.
+pub fn cl_protect(u: &mut Universe, selection: &[ShipId], protect: &[ShipId]) -> Option<CommandId> {
+    let protect: Vec<ShipId> = protect.iter().copied().filter(|&t| u.ships.get(t).is_some()).collect();
+    let protect = &protect[..];
+    if selection.is_empty() || protect.is_empty() {
+        return None;
+    }
+    if let Some(cid) = selection_already_doing_something(u, selection) {
+        change_order_to_protect(u, cid, protect);
+        return Some(cid);
+    }
+    remove_ships_from_doing_stuff(u, selection);
+    let mut cmd = new_command(selection.to_vec());
+    cmd.order = order::NULL;
+    cmd.attributes = attr::PROTECTING;
+    cmd.protect = protect.to_vec();
+    let cid = u.commands.add(cmd);
+    prepare_protect(u, cid);
+    Some(cid)
+}
+
+/// `clWrapProtect` (0x44e9a0) in single player: the live ships guard `protect` (the original
+/// also makes them controllable and flashes the protected ships when the player gives it).
+pub fn cl_wrap_protect(u: &mut Universe, selection: &[ShipId], protect: &[ShipId]) -> Option<CommandId> {
+    let sel: Vec<ShipId> = selection.iter().copied().filter(|&id| u.ships.get(id).is_some()).collect();
+    let prot: Vec<ShipId> = protect.iter().copied().filter(|&id| u.ships.get(id).is_some()).collect();
+    if sel.is_empty() {
+        return None;
+    }
+    cl_protect(u, &sel, &prot)
+}
+
+/// The guard distance of `protectShip` / `protectShipsAvg`: capital ships (and types 0x40,
+/// 0x4f, plus 0x3f, 0x4d for the averaged form) keep the capital-ship distance.
+fn protect_range(u: &Universe, id: ShipId, avg: bool) -> f32 {
+    let s = u.ships.ship(id);
+    let capital = u.statics.ship(s.ship_type).is_some_and(|st_| st_.is_capital_ship);
+    let t = s.ship_type.index();
+    let special_type = matches!(t, 0x40 | 0x4f) || (avg && matches!(t, 0x3f | 0x4d));
+    if capital || special_type {
+        u.tweaks.combat.protect_get_this_close_cap
+    } else {
+        u.tweaks.combat.protect_get_this_close_strike
+    }
+}
+
+fn steady(u: &mut Universe, id: ShipId, drift_only: bool) {
+    let tw = u.tweaks.clone();
+    let dt = u.phys_time_elapsed;
+    let statics = u.statics.clone();
+    let s = u.ships.ship_mut(id);
+    let Some(stat) = statics.ship(s.ship_type) else { return };
+    if drift_only {
+        aitrack::steady_ship_drift_only(s, stat, &tw, dt);
+    } else {
+        aitrack::steady_ship(s, stat, &tw, dt);
+    }
+}
+
+/// Flies `id` with the protected ships' velocity towards `to` (or just matching their speed),
+/// and steadies it when something is in the way.
+fn protect_fly(u: &mut Universe, id: ShipId, to: Option<Vector>, vel: Vector, dont_rotate: bool) {
+    let fl = if dont_rotate {
+        fly::DONT_FLY_TO_OBSCURED_POINTS | fly::RETURN_IMMED_IF_POINT_OBSCURED
+    } else {
+        fly::DONT_FLY_TO_OBSCURED_POINTS | fly::RETURN_IMMED_IF_POINT_OBSCURED | fly::POINT_IN_DIRECTION_FLYING
+    };
+    if aiship::fly_to_point_avoiding_objs(u, id, to, fl, 0.0, Some(vel)) & aiship::FLY_OBJECT_IN_WAY != 0 {
+        steady(u, id, dont_rotate);
+    }
+}
+
+fn sub(a: Vector, b: Vector) -> Vector {
+    Vector::new(st(ld(a.x) - ld(b.x)), st(ld(a.y) - ld(b.y)), st(ld(a.z) - ld(b.z)))
+}
+
+/// `protectShip` (0x43cca0): `id` stays near `protectee` and keeps pace with it.
+pub fn protect_ship(u: &mut Universe, id: ShipId, protectee: ShipId, passive_attacked: bool) {
+    let (Some(s), Some(p)) = (u.ships.get(id), u.ships.get(protectee)) else { return };
+    let (Some(ss), Some(ps)) = (u.statics.ship(s.ship_type), u.statics.ship(p.ship_type)) else { return };
+    let size = ss.header.coll.coll_sphere_size;
+    let psize = ps.header.coll.coll_sphere_size.max(size);
+    let range = st(ld(protect_range(u, id, false)) + ld(psize) + ld(size));
+    let mut point = p.posinfo.position;
+    // Resource controllers follow behind, out of the way.
+    if matches!(s.ship_type.index(), 0x10 | 0x33) {
+        let back = st(ld(u.tweaks.combat.rescontroller_follow_behind) * ld(range));
+        let h = p.rotinfo.coordsys.col(2);
+        point = Vector::new(st(ld(point.x) - ld(h.x) * ld(back)), st(ld(point.y) - ld(h.y) * ld(back)), st(ld(point.z) - ld(h.z) * ld(back)));
+    }
+    let dist = sub(s.posinfo.position, point).dist_sloppy();
+    let dont_rotate = passive_attacked && ss.rotate_to_retaliate;
+    let vel = p.posinfo.velocity;
+    let docking_with_me = p.base.dock_with == Some(id) && aitrack::move_reached_destination(s, p.posinfo.position, 3000.0);
+    let circular = s.special_flags & special::CIRCULAR_GUARD != 0;
+    if !docking_with_me {
+        if range <= dist {
+            protect_fly(u, id, Some(point), vel, dont_rotate);
+            return;
+        }
+        if !circular && vel.dist_sloppy() >= u.tweaks.combat.protect_still_velocity {
+            protect_fly(u, id, None, vel, dont_rotate);
+            return;
+        }
+    }
+    steady(u, id, dont_rotate);
+}
+
+/// `protectShipsAvg` (0x43ced0): a single guard of several ships stays near the centre of
+/// their bounding box, at their average velocity.
+pub fn protect_ships_avg(u: &mut Universe, id: ShipId, protect: &[ShipId], passive_attacked: bool) {
+    let live: Vec<ShipId> = protect.iter().copied().filter(|&p| u.ships.get(p).is_some()).collect();
+    let Some(&first) = live.first() else { return };
+    let Some(s) = u.ships.get(id) else { return };
+    let Some(ss) = u.statics.ship(s.ship_type) else { return };
+    let p0 = u.ships.ship(first).posinfo;
+    let (mut lo, mut hi) = (p0.position, p0.position);
+    let mut vel = p0.velocity;
+    for &o in &live[1..] {
+        let q = u.ships.ship(o).posinfo;
+        vel = Vector::new(st(ld(vel.x) + ld(q.velocity.x)), st(ld(vel.y) + ld(q.velocity.y)), st(ld(vel.z) + ld(q.velocity.z)));
+        for (l, h, c) in [(&mut lo.x, &mut hi.x, q.position.x), (&mut lo.y, &mut hi.y, q.position.y), (&mut lo.z, &mut hi.z, q.position.z)] {
+            if c < *l {
+                *l = c;
+            } else if c > *h {
+                *h = c;
+            }
+        }
+    }
+    let centre = Vector::new(st((ld(hi.x) + ld(lo.x)) * 0.5), st((ld(hi.y) + ld(lo.y)) * 0.5), st((ld(hi.z) + ld(lo.z)) * 0.5));
+    let inv = st(1.0 / hwc_math::fpu::fild_u32(live.len() as u32));
+    let vel = Vector::new(st(ld(inv) * ld(vel.x)), st(ld(inv) * ld(vel.y)), st(ld(inv) * ld(vel.z)));
+    let dist = sub(s.posinfo.position, centre).dist_sloppy();
+    let range = protect_range(u, id, true);
+    let size = ss.header.coll.coll_sphere_size;
+    let dont_rotate = passive_attacked && ss.rotate_to_retaliate;
+    let circular = s.special_flags & special::CIRCULAR_GUARD != 0;
+    let docking_with_me = live.iter().any(|&p| u.ships.ship(p).base.dock_with == Some(id));
+    if !docking_with_me {
+        if ld(range) + ld(size) <= ld(dist) {
+            protect_fly(u, id, Some(centre), vel, dont_rotate);
+            return;
+        }
+        if !circular && vel.dist_sloppy() >= u.tweaks.combat.protect_still_velocity {
+            protect_fly(u, id, None, vel, dont_rotate);
+            return;
+        }
+    }
+    steady(u, id, dont_rotate);
+}
+
+/// The `COMMAND_NULL` + protecting case of `clProcess`: one protected ship is guarded by all;
+/// a single guard of several ships keeps to their middle; otherwise the guards share the
+/// protected ships out in turn.
+fn process_protect(u: &mut Universe, cid: CommandId) {
+    let passive = u.commands.get(cid).is_some_and(|c| c.attributes & attr::PASSIVE_ATTACKING != 0);
+    run_passive_attack(u, cid);
+    let Some(c) = u.commands.get(cid).cloned() else { return };
+    if c.protect.is_empty() || c.selection.is_empty() {
+        return;
+    }
+    if c.protect.len() == 1 {
+        for &id in &c.selection {
+            protect_ship(u, id, c.protect[0], passive);
+        }
+    } else if c.selection.len() == 1 {
+        protect_ships_avg(u, c.selection[0], &c.protect, passive);
+    } else {
+        for (i, &id) in c.selection.iter().enumerate() {
+            protect_ship(u, id, c.protect[i % c.protect.len()], passive);
+        }
+    }
+}
+
+/// The same for a formation: a sphere surrounds the protected ship; otherwise the leader
+/// guards and the formation follows it.
+fn process_protect_formation(u: &mut Universe, cid: CommandId) {
+    let passive = u.commands.get(cid).is_some_and(|c| c.attributes & attr::PASSIVE_ATTACKING != 0);
+    run_passive_attack(u, cid);
+    let Some(c) = u.commands.get(cid).cloned() else { return };
+    if c.protect.is_empty() || c.selection.is_empty() {
+        return;
+    }
+    if c.formation.formation_type == formation::kind::SPHERE && c.selection.len() > 1 {
+        formation::process(u, cid, false, passive);
+    } else if c.protect.len() > 1 {
+        protect_ships_avg(u, c.selection[0], &c.protect, passive);
+        formation::process(u, cid, false, passive);
+    } else {
+        protect_ship(u, c.selection[0], c.protect[0], passive);
+        let still = u.ships.get(c.protect[0]).is_none_or(|p| p.posinfo.is_moving == 0);
+        formation::process(u, cid, still, passive);
+    }
+}
+
+/// `clPostProcess` (0x448a20): guards whose protected ship is being hit by an enemy attack it
+/// (the attack-capable ones, without the non-combat types), keeping the guard order.
+pub fn cl_post_process(u: &mut Universe) {
+    let todo = u.commands.todo.clone();
+    for cid in todo {
+        let Some(c) = u.commands.get(cid).cloned() else { continue };
+        if c.attributes & attr::PROTECTING == 0 || c.protect_flags & PROTECTFLAGS_JUST_FOLLOW != 0 || c.selection.is_empty() {
+            continue;
+        }
+        for (i, &p) in c.protect.iter().enumerate() {
+            let Some(rocker) = u.ships.get(p).and_then(|s| s.getting_rocked).filter(|&r| u.ships.get(r).is_some()) else { continue };
+            let rocker_player = u.ships.ship(rocker).player;
+            if u.ships.get(c.selection[0]).is_none() || crate::shockwave::is_ally(u, c.selection[0], rocker_player) {
+                continue;
+            }
+            if !matches!(c.order, order::NULL | order::MOVE | order::ATTACK) {
+                continue;
+            }
+            // The first protected ship of a sphere stays surrounded (its guards only fire back).
+            let sphere = c.attributes & attr::FORMATION != 0 && matches!(c.formation.formation_type, formation::kind::SPHERE | 10);
+            if !sphere || i != 0 {
+                let mut attackers = attack_capable(u, &c.selection);
+                if !attackers.is_empty() {
+                    let targets = match u.ships.ship(rocker).command.and_then(|rc| u.commands.get(rc)) {
+                        Some(rc) if rc.attributes & attr::FORMATION != 0 => rc.selection.clone(),
+                        _ => vec![rocker],
+                    };
+                    remove_non_combat_for_guard_attack(u, &mut attackers);
+                    if !attackers.is_empty() {
+                        if let Some(nc) = cl_protect(u, &attackers, &c.protect) {
+                            change_order_to_attack(u, nc, &targets);
+                        }
+                    }
+                }
+            }
+            break;
+        }
+    }
+}
+
+/// `makeShipsNotHaveNonCombatShipsForGuardAttack` (0x50de70): types 0x2d, 0x3f, 0x40, 0x4d,
+/// 0x4e and 0x4f stay out of a guard's retaliation (the last ship moves into the hole).
+fn remove_non_combat_for_guard_attack(u: &Universe, sel: &mut Vec<ShipId>) {
+    let mut i = 0;
+    while i < sel.len() {
+        let t = u.ships.ship(sel[i]).ship_type.index();
+        if matches!(t, 0x2d | 0x3f | 0x40 | 0x4d | 0x4e | 0x4f) {
+            sel.swap_remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// The ships a ship's command protects (empty when it is not guarding).
+pub fn protect_list(u: &Universe, id: ShipId) -> &[ShipId] {
+    match u.ships.get(id).and_then(|s| s.command).and_then(|c| u.commands.get(c)) {
+        Some(c) if c.attributes & attr::PROTECTING != 0 => &c.protect,
+        _ => &[],
+    }
+}
+
+/// `makeShipsControllable(selection, order)` (0x50d300) for orders other than halt: ships
+/// that are docking or launching with a host leave the selection (the last ship moves into
+/// the hole).
+pub fn make_ships_controllable(u: &Universe, sel: &mut Vec<ShipId>) {
+    let mut i = 0;
+    while i < sel.len() {
+        let busy = u.ships.get(sel[i]).is_some_and(|s| {
+            s.docking_ship.is_some() && s.command.and_then(|c| u.commands.get(c)).is_some_and(|c| matches!(c.order, order::DOCK | order::LAUNCH_SHIP))
+        });
+        if busy {
+            sel.swap_remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+// --- military parade
+
+/// `GetMilitaryGroupAroundShip`: the parade command around `around`.
+pub fn military_group_around(u: &Universe, around: ShipId) -> Option<CommandId> {
+    u.commands.iter().find(|c| c.order == order::MILITARY_PARADE && c.parade.as_ref().is_some_and(|p| p.around == around)).map(|c| c.id)
+}
+
+/// `GroupShipIntoMilitaryParade` (0x446c60): `ship` joins the parade around `around` (one is
+/// created when there is none: `CreateMilitaryGroupAroundShip`).
+pub fn group_ship_into_military_parade(u: &mut Universe, ship: ShipId, around: ShipId) {
+    if u.ships.get(ship).is_none() || u.ships.get(around).is_none() {
+        return;
+    }
+    if let Some(cid) = military_group_around(u, around) {
+        // AddShipToMilitaryGroup: AddShipToGroup, then the slot.
+        let mut p = u.commands.get(cid).and_then(|c| c.parade.clone()).expect("parade");
+        crate::parade::put_ship(u, ship, &mut p);
+        let c = u.commands.get_mut(cid).expect("command");
+        c.selection.push(ship);
+        c.parade = Some(p);
+        let s = u.ships.ship_mut(ship);
+        s.command = Some(cid);
+        aiship::row_remove_ship(s);
+        init_ship_ai(u, ship);
+        return;
+    }
+    let mut p = crate::parade::new_parade(u, around);
+    crate::parade::put_ship(u, ship, &mut p);
+    let mut cmd = new_command(vec![ship]);
+    cmd.order = order::MILITARY_PARADE;
+    cmd.parade = Some(p);
+    let cid = u.commands.add(cmd);
+    prepare_ships(u, cid);
+    init_ship_ai(u, ship);
+}
+
+/// `clSetMilitaryParade` (0x446cc0): the ships of the selection join the parade around its
+/// mothership or carrier (the first of the selection), unless they are in it already.
+pub fn cl_set_military_parade(u: &mut Universe, selection: &[ShipId]) {
+    let host = selection.iter().copied().find(|&id| {
+        u.ships.get(id).and_then(|s| crate::base::class_of(u, s.ship_type)).is_some_and(|c| matches!(c, crate::statics::ShipClass::Mothership | crate::statics::ShipClass::Carrier))
+    });
+    let Some(around) = host else { return };
+    for &id in selection {
+        if id == around || u.ships.get(id).is_none() {
+            continue;
+        }
+        let already = u.ships.ship(id).command.and_then(|c| u.commands.get(c)).is_some_and(|c| c.order == order::MILITARY_PARADE && c.parade.as_ref().is_some_and(|p| p.around == around));
+        if !already {
+            remove_ships_from_doing_stuff(u, &[id]);
+            group_ship_into_military_parade(u, id, around);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2158,3 +2616,4 @@ mod tests {
         }
     }
 }
+

@@ -1162,7 +1162,10 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
                 fly_to_point_avoiding_objs(u, ship, Some(p), 0x3a, 0.0, None);
                 return false;
             }
-            // (Slipgates queue the ship here.)
+            // Slipgates remember the ship, so its escorts follow it through.
+            if purpose_ == purpose::SLIPGATE && crate::ships::slipgate::is_slipgate_type(u.ships.ship(dw).ship_type) {
+                crate::ships::slipgate::add_ship_to_queue(u, dw, ship);
+            }
             u.ships.ship_mut(ship).base.dock_state = state::FLY_TO_CONE;
         }
         state::FLY_TO_FRONT => {
@@ -1173,6 +1176,9 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
         }
         state::FLY_TO_CONE => {
             let Some(p) = reserved_point(u, ship, dw).cloned() else { return false };
+            if crate::ships::slipgate::is_slipgate_type(u.ships.ship(dw).ship_type) {
+                crate::ships::slipgate::open(u, dw);
+            }
             if fly_to_cone_inside(u, ship, dw, &p) {
                 let s = u.ships.ship_mut(ship);
                 s.special_flags2 |= special2::DOCKING;
@@ -1189,12 +1195,23 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
             }
         }
         state::FLY_TO_ORIGIN => {
+            let gate = crate::ships::slipgate::is_slipgate_type(u.ships.ship(dw).ship_type);
+            if gate {
+                crate::ships::slipgate::open(u, dw);
+            }
             if fly_to_cone_origin(u, ship, dw, 4.0) {
-                if dslip {
-                    // (Slipgate transit is not modelled: the ship waits at the gate.)
-                    steady(u, ship);
+                if gate {
+                    // At the open gate the ship waits to go through; its dock point is free.
+                    if crate::ships::slipgate::open(u, dw) {
+                        u.ships.ship_mut(ship).base.dock_state = 0x10;
+                        u.ships.ship_mut(ship).base.slipgate_timer = now;
+                        free_point(u, ship, dw);
+                    } else {
+                        steady(u, ship);
+                    }
                     return false;
                 }
+                let _ = dslip;
                 let point_type = reserved_point(u, ship, dw).and_then(|p| p.dock_type).map_or(-1, |t| t.index() as i32);
                 base::remove_ship_from_outside(u, ship);
                 if purpose_ == purpose::RETIRE {
@@ -1346,14 +1363,35 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
         }
         0x10 | 0x11 => {
             steady_drift_only(u, ship);
+            if crate::ships::slipgate::is_slipgate_type(u.ships.ship(dw).ship_type) {
+                crate::ships::slipgate::open(u, dw);
+            }
             let s = u.ships.ship_mut(ship);
             if st(ld(s.base.slipgate_timer) + 1.5) < now {
                 s.base.dock_state = if st_now != 0x10 { 0xe } else { 0xd };
                 return false;
             }
         }
-        0xd | 0xe => {
+        0xd => {
+            // Through the gate: the ship is put inside the partner gate and launched from it.
             steady_drift_only(u, ship);
+            crate::ships::slipgate::open(u, dw);
+            if u.ships.ship(ship).base.dock_timer < now {
+                if let Some(partner) = crate::ships::slipgate::partner(u, dw).filter(|&p| u.ships.get(p).is_some()) {
+                    base::remove_ship_from_outside(u, ship);
+                    put_ship_inside(u, ship, partner);
+                    let s = u.ships.ship_mut(ship);
+                    s.base.dock_with = Some(partner);
+                    s.base.dock_state = state::LAUNCH;
+                } else {
+                    u.ships.ship_mut(ship).base.dock_state = state::FLY_OUT;
+                }
+                return false;
+            }
+        }
+        0xe => {
+            steady_drift_only(u, ship);
+            crate::ships::slipgate::open(u, dw);
             if u.ships.ship(ship).base.dock_timer < now {
                 u.ships.ship_mut(ship).base.dock_state = state::FLY_OUT;
                 return false;

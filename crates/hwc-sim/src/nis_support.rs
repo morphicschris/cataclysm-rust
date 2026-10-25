@@ -231,16 +231,19 @@ fn generic_capital_fire_untargeted(u: &mut Universe, id: ShipId) {
 /// modules the fleet carried into this mission. `nisNewObjectCreate` builds an NIS
 /// mothership's modules from it.
 pub fn hyperspace_ship_types_attached_to_mothership(u: &Universe, in_hyperspace: &[ShipId]) -> Vec<ShipType> {
+    // A carried module waiting in hyperspace may be held to the mothership by the level's
+    // clamp records instead of its own clamp: a module (`SOF_MODULE`) in the list whose
+    // player's Somtaaw mothership is in the list too counts as attached.
+    let ms_in_list = |player: usize| in_hyperspace.iter().filter_map(|&m| u.ships.get(m)).any(|m| m.player == player && m.ship_type == ShipType::sMothership);
     in_hyperspace
         .iter()
         .filter_map(|&id| u.ships.get(id))
         .filter(|s| {
-            s.base
-                .clamp
-                .as_ref()
-                .and_then(|c| c.host)
-                .and_then(|h| u.ships.get(h))
-                .is_some_and(|h| h.ship_type == ShipType::sMothership)
+            let host = s.base.clamp.as_ref().and_then(|c| c.host).and_then(|h| u.ships.get(h));
+            match host {
+                Some(h) => h.ship_type == ShipType::sMothership,
+                None => s.flags & crate::base::SOF_MODULE != 0 && ms_in_list(s.player),
+            }
         })
         .map(|s| s.ship_type)
         .collect()

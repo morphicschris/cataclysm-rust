@@ -51,6 +51,7 @@ pub mod proximity;
 pub mod ramming;
 pub mod repair_droid;
 pub mod sentinel;
+pub mod slipgate;
 pub mod worker_repair;
 
 /// The ship module a type uses (which `CustShipHeader`).
@@ -87,6 +88,8 @@ pub enum Module {
     Crystal,
     Worker,
     SalCap,
+    /// The slipgates (`dSlipgateSmall/Medium/Large`).
+    Slipgate,
     /// Everything else (no ship-specific callbacks beyond the combat routines).
     Generic,
 }
@@ -131,6 +134,7 @@ pub fn module_of(t: ShipType) -> Module {
         dCrystal0 | dCrystal1 => Module::Crystal,
         sWorker | bWorker => Module::Worker,
         kSalCapCorvette | tSalCapCorvette => Module::SalCap,
+        dSlipgateSmall | dSlipgateMedium | dSlipgateLarge => Module::Slipgate,
         _ => Module::Generic,
     }
 }
@@ -161,6 +165,7 @@ pub enum ShipSpec {
     NomadMoon(nomad::NomadSpec),
     Crystal(crystal::CrystalSpec),
     BeastMothership(beast::BeastMothershipSpec),
+    Slipgate(slipgate::SlipgateSpec),
 }
 
 /// Per-type statics the modules' static initialisers read from the ship files
@@ -275,6 +280,7 @@ pub fn init(u: &mut Universe, id: ShipId) {
         Module::Crystal => crystal::init(u, id),
         Module::HeavyCruiser | Module::Carrier | Module::BeastMothership => beast::init(u, id),
         Module::Worker => worker_repair::init(u, id),
+        Module::Slipgate => slipgate::init(u, id),
         _ => {}
     }
 }
@@ -476,6 +482,7 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
         Module::GravWell => gravwell::housekeep(u, id),
         Module::ProximitySensor => proximity::housekeep(u, id),
         Module::NomadMoon => nomad::housekeep(u, id),
+        Module::Slipgate => slipgate::housekeep(u, id),
         _ => {}
     }
     if u.ships.get(id).is_some_and(|s| s.base.depot.is_some()) {
@@ -505,6 +512,7 @@ pub fn remove_ship_refs(u: &mut Universe, id: ShipId, gone: ShipId) {
         Module::Worker => worker_repair::remove_ship_refs(u, id, gone),
         Module::GravWell => gravwell::remove_ship_refs(u, id, gone),
         Module::NomadMoon => nomad::remove_ship_refs(u, id, gone),
+        Module::Slipgate => slipgate::remove_ship_refs(u, id, gone),
         _ => {}
     }
 }
