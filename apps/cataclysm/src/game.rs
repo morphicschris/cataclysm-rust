@@ -17,6 +17,8 @@ use hwc_sim::harness::group_centre;
 use hwc_sim::statics::{ShipType, Technology};
 use hwc_sim::{command, dock, formation, ShipId};
 use hwc_ui::canvas::{Canvas, Color, Rect};
+use hwc_ui::letterbox::{self, Letterbox};
+use hwc_ui::subtitle::{self, Subtitles};
 use hwc_ui::ingame::host::{Command, Formation, GameMessage, GameRequest, Owner};
 use hwc_ui::ingame::keys::{self, Action};
 use hwc_ui::ingame::strings::Strings;
@@ -38,8 +40,10 @@ use crate::world::World;
 const CLICK_SLOP: i32 = 5;
 /// Right-button movement that still opens the menu (`MR_MouseMovementClickLimit`).
 const RIGHT_CLICK_LIMIT: f32 = 6.0;
-/// Subtitles without a known length stay this long (`subTitleShortest`).
-const SUBTITLE_SHORTEST: f32 = 2.0;
+/// Frames the mission's letterbox takes to come in or go out. The simulation records only
+/// that `wideScreenIn...` / `wideScreenOut` ran, not their frame counts; every shipped call in
+/// mission 1 uses 90.
+const WIDE_SCREEN_FRAMES: i32 = 90;
 /// The mission-complete note stays this long before the game returns to the menu.
 const COMPLETE_TIME: f32 = 10.0;
 /// UI sound events of the move mechanism (`UI_MovementGUIon/off`).
@@ -95,9 +99,12 @@ pub struct Game {
     selecting: Vec<ShipId>,
     groups: HashMap<u8, Vec<ShipId>>,
     messages: Vec<GameMessage>,
-    /// Subtitle text and the game time it goes away.
-    subtitles: Vec<(String, f32)>,
-    location: Option<(String, f32)>,
+    /// Speech subtitles, simulated subtitles and location cards (`Subtitle.c`).
+    pub subtitles: Option<Subtitles>,
+    /// The NIS letterbox the mission's `wideScreenIn/Out` drive.
+    pub letterbox: Letterbox,
+    /// The simulation's widescreen flag last seen.
+    wide_screen: bool,
     pub mode: Mode,
     mouse: (i32, i32),
     left_down: Option<(i32, i32)>,
@@ -112,7 +119,6 @@ pub struct Game {
     formation_index: usize,
     canvas: Canvas,
     target: Option<OffscreenTarget>,
-    subtitle_font: Option<Rc<hwc_formats::font::Font>>,
     big_font: Option<Rc<hwc_formats::font::Font>>,
     real_time: f32,
     /// The sensors manager.
@@ -176,8 +182,9 @@ impl Game {
             selecting: Vec::new(),
             groups: HashMap::new(),
             messages: Vec::new(),
-            subtitles: Vec::new(),
-            location: None,
+            subtitles: None,
+            letterbox: Letterbox::default(),
+            wide_screen: false,
             mode: Mode::Select,
             mouse: (0, 0),
             left_down: None,
@@ -190,7 +197,6 @@ impl Game {
             formation_index: 0,
             canvas: Canvas::new(640, 480),
             target: None,
-            subtitle_font: res.font("Arial_13.hff"),
             big_font: res.font("Arial_13.hff"),
             hotkey_font: res.font("default.hff"),
             real_time: 0.0,
@@ -199,6 +205,11 @@ impl Game {
             pan_arrows: [false; 4],
             hover: None,
         };
+        let mut subs = Subtitles::load(&res, true, &g.world.team_schemes());
+        if let Some(s) = subs.as_mut() {
+            s.language = options.get("language").max(0) as usize;
+        }
+        g.subtitles = subs;
         g.sync_resource_units();
         Ok(g)
     }
@@ -854,6 +865,16 @@ impl Game {
             GameRequest::ApplyOptions | GameRequest::AudioSettings => {
                 out.push(Outcome::ApplyOptions)
             }
+            GameRequest::SkipFleetIntel => {
+                let now = self.world.universe().total_time_elapsed;
+                if let Some(s) = self.subtitles.as_mut() {
+                    if s.skip(now) {
+                        if let Some(a) = audio.as_mut() {
+                            a.stop_mission_speech(subtitle::SKIP_FADE);
+                        }
+                    }
+                }
+            }
             GameRequest::SetRepairPriority { .. }
             | GameRequest::BeastSystems(_)
             | GameRequest::TraderAccept(_)
@@ -1035,7 +1056,10 @@ impl Game {
                     self.selection.clear();
                 }
             }
-            keys::PAUSE => self.paused = !self.paused,
+            // `kbcbPause`: not while the letterbox comes in or is in.
+            keys::PAUSE if self.letterbox.fade_in == 0.0 && !self.letterbox.fully => {
+                self.paused = !self.paused
+            }
             keys::NEXT_FORMATION | keys::PREV_FORMATION if self.selection.len() > 1 => {
                 let step = if a == keys::NEXT_FORMATION {
                     1
@@ -1119,7 +1143,8 @@ impl Game {
         for _ in 0..steps {
             self.world.step();
             if let Some(a) = audio.as_mut() {
-                a.sim_events(self.world.universe());
+                a.sim_events(self.world.universe(), !self.world.effects_on);
+                a.effect_events(self.world.universe());
             }
             self.after_step(audio);
         }
@@ -1133,11 +1158,7 @@ impl Game {
                 &self.world.run.universe,
             );
         }
-        let now = self.world.universe().total_time_elapsed;
-        self.subtitles.retain(|s| s.1 > now);
-        if self.location.as_ref().is_some_and(|l| l.1 <= now) {
-            self.location = None;
-        }
+        self.update_presentation(dt, audio);
         if let Some(End::Complete { at }) = self.end {
             if self.real_time - at > COMPLETE_TIME {
                 out.push(Outcome::Leave);
@@ -1202,19 +1223,24 @@ impl Game {
                     let spoken = audio
                         .as_mut()
                         .and_then(|a| a.mission_speech(event, variable));
-                    if let Some(s) = spoken {
-                        let secs = (s.duration_ms.max(0) as f32 / 1000.0).max(SUBTITLE_SHORTEST);
-                        // The subtitle's end is what ends the intel event in the original.
-                        self.world.run.game.speech_end = Some(now + secs);
-                        let text = s.subtitles.join(" ");
-                        if !text.trim().is_empty() {
-                            self.subtitles = vec![(text, now + secs)];
+                    // Each subtitled fragment reaches the subtitle system with its actor; the
+                    // last letterbox card expiring is what ends the intel event.
+                    let mission = self.world.run.game.config.mission;
+                    let actor = subtitle::actor_for_speech(0, event, true, mission);
+                    if let (Some(s), Some(actor), Some(subs)) =
+                        (spoken, actor, self.subtitles.as_mut())
+                    {
+                        let n = s.subtitles.len().max(1) as f32;
+                        let each = s.duration_ms.max(0) as f32 / 1000.0 / n;
+                        for t in &s.subtitles {
+                            subs.add(actor, event, &text::to_latin1(t), each);
                         }
                     }
                 }
                 Cue::LocationCard { milliseconds, text } => {
-                    let secs = (milliseconds.max(1000) as f32 / 1000.0).min(30.0);
-                    self.location = Some((text, now + secs));
+                    if let Some(subs) = self.subtitles.as_mut() {
+                        subs.location_card(milliseconds, &text::to_latin1(&text));
+                    }
                 }
                 Cue::Completed => {
                     if self.end.is_none() {
@@ -1263,9 +1289,26 @@ impl Game {
                 *dst = [src[0], src[1], src[2], 255];
             }
         }
-        self.draw_marks();
-        self.draw_text();
+        if !self.letterbox.fully {
+            self.draw_marks();
+        }
+        self.ui.letterboxed = self.letterbox.fully;
         self.ui.draw(&mut self.canvas);
+        // Over everything: the letterbox bars, then the subtitles (`rndRenderTask`).
+        self.letterbox.draw(&mut self.canvas);
+        if let Some(s) = self.subtitles.as_mut() {
+            let now = self.world.run.universe.total_time_elapsed;
+            let state = subtitle::DrawState {
+                letterbox_fading: self.letterbox.fade != 0.0,
+                letterboxed: self.letterbox.fully,
+            };
+            s.resize(self.canvas.width, self.canvas.height);
+            s.draw(&mut self.canvas, now, None, state);
+            if s.take_message_ended() != 0 {
+                self.world.run.game.intel_ended = true;
+            }
+        }
+        self.draw_text();
         Ok(())
     }
 
@@ -1311,6 +1354,29 @@ impl Game {
         .with_keys(|a| ui.action_held(a));
         let now = self.world.universe().total_time_elapsed;
         self.pointer.update(&state, now);
+    }
+
+    /// The letterbox and the subtitles, once a frame after the universe updates.
+    fn update_presentation(&mut self, dt: f32, audio: &mut Option<Audio>) {
+        let wide = self.world.run.game.wide_screen;
+        if wide != self.wide_screen {
+            self.wide_screen = wide;
+            if wide {
+                if self.letterbox.wide_screen_in(WIDE_SCREEN_FRAMES) {
+                    sound(audio, letterbox::SOUND_IN);
+                }
+            } else {
+                self.letterbox.wide_screen_out(WIDE_SCREEN_FRAMES);
+                sound(audio, letterbox::SOUND_OUT);
+            }
+        }
+        self.letterbox.update(dt);
+        // Fleet intel holds the keyboard (`smFleetIntel`).
+        self.ui.fleet_intel = self.world.run.game.sensors_kas_flag != 0;
+        let now = self.world.universe().total_time_elapsed;
+        if let Some(s) = self.subtitles.as_mut() {
+            s.update(now);
+        }
     }
 
     /// Draws the game's pointer (`mouseDraw`) at the mouse position.
@@ -1388,6 +1454,9 @@ impl Game {
         let selecting: &[ShipId] = if in_sensors { &[] } else { &self.selecting };
         for &id in marked.iter().chain(selecting) {
             let Some(s) = u.ship(id) else { continue };
+            if s.flags & hwc_sim::object::sof::DEAD != 0 {
+                continue;
+            }
             let Some(st) = u.statics.ship(s.ship_type) else {
                 continue;
             };
@@ -1485,32 +1554,13 @@ impl Game {
         }
     }
 
-    /// Subtitles (`subtitle.script` region 1: 80,10 - 620,57 scaled to the screen, Arial_13,
-    /// white with a drop shadow), the location card and the mission-complete note.
+    /// The mission-complete note.
     fn draw_text(&mut self) {
         let (w, h) = (self.canvas.width, self.canvas.height);
-        let Some(font) = self.subtitle_font.clone() else {
+        let Some(big) = self.big_font.clone() else {
             return;
         };
-        let lh = text::height(&font);
-        let x0 = 80 * w / 640;
-        let x1 = 620 * w / 640;
-        let mut y = 10 * h / 480;
-        for (s, _) in self.subtitles.clone() {
-            for line in wrap(&font, &s, x1 - x0) {
-                text::print(
-                    &mut self.canvas,
-                    &font,
-                    x0,
-                    y,
-                    [255, 255, 255, 255],
-                    &text::to_latin1(&line),
-                    (Shadow::SE, [0, 0, 0, 255]),
-                );
-                y += lh;
-            }
-        }
-        let big = self.big_font.clone().unwrap_or(font);
+        let lh = text::height(&big);
         let centred = |canvas: &mut Canvas, s: &str, y: i32| {
             let b = text::to_latin1(s);
             let tw = text::width(&big, &b);
@@ -1524,11 +1574,6 @@ impl Game {
                 (Shadow::SE, [0, 0, 0, 255]),
             );
         };
-        if let Some((card, _)) = self.location.clone() {
-            for (i, line) in card.split("\\n").enumerate() {
-                centred(&mut self.canvas, line, h * 3 / 10 + i as i32 * (lh + 2));
-            }
-        }
         if let Some(End::Complete { .. }) = self.end {
             centred(&mut self.canvas, "MISSION COMPLETE", h / 2 - lh);
             centred(
@@ -1544,28 +1589,4 @@ fn sound(audio: &mut Option<Audio>, e: u32) {
     if let Some(a) = audio.as_mut() {
         a.event(e);
     }
-}
-
-/// Words of `s` in lines no wider than `width`.
-fn wrap(font: &hwc_formats::font::Font, s: &str, width: i32) -> Vec<String> {
-    let mut out = Vec::new();
-    for para in s.split('\n') {
-        let mut line = String::new();
-        for word in para.split_whitespace() {
-            let cand = if line.is_empty() {
-                word.to_string()
-            } else {
-                format!("{line} {word}")
-            };
-            if text::width(font, &text::to_latin1(&cand)) > width && !line.is_empty() {
-                out.push(std::mem::replace(&mut line, word.to_string()));
-            } else {
-                line = cand;
-            }
-        }
-        if !line.is_empty() {
-            out.push(line);
-        }
-    }
-    out
 }

@@ -18,11 +18,13 @@ pub mod fe;
 pub mod fer;
 pub mod ingame;
 pub mod known;
+pub mod letterbox;
 pub mod options;
 pub mod present;
 pub mod region;
 pub mod scale;
 pub mod session;
+pub mod subtitle;
 pub mod text;
 
 pub use assets::{AssetSource, Language, Resources};

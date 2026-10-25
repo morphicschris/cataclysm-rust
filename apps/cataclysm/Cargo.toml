@@ -16,6 +16,7 @@ hwc-audio = { path = "../../crates/hwc-audio" }
 hwc-video = { path = "../../crates/hwc-video" }
 hwc-render = { path = "../../crates/hwc-render" }
 hwc-sim = { path = "../../crates/hwc-sim" }
+hwc-fx = { path = "../../crates/hwc-fx" }
 hwc-kas = { path = "../../crates/hwc-kas" }
 hwc-math = { path = "../../crates/hwc-math" }
 glam = "0.30"

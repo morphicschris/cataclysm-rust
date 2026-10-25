@@ -16,6 +16,8 @@ mod preview;
 mod sensors;
 #[cfg(test)]
 mod smoke;
+#[cfg(test)]
+mod speech;
 mod tour;
 mod world;
 

@@ -127,6 +127,11 @@ pub struct InGameUi {
     pub fe: Fe,
     held: HashSet<u16>,
     captured: bool,
+    /// The letterbox is fully in: the main overlay is not drawn (`moDraw`).
+    pub letterboxed: bool,
+    /// A fleet intel event holds the keyboard (`smFleetIntel`): bound actions do nothing
+    /// except Escape and Skip_Sensors, which skip the event.
+    pub fleet_intel: bool,
 }
 
 fn read_text(source: &dyn AssetSource, name: &str) -> Option<String> {
@@ -192,6 +197,8 @@ impl InGameUi {
             fe,
             held: HashSet::new(),
             captured: false,
+            letterboxed: false,
+            fleet_intel: false,
         })
     }
 
@@ -350,6 +357,12 @@ impl InGameUi {
             return true;
         }
         let actions = self.fe.game.ig.keys.actions_for(code, mods);
+        if self.fleet_intel {
+            if actions.iter().any(|&a| a == keys::ESCAPE || a == keys::SKIP_SENSORS) {
+                self.fe.game.ig.request(GameRequest::SkipFleetIntel);
+            }
+            return !actions.is_empty();
+        }
         for a in &actions {
             if !a.is_polled() {
                 execute_action(&mut self.fe, *a, true);
@@ -435,7 +448,9 @@ impl InGameUi {
             Some(Manager::Construction | Manager::Launch | Manager::Research | Manager::Trader)
         );
         if !full_screen {
-            overlay::draw(&mut self.fe, canvas);
+            if !self.letterboxed {
+                overlay::draw(&mut self.fe, canvas);
+            }
             shipprint::draw(&mut self.fe, canvas);
             popup::draw(&mut self.fe, canvas);
         }

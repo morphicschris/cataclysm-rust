@@ -257,6 +257,7 @@ dependencies = [
  "glam",
  "hwc-audio",
  "hwc-formats",
+ "hwc-fx",
  "hwc-kas",
  "hwc-math",
  "hwc-render",

@@ -181,7 +181,33 @@ impl Audio {
     }
 
     /// Sounds for one universe update's events.
-    pub fn sim_events(&mut self, u: &Universe) {
+    /// Stops the mission speech (`speechEventActorStop` when fleet intel is skipped).
+    pub fn stop_mission_speech(&mut self, fade: f32) {
+        self.system.stop_speech(0, fade);
+    }
+
+    /// Sounds the effect scripts asked for in the last update (`playSound`: at the effect).
+    pub fn effect_events(&mut self, u: &Universe) {
+        for e in hwc_sim::effects::events(u) {
+            if let hwc_fx::FxEvent::Sound {
+                event, position, ..
+            } = *e
+            {
+                let emitter = Emitter {
+                    position: [position.x, position.y, position.z],
+                    is_ship: false,
+                    ..Default::default()
+                };
+                self.system
+                    .play_event(Some(&emitter), event, &mut ShipSounds::default());
+            }
+        }
+    }
+
+    /// Sounds for one universe update's events. `stand_ins`: also the hit and explosion
+    /// sounds by ship class (without effects; with them the effect scripts play the
+    /// original's).
+    pub fn sim_events(&mut self, u: &Universe, stand_ins: bool) {
         for e in &u.events {
             match e {
                 SimEvent::GunFired { ship, gun, .. } => {
@@ -206,6 +232,7 @@ impl Audio {
                     self.system
                         .play_event(Some(&emitter), event::GUN_SHOT, slot);
                 }
+                SimEvent::BulletHit { .. } if !stand_ins => {}
                 SimEvent::BulletHit {
                     ship,
                     position,
@@ -238,6 +265,9 @@ impl Audio {
                 } => {
                     if let Some(mut slot) = self.ships.remove(ship) {
                         self.system.stop_burst(&mut slot);
+                    }
+                    if !stand_ins {
+                        continue;
                     }
                     let class = u.statics.ship(*ship_type).and_then(|st| st.ship_class);
                     let emitter = Emitter {

@@ -639,7 +639,9 @@ impl GameUiHost for SimHost<'_> {
 /// Whether the local player may select this ship.
 pub fn selectable(u: &Universe, id: ShipId) -> bool {
     u.ship(id).is_some_and(|s| {
-        s.player == PLAYER && s.flags & sof::HIDE == 0 && s.flags & SOF_MODULE == 0
+        s.player == PLAYER
+            && s.flags & (sof::HIDE | sof::DEAD) == 0
+            && s.flags & SOF_MODULE == 0
     })
 }
 
