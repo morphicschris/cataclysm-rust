@@ -94,6 +94,9 @@ pub fn level_presentation(level: &LevelState) -> (Option<String>, Option<String>
     (find("Background"), find("Lighting"))
 }
 
+/// `MissionConfig::nislet_seconds` while the game plays NISlets itself: never reached.
+pub const NISLET_HELD: f32 = 1e30;
+
 /// Missions the simulation can start (`MissionRun::start` carries no fleet over from an
 /// earlier mission yet, so only the first one).
 pub fn supported(n: u32) -> bool {
@@ -106,6 +109,9 @@ pub struct Loader {
     pub skill: i32,
     pub statics: Option<Arc<StaticWorld>>,
     pub tweaks: Option<SimTweaks>,
+    /// The game plays the NISlets the mission asks for (otherwise the simulation counts them
+    /// as played at once).
+    pub play_nislets: bool,
 }
 
 impl Loader {
@@ -115,6 +121,7 @@ impl Loader {
             skill,
             statics: None,
             tweaks: None,
+            play_nislets: true,
         }
     }
 
@@ -145,6 +152,11 @@ impl Loader {
         let script = load_kas_mission(assets.data(), &name).map_err(|e| e.to_string())?;
         let mut config = MissionConfig::new(self.mission);
         config.skill = self.skill;
+        // The game plays the NISlets and reports their end; the simulation's stand-in timer
+        // must not end them first.
+        if self.play_nislets {
+            config.nislet_seconds = NISLET_HELD;
+        }
         MissionRun::start(statics, tweaks, assets, script, config).map_err(|e| e.to_string())
     }
 }

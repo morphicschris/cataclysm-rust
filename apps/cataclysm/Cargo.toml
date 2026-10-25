@@ -19,5 +19,6 @@ hwc-sim = { path = "../../crates/hwc-sim" }
 hwc-fx = { path = "../../crates/hwc-fx" }
 hwc-kas = { path = "../../crates/hwc-kas" }
 hwc-math = { path = "../../crates/hwc-math" }
+hwc-nis = { path = "../../crates/hwc-nis" }
 glam = "0.30"
 jpeg-decoder = { version = "0.3", default-features = false }

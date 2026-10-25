@@ -11,6 +11,9 @@ mod host;
 mod intro;
 mod loading;
 mod mission;
+mod nis;
+#[cfg(test)]
+mod nis_shots;
 mod play;
 mod preview;
 mod sensors;

@@ -174,6 +174,9 @@ fn mission_one_plays_through_the_game_path() {
     };
     // Loading screen, then the mission.
     let mut loading = Loading::new(data.clone(), &rig.session, 1, 2, SIZE).expect("loading");
+    // These tests start in the mission itself (the opening NIS has its own test).
+    loading.opening_nis = false;
+    loading.loader.play_nislets = false;
     save(loading.render(SIZE), "01_loading_start");
     let mut steps = 0;
     let mut game = loop {
@@ -364,6 +367,9 @@ fn sensors_manager_and_pointers() {
         return;
     };
     let mut loading = Loading::new(data.clone(), &rig.session, 1, 2, SIZE).expect("loading");
+    // These tests start in the mission itself (the opening NIS has its own test).
+    loading.opening_nis = false;
+    loading.loader.play_nislets = false;
     let mut game = loop {
         match loading.advance(&rig.session, Some(&mut rig.renderer), DT) {
             Progress::Working => {}

@@ -32,6 +32,8 @@ use hwc_ui::ingame::cursor::{self, avail, Availability, Pointer, PointerAction};
 use crate::audio::Audio;
 use crate::host::{selectable, sim_id, SimHost, PLAYER};
 use crate::mission::{Cue, CueReader};
+use crate::nis::{self, Kind as NisKind, NisRun};
+use hwc_nis::{Action as NisAction, Fired};
 use crate::sensors::{self, Phase, Sensors};
 use crate::world::World;
 
@@ -130,6 +132,21 @@ pub struct Game {
     /// What is under the pointer this frame.
     pub hover: Option<Hover>,
     hotkey_font: Option<Rc<hwc_formats::font::Font>>,
+    /// The NIS playing, if any.
+    pub nis: Option<NisRun>,
+    /// The NISlet the simulation last asked for (so it is played once).
+    nislet_started: Option<i32>,
+    /// Mission log lines already searched for `G_PlayNis` requests.
+    nis_log_seen: usize,
+    /// The next NIS end leaves the letterbox in (`nisUpdateTask`'s 0x8f1f24: set when
+    /// mission 1's script starts).
+    keep_letterbox_after_nis: bool,
+    /// Notes printed once per kind of unhandled NIS event.
+    nis_notes: Vec<String>,
+    /// The square target of a banked NIS camera.
+    roll_target: Option<OffscreenTarget>,
+    /// An NIS set up on the loading screen, started on the first frame.
+    queued_nis: Option<(NisRun, Vec<Fired>)>,
 }
 
 fn v3(v: hwc_math::Vector) -> Vec3 {
@@ -204,6 +221,13 @@ impl Game {
             pointer,
             pan_arrows: [false; 4],
             hover: None,
+            nis: None,
+            nislet_started: None,
+            nis_log_seen: 0,
+            keep_letterbox_after_nis: false,
+            nis_notes: Vec::new(),
+            queued_nis: None,
+            roll_target: None,
         };
         let mut subs = Subtitles::load(&res, true, &g.world.team_schemes());
         if let Some(s) = subs.as_mut() {
@@ -272,6 +296,16 @@ impl Game {
 
     /// One input event in canvas pixels.
     pub fn input(&mut self, ev: InputEvent, audio: &mut Option<Audio>) {
+        if self.nis.is_some() {
+            // The NIS locks the controls out (`mrDisable`, `mouseDisable`); Escape skips to
+            // its end (`kbcbEscape` -> `nisGoToEnd`) once the letterbox is in.
+            match ev {
+                InputEvent::MouseMove { x, y } => self.mouse = (x, y),
+                InputEvent::KeyDown(hwc_ui::consts::key::ESCAPE) => self.skip_nis(),
+                _ => {}
+            }
+            return;
+        }
         if let InputEvent::MouseMove { x, y } = ev {
             let (dx, dy) = (x - self.mouse.0, y - self.mouse.1);
             self.mouse = (x, y);
@@ -1095,6 +1129,9 @@ impl Game {
     /// mission's cues, the sound.
     pub fn update(&mut self, dt: f32, audio: &mut Option<Audio>) -> Vec<Outcome> {
         let mut out = Vec::new();
+        if let Some((run, fired)) = self.queued_nis.take() {
+            self.begin_nis(run, fired, audio);
+        }
         self.real_time += dt;
         let requests = self.with_host(|ui, host| ui.update(host, dt));
         for r in requests {
@@ -1138,19 +1175,35 @@ impl Game {
                     self.ships_in_box([a.0 as f32, a.1 as f32], [b.0 as f32, b.1 as f32]);
             }
         }
-        self.world.paused = self.paused;
+        self.world.paused = self.paused && self.nis.is_none();
         let steps = self.world.due_steps(f64::from(dt));
         for _ in 0..steps {
-            self.world.step();
+            let opening = self.nis.as_ref().is_some_and(|n| n.kind == NisKind::Opening);
+            if opening {
+                self.world.step_universe();
+            } else {
+                self.world.step();
+            }
             if let Some(a) = audio.as_mut() {
                 a.sim_events(self.world.universe(), !self.world.effects_on);
                 a.effect_events(self.world.universe());
             }
-            self.after_step(audio);
+            if !opening {
+                self.after_step(audio);
+            }
+            self.nis_step(audio);
         }
         if let Some(a) = audio.as_mut() {
-            let eye = self.world.camera.eye();
-            let at = self.world.camera.look_at;
+            let (eye, at) = match &self.nis {
+                Some(n) => {
+                    let c = &n.player.camera;
+                    (
+                        Vec3::new(c.eye.x, c.eye.y, c.eye.z),
+                        Vec3::new(c.look_at.x, c.look_at.y, c.look_at.z),
+                    )
+                }
+                None => (self.world.camera.eye(), self.world.camera.look_at),
+            };
             a.game_update(
                 eye.to_array(),
                 at.to_array(),
@@ -1219,24 +1272,7 @@ impl Game {
                         a.play_music(track);
                     }
                 }
-                Cue::Speech { event, variable } => {
-                    let spoken = audio
-                        .as_mut()
-                        .and_then(|a| a.mission_speech(event, variable));
-                    // Each subtitled fragment reaches the subtitle system with its actor; the
-                    // last letterbox card expiring is what ends the intel event.
-                    let mission = self.world.run.game.config.mission;
-                    let actor = subtitle::actor_for_speech(0, event, true, mission);
-                    if let (Some(s), Some(actor), Some(subs)) =
-                        (spoken, actor, self.subtitles.as_mut())
-                    {
-                        let n = s.subtitles.len().max(1) as f32;
-                        let each = s.duration_ms.max(0) as f32 / 1000.0 / n;
-                        for t in &s.subtitles {
-                            subs.add(actor, event, &text::to_latin1(t), each);
-                        }
-                    }
-                }
+                Cue::Speech { event, variable } => self.speak(event, variable, audio),
                 Cue::LocationCard { milliseconds, text } => {
                     if let Some(subs) = self.subtitles.as_mut() {
                         subs.location_card(milliseconds, &text::to_latin1(&text));
@@ -1257,6 +1293,400 @@ impl Game {
         }
     }
 
+    /// A speech event on the intel stream with its subtitles: each subtitled fragment reaches
+    /// the subtitle system with its actor; the last letterbox card expiring is what ends the
+    /// intel event.
+    fn speak(&mut self, event: u32, variable: i32, audio: &mut Option<Audio>) {
+        let spoken = audio
+            .as_mut()
+            .and_then(|a| a.mission_speech(event, variable));
+        let mission = self.world.run.game.config.mission;
+        let actor = subtitle::actor_for_speech(0, event, true, mission);
+        if let (Some(s), Some(actor), Some(subs)) = (spoken, actor, self.subtitles.as_mut()) {
+            let n = s.subtitles.len().max(1) as f32;
+            let each = s.duration_ms.max(0) as f32 / 1000.0 / n;
+            for t in &s.subtitles {
+                subs.add(actor, event, &text::to_latin1(t), each);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // NIS
+    // ---------------------------------------------------------------------------------------
+
+    /// An NIS starts playing (`singlePlayerStartNis`): the managers and menus close, the
+    /// volumes are kept to restore, the letterbox comes in as the script says, and the
+    /// events at time 0 run.
+    pub fn begin_nis(&mut self, mut run: NisRun, fired: Vec<Fired>, audio: &mut Option<Audio>) {
+        if self.sensors.is_open() {
+            self.close_sensors(audio);
+        }
+        self.mode = Mode::Select;
+        self.left_down = None;
+        self.right_down = false;
+        self.selecting.clear();
+        run.volumes = audio.as_ref().map(|a| a.volumes());
+        if run.kind != NisKind::Opening {
+            run.saved_camera = Some(self.world.camera);
+            run.saved_lighting = Some(self.world.lighting.clone());
+        }
+        if let Some(secs) = run.player.data.scissor_fade_in {
+            // `nisScissorBlendSet` sets the fade-in when the script loads; the NIS task moves
+            // it from there.
+            self.letterbox.fade_in = secs;
+        }
+        self.nis = Some(run);
+        self.nis_present(fired, audio);
+    }
+
+    /// An NIS made on the loading screen (the opening); it starts with the first frame.
+    pub fn queue_nis(&mut self, run: NisRun, fired: Vec<Fired>) {
+        self.queued_nis = Some((run, fired));
+    }
+
+    /// Uploads the art of the world and of the mission's world waiting behind the opening.
+    pub fn prepare(&mut self, renderer: &mut Renderer) {
+        self.world.prepare(renderer);
+        let waiting = self
+            .queued_nis
+            .as_mut()
+            .map(|q| &mut q.0)
+            .or(self.nis.as_mut())
+            .and_then(|n| n.pending.as_mut());
+        if let Some(w) = waiting {
+            w.prepare(renderer);
+        }
+    }
+
+    /// Escape during an NIS: to its end, unless the letterbox is still coming in.
+    pub fn skip_nis(&mut self) {
+        let fading_in = self.letterbox.fade_in > 0.0;
+        if let Some(n) = self.nis.as_mut() {
+            if n.player.can_skip(fading_in) {
+                n.player.go_to_end();
+            }
+        }
+    }
+
+    /// One NIS task step after a universe update (and the start of an NIS the mission asked
+    /// for).
+    fn nis_step(&mut self, audio: &mut Option<Audio>) {
+        if self.nis.is_none() {
+            self.nis_requests(audio);
+        }
+        let Some(mut run) = self.nis.take() else {
+            return;
+        };
+        let (fired, finished) = run.tick(&mut self.world);
+        self.nis = Some(run);
+        self.nis_present(fired, audio);
+        if finished {
+            self.end_nis(audio);
+        }
+    }
+
+    /// `G_PlayNislet` (the simulation holds the request in `Game::nislet` until its stand-in
+    /// time, which the game puts out of reach) and `G_PlayNis` (which the simulation reports
+    /// finished at once; the NIS is still shown).
+    fn nis_requests(&mut self, audio: &mut Option<Audio>) {
+        let mission = self.world.run.game.config.mission;
+        let mut request = None;
+        match self.world.run.game.nislet {
+            Some((n, _)) if self.nislet_started != Some(n) => {
+                self.nislet_started = Some(n);
+                request = Some(NisKind::Nislet(n.max(0) as u32));
+            }
+            None => self.nislet_started = None,
+            _ => {}
+        }
+        let log = &self.world.run.game.log;
+        for e in &log[self.nis_log_seen.min(log.len())..] {
+            if let Some(rest) = e.text.strip_prefix("NIS ") {
+                if let Some(n) = rest.split(' ').next().and_then(|n| n.parse::<u32>().ok()) {
+                    if rest.contains("requested") && request.is_none() {
+                        request = Some(NisKind::Mission(n));
+                    }
+                }
+            }
+        }
+        self.nis_log_seen = log.len();
+        let Some(kind) = request else {
+            return;
+        };
+        let point = self
+            .world
+            .run
+            .game
+            .level
+            .point(hwc_kas::kas_hash("StartPointPlayer"))
+            .unwrap_or([0.0; 4]);
+        let assets = self.world.assets().clone();
+        match nis::load(&assets, kind, mission) {
+            Ok(data) => {
+                let (run, fired) = NisRun::start(&mut self.world, data, kind, point, mission);
+                self.world.load_new_art();
+                self.begin_nis(run, fired, audio);
+            }
+            Err(e) => {
+                eprintln!("cataclysm: {e}");
+                // Without its files the NISlet counts as played.
+                if let NisKind::Nislet(n) = kind {
+                    self.nislet_done(n);
+                }
+            }
+        }
+    }
+
+    fn nislet_done(&mut self, n: u32) {
+        let run = &mut self.world.run;
+        run.kas
+            .set_var(None, hwc_kas::var_hash(&format!("G_Nislet{n}Complete")), 1);
+        run.game.nislet = None;
+        self.nislet_started = None;
+    }
+
+    /// `nisStop` and `singlePlayerNisStoppedCB`.
+    fn end_nis(&mut self, audio: &mut Option<Audio>) {
+        let Some(mut run) = self.nis.take() else {
+            return;
+        };
+        let report = run.player.stop();
+        run.stage.stop(self.world.universe_mut(), &report);
+        if let Some(a) = audio.as_mut() {
+            if report.stop_music {
+                a.stop_music(0.0);
+            }
+            if let Some(v) = run.volumes {
+                a.set_volumes(v);
+            }
+        }
+        if let Some(s) = self.subtitles.as_mut() {
+            s.reset();
+        }
+        // The bars go when the NIS ends, unless mission 1's start asked to keep them.
+        if self.keep_letterbox_after_nis {
+            self.keep_letterbox_after_nis = false;
+        } else {
+            self.letterbox.fully = false;
+        }
+        if let Some(c) = run.saved_camera.take() {
+            self.world.camera = c;
+        }
+        if let Some(l) = run.saved_lighting.take() {
+            self.world.lighting = l;
+        }
+        match run.kind {
+            NisKind::Opening => {
+                if let Some(w) = run.pending.take() {
+                    self.world = w;
+                    self.wide_screen = self.world.run.game.wide_screen;
+                    // Mission 1's start sets the flag that keeps the next NIS's letterbox.
+                    if self.world.run.game.config.mission == 1 {
+                        self.keep_letterbox_after_nis = true;
+                    }
+                }
+            }
+            NisKind::Nislet(n) => self.nislet_done(n),
+            NisKind::Mission(_) => {}
+        }
+    }
+
+    /// The events of an NIS step the presentation handles.
+    fn nis_present(&mut self, fired: Vec<Fired>, audio: &mut Option<Audio>) {
+        for f in fired {
+            let ship = f.object.and_then(|i| {
+                self.nis
+                    .as_ref()
+                    .and_then(|n| n.stage.ship(self.world.universe(), i))
+            });
+            match f.action {
+                NisAction::FleetSpeechEvent { event, variable }
+                | NisAction::SpeechEvent {
+                    event, variable, ..
+                } => {
+                    if !f.seeking {
+                        self.speak(event as u32, variable, audio);
+                    }
+                }
+                NisAction::SoundEvent { event } => {
+                    if !f.seeking {
+                        sound(audio, event as u32);
+                    }
+                }
+                NisAction::Subtitle { index, ms } => {
+                    let text = hwc_nis::tables::subtitle_string(index)
+                        .and_then(|k| self.strings.get(k))
+                        .map(|t| t.trim().to_string());
+                    if let (Some(t), Some(subs)) = (text, self.subtitles.as_mut()) {
+                        // `nisSubtitle`: a location card on actor 0x70, event 0.
+                        let mut b = format!(
+                            "#r{:x}#t{:x}",
+                            subtitle::region::LOCATION_CARD,
+                            subtitle::THEME_LOCATION_CARD
+                        )
+                        .into_bytes();
+                        b.extend_from_slice(&text::to_latin1(&t));
+                        subs.add(subtitle::ACTOR_LOCATION_CARD, 0, &b, ms as f32 * 0.001);
+                    }
+                }
+                NisAction::StartMusic(track) => {
+                    self.music = Some(track);
+                    if let Some(a) = audio.as_mut() {
+                        a.stop_music(0.0);
+                        a.play_music(track);
+                    }
+                }
+                NisAction::StopMusic(fade) => {
+                    if let Some(a) = audio.as_mut() {
+                        a.stop_music(fade);
+                    }
+                }
+                NisAction::MusicVolume(v) => {
+                    if let Some(a) = audio.as_mut() {
+                        a.set_music_volume(v);
+                    }
+                }
+                NisAction::SpeechVolume(v) => {
+                    if let Some(a) = audio.as_mut() {
+                        a.set_speech_volume(v);
+                    }
+                }
+                NisAction::SfxVolume(v) => {
+                    if let Some(a) = audio.as_mut() {
+                        a.set_sfx_volume(v);
+                    }
+                }
+                NisAction::WideScreenOut(secs) => {
+                    // `nisScissorOut` (no sound, unlike the mission's `wideScreenOut`).
+                    let l = &mut self.letterbox;
+                    if l.fade_in != 0.0 {
+                        l.fade_time = 0.0;
+                        l.fade_in = 0.0;
+                        l.fade = 0.0;
+                    }
+                    l.fade_out = secs;
+                }
+                NisAction::LightAmbient { light, rgb } | NisAction::LightDiffuse { light, rgb } => {
+                    let ambient = matches!(f.action, NisAction::LightAmbient { .. });
+                    let c = Vec3::new(rgb[0] as f32, rgb[1] as f32, rgb[2] as f32) * 0.003_921_569;
+                    if let Some(n) = self.nis.as_mut() {
+                        let l = &mut n.lights[light.clamp(0, 1) as usize];
+                        if ambient {
+                            l.ambient = c;
+                        } else {
+                            l.diffuse = c;
+                        }
+                        n.apply_lights(&mut self.world);
+                    }
+                }
+                NisAction::GlobalAmbient(rgb) => {
+                    self.world.lighting.global_ambient =
+                        Vec3::new(rgb[0] as f32, rgb[1] as f32, rgb[2] as f32) * 0.003_921_569;
+                }
+                NisAction::NumberLights(n) => {
+                    if let Some(r) = self.nis.as_mut() {
+                        r.number_lights = n.clamp(1, 2) as usize;
+                        r.apply_lights(&mut self.world);
+                    }
+                }
+                NisAction::MeshAnimStart(ref name) => {
+                    if let Some(id) = ship {
+                        if !self.world.play_anim(id, name) {
+                            self.nis_note(format!("meshAnimStart {name}: no such animation"));
+                        }
+                    }
+                }
+                // Done by the player (fade, camera, flags) or the stage (objects).
+                NisAction::Show
+                | NisAction::Hide
+                | NisAction::HideUniverseToggle
+                | NisAction::PauseUniverseToggle
+                | NisAction::FadeSet { .. }
+                | NisAction::FadeTo { .. }
+                | NisAction::CameraFov(_)
+                | NisAction::CameraClipNear(_)
+                | NisAction::CameraClipFar(_)
+                | NisAction::RemainAtEnd { .. }
+                | NisAction::KeepMovingAtEnd
+                | NisAction::Death { .. } => {}
+                ref other => {
+                    let k = format!("{other:?}");
+                    let k = k.split(['(', ' ', '{']).next().unwrap_or("").to_string();
+                    self.nis_note(format!("NIS event {k} is not shown yet"));
+                }
+            }
+        }
+    }
+
+    fn nis_note(&mut self, note: String) {
+        if !self.nis_notes.contains(&note) {
+            eprintln!("note: {note}");
+            self.nis_notes.push(note);
+        }
+    }
+
+    /// A banked NIS camera: the scene is drawn square, large enough to cover the screen at any
+    /// bank, with the field of view widened to match, and turned onto the canvas (the game
+    /// camera keeps +z up).
+    fn render_rolled(&mut self, renderer: &mut Renderer, px: (u32, u32), m: [f32; 4]) -> Result<(), String> {
+        let (w, h) = (px.0 as f32, px.1 as f32);
+        let d = (w.hypot(h)).ceil() as u32 + 2;
+        if self.roll_target.as_ref().is_none_or(|t| t.width != d) {
+            self.roll_target = Some(OffscreenTarget::new(renderer, d, d));
+        }
+        let fov = self.world.camera.tweaks.field_of_view;
+        let t = (fov.to_radians() * 0.5).tan();
+        self.world.camera.tweaks.field_of_view = (2.0 * (t * d as f32 / h).atan()).to_degrees();
+        let frame = self.world.frame((d, d));
+        let target = self.roll_target.as_ref().expect("target");
+        let rgba = self.world.render_offscreen(renderer, target, &frame)?;
+        self.world.camera.tweaks.field_of_view = fov;
+        let c = d as f32 * 0.5;
+        let (cw, ch) = (self.canvas.width, self.canvas.height);
+        for y in 0..ch {
+            let dy = (ch as f32 * 0.5) - (y as f32 + 0.5);
+            for x in 0..cw {
+                let dx = (x as f32 + 0.5) - cw as f32 * 0.5;
+                let x0 = m[0] * dx + m[1] * dy;
+                let y0 = m[2] * dx + m[3] * dy;
+                let sx = (c + x0).floor() as i64;
+                let sy = (c - y0).floor() as i64;
+                let p = if sx >= 0 && sy >= 0 && (sx as u32) < d && (sy as u32) < d {
+                    let i = ((sy as u32 * d + sx as u32) * 4) as usize;
+                    [rgba[i], rgba[i + 1], rgba[i + 2], 255]
+                } else {
+                    [0, 0, 0, 255]
+                };
+                self.canvas.pixels[(y * cw + x) as usize] = p;
+            }
+        }
+        Ok(())
+    }
+
+    /// The NIS fade to black (or white) over the picture between the letterbox bars
+    /// (`mrRegionDraw`).
+    fn draw_nis_fade(&mut self) {
+        let Some(n) = &self.nis else {
+            return;
+        };
+        let f = n.player.fade;
+        if f.level == 0.0 {
+            return;
+        }
+        let (w, h) = (self.canvas.width, self.canvas.height);
+        let full = letterbox::bar_height(w, h);
+        let bar = if self.letterbox.fade == 0.0 {
+            full
+        } else {
+            (full as f32 * self.letterbox.fade) as i32
+        };
+        let c = if f.white { 255 } else { 0 };
+        let a = (f.level.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let r = Rect::new(0, (bar - 7).max(0), w, (h - bar + 7).min(h));
+        self.canvas.blend_rect(r, [c, c, c, a]);
+    }
+
     /// Draws the frame: the 3D view, the game's marks (health bars of the selection, band box,
     /// move plate), subtitles and the interface. The pointer is the application's.
     pub fn render(&mut self, renderer: &mut Renderer, size: (i32, i32)) -> Result<(), String> {
@@ -1273,7 +1703,11 @@ impl Game {
             self.target = Some(OffscreenTarget::new(renderer, px.0, px.1));
         }
         self.world.prepare(renderer);
-        if self.sensors.phase() == Phase::Sensors {
+        let game_camera = self.nis.as_ref().map(|_| self.world.camera);
+        if let Some(n) = &self.nis {
+            n.view(&mut self.world);
+        }
+        if self.sensors.phase() == Phase::Sensors && self.nis.is_none() {
             self.render_sensors(renderer, px)?;
         } else {
             // The main-view part of a sensors zoom uses the main camera's clip planes.
@@ -1281,18 +1715,27 @@ impl Game {
             if let Some(m) = self.sensors.main_camera() {
                 self.world.camera.tweaks = m.tweaks;
             }
-            let frame = self.world.frame(px);
-            let target = self.target.as_ref().expect("target");
-            let rgba = self.world.render_offscreen(renderer, target, &frame);
-            self.world.camera.tweaks = saved;
-            for (dst, src) in self.canvas.pixels.iter_mut().zip(rgba?.as_chunks::<4>().0) {
-                *dst = [src[0], src[1], src[2], 255];
+            let roll = self.nis.as_ref().and_then(|n| n.roll());
+            if let Some(m) = roll {
+                self.render_rolled(renderer, px, m)?;
+            } else {
+                let frame = self.world.frame(px);
+                let target = self.target.as_ref().expect("target");
+                let rgba = self.world.render_offscreen(renderer, target, &frame);
+                for (dst, src) in self.canvas.pixels.iter_mut().zip(rgba?.as_chunks::<4>().0) {
+                    *dst = [src[0], src[1], src[2], 255];
+                }
             }
+            self.world.camera.tweaks = saved;
         }
-        if !self.letterbox.fully {
+        if let Some(c) = game_camera {
+            self.world.camera = c;
+        }
+        self.draw_nis_fade();
+        if !self.letterbox.fully && self.nis.is_none() {
             self.draw_marks();
         }
-        self.ui.letterboxed = self.letterbox.fully;
+        self.ui.letterboxed = self.letterbox.fully || self.nis.is_some();
         self.ui.draw(&mut self.canvas);
         // Over everything: the letterbox bars, then the subtitles (`rndRenderTask`).
         self.letterbox.draw(&mut self.canvas);
@@ -1381,6 +1824,9 @@ impl Game {
 
     /// Draws the game's pointer (`mouseDraw`) at the mouse position.
     pub fn draw_cursor(&mut self) {
+        if self.nis.is_some() {
+            return;
+        }
         let (x, y) = self.mouse;
         self.pointer.draw(&mut self.canvas, x, y);
     }

@@ -260,6 +260,7 @@ dependencies = [
  "hwc-fx",
  "hwc-kas",
  "hwc-math",
+ "hwc-nis",
  "hwc-render",
  "hwc-sim",
  "hwc-ui",
@@ -797,6 +798,15 @@ version = "0.1.0"
 [[package]]
 name = "hwc-math"
 version = "0.1.0"
+
+[[package]]
+name = "hwc-nis"
+version = "0.1.0"
+dependencies = [
+ "hwc-formats",
+ "hwc-math",
+ "hwc-sim",
+]
 
 [[package]]
 name = "hwc-render"

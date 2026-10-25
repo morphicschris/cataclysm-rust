@@ -56,6 +56,8 @@ fn start() -> Option<(Box<Game>, Renderer, Option<crate::audio::Audio>)> {
         .and_then(|g| crate::audio::Audio::open(g, false))
         .ok();
     let mut loading = Loading::new(data, &session, 1, 2, SIZE).ok()?;
+    loading.opening_nis = false;
+    loading.loader.play_nislets = false;
     for _ in 0..20 {
         match loading.advance(&session, Some(&mut renderer), DT) {
             Progress::Working => {}

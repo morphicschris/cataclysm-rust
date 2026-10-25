@@ -26,6 +26,7 @@ enum Step {
     Statics,
     Level,
     Art,
+    Nis,
     Interface,
     Upload,
     Failed(String, f32),
@@ -44,9 +45,13 @@ pub struct Loading {
     pub mission: u32,
     source: Rc<dyn AssetSource>,
     assets: Assets,
-    loader: Loader,
+    pub loader: Loader,
     run: Option<MissionRun>,
     world: Option<World>,
+    /// The opening NIS, set up next to the mission.
+    nis: Option<(crate::nis::NisRun, Vec<hwc_nis::Fired>)>,
+    /// Play the opening NIS before mission 1 (the original always does).
+    pub opening_nis: bool,
     game: Option<Game>,
     step: Step,
 }
@@ -82,6 +87,8 @@ impl Loading {
             loader: Loader::new(mission, difficulty),
             run: None,
             world: None,
+            nis: None,
+            opening_nis: std::env::var_os("HWC_SKIP_NIS").is_none(),
             game: None,
             step: Step::Start,
         })
@@ -133,16 +140,37 @@ impl Loading {
                 match World::new(self.assets.clone(), run, player_colors(session)) {
                     Ok(w) => {
                         self.world = Some(w);
-                        self.screen.set_progress(0.8);
-                        Step::Interface
+                        self.screen.set_progress(0.7);
+                        Step::Nis
                     }
                     Err(e) => Step::Failed(e, UNSUPPORTED_TIME),
                 }
             }
+            Step::Nis => {
+                // `singlePlayerStartGame`: mission 1 starts with the opening NIS in its own
+                // level; the mission waits behind it.
+                if self.mission == 1 && self.opening_nis {
+                    let mission = self.world.take().expect("world");
+                    let statics = self.loader.statics.clone().expect("statics");
+                    let tweaks = self.loader.tweaks.clone().expect("tweaks");
+                    match crate::nis::opening(&self.assets, statics, tweaks, mission, player_colors(session)) {
+                        Ok((w, run, fired)) => {
+                            self.world = Some(w);
+                            self.nis = Some((run, fired));
+                        }
+                        Err(e) => return self.fail(e),
+                    }
+                }
+                self.screen.set_progress(0.8);
+                Step::Interface
+            }
             Step::Interface => {
                 let world = self.world.take().expect("world");
                 match Game::new(self.source.clone(), session, world) {
-                    Ok(g) => {
+                    Ok(mut g) => {
+                        if let Some((run, fired)) = self.nis.take() {
+                            g.queue_nis(run, fired);
+                        }
                         self.game = Some(g);
                         self.screen.set_progress(0.9);
                         Step::Upload
@@ -153,7 +181,7 @@ impl Loading {
             Step::Upload => {
                 let mut game = self.game.take().expect("game");
                 if let Some(r) = renderer {
-                    game.world.prepare(r);
+                    game.prepare(r);
                 }
                 self.screen.set_progress(1.0);
                 return Progress::Ready(Box::new(game));
@@ -167,6 +195,11 @@ impl Loading {
             }
         };
         self.step = next;
+        Progress::Working
+    }
+
+    fn fail(&mut self, why: String) -> Progress {
+        self.step = Step::Failed(why, UNSUPPORTED_TIME);
         Progress::Working
     }
 

@@ -318,6 +318,11 @@ impl World {
         self.team_colors.schemes.iter().map(|s| (s.base, s.stripe)).collect()
     }
 
+    /// The game files the world draws from.
+    pub fn assets(&self) -> &Assets {
+        &self.src
+    }
+
     pub fn universe(&self) -> &Universe {
         &self.run.universe
     }
@@ -419,6 +424,13 @@ impl World {
         Ok(())
     }
 
+    /// Loads the art of ships and asteroids that appeared since the last update.
+    pub fn load_new_art(&mut self) {
+        if let Err(e) = self.load_art() {
+            eprintln!("cataclysm: {e}");
+        }
+    }
+
     fn resource_kinds_loaded(&self) -> bool {
         self.universe()
             .base
@@ -507,6 +519,19 @@ impl World {
     pub fn step(&mut self) {
         self.snapshot();
         self.run.step();
+        self.after_update();
+    }
+
+    /// One universe update without the mission (its KAS script and single-player state):
+    /// the universe of the opening NIS's level, which runs before the mission exists.
+    pub fn step_universe(&mut self) {
+        self.snapshot();
+        self.run.universe.update();
+        self.after_update();
+    }
+
+    /// The presentation work after a universe update.
+    fn after_update(&mut self) {
         // Ships built or arriving since the last update need their art.
         if let Err(e) = self.load_art() {
             eprintln!("cataclysm: {e}");
@@ -576,6 +601,49 @@ impl World {
                 self.camera_pending = false;
             }
         }
+    }
+
+    /// Cuts the ship's engine trails (`trailZeroLength`, an NIS object that jumped).
+    pub fn cut_trails(&mut self, id: ShipId) {
+        let Some(t) = self.universe().ship(id).map(|s| s.ship_type) else { return };
+        if let (Some(art), Some(fx)) = (self.art.get(&t), self.fx.get_mut(&id)) {
+            fx.trails = ShipTrails::new(&art.trail, id.0 as u32 ^ 0x9e37_79b9);
+        }
+    }
+
+    /// `madAnimationStart` by animation name (`meshAnimStart` in an NIS); false when the
+    /// ship's `.mad` has no such animation.
+    pub fn play_anim(&mut self, id: ShipId, name: &str) -> bool {
+        let Some(t) = self.universe().ship(id).map(|s| s.ship_type) else { return false };
+        let Some(art) = self.art.get(&t) else { return false };
+        let Some(clip) = art.clip.as_ref() else { return false };
+        let Some(index) = clip.find(name) else { return false };
+        if let Some(fx) = self.fx.get_mut(&id) {
+            fx.anim.play(clip, index, 0);
+            fx.last_mad = index as i32;
+        }
+        if let Some(s) = self.run.universe.ships.get_mut(id) {
+            s.base.mad_anim = index as i32;
+        }
+        true
+    }
+
+    /// Looks from `eye` at `look_at` with a vertical field of view in degrees (the NIS camera;
+    /// the game camera's up is always +z, so a camera bank is not shown).
+    pub fn set_view(&mut self, eye: Vec3, look_at: Vec3, fov: f32) {
+        let d = eye - look_at;
+        let dist = d.length();
+        if dist.is_nan() || dist <= 1e-3 || !dist.is_finite() {
+            return;
+        }
+        self.camera.look_at = look_at;
+        self.camera.distance = dist;
+        self.camera.angle = d.y.atan2(d.x);
+        if self.camera.angle < 0.0 {
+            self.camera.angle += std::f32::consts::TAU;
+        }
+        self.camera.declination = (-d.z / dist).clamp(-1.0, 1.0).asin();
+        self.camera.tweaks.field_of_view = fov;
     }
 
     /// Hyperspace effect state of each arriving ship: `(state, clipt)`.
@@ -876,6 +944,9 @@ impl World {
             let ResourceKind::Asteroid(k) = r.kind else {
                 continue;
             };
+            if r.flags & hwc_sim::object::sof::HIDE != 0 {
+                continue;
+            }
             if !self
                 .resource_art
                 .get(&k)

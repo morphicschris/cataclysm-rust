@@ -118,6 +118,29 @@ impl Audio {
         m.set_master_eq(&eq);
     }
 
+    /// The volume levels (`soundEventGetVolume`).
+    pub fn volumes(&self) -> hwc_audio::system::Volumes {
+        self.system.volumes()
+    }
+
+    /// Restores levels saved with [`Audio::volumes`].
+    pub fn set_volumes(&mut self, v: hwc_audio::system::Volumes) {
+        self.system.set_volumes(v);
+    }
+
+    /// `soundEventMusicVol`, `soundEventSpeechVol`, `soundEventSFXVol` (0..1).
+    pub fn set_music_volume(&mut self, level: f32) {
+        self.system.set_music_volume(level);
+    }
+
+    pub fn set_speech_volume(&mut self, level: f32) {
+        self.system.set_speech_volume(level);
+    }
+
+    pub fn set_sfx_volume(&mut self, level: f32) {
+        self.system.set_sfx_volume(level);
+    }
+
     /// `soundEventPlay(NULL, event)`.
     pub fn event(&mut self, event: u32) {
         self.system.play_event(None, event, &mut self.ship);
