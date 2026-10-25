@@ -545,7 +545,9 @@ pub struct LensFlare {
     pub intensity: f32,
     /// Field +0x10.
     pub enabled: u8,
-    /// Field +0x11, cleared every time the owning system is "rendered".
+    /// Field +0x11: 2 when just added (the renderer tests it for occlusion), 0 after its
+    /// system was drawn this frame, 1 after the flare pass while the system was not drawn
+    /// (the flare then fades out).
     pub pending: u8,
     /// Field +0x12.
     pub active: u8,
@@ -787,7 +789,8 @@ pub fn make_particle(pat: &Pat, kind: PartType, index: u32, env: &mut CreateEnv)
     let length = dist(randy, pat.length, pat.length_dist);
     let delta_length = dist(randy, pat.delta_length, pat.delta_length_dist);
     let lens_flare = if kind == PartType::LensFlare {
-        env.lens_flares.push(LensFlare { position: Vector::ZERO, intensity: 1.0, enabled: 1, pending: 1, active: 1 });
+        // `lensFlareAdd` links the new flare in with state 2 ("just added": occlusion is tested).
+        env.lens_flares.push(LensFlare { position: Vector::ZERO, intensity: 1.0, enabled: 1, pending: 2, active: 1 });
         Some(env.lens_flares.len() - 1)
     } else {
         None
@@ -943,7 +946,7 @@ fn advance_tex_anim(src: &dyn DataSource, p: &Particle) -> i32 {
 }
 
 /// `partAdvanceMeshMorph`.
-fn advance_mesh_morph(src: &dyn DataSource, p: &mut Particle) -> i32 {
+pub(crate) fn advance_mesh_morph(src: &dyn DataSource, p: &mut Particle) -> i32 {
     let r = p.mstruct.expect("mesh anim");
     let cur = ftol_i32(ld(p.mesh_frame));
     let frame = |i: i32| (src.dword(r, (i as u32).wrapping_mul(8)), src.dword(r, (i as u32).wrapping_mul(8) + 4));

@@ -1848,7 +1848,18 @@ impl FxWorld {
                 if sys.kind == PartType::Billboard && sys.flags & sysflag::WORLDSPACE == 0 && e.flags & sof::OWNER_COORDSYS == 0 {
                     sys.position = e.position;
                 }
-                let hits = crate::emit::emit_system(&sys, &e, &scaled, owner.as_ref(), &self.lib, &mut self.randy, &mut self.lens_flares, list);
+                let data = WorldData { lib: &self.lib, effects: &self.effects, random_offsets: &self.random_offsets };
+                let hits = crate::emit::emit_system_with(
+                    &mut sys,
+                    &data,
+                    &e,
+                    &scaled,
+                    owner.as_ref(),
+                    &self.lib,
+                    &mut self.randy,
+                    &mut self.lens_flares,
+                    list,
+                );
                 if hits == 0 {
                     sys.is_alive = false;
                 }

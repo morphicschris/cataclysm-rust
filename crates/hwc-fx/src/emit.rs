@@ -9,9 +9,18 @@ use hwc_math::random::{Randy, RAN_PARTICLE_STREAM};
 use hwc_math::{HMatrix, Matrix, Vector};
 
 use crate::compiler::Library;
-use crate::particle::{pflag, sysflag, LensFlare, PartSystem, PartType, TR_INVALID};
-use crate::render::{Blend, Bolt, Cube, Flare, Line, MeshInstance, Point, RenderList, Sprite};
+use crate::particle::{self, pflag, sysflag, DataRef, DataSource, LensFlare, PartSystem, PartType, TR_INVALID};
+use crate::render::{Blend, Bolt, Cube, Flare, Line, MeshInstance, Point, PrimKind, RenderList, Sprite};
 use crate::runtime::{sof, Effect, Owner};
+
+/// A data source with nothing in it (morph tables then read as empty).
+struct NoData;
+
+impl DataSource for NoData {
+    fn dword(&self, _: DataRef, _: u32) -> u32 {
+        0
+    }
+}
 
 fn add(a: Vector, b: Vector) -> Vector {
     Vector::new(a.x + b.x, a.y + b.y, a.z + b.z)
@@ -50,9 +59,61 @@ fn mesh_name(lib: &Library, mesh: u32) -> Option<String> {
 }
 
 /// Emit one system; returns the hit count (`0` kills the system).
+///
+/// Morphing meshes need the morph table to find their next frame, which this variant cannot
+/// read: their next mesh is reported as the current one. [`emit_system_with`] is the full
+/// version.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_system(
     sys: &PartSystem,
+    e: &Effect,
+    scaled: &Matrix,
+    owner: Option<&Owner>,
+    lib: &Library,
+    randy: &mut Randy,
+    flares: &mut [LensFlare],
+    out: &mut RenderList,
+) -> u32 {
+    let mut copy = sys.clone();
+    emit_system_with(&mut copy, &NoData, e, scaled, owner, lib, randy, flares, out)
+}
+
+/// [`emit_system`] with access to the effect data. Like the original renderer, finding a
+/// morphing mesh's next frame (`partAdvanceMeshMorph`) may count down the particle's loop
+/// counter, hence `&mut`.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_system_with(
+    sys: &mut PartSystem,
+    data: &dyn DataSource,
+    e: &Effect,
+    scaled: &Matrix,
+    owner: Option<&Owner>,
+    lib: &Library,
+    randy: &mut Randy,
+    flares: &mut [LensFlare],
+    out: &mut RenderList,
+) -> u32 {
+    let kind = match sys.kind {
+        PartType::Billboard => PrimKind::Sprites,
+        PartType::Points => PrimKind::Points,
+        PartType::Lines => PrimKind::Lines,
+        PartType::EBolt => PrimKind::Bolts,
+        PartType::Cubes => PrimKind::Cubes,
+        PartType::Mesh => PrimKind::Meshes,
+        PartType::LensFlare => PrimKind::Flares,
+    };
+    let before = out.kind_len(kind);
+    let lit = sys.particles.first().is_some_and(|p| p.lit != 0);
+    let alpha = sys.flags & sysflag::ALPHA != 0;
+    let hits = emit_particles(sys, data, e, scaled, owner, lib, randy, flares, out);
+    out.push_span(kind, before, lit, alpha);
+    hits
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_particles(
+    sys: &mut PartSystem,
+    data: &dyn DataSource,
     e: &Effect,
     scaled: &Matrix,
     owner: Option<&Owner>,
@@ -107,6 +168,8 @@ pub fn emit_system(
                     slices: u32::from(sys.slices),
                     blend,
                     stipple: p.flags & pflag::STIPPLE != 0,
+                    additive: p.flags & pflag::ADDITIVE != 0,
+                    illum: p.illum,
                 });
             }
         }
@@ -243,12 +306,18 @@ pub fn emit_system(
                 if p.waitspan > 0.0 {
                     continue;
                 }
-                out.cubes.push(Cube { position: to_world(p.position), size: p.scale_x * 0.5, color: p.icolor });
+                out.cubes.push(Cube {
+                    position: to_world(p.position),
+                    size: p.scale_x * 0.5,
+                    color: p.icolor,
+                    blend: if alpha_sys { Blend::Alpha } else { Blend::Opaque },
+                });
             }
         }
         PartType::Mesh => {
             let mut current = sys.tex;
-            for p in &sys.particles {
+            let (sys_mat, sys_pos, sys_flags) = (sys.mat, sys.position, sys.flags);
+            for p in &mut sys.particles {
                 if p.lifespan < 0.0 {
                     continue;
                 }
@@ -306,7 +375,29 @@ pub fn emit_system(
                         xf.mul_hmat(&m)
                     }
                 };
-                let morph = p.mstruct.map(|_| (mesh_name(lib, p.mesh), p.mesh_frame - (p.mesh_frame as i32) as f32));
+                let mut billboard_velocity = if world { p.w_vel } else { scale(p.rvec, p.vel_r) };
+                if sys_flags & sysflag::WORLDSPACE_VELOCITY == 0 {
+                    billboard_velocity = Vector::new(
+                        billboard_velocity.x - p.effect_vel.x,
+                        billboard_velocity.y - p.effect_vel.y,
+                        billboard_velocity.z - p.effect_vel.z,
+                    );
+                }
+                if billboard_velocity.x == 0.0 && billboard_velocity.y == 0.0 && billboard_velocity.z == 0.0 {
+                    billboard_velocity.z = 1.0;
+                } else {
+                    billboard_velocity.normalize();
+                }
+                let (morph, morph_base) = match p.mstruct {
+                    Some(r) => {
+                        let next = particle::advance_mesh_morph(data, p);
+                        let next_mesh = data.dword(r, (next as u32).wrapping_mul(8));
+                        let frac = p.mesh_frame - (p.mesh_frame as i32) as f32;
+                        let named = |m: u32| if m == 0 { mesh_name(lib, p.mesh) } else { mesh_name(lib, m) };
+                        (Some((named(next_mesh), frac)), named(data.dword(r, 0)))
+                    }
+                    None => (None, None),
+                };
                 out.meshes.push(MeshInstance {
                     mesh: mesh_name(lib, p.mesh),
                     morph,
@@ -332,6 +423,15 @@ pub fn emit_system(
                     depth_write: p.flags & pflag::NO_DEPTH_WRITE == 0,
                     pseudo_billboard: p.flags & pflag::PSEUDO_BILLBOARD != 0,
                     true_billboard: p.flags & pflag::TRUE_BILLBOARD != 0,
+                    additive: p.flags & pflag::ADDITIVE != 0,
+                    alpha_system: alpha_sys,
+                    xyz_scale: p.flags & pflag::XYZSCALE != 0,
+                    morph_base,
+                    billboard_velocity,
+                    system_coordsys: sys_mat,
+                    system_position: sys_pos,
+                    local_position: p.position,
+                    world_space: world,
                 });
             }
         }
@@ -343,9 +443,11 @@ pub fn emit_system(
                 }
             }
             for p in &sys.particles {
-                if let Some(f) = p.lens_flare.and_then(|fi| flares.get(fi)) {
+                // The flare object holds the particle position as stored (world space for the
+                // world-space systems that create flares).
+                if let Some((fi, f)) = p.lens_flare.and_then(|fi| flares.get(fi).map(|f| (fi, f))) {
                     if f.enabled != 0 && p.lifespan >= 0.0 && p.waitspan <= 0.0 {
-                        out.flares.push(Flare { position: to_world(f.position), intensity: f.intensity });
+                        out.flares.push(Flare { position: f.position, intensity: f.intensity, index: fi });
                     }
                 }
             }

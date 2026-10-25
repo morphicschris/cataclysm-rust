@@ -15,6 +15,7 @@ pub mod assets;
 pub mod background;
 pub mod camera;
 pub mod effects;
+pub mod fx;
 pub mod gpu;
 pub mod lighting;
 pub mod lod;
@@ -28,6 +29,7 @@ pub use assets::{AssetSource, DirSource, ShipDef, ShipModel, TeamColors, TeamSch
 pub use background::Background;
 pub use camera::{CameraTweaks, OrbitCamera};
 pub use effects::{Blend, EffectBatch, EffectTexture};
+pub use fx::{EffectRenderer, FxOptions, FxView};
 pub use gpu::{
     headless_device, EngineEffectAssets, GpuBackground, GpuShip, OffscreenTarget, Renderer, Scene,
     SceneExtras, ShipInstance, TeamPaint, DEPTH_FORMAT, OFFSCREEN_FORMAT,

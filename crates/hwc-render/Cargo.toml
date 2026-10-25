@@ -8,6 +8,8 @@ description = "Real-time wgpu renderer for Homeworld: Cataclysm ships, lighting 
 
 [dependencies]
 hwc-formats = { path = "../hwc-formats" }
+hwc-fx = { path = "../hwc-fx" }
+hwc-math = { path = "../hwc-math" }
 wgpu = "30"
 glam = { version = "0.30", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }

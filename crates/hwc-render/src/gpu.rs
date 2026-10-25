@@ -1737,6 +1737,24 @@ impl OffscreenTarget {
         scene: &Scene<'_>,
         extras: &SceneExtras<'_>,
     ) -> Result<Vec<u8>, String> {
+        self.render_ex_with(renderer, scene, extras, |_, _, _, _| {})
+    }
+
+    /// [`render_ex`](Self::render_ex), then `after` records more passes into the same encoder
+    /// over the scene's colour and depth (e.g. [`crate::EffectRenderer::draw`]) before the
+    /// image is read back.
+    pub fn render_ex_with(
+        &self,
+        renderer: &mut Renderer,
+        scene: &Scene<'_>,
+        extras: &SceneExtras<'_>,
+        after: impl FnOnce(
+            &mut Renderer,
+            &mut wgpu::CommandEncoder,
+            &wgpu::TextureView,
+            &wgpu::TextureView,
+        ),
+    ) -> Result<Vec<u8>, String> {
         let device = renderer.device.clone();
         let mut encoder = device.create_command_encoder(&Default::default());
         renderer.render_ex(
@@ -1747,6 +1765,7 @@ impl OffscreenTarget {
             scene,
             extras,
         );
+        after(renderer, &mut encoder, &self.color_view, &self.depth_view);
         let row = self.width * 4;
         let padded =
             row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
