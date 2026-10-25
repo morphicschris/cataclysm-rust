@@ -1372,6 +1372,43 @@ smUniverseSizeZ 3000
         assert!(st.resources.iter().all(|x| x.kind == ResourceKind::Asteroid(0) && x.position.x.abs() <= 1000.0));
     }
 
+    /// `ExcludeShips race,All` only unloads the race's types; a single type also goes through
+    /// `rmEnableShip`. The Super Acolyte is a derelict type, so excluding the derelicts leaves it
+    /// out of the construction manager.
+    #[test]
+    fn include_and_exclude_ships_flag_needed_types() {
+        let level = "[x]
+ExcludeShips    RACE_DERELICT,All
+ExcludeShips    RACE_SECT,All
+IncludeShips    RACE_SECT,sAcolyte
+ExcludeShips    RACE_SECT,sMimic
+";
+        let src = Mem(vec![("SinglePlayer/Mission01/Mission01.mission".into(), level.into())]);
+        let statics = std::sync::Arc::new(crate::statics::test_world(vec![
+            ship(ShipType::sAcolyte, ShipRace::Somtaaw, 10.0),
+            ship(ShipType::sMimic, ShipRace::Somtaaw, 10.0),
+            ship(ShipType::sRecon, ShipRace::Somtaaw, 10.0),
+            ship(ShipType::dAcolyte, ShipRace::Derelict, 10.0),
+            ship(ShipType::tHeavyInterceptor, ShipRace::Taiidan, 10.0),
+        ]));
+        let mut u = Universe::new(statics, crate::SimTweaks::compiled(), &[ShipRace::Somtaaw, ShipRace::Taiidan]);
+        u.single_player = true;
+        let ctx = LevelContext { single_player: true, mission: 1, fleet_modifier: 0.0, resources: ResourceTweaks::default() };
+        let mut st = LevelState::default();
+        let (dir, file) = mission_paths(1, None);
+        load_level(&mut u, &src, &dir, &file, &ctx, &mut st).unwrap();
+        let needed = |t: ShipType| u.statics.ship(t).unwrap().info_needed;
+        assert!(needed(ShipType::sAcolyte));
+        assert!(!needed(ShipType::sMimic) && !needed(ShipType::sRecon) && !needed(ShipType::dAcolyte));
+        assert!(needed(ShipType::tHeavyInterceptor));
+        let sp = &u.statics.research.single_player_somtaaw.ship_mode;
+        assert_eq!((sp.get(&ShipType::sAcolyte), sp.get(&ShipType::sMimic), sp.get(&ShipType::sRecon)), (Some(&0), Some(&-2), None));
+        // The multiplayer table keeps the Super Acolyte disabled whatever is asked.
+        enable_ship(&mut u, 0, ShipType::dAcolyte, true);
+        assert_eq!(u.statics.research.single_player_somtaaw.ship_mode.get(&ShipType::dAcolyte), Some(&0));
+        assert_eq!(u.statics.research.multiplayer_somtaaw.ship_mode.get(&ShipType::dAcolyte), Some(&-2));
+    }
+
     #[test]
     fn point_keeps_fourth_component() {
         let mut st = LevelState::default();

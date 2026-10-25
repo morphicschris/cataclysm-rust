@@ -118,3 +118,55 @@ fn mission01_reaches_first_objective_deterministically() {
     assert_eq!(hash_a, hash_b);
     assert_eq!(states_a, states_b);
 }
+
+/// The construction manager's list in Mission 1 is the original's: the level's IncludeShips
+/// (no Mimic, no Super Acolyte, which `ExcludeShips RACE_DERELICT,All` leaves unloaded), the
+/// research the mission gives (`TechSet TECH_DRIVE_FIGHTER` makes Acolytes buildable), and the
+/// modules KAS switches off (`EnableShipConstruction`).
+#[test]
+fn mission01_construction_list_matches_the_original() {
+    use hwc_sim::statics::ShipType as T;
+    let Some(d) = data() else { return };
+    let mut run = start(d);
+    while !run.game.ships_have_arrived && run.universe.update_counter < 2000 {
+        run.step();
+    }
+    let ms = run.game.level.motherships[0].expect("player mothership");
+    let list = hwc_sim::level::construction_list(&run.universe, ms);
+    assert_eq!(list, vec![T::sRecon, T::sAcolyte, T::sRammingFrigate, T::sWorker, T::sProcessor, T::sMothershipDockingBay]);
+    assert!(!hwc_sim::level::construction_offers(&run.universe, ms, T::dAcolyte));
+    let fighter = hwc_sim::statics::Technology::from_name("TECH_DRIVE_FIGHTER").unwrap();
+    assert_eq!(run.universe.base.players[0].tech.has[fighter.index()], 1);
+}
+
+/// `GetWorldResources` is the resource units left in the harvestable resources, and drops as
+/// the player's workers harvest them.
+#[test]
+fn mission01_world_resources_drop_as_asteroids_are_harvested() {
+    use hwc_sim::resource::world_resources;
+    use hwc_sim::statics::ShipType as T;
+    let Some(d) = data() else { return };
+    let mut run = start(d);
+    while !run.game.ships_have_arrived && run.universe.update_counter < 2000 {
+        run.step();
+    }
+    let before = world_resources(&run.universe);
+    assert!(before > 0);
+    let workers: Vec<_> = run
+        .universe
+        .ship_list
+        .iter()
+        .copied()
+        .filter(|&id| run.universe.ship(id).is_some_and(|s| s.player == 0 && s.ship_type == T::sWorker))
+        .collect();
+    assert_eq!(workers.len(), 2);
+    hwc_sim::resource::cl_collect_resource(&mut run.universe, &workers, None);
+    for _ in 0..16 * 240 {
+        run.step();
+        if world_resources(&run.universe) < before {
+            break;
+        }
+    }
+    let after = world_resources(&run.universe);
+    assert!(after < before, "no resource units harvested ({before} left)");
+}

@@ -86,6 +86,12 @@ impl ResourceTable {
     }
 }
 
+/// `univGetResourceStatistics` (0x544b50), its first figure: the resource units left in the
+/// harvestable resources (the smallest asteroids are minor objects, outside that list).
+pub fn world_resources(u: &Universe) -> i32 {
+    u.base.resources.list.iter().filter(|r| r.kind != ResourceKind::Asteroid(0)).map(|r| r.resource_value).sum()
+}
+
 /// The statics of a resource.
 pub fn info(u: &Universe, kind: ResourceKind) -> Option<&ResourceInfo> {
     match kind {

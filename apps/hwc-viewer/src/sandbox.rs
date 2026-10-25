@@ -1378,7 +1378,12 @@ impl Sandbox {
             return;
         };
         let factory = self.universe().ship(ms).map_or_else(|| "?".into(), |s| s.ship_type.to_string());
+        let mission = self.sim.mission().is_some();
         for t in BUILD_CHOICES {
+            // A mission's construction manager only offers what the level and KAS allow.
+            if mission && !hwc_sim::level::construction_offers(self.universe(), ms, t) {
+                continue;
+            }
             if hwc_sim::construction::queue_build(self.sim.universe_mut(), ms, t, 1) > 0 {
                 self.note(format!("Queued: {t} at {factory}"));
                 self.ui_sound(audio::ui::CLICK);

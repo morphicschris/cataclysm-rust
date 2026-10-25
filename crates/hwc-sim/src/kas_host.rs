@@ -746,16 +746,7 @@ impl KasRuntime for SimHost<'_> {
     }
 
     fn get_world_resources(&mut self, _cx: &Cx) -> i32 {
-        // univGetResourceStatistics: the resource units left in the harvestable resources (the
-        // smallest asteroids are minor objects and not in that list).
-        self.u
-            .base
-            .resources
-            .list
-            .iter()
-            .filter(|r| r.kind != crate::resource::ResourceKind::Asteroid(0))
-            .map(|r| r.resource_value)
-            .sum()
+        crate::resource::world_resources(self.u)
     }
 
     fn tech_set(&mut self, _cx: &Cx, tech_name: Str<'_>) {

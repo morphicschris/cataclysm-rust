@@ -493,6 +493,9 @@ impl MissionRun {
         let mut universe = Universe::new(statics.clone(), tweaks, &[ShipRace::Somtaaw, ShipRace::Taiidan]);
         universe.single_player = true;
         universe.sp_difficulty = config.skill.max(0) as u32;
+        // gameStart runs with the single-player flag set: the players take the single-player
+        // research tables (rmInitializeResearchStruct), not the multiplayer ones.
+        crate::base::init(&mut universe);
         let sp_tweaks = SpTweaks::load(src);
 
         let mut game = Game {
