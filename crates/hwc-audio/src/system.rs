@@ -182,6 +182,17 @@ impl Default for GameContext {
     }
 }
 
+/// Something in view that the in-game music level takes its distance from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NearbyObject {
+    pub position: Vec3,
+    /// Distance-table row (ship class) for ships, which only count while within their audible
+    /// range; `None` for derelicts, which count at any distance.
+    pub class_row: Option<usize>,
+    /// Current speed; a moving closest ship selects the "active" music curve.
+    pub speed: f32,
+}
+
 /// Opt-in behaviour beyond the original. All off by default.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Enhancements {
@@ -198,9 +209,38 @@ pub struct Volumes {
     pub music: f32,
 }
 
+/// The options screen's slider positions (0..100) a fresh install starts with: music 60,
+/// effects 75, speech 75.
+pub const DEFAULT_SLIDERS: Sliders = Sliders { music: 60, sfx: 75, speech: 75 };
+
+/// Volume slider positions as the options screen stores them (0..100).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sliders {
+    pub music: i32,
+    pub sfx: i32,
+    pub speech: i32,
+}
+
+/// A slider position (0..100) as a level 0..1: the game scales by 1.025 so that the top few
+/// positions all reach full level.
+pub fn slider_level(position: i32) -> f32 {
+    (position as f32 * 1.025 * 0.01).clamp(0.0, 1.0)
+}
+
+impl Volumes {
+    /// Levels for slider positions, with the master (cinematic) scale at 1.
+    pub fn from_sliders(s: Sliders) -> Self {
+        Self { master: 1.0, sfx: slider_level(s.sfx), speech: slider_level(s.speech), music: slider_level(s.music) }
+    }
+
+    /// Everything at full level (louder than any slider setting short of the top).
+    pub const FULL: Self = Self { master: 1.0, sfx: 1.0, speech: 1.0, music: 1.0 };
+}
+
+/// The levels of a fresh install ([`DEFAULT_SLIDERS`]), which the sound system starts with.
 impl Default for Volumes {
     fn default() -> Self {
-        Self { master: 1.0, sfx: 1.0, speech: 1.0, music: 1.0 }
+        Self::from_sliders(DEFAULT_SLIDERS)
     }
 }
 
@@ -277,7 +317,7 @@ impl SoundSystem {
             context: GameContext::default(),
             enhancements: Enhancements::default(),
             volumes: Volumes::default(),
-            sfx_level: 1.0,
+            sfx_level: Volumes::default().master * Volumes::default().sfx,
             rng_sound: RanStream::default(),
             rng_speech: RanStream::default(),
             rng_music: RanStream::default(),
@@ -342,6 +382,14 @@ impl SoundSystem {
 
     pub fn volumes(&self) -> Volumes {
         self.volumes
+    }
+
+    /// Set all four levels at once.
+    pub fn set_volumes(&mut self, v: Volumes) {
+        self.set_master_volume(v.master);
+        self.set_sfx_volume(v.sfx);
+        self.set_speech_volume(v.speech);
+        self.set_music_volume(v.music);
     }
 
     /// Effects level 0..1 (scaled by the master level).
@@ -1095,6 +1143,31 @@ impl SoundSystem {
         }
     }
 
+    /// The game's per-frame pass over the objects in view, as far as the music level needs it:
+    /// sets [`GameContext::closest_distance`] to the nearest derelict or audible ship and
+    /// [`GameContext::active`] when a ship that became the nearest so far was moving faster than
+    /// `SFX_FLOAT_VELOCITY`. With nothing near, the music plays at its in-game maximum.
+    pub fn note_nearby(&mut self, objects: impl IntoIterator<Item = NearbyObject>) {
+        let mut closest = 1e21f32;
+        let mut active = false;
+        for o in objects {
+            let d = self.listener.distance(o.position);
+            match o.class_row {
+                None => closest = closest.min(d),
+                Some(row) => {
+                    if self.data.tables.in_range(row, d) && d < closest {
+                        closest = d;
+                        if o.speed > self.data.tweaks.sfx_float_velocity {
+                            active = true;
+                        }
+                    }
+                }
+            }
+        }
+        self.context.closest_distance = closest;
+        self.context.active = active;
+    }
+
     /// Per-frame update from the game loop: music levels and the mixer's stall detector.
     pub fn update(&mut self, game_running: bool) {
         self.mixer().note_render_frame(game_running);
@@ -1109,6 +1182,18 @@ fn round_vol(v: f32) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_levels_are_a_fresh_installs_sliders() {
+        let v = Volumes::default();
+        assert!((v.music - 0.615).abs() < 1e-6);
+        assert!((v.sfx - 0.76875).abs() < 1e-6);
+        assert!((v.speech - 0.76875).abs() < 1e-6);
+        assert_eq!(v.master, 1.0);
+        assert_eq!(slider_level(100), 1.0);
+        assert_eq!(slider_level(98), 1.0);
+        assert_eq!(slider_level(-5), 0.0);
+    }
 
     #[test]
     fn ran_stream_is_the_game_generator() {

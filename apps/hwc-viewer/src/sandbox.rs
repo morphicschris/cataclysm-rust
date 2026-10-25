@@ -89,6 +89,12 @@ const HS_WINDOW: [f32; 4] = [70.0 / 255.0, 90.0 / 255.0, 1.0, 90.0 / 255.0];
 const HS_OUTLINE: [f32; 4] = [110.0 / 255.0, 130.0 / 255.0, 1.0, 90.0 / 255.0];
 /// `HS_DIST / 2`: how far beyond the bounding box the window reaches.
 const HS_DIST_2: f32 = 1.08 / 2.0;
+/// How long a quick key's result stays on screen (seconds).
+const ACTION_NOTE_SECONDS: f64 = 4.0;
+/// How long the key hint shows after a mission starts (seconds of real time).
+const KEY_HINT_SECONDS: f64 = 30.0;
+/// The quick keys of mission mode (the real managers are in `hwc-ui` / the game).
+pub const MISSION_KEY_HINT: &str = "keys: click/drag select, M move, A attack, G harvest, H halt, F formation, B queue a ship, R start research, L launch, U auto-launch, C focus, Space pause";
 /// One universe update in seconds.
 const TICK: f32 = 1.0 / 16.0;
 /// How long notes and location cards stay up (game seconds).
@@ -233,6 +239,11 @@ pub struct Sandbox {
     pub formation_index: usize,
     pub nav_lights: bool,
     pub status: String,
+    /// What the last quick key did (or why it was refused), on screen until the time given in
+    /// [`Self::ui_clock`] seconds.
+    action_note: Option<(String, f64)>,
+    /// Real time the window has been running (seconds), for on-screen notes.
+    ui_clock: f64,
     /// The camera keeps looking at these ships (the game's camera focus).
     pub focus: Vec<ShipId>,
     effects: Vec<Effect>,
@@ -334,6 +345,8 @@ impl Sandbox {
             formation_index: 0,
             nav_lights: true,
             status: String::new(),
+            action_note: None,
+            ui_clock: 0.0,
             focus: Vec::new(),
             effects: Vec::new(),
             resource_art: BTreeMap::new(),
@@ -787,8 +800,10 @@ impl Sandbox {
     /// Advances real time: the task scheduler hands out 240 Hz ticks and runs the universe
     /// task once per 15 (at most 8 times per frame, like the original).
     pub fn advance(&mut self, seconds: f64) {
+        self.ui_clock += seconds;
         if let Some(a) = &mut self.audio {
             a.set_listener(self.camera.eye(), self.camera.look_at);
+            a.nearby_ships(self.sim.universe());
             a.frame(!self.paused);
         }
         if self.paused {
@@ -881,16 +896,15 @@ impl Sandbox {
                 .get(s.color_scheme)
                 .or(self.team_colors.schemes.first());
             let team_color = scheme.map_or([1.0; 3], |c| normalized_team_color(c.base));
-            // Hyperspace: the window cuts the hull along its heading (`hsGetEquation`); ships
-            // clamped to an arriving host (the mothership's modules) take the host's plane.
+            // Hyperspace: the window cuts the hull along its heading (`hsGetEquation`). A ship
+            // clamped to a host (the mothership's modules) has no window of its own
+            // (`hsShouldDisplayEffect`) and is cut by the host's plane while the host is in
+            // hyperspace; the host's window is sized to cover them (`hyperspaceBoxScale`).
             let host = clamp_host(sim, s);
             let hs = hyper.get(&id).copied();
-            let clip = match (hs, host.and_then(|h| Some((h, *hyper.get(&h)?)))) {
-                (Some((state, clipt)), _) => {
-                    let fl = st.map_or(radius, |st| st.header.coll.forward_length);
-                    hs_plane(state, clipt, fl)
-                }
-                (None, Some((h, (state, clipt)))) => u.ship(h).and_then(|hs| {
+            let clip = match host {
+                Some(h) => hyper.get(&h).and_then(|&(state, clipt)| {
+                    let hs = u.ship(h)?;
                     let fl = u
                         .statics
                         .ship(hs.ship_type)
@@ -899,9 +913,12 @@ impl Sandbox {
                     let (_, host_m) = Self::transform_of(hs);
                     Some((host_m.inverse() * transform).transpose() * plane)
                 }),
-                _ => None,
+                None => hs.and_then(|(state, clipt)| {
+                    let fl = st.map_or(radius, |st| st.header.coll.forward_length);
+                    hs_plane(state, clipt, fl)
+                }),
             };
-            if let (Some((state, clipt)), Some(st)) = (hs, st) {
+            if let (Some((state, clipt)), Some(st), None) = (hs, st, host) {
                 hyperspace_window(&mut frame.effects, transform, st, state, clipt);
             }
             let max_velocity = if s.max_velocity_copy > 0.0 {
@@ -1353,20 +1370,23 @@ impl Sandbox {
         self.universe().base.players.first().and_then(|p| p.mothership)
     }
 
-    /// `B`: queue one ship at the mothership (the first of [`BUILD_CHOICES`] it can build).
+    /// `B`: queue one ship at the mothership (the first of [`BUILD_CHOICES`] it can build). The
+    /// build manager itself lives in `hwc-ui` (the game); this only says what happened.
     pub fn queue_build(&mut self) {
         let Some(ms) = self.mothership() else {
-            self.status = "no mothership".into();
+            self.note("Build refused: no mothership".into());
             return;
         };
+        let factory = self.universe().ship(ms).map_or_else(|| "?".into(), |s| s.ship_type.to_string());
         for t in BUILD_CHOICES {
             if hwc_sim::construction::queue_build(self.sim.universe_mut(), ms, t, 1) > 0 {
-                self.status = format!("queued {t}");
+                self.note(format!("Queued: {t} at {factory}"));
                 self.ui_sound(audio::ui::CLICK);
                 return;
             }
         }
-        self.status = "nothing can be built".into();
+        let why = build_refusal(self.universe(), ms, BUILD_CHOICES[0]);
+        self.note(format!("Build refused at {factory}: {} {why}", BUILD_CHOICES[0]));
     }
 
     /// `L`: launch everything inside the mothership.
@@ -1395,16 +1415,33 @@ impl Sandbox {
         self.status = format!("auto-launch {}", if bits & 1 != 0 { "on" } else { "off" });
     }
 
-    /// `R`: research the first technology a lab is free for.
+    /// `R`: research the first technology a lab is free for (the research manager lives in
+    /// `hwc-ui`); says what started or why nothing did.
     pub fn research(&mut self) {
         for &t in hwc_sim::statics::Technology::ALL {
             if hwc_sim::research::research_tech_if_lab_free(self.sim.universe_mut(), 0, t.index())
             {
-                self.status = format!("researching {t}");
+                self.note(format!("Researching: {t}"));
+                self.ui_sound(audio::ui::CLICK);
                 return;
             }
         }
-        self.status = "no lab free".into();
+        let u = self.universe();
+        let why = match u.base.players.first() {
+            None => "no player",
+            Some(p) if !p.can_do_research => "research is not available (no research module, or the mission does not allow it yet)",
+            Some(p) if hwc_sim::statics::Technology::ALL.iter().all(|t| p.tech.has.get(t.index()).copied() == Some(1)) => {
+                "everything is researched"
+            }
+            Some(_) => "no free lab for any missing technology",
+        };
+        self.note(format!("Research refused: {why}"));
+    }
+
+    /// Shows `text` on screen for a few seconds (and in the title).
+    fn note(&mut self, text: String) {
+        self.action_note = Some((text.clone(), self.ui_clock + ACTION_NOTE_SECONDS));
+        self.status = text;
     }
 
     /// `G`: the selected ships harvest.
@@ -1532,6 +1569,19 @@ impl Sandbox {
                     font.draw(o, (w - tw) * 0.5, top + i as f32 * lh, l, [0.75, 0.95, 1.0, 1.0]);
                 }
             }
+        }
+        // The last quick key's result, above the status line.
+        let status_y = h - small.line_height() - 8.0;
+        if let Some((note, until)) = &self.action_note {
+            if self.ui_clock < *until {
+                let tw = font.width(note);
+                let y = status_y - 2.0 * lh - 30.0;
+                o.fill([(w - tw) * 0.5 - 8.0, y - 4.0], [(w + tw) * 0.5 + 8.0, y + lh], [0.0, 0.0, 0.0, 0.55]);
+                font.draw(o, (w - tw) * 0.5, y, note, [1.0, 0.9, 0.5, 1.0]);
+            }
+        }
+        if self.sim.mission().is_some() && self.ui_clock < KEY_HINT_SECONDS {
+            small.draw(o, 10.0, status_y - small.line_height() - 4.0, MISSION_KEY_HINT, [0.7, 0.8, 0.9, 0.9]);
         }
         // Status, bottom left.
         let u = self.universe();
@@ -1735,6 +1785,25 @@ impl Sandbox {
     }
 }
 
+/// Why `factory` cannot queue a `t` (the build manager's checks, first failing one).
+fn build_refusal(u: &Universe, factory: ShipId, t: ShipType) -> &'static str {
+    use hwc_sim::construction as cm;
+    let Some(f) = u.ship(factory) else { return "(no factory)" };
+    if !cm::can_build_ship_type(u, factory, t, false) {
+        return "is not in its build list or has no free build point";
+    }
+    if !cm::can_build_ship_type(u, factory, t, true) {
+        return "needs research (or a docking bay)";
+    }
+    if !cm::player_has_support_units_for_type(u, t, f.player, 0) {
+        return "needs more support units";
+    }
+    if !cm::unit_cap_can_create_ship(u, t, factory, 0) {
+        return "is at its unit cap";
+    }
+    "cannot be built"
+}
+
 /// The ship a ship is clamped to: its clamp host, or for a mission, the level's module clamps.
 fn clamp_host(sim: &Sim, s: &hwc_sim::Ship) -> Option<ShipId> {
     s.base.clamp.as_ref().and_then(|c| c.host).or_else(|| {
@@ -1770,7 +1839,46 @@ fn fx_pose(art: &ShipArt, fx: &ShipFx, level: usize) -> Option<Vec<Option<Mat4>>
     clip.pose(&fx.anim, binding)
 }
 
-/// The hyperspace window (`hsRectangle`) at the clip plane of an arriving ship, in ship space.
+/// The hyperspace window's corners in ship space (`hsEnd` / `hsRectangle`): centred on the
+/// collision sphere's axis at the clip plane, `HS_DIST` times the bounding box across, scaled by
+/// the ship's `hyperspaceBoxScale` (6 for the Kuun-Lan, so that its spine's window covers the
+/// modules too). The up extent opens and closes with `clipt` while popping up and collapsing.
+fn hyperspace_window_corners(st: &hwc_sim::statics::ShipStaticInfo, state: u32, clipt: f32) -> Option<[Vec3; 4]> {
+    let c = &st.header.coll;
+    let (z, open) = match state {
+        hs_effect::POPUP_OUTOF | hs_effect::POPUP_INTO => (c.forward_length, 1.0 - clipt),
+        hs_effect::SLICING_OUTOF | hs_effect::SLICING_INTO => (clipt * c.forward_length, 1.0),
+        hs_effect::COLLAPSE_OUTOF | hs_effect::COLLAPSE_INTO => (-c.forward_length, clipt),
+        _ => return None,
+    };
+    let box_scale = st.hyperspace_box_scale;
+    let half_x = HS_DIST_2 * c.up_length * box_scale * open.clamp(0.0, 1.0);
+    let half_y = HS_DIST_2 * c.right_length * box_scale;
+    let o = Vec3::new(c.coll_sphere_offset.x, c.coll_sphere_offset.y, z);
+    Some(
+        [
+            Vec3::new(-half_x, -half_y, 0.0),
+            Vec3::new(-half_x, half_y, 0.0),
+            Vec3::new(half_x, half_y, 0.0),
+            Vec3::new(half_x, -half_y, 0.0),
+        ]
+        .map(|p| o + p),
+    )
+}
+
+/// The window's fill and outline colours: the ship's `hyperspaceColor` unless black, else the
+/// default blue; alpha 90, the outline 40 brighter in red and green (wrapping as bytes do).
+fn hyperspace_colors(st: &hwc_sim::statics::ShipStaticInfo) -> ([f32; 4], [f32; 4]) {
+    let [r, g, b, _] = st.hyperspace_color;
+    if [r, g, b] == [0, 0, 0] {
+        return (HS_WINDOW, HS_OUTLINE);
+    }
+    let f = |v: u8| f32::from(v) / 255.0;
+    let a = 90.0 / 255.0;
+    ([f(r), f(g), f(b), a], [f(r.wrapping_add(40)), f(g.wrapping_add(40)), f(b), a])
+}
+
+/// The hyperspace window (`hsRectangle`) at the clip plane of an arriving ship.
 fn hyperspace_window(
     out: &mut EffectBatch,
     transform: Mat4,
@@ -1778,31 +1886,16 @@ fn hyperspace_window(
     state: u32,
     clipt: f32,
 ) {
-    let c = &st.header.coll;
-    let (z, scale) = match state {
-        hs_effect::POPUP_OUTOF | hs_effect::POPUP_INTO => (c.forward_length, 1.0 - clipt),
-        hs_effect::SLICING_OUTOF | hs_effect::SLICING_INTO => (clipt * c.forward_length, 1.0),
-        hs_effect::COLLAPSE_OUTOF | hs_effect::COLLAPSE_INTO => (-c.forward_length, clipt),
-        _ => return,
-    };
-    let scale = scale.clamp(0.0, 1.0);
-    let half_x = HS_DIST_2 * c.up_length * scale;
-    let half_y = HS_DIST_2 * c.right_length;
-    let o = Vec3::new(c.coll_sphere_offset.x, c.coll_sphere_offset.y, z);
-    let corners = [
-        Vec3::new(-half_x, -half_y, 0.0),
-        Vec3::new(-half_x, half_y, 0.0),
-        Vec3::new(half_x, half_y, 0.0),
-        Vec3::new(half_x, -half_y, 0.0),
-    ]
-    .map(|p| transform.transform_point3(o + p));
-    out.quad(corners.map(|p| (p, HS_WINDOW)), Blend::Alpha);
+    let Some(corners) = hyperspace_window_corners(st, state, clipt) else { return };
+    let corners = corners.map(|p| transform.transform_point3(p));
+    let (fill, outline) = hyperspace_colors(st);
+    out.quad(corners.map(|p| (p, fill)), Blend::Alpha);
     for i in 0..4 {
         out.lines.push(FxLine {
             from: corners[i],
             to: corners[(i + 1) % 4],
-            from_color: HS_OUTLINE,
-            to_color: HS_OUTLINE,
+            from_color: outline,
+            to_color: outline,
             width: 2.0,
             blend: Blend::Additive,
         });
@@ -1829,6 +1922,65 @@ mod tests {
         assert_eq!(hs_plane(hs_effect::INACTIVE, 0.0, fl), None);
     }
 
+    /// Mission 1's arrival draws one hyperspace window, the mothership's, and it is wide enough
+    /// for the clamped modules (the docking bay among them) to pass through it.
+    #[test]
+    fn mission_one_arrival_has_one_window_covering_the_modules() {
+        let Some(dir) = std::env::var_os("HWC_GAME_DIR") else {
+            return;
+        };
+        let assets = GameAssets::open(std::path::Path::new(&dir)).unwrap();
+        let run = crate::mission::start(&assets, 1, 2).unwrap();
+        let mut sb = Sandbox::mission(assets, run, false).unwrap();
+        let mut checked = false;
+        while sb.universe().update_counter < 400 && !checked {
+            sb.step();
+            let hyper = sb.hyperspace();
+            let u = sb.universe();
+            let Some((&ms, &(state, clipt))) = hyper.iter().find(|(id, _)| {
+                u.ship(**id).is_some_and(|s| s.ship_type == ShipType::sMothership)
+            }) else {
+                continue;
+            };
+            if state != hs_effect::SLICING_OUTOF {
+                continue;
+            }
+            let windows: Vec<ShipId> = hyper
+                .keys()
+                .copied()
+                .filter(|&id| u.ship(id).is_some_and(|s| clamp_host(&sb.sim, s).is_none()))
+                .collect();
+            assert_eq!(windows, vec![ms], "only the mothership opens a window");
+            let m = u.ship(ms).unwrap();
+            let st = u.statics.ship(m.ship_type).unwrap();
+            let corners = hyperspace_window_corners(st, state, clipt).unwrap();
+            let (_, host_m) = Sandbox::transform_of(m);
+            let inv = host_m.inverse();
+            for &id in hyper.keys().filter(|&&id| id != ms) {
+                let p = inv.transform_point3(v3(u.ship(id).unwrap().posinfo.position));
+                assert!(
+                    corners.iter().any(|c| c.x <= p.x) && corners.iter().any(|c| c.x >= p.x)
+                        && corners.iter().any(|c| c.y <= p.y) && corners.iter().any(|c| c.y >= p.y),
+                    "module {id:?} at {p} outside the window {corners:?}"
+                );
+            }
+            checked = true;
+        }
+        assert!(checked, "the mothership never sliced through");
+        // B and R say what they did.
+        while !sb.sim.mission().unwrap().game.ships_have_arrived {
+            sb.step();
+        }
+        sb.queue_build();
+        let note = sb.action_note.clone().unwrap().0;
+        assert!(note.starts_with("Queued: ") || note.starts_with("Build refused"), "{note}");
+        eprintln!("B: {note}");
+        sb.research();
+        let note = sb.action_note.clone().unwrap().0;
+        assert!(note.starts_with("Researching: ") || note.starts_with("Research refused"), "{note}");
+        eprintln!("R: {note}");
+    }
+
     /// Mission 1 on the simulation, drawn offscreen: the fleet arrives through the hyperspace
     /// window, ships get trails, objectives and subtitles reach the overlay. Needs the game
     /// install (`HWC_GAME_DIR`) and a GPU; skips otherwise.
@@ -1838,7 +1990,7 @@ mod tests {
             return;
         };
         let assets = GameAssets::open(std::path::Path::new(&dir)).unwrap();
-        let Ok(audio) = assets.reopen().and_then(|gd| Audio::new(gd, true)) else {
+        let Ok(audio) = assets.reopen().and_then(|gd| Audio::new(gd, true, false)) else {
             return;
         };
         let run = crate::mission::start(&assets, 1, 2).unwrap();

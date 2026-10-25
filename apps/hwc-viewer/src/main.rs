@@ -57,6 +57,7 @@ sandbox mode (--sandbox [fleet|idle|patrol|dogfight|frigates|base]):
   U toggles its auto-launch, R starts research, G sends the selection harvesting,
   Space pauses (. steps), I toggles interpolation, right-drag rotates, wheel zooms
   --mute                  no sound (sound events, music and speech are played otherwise)
+  --soft-limit            soft knee instead of the original's hard 16-bit clamp on loud mixes
 
 mission mode (--mission <n>; the data is a game install, imported data or the cataclysm.big
 of an install, because the mission script comes from cataclysm.exe):
@@ -64,7 +65,7 @@ of an install, because the mission script comes from cataclysm.exe):
   subtitles and skipped NIS sequences are shown as overlay text
   --skill <0-2>           difficulty (default 2)
   --shots <names>         with --screenshot: images when these first happen: arrival,
-                          launch, combat, subtitle, objective (within --ticks max,
+                          launch, combat, subtitle, objective, asteroids (within --ticks max,
                           default 4000)
 
 controls:
@@ -98,6 +99,7 @@ struct Options {
     mission: Option<u32>,
     skill: i32,
     mute: bool,
+    soft_limit: bool,
     shots: Vec<String>,
 }
 
@@ -169,6 +171,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 o.skill = v.parse().map_err(|_| format!("--skill: bad value {v:?}"))?;
             }
             "--mute" => o.mute = true,
+            "--soft-limit" => o.soft_limit = true,
             "--shots" => {
                 o.shots = value()?
                     .split(',')
@@ -314,6 +317,10 @@ fn setup_sandbox(o: &Options) -> Result<sandbox::Sandbox, String> {
     let mut sb = match o.mission {
         Some(n) => {
             let run = mission::start(&assets, n, o.skill)?;
+            if o.screenshot.is_none() {
+                println!("{}", sandbox::MISSION_KEY_HINT);
+                println!("(B and R are quick keys; the build and research managers are in the game, cataclysm.exe)");
+            }
             sandbox::Sandbox::mission(assets, run, o.interpolate)?
         }
         None => {
@@ -329,7 +336,7 @@ fn setup_sandbox(o: &Options) -> Result<sandbox::Sandbox, String> {
     };
     // Offscreen captures never play sound, but the engine still gives speech its subtitles.
     let mute = o.mute || o.screenshot.is_some();
-    match audio_data.and_then(|gd| audio::Audio::new(gd, mute)) {
+    match audio_data.and_then(|gd| audio::Audio::new(gd, mute, o.soft_limit)) {
         Ok(a) => sb.audio = Some(a),
         Err(e) => eprintln!("warning: no sound: {e}"),
     }
@@ -493,6 +500,17 @@ fn mission_shots(mut sb: sandbox::Sandbox, o: &Options, out: &str) -> Result<(),
         if take.is_none() && want("objective") && !run.game.objectives.is_empty() {
             take = Some("objective");
         }
+        // The mission's nearest asteroid to the mothership, with the field around it.
+        let asteroid_at = (want("asteroids") && run.game.ships_have_arrived)
+            .then(|| {
+                let u = sb.universe();
+                let m = run.game.level.motherships.first().copied().flatten().and_then(|id| u.ship(id))?;
+                let mp = m.posinfo.position;
+                let d = |r: &hwc_sim::resource::Resource| (r.position - mp).mag_sq();
+                let r = u.base.resources.list.iter().min_by(|a, b| d(a).total_cmp(&d(b)))?;
+                Some(glam::Vec3::new(r.position.x, r.position.y, r.position.z))
+            })
+            .flatten();
         if want("combat") {
             if combat_at.is_none() {
                 combat_at = sb.universe().events.iter().find_map(|e| match e {
@@ -517,6 +535,15 @@ fn mission_shots(mut sb: sandbox::Sandbox, o: &Options, out: &str) -> Result<(),
         if let Some(tag) = take {
             cap.shoot(&mut sb, None, &shot_path(out, tag, true))?;
             wanted.retain(|w| w != tag);
+        }
+        if let Some(p) = asteroid_at {
+            let saved = (sb.camera.look_at, sb.camera.distance, sb.focus.clone());
+            sb.focus.clear();
+            sb.camera.look_at = p;
+            sb.camera.distance = 12000.0;
+            cap.shoot(&mut sb, None, &shot_path(out, "asteroids", true))?;
+            (sb.camera.look_at, sb.camera.distance, sb.focus) = saved;
+            wanted.retain(|w| w != "asteroids");
         }
     }
     if !wanted.is_empty() {

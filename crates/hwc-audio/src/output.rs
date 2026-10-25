@@ -89,7 +89,8 @@ impl Feeder {
                     let (a, b, c, d) = (p0[k], p1[k], p2[k], p3[k]);
                     b + 0.5 * t * (c - a + t * (2.0 * a - 5.0 * b + 4.0 * c - d + t * (3.0 * (b - c) + d - a)))
                 };
-                [c(0), c(1)]
+                // The cubic can overshoot between samples near full scale; keep it in range.
+                [c(0).clamp(-1.0, 1.0), c(1).clamp(-1.0, 1.0)]
             }
         };
         self.pos += self.step;

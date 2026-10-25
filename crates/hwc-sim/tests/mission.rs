@@ -87,6 +87,10 @@ fn mission01_level_loads_in_original_order() {
     assert!(run.game.level.point(kas_hash("StartPointPlayer")).is_some());
     assert!(run.game.level.volume(kas_hash("BattleZone")).is_some());
     assert_eq!(run.game.level.resources.len(), 16);
+    // The asteroids are harvestable simulation objects, numbered in creation order.
+    let ids: Vec<u16> = run.universe.base.resources.list.iter().map(|r| r.id.0).collect();
+    assert_eq!(ids, (0..16).collect::<Vec<u16>>());
+    assert!(run.universe.base.resources.list.iter().all(|r| r.resource_value > 0));
     assert_eq!(run.game.sp_state, sp_state::START_KAS);
 }
 

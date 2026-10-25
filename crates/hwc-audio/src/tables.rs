@@ -249,6 +249,8 @@ pub struct Tweaks {
     pub sfx_hyperspace_volume: i32,
     pub sfx_cardioid_factor: f32,
     pub sfx_cardioid_min: f32,
+    /// Speed above which the closest ship counts as moving (selects the "active" music curve).
+    pub sfx_float_velocity: f32,
     pub speech_min_perceptible_vol: f32,
     pub speech_ambient_level: f32,
     pub speech_singleplayer_ratio: f32,
@@ -274,6 +276,7 @@ impl Default for Tweaks {
             sfx_hyperspace_volume: 100,
             sfx_cardioid_factor: 1.0,
             sfx_cardioid_min: 0.43,
+            sfx_float_velocity: 20.0,
             speech_min_perceptible_vol: 0.0,
             speech_ambient_level: 0.6,
             speech_singleplayer_ratio: 0.5,
@@ -312,6 +315,7 @@ impl Tweaks {
         i("SFX_HYPERSPACE_VOLUME", &mut t.sfx_hyperspace_volume);
         f("SFX_CARDIOD_FACTOR", &mut t.sfx_cardioid_factor);
         f("SFX_CARDIOD_MIN", &mut t.sfx_cardioid_min);
+        f("SFX_FLOAT_VELOCITY", &mut t.sfx_float_velocity);
         f("SPEECH_MIN_PERCEPTABLE_VOL", &mut t.speech_min_perceptible_vol);
         f("SPEECH_AMBIENT_LEVEL", &mut t.speech_ambient_level);
         f("SPEECH_SINGLEPLAYER_RATIO", &mut t.speech_singleplayer_ratio);

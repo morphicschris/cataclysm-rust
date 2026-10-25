@@ -43,8 +43,11 @@ fn loads_through_game_data() {
     }
 }
 
+/// A sound system at full levels (the reference decodes are unscaled).
 fn system(data: &Arc<SoundData>) -> SoundSystem {
-    SoundSystem::new(data.clone(), Arc::new(Mutex::new(Mixer::default())))
+    let mut s = SoundSystem::new(data.clone(), Arc::new(Mutex::new(Mixer::default())));
+    s.set_volumes(hwc_audio::system::Volumes::FULL);
+    s
 }
 
 fn dump(name: &str, r: &offline::Rendered) {
@@ -440,3 +443,23 @@ fn scripted_scene_is_deterministic_and_balanced() {
     );
 }
 
+
+/// The in-game music level's distance comes from the nearest derelict or audible ship; ships
+/// beyond their class's range are ignored, and a moving nearest ship selects the active curve.
+#[test]
+fn nearby_objects_set_the_music_context() {
+    use hwc_audio::system::NearbyObject;
+    let Some(d) = data() else { return };
+    let mut s = system(&d);
+    let row = (0..d.tables.rows()).find(|&r| d.tables.max_range(r).is_some_and(|m| m > 100.0)).expect("a row with range");
+    let range = d.tables.max_range(row).unwrap();
+    let ship = |x: f32, speed: f32| NearbyObject { position: [x, 0.0, 0.0], class_row: Some(row), speed };
+    s.note_nearby([ship(range + 50.0, 0.0)]);
+    assert_eq!(s.context.closest_distance, 1e21);
+    assert!(!s.context.active);
+    s.note_nearby([ship(range * 0.5, 100.0), ship(range * 0.25, 0.0)]);
+    assert_eq!(s.context.closest_distance, range * 0.25);
+    assert!(s.context.active, "a moving ship that was nearest so far keeps the active curve");
+    s.note_nearby([NearbyObject { position: [range * 3.0, 0.0, 0.0], class_row: None, speed: 0.0 }]);
+    assert_eq!(s.context.closest_distance, range * 3.0);
+}

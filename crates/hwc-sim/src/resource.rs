@@ -42,6 +42,10 @@ pub struct Resource {
     pub flags: u32,
     /// +0x38 attributes.
     pub attributes: u32,
+    /// +0x3c attributes parameter.
+    pub attributes_param: i16,
+    /// +0x194: the regrowing resource volume it belongs to (index into the level's volumes).
+    pub volume: Option<usize>,
     pub position: Vector,
     pub velocity: Vector,
     pub force: Vector,
@@ -90,13 +94,9 @@ pub fn info(u: &Universe, kind: ResourceKind) -> Option<&ResourceInfo> {
     }
 }
 
-/// `univAddAsteroid` (0x53bae0) / `univAddDustCloud`: a resource at `position` with a random
-/// orientation and its full resource value.
-pub fn add_resource(u: &mut Universe, kind: ResourceKind, position: Vector) -> Option<ResourceId> {
-    let stat = info(u, kind)?.clone();
-    let id = ResourceId(u.base.resources.next_id);
-    u.base.resources.next_id = u.base.resources.next_id.wrapping_add(1);
-    // univInitSpaceObjPosRot with a random orientation.
+/// `univInitSpaceObjPosRot` with a random orientation: three game random numbers, turning the
+/// default orientation about x, then y, then z.
+pub fn random_orientation(u: &mut Universe) -> Matrix {
     let mut coordsys = DEFAULT_SHIP_MATRIX;
     let a = u.randy.random(RAN_GAME);
     let b = u.randy.random(RAN_GAME);
@@ -110,17 +110,31 @@ pub fn add_resource(u: &mut Universe, kind: ResourceKind, position: Vector) -> O
     let (cz, sz) = rot(c);
     coordsys = coordsys.mul_mat(&Matrix::rot_about_x(cx, sx));
     coordsys = coordsys.mul_mat(&Matrix::rot_about_y(cy, sy));
-    coordsys = coordsys.mul_mat(&Matrix::rot_about_z(cz, sz));
+    coordsys.mul_mat(&Matrix::rot_about_z(cz, sz))
+}
+
+/// `univAddAsteroid` (0x53bae0) / `univAddDustCloud` (0x53c3a0): a resource at `position` with
+/// a random orientation and its full resource value. Without statics for `kind` nothing is
+/// created (and no random numbers are drawn).
+pub fn add_resource(u: &mut Universe, kind: ResourceKind, position: Vector) -> Option<ResourceId> {
+    let stat = info(u, kind)?.clone();
+    let id = ResourceId(u.base.resources.next_id);
+    u.base.resources.next_id = u.base.resources.next_id.wrapping_add(1);
+    let coordsys = random_orientation(u);
     let off = coordsys.mul_vec(stat.header.coll.coll_sphere_offset);
-    let mut flags = 0x0010_4003;
-    if kind == ResourceKind::Asteroid(0) {
-        flags |= 4;
-    }
+    let flags = match kind {
+        // The smallest asteroids are minor objects (`SOF_...4`, kept out of the blobs).
+        ResourceKind::Asteroid(0) => 0x0010_4007,
+        ResourceKind::Asteroid(_) => 0x0010_4003,
+        ResourceKind::DustCloud(_) => 0x0018_4003,
+    };
     let r = Resource {
         id,
         kind,
         flags,
         attributes: 0,
+        attributes_param: 0,
+        volume: None,
         position,
         velocity: Vector::ZERO,
         force: Vector::ZERO,

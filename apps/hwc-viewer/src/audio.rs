@@ -12,8 +12,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use glam::Vec3;
-use hwc_audio::mixer::Mixer;
-use hwc_audio::system::{event, Emitter, ShipSounds, SoundSystem, SpeechStarted};
+use hwc_audio::codec::Limiter;
+use hwc_audio::mixer::{Mixer, MixerOptions};
+use hwc_audio::system::{event, Emitter, NearbyObject, ShipSounds, SoundSystem, SpeechStarted};
 use hwc_audio::tables::Listener;
 use hwc_audio::{DataSource, SoundData};
 use hwc_formats::gamedata::GameData;
@@ -77,9 +78,14 @@ fn to3(v: Vec3) -> [f32; 3] {
 impl Audio {
     /// Loads the sound data from `game` and, unless `mute`, opens the sound card. With `mute` the
     /// engine still runs (speech subtitles and lengths are needed) but nothing is heard.
-    pub fn new(game: GameData, mute: bool) -> Result<Self, String> {
+    /// `soft_limit` swaps the original's hard 16-bit clamp for a soft knee (opt-in).
+    pub fn new(game: GameData, mute: bool, soft_limit: bool) -> Result<Self, String> {
         let data = SoundData::load(&DataSource::from_game_data(game)).map_err(|e| e.to_string())?;
-        let mixer = Arc::new(Mutex::new(Mixer::default()));
+        let opts = MixerOptions {
+            limiter: if soft_limit { Limiter::Soft } else { Limiter::Hard },
+            ..Default::default()
+        };
+        let mixer = Arc::new(Mutex::new(Mixer::new(opts)));
         let mut sys = SoundSystem::new(Arc::new(data), mixer.clone());
         if mute {
             // Nothing pulls the mixer, so nothing is heard; speech still reports its subtitles.
@@ -110,6 +116,23 @@ impl Audio {
             look_at: to3(look_at),
             up: [0.0, 0.0, 1.0],
         };
+    }
+
+    /// The in-game music level follows the distance from the camera to the nearest audible
+    /// ship (set the listener first).
+    pub fn nearby_ships(&mut self, u: &Universe) {
+        let objects = u.ship_list.iter().filter_map(|&id| {
+            let s = u.ship(id)?;
+            let st = u.statics.ship(s.ship_type)?;
+            let p = s.posinfo.position;
+            let v = s.posinfo.velocity;
+            Some(NearbyObject {
+                position: [p.x, p.y, p.z],
+                class_row: Some(st.ship_class.map_or(0, |c| c.index())),
+                speed: (v.x * v.x + v.y * v.y + v.z * v.z).sqrt(),
+            })
+        });
+        self.sys.note_nearby(objects);
     }
 
     /// Per-frame upkeep (music levels, the mixer's stall detector).

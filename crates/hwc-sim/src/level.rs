@@ -11,9 +11,11 @@
 //! place in the computer player's team list and resources their random numbers in the
 //! original order.
 //!
-//! What a level creates that the simulation has no objects for yet (asteroids, clouds,
-//! derelicts, resource volumes) is kept here as plain records ([`LevelState`]), with the random
-//! numbers the original draws for them consumed from the game stream.
+//! Asteroids and dust clouds become the simulation's resource objects ([`crate::resource`]),
+//! harvestable, in the original creation order and with the original's random numbers. What
+//! the simulation has no objects for yet (gas clouds, derelicts, resource volumes) is kept here
+//! as plain records ([`LevelState`]), with the random numbers the original draws for them
+//! consumed from the game stream; the resources are recorded there too.
 
 use hwc_formats::script::split_line;
 use hwc_kas::{kas_hash, Hash};
@@ -125,10 +127,13 @@ pub enum ResourceKind {
     GasCloud(u8),
 }
 
-/// A resource object created by a level (no simulation object yet).
+/// A resource object created by a level, as the level set it up. Asteroids and dust clouds
+/// also exist in the simulation ([`crate::resource`], `id`); gas clouds are records only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LevelResource {
     pub kind: ResourceKind,
+    /// The simulation's resource object.
+    pub id: Option<crate::resource::ResourceId>,
     pub position: Vector,
     pub velocity: Vector,
     /// Random spin of the larger asteroids (`rotinfo.rotspeed`).
@@ -1011,15 +1016,35 @@ fn random_resource_type(u: &mut Universe, vol: &ResourceVolume, regrowing: bool)
     (0..10).find(|&i| r < u32::from(vol.cum[i][j])).unwrap_or(0) as u8
 }
 
-/// `AddResourceToVolumeAtPosition` (0x49b3??) for a level being loaded (no overlap test).
+/// `AddResourceToVolumeAtPosition` (0x49b350) for a level being loaded (no overlap test): the
+/// type from the volume's distribution, then the object (`univAddAsteroid` /
+/// `univAddDustCloud` / `univAddGasCloud`, each drawing a random orientation), then the
+/// asteroid's spin and drift.
 fn add_resource_at(u: &mut Universe, vol: &ResourceVolume, vol_index: Option<usize>, regrowing: bool, p: Vector, tw: &ResourceTweaks, state: &mut LevelState) {
+    use crate::resource::{self, ResourceKind as Kind};
     let t = random_resource_type(u, vol, regrowing);
+    let kind = match vol.obj_type {
+        2 => ResourceKind::Asteroid(t),
+        4 => ResourceKind::GasCloud(t),
+        _ => ResourceKind::DustCloud(t),
+    };
+    let sim_kind = match kind {
+        ResourceKind::Asteroid(t) => Some(Kind::Asteroid(t)),
+        ResourceKind::DustCloud(t) => Some(Kind::DustCloud(t)),
+        ResourceKind::GasCloud(_) => None,
+    };
+    let id = sim_kind.and_then(|k| resource::add_resource(u, k, p));
+    if id.is_none() {
+        // No simulation object (gas clouds, or statics missing): the original still draws the
+        // object's orientation.
+        resource::random_orientation(u);
+        if sim_kind.is_some() {
+            state.warnings.push(format!("{kind:?}: no statics; kept as a record only"));
+        }
+    }
     let mut res = LevelResource {
-        kind: match vol.obj_type {
-            2 => ResourceKind::Asteroid(t),
-            4 => ResourceKind::GasCloud(t),
-            _ => ResourceKind::DustCloud(t),
-        },
+        kind,
+        id,
         position: p,
         velocity: Vector::ZERO,
         rot_speed: Vector::ZERO,
@@ -1040,6 +1065,14 @@ fn add_resource_at(u: &mut Universe, vol: &ResourceVolume, vol_index: Option<usi
             // A meteor storm volume gives its asteroids a drift and spins them again.
             spin_asteroid(u, &mut res, t, tw);
         }
+    }
+    if let Some(r) = id.and_then(|id| u.base.resources.get_mut(id)) {
+        r.attributes = res.attributes;
+        r.attributes_param = res.attributes_param;
+        r.volume = res.volume;
+        r.rotspeed = res.rot_speed;
+        r.velocity = res.velocity;
+        r.is_moving = res.velocity != Vector::ZERO;
     }
     state.resources.push(res);
 }
@@ -1211,11 +1244,13 @@ smUniverseSizeZ 3000
         // heading stays in the horizontal plane.
         let h = u.ships.ship(ShipId(0)).heading();
         assert!(h.z.abs() < 1e-6 && (h.x * h.x + h.y * h.y - 1.0).abs() < 1e-5);
-        // Two asteroids of type 0: three random numbers for the position and one for the type
-        // each, no spin for small asteroids.
+        // Two asteroids of type 0: three random numbers for the position, one for the type and
+        // three for the orientation `univAddAsteroid` gives it (`univInitSpaceObjPosRot` with a
+        // random rotation; drawn even though this test world has no asteroid statics), no spin
+        // for small asteroids.
         assert_eq!(st.resources.len(), 2);
         let mut r = hwc_math::Randy::default();
-        for _ in 0..8 {
+        for _ in 0..14 {
             r.random(RAN_GAME);
         }
         assert_eq!(u.randy, r);
