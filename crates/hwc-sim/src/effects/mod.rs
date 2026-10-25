@@ -305,10 +305,12 @@ pub fn owner_state(u: &Universe, o: FxOwner) -> Option<Owner> {
 }
 
 /// Refresh every owner the effects refer to from the simulation; owners that are gone are
-/// detached (`etgShipDied`).
+/// detached (`etgShipDied`). The NIS's effect anchors ([`crate::nis_support::nis_effect_owner`])
+/// are kept up to date by the NIS and left alone.
 pub fn sync_owners(u: &mut Universe) {
     let Some(fx) = u.effects.as_ref() else { return };
-    let mut ids: Vec<OwnerId> = fx.world.effects.iter().filter_map(|e| e.owner).collect();
+    let mut ids: Vec<OwnerId> =
+        fx.world.effects.iter().filter_map(|e| e.owner).filter(|&id| !crate::nis_support::is_nis_effect_owner(id)).collect();
     ids.sort_unstable();
     ids.dedup();
     let states: Vec<(OwnerId, Option<Owner>)> =

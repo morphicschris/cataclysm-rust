@@ -45,9 +45,20 @@ pub const SP_KAS_UPDATE_RATE: u32 = 15;
 /// Single-player states (`singlePlayerGameInfo.hyperspaceState`, 0xaaf910).
 pub mod sp_state {
     pub const NONE: u32 = 0;
+    /// The hyperspace button was pressed: roll call (or the five seconds before a jump without
+    /// one).
+    pub const WAITING_ROLLCALL: u32 = 2;
+    /// 2.5 s for Fleet Command's announcement.
+    pub const WAITING_FLEET_COMMAND: u32 = 3;
+    /// The fleet turns to the mothership's heading and jumps.
+    pub const SHIPS_LEAVING: u32 = 4;
+    /// Whiteout and the between-missions movie.
+    pub const WHITEOUT: u32 = 5;
     pub const START_KAS: u32 = 6;
     pub const KAS_STARTED: u32 = 7;
     pub const ARRIVING: u32 = 9;
+    /// The jump failed (`Game_HyperspaceFailed`).
+    pub const FAILED: u32 = 10;
 }
 
 /// Per-ship hyperspace states (`shipHyperspaceState`, ship info +0x20).
@@ -85,6 +96,14 @@ pub struct SpTweaks {
     pub base_mothership_arrivetime: f32,
     pub random_waittime: f32,
     pub decelerate_time: f32,
+    /// `HYPERSPACE_ACCELERATE_TIME` (0x88a06c).
+    pub accelerate_time: f32,
+    /// `HYPERSPACE_WHITEOUTTIME` (0x88a080).
+    pub whiteout_time: f32,
+    /// `HYPERSPACE_RANGE`, squared as the script table stores it (0x88a0c4).
+    pub hyperspace_range_sq: f32,
+    /// `HYPERSPACE_HEADINGACCURACY`, the cosine of the script's angle (0x88a078).
+    pub heading_accuracy: f32,
     pub starting_rus: i32,
     /// `SUBMESSAGE_SAFETY_TIMEOUT`: how long `IntelEventEnded` waits for a subtitle that never
     /// reports its end.
@@ -109,6 +128,10 @@ impl Default for SpTweaks {
             base_mothership_arrivetime: 1.0,
             random_waittime: 0.2,
             decelerate_time: 3.0,
+            accelerate_time: 3.0,
+            whiteout_time: 0.1,
+            hyperspace_range_sq: 9_000_000.0,
+            heading_accuracy: 0.98,
             starting_rus: 200,
             submessage_safety_timeout: 15.0,
             base_fleet_strength: Vec::new(),
@@ -142,6 +165,19 @@ impl SpTweaks {
                 "HYPERSPACE_BASE_MOTHERSHIPARRIVETIME" => f(&mut t.base_mothership_arrivetime),
                 "HYPERSPACE_RANDOM_WAITTIME" => f(&mut t.random_waittime),
                 "HYPERSPACE_DECELERATE_TIME" => f(&mut t.decelerate_time),
+                "HYPERSPACE_ACCELERATE_TIME" => f(&mut t.accelerate_time),
+                "HYPERSPACE_WHITEOUTTIME" => f(&mut t.whiteout_time),
+                // scriptSetReal32SqrCB / scriptSetCosAngCB.
+                "HYPERSPACE_RANGE" => {
+                    if let Some(x) = scan_f32(&v) {
+                        t.hyperspace_range_sq = st(ld(x) * ld(x));
+                    }
+                }
+                "HYPERSPACE_HEADINGACCURACY" => {
+                    if let Some(x) = scan_f32(&v) {
+                        t.heading_accuracy = st(fcos(ld(x) * ld(level::DEG_TO_RAD)));
+                    }
+                }
                 "SUBMESSAGE_SAFETY_TIMEOUT" => f(&mut t.submessage_safety_timeout),
                 "SINGLEPLAYER_STARTINGRUS" => {
                     if let Some(x) = scan_i32(&v) {
@@ -176,11 +212,15 @@ pub struct MissionConfig {
     pub speech_seconds: Option<f32>,
     /// Record every KAS runtime call in the log.
     pub log_calls: bool,
+    /// A front end plays the NIS and NISlets the mission asks for: requests wait in
+    /// [`Game::pending_nis`] until [`MissionRun::nis_finished`] (otherwise they count as
+    /// finished at once, or after [`nislet_seconds`](Self::nislet_seconds)).
+    pub hold_nis: bool,
 }
 
 impl MissionConfig {
     pub fn new(mission: u32) -> Self {
-        MissionConfig { mission, skill: 2, nislet_seconds: 0.0, speech_seconds: None, log_calls: true }
+        MissionConfig { mission, skill: 2, nislet_seconds: 0.0, speech_seconds: None, log_calls: true, hold_nis: false }
     }
 }
 
@@ -228,16 +268,41 @@ pub struct Objective {
     pub complete: bool,
 }
 
-/// A ship of the player's fleet travelling in hyperspace between levels.
+/// A ship of the player's fleet travelling in hyperspace between levels (an entry of the
+/// original's `ShipsInHyperspace` list, with the ships inside it).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FleetShip {
     pub ship_type: ShipType,
-    /// Offset from the mothership when the fleet left (ship info +0x2c..+0x34).
+    /// Offset from the mothership when the fleet left (ship info +0x2c..+0x34: along the
+    /// mothership's heading, right and up axes).
     pub offset: Vector,
-    /// Ships docked inside it (launched on arrival).
-    pub docked: Vec<ShipType>,
+    /// Ships docked inside it.
+    pub docked: Vec<FleetShip>,
     /// A module that rides on the mothership.
     pub module: bool,
+    /// Carried over from a previous mission (created without the mission's starting modules,
+    /// docked ships really inside their host) rather than made up from the opening NIS.
+    pub carried: bool,
+    /// The ship's own state that survives the jump (the original keeps the ship object).
+    pub color_scheme: Option<usize>,
+    pub tactics: Option<usize>,
+    pub attributes: u32,
+}
+
+impl FleetShip {
+    /// A ship of the opening NIS's fleet.
+    pub fn new(ship_type: ShipType) -> Self {
+        FleetShip { ship_type, offset: Vector::ZERO, docked: Vec::new(), module: false, carried: false, color_scheme: None, tactics: None, attributes: 0 }
+    }
+
+    /// Every ship type in this entry and inside it.
+    pub fn types(&self) -> Vec<ShipType> {
+        let mut v = vec![self.ship_type];
+        for d in &self.docked {
+            v.extend(d.types());
+        }
+        v
+    }
 }
 
 /// A ship on its way in from hyperspace (`UpdateArrivingShip`).
@@ -258,7 +323,9 @@ pub struct ArrivingShip {
     pub hs_flags: u32,
     pub mothership: bool,
     pub clamped_to_mothership: bool,
-    pub docked: Vec<ShipType>,
+    pub docked: Vec<FleetShip>,
+    /// The fleet entry this ship came from (its carried state).
+    pub entry: Option<Box<FleetShip>>,
 }
 
 /// Camera state the KAS camera functions read and write.
@@ -319,6 +386,12 @@ pub struct Game {
     /// A NISlet "playing": (number, finish time).
     pub nislet: Option<(i32, f32)>,
     pub ships_have_arrived: bool,
+    /// A NIS (`G_PlayNis`) or NISlet (`G_PlayNislet`) waiting for the front end to play it
+    /// ([`MissionConfig::hold_nis`]).
+    pub pending_nis: Option<NisRequest>,
+    /// The single-player state of the trip between missions (roll call, the fleet leaving, the
+    /// ships in hyperspace); see [`crate::campaign`].
+    pub hyper: crate::campaign::HyperState,
     /// Label names for the log (team labels from the level, names from the mission IR).
     pub names: std::collections::HashMap<Hash, String>,
     pub log: Vec<LogEntry>,
@@ -447,15 +520,15 @@ pub fn opening_nis_fleet(src: &dyn DataSource, statics: &StaticWorld, mission: u
         let stat = statics.ship(t);
         let capital = stat.is_some_and(|s| s.is_capital_ship || s.ship_class == Some(ShipClass::Component));
         if t == ShipType::sMothership {
-            fleet.push(FleetShip { ship_type: t, offset: Vector::ZERO, docked: Vec::new(), module: false });
+            fleet.push(FleetShip::new(t));
             // (The mission modules come with the mothership: `univCreateShip` creates them.)
             if mission == 1 {
-                fleet.push(FleetShip { ship_type: ShipType::sMothershipDockingBay, offset: Vector::ZERO, docked: Vec::new(), module: true });
+                fleet.push(FleetShip { module: true, ..FleetShip::new(ShipType::sMothershipDockingBay) });
             }
         } else if capital {
-            fleet.push(FleetShip { ship_type: t, offset: Vector::ZERO, docked: Vec::new(), module: false });
+            fleet.push(FleetShip::new(t));
         } else {
-            docked.push(t);
+            docked.push(FleetShip::new(t));
         }
     }
     match fleet.iter_mut().find(|f| f.ship_type == ShipType::sMothership) {
@@ -485,17 +558,53 @@ impl MissionRun {
         config: MissionConfig,
     ) -> Result<Self, MissionError> {
         let mission = config.mission;
-        let fleet = if mission == 1 {
-            opening_nis_fleet(src, &statics, mission)?
-        } else {
-            return Err(MissionError(format!("mission {mission}: carrying a fleet over from the previous mission is not implemented")));
-        };
+        if mission != 1 {
+            return Err(MissionError(format!(
+                "mission {mission}: the fleet comes over from the previous mission (use MissionRun::start_campaign with its Carry, or Carry::warp)"
+            )));
+        }
+        let fleet = opening_nis_fleet(src, &statics, mission)?;
+        Self::load(statics, tweaks, src, script, config, fleet, None)
+    }
+
+    /// Starts the mission after the one `carry` was taken from (`singlePlayerLoadNewLevel`):
+    /// the fleet that hyperspaced out arrives here with its RUs, research and technology.
+    /// `config.mission` must be the next mission.
+    pub fn start_campaign(
+        statics: Arc<StaticWorld>,
+        tweaks: SimTweaks,
+        src: &dyn DataSource,
+        script: KasMission,
+        config: MissionConfig,
+        carry: &crate::campaign::Carry,
+    ) -> Result<Self, MissionError> {
+        if config.mission != carry.mission + 1 {
+            return Err(MissionError(format!("the carried fleet left mission {}; it arrives in mission {}, not {}", carry.mission, carry.mission + 1, config.mission)));
+        }
+        let fleet = crate::campaign::wipe_unavailable_modules(&carry.fleet, config.mission);
+        Self::load(statics, tweaks, src, script, config, fleet, Some(carry))
+    }
+
+    fn load(
+        statics: Arc<StaticWorld>,
+        tweaks: SimTweaks,
+        src: &dyn DataSource,
+        script: KasMission,
+        config: MissionConfig,
+        fleet: Vec<FleetShip>,
+        carry: Option<&crate::campaign::Carry>,
+    ) -> Result<Self, MissionError> {
+        let mission = config.mission;
         let mut universe = Universe::new(statics.clone(), tweaks, &[ShipRace::Somtaaw, ShipRace::Taiidan]);
         universe.single_player = true;
         universe.sp_difficulty = config.skill.max(0) as u32;
+        universe.base.options.mission = mission as i32;
         // gameStart runs with the single-player flag set: the players take the single-player
         // research tables (rmInitializeResearchStruct), not the multiplayer ones.
         crate::base::init(&mut universe);
+        if let Some(c) = carry {
+            crate::campaign::restore_player(&mut universe, c);
+        }
         let sp_tweaks = SpTweaks::load(src);
 
         let mut game = Game {
@@ -531,12 +640,21 @@ impl MissionRun {
             arriving: Vec::new(),
             nislet: None,
             ships_have_arrived: false,
+            pending_nis: None,
+            hyper: crate::campaign::HyperState::default(),
             names: script.names.iter().map(|(h, n)| (*h, n.clone())).collect(),
             log: Vec::new(),
             frame: 0,
             time: 0.0,
         };
-        game.log(LogKind::Flow, format!("mission {mission}: opening NIS skipped (nis\\n01.nis); fleet in hyperspace: {}", fleet_summary(&game.fleet)));
+        match carry {
+            None => game.log(LogKind::Flow, format!("mission {mission}: opening NIS skipped (nis\\n01.nis); fleet in hyperspace: {}", fleet_summary(&game.fleet))),
+            Some(c) => {
+                game.hyper.old_auto_launch = c.old_auto_launch;
+                game.resource_units[HUMAN_PLAYER] = c.resource_units;
+                game.log(LogKind::Flow, format!("mission {mission}: fleet from mission {} in hyperspace: {} ({} RUs)", c.mission, fleet_summary(&game.fleet), c.resource_units));
+            }
+        }
 
         // singlePlayerLoadNewLevel: the fleet strength scales the level (0 for mission 1).
         let fleet_modifier = fleet_modifier(&game, &statics, mission);
@@ -550,6 +668,9 @@ impl MissionRun {
         }
         // clPresetShipsToPosition after the level is in.
         level::preset_ships_to_position(&mut universe);
+        if carry.is_some() {
+            crate::campaign::create_fleet_in_hyperspace(&mut universe, &mut game);
+        }
         for w in game.level.warnings.clone() {
             game.log(LogKind::Warning, w);
         }
@@ -569,10 +690,17 @@ impl MissionRun {
                 game.level.derelicts.len()
             ),
         );
-        // levelInit's single-player starting RUs are replaced by the mission's own RUsSet.
-        game.resource_units = game.level.resource_units.clone();
-        if game.resource_units.len() < 2 {
-            game.resource_units.resize(2, 0);
+        if carry.is_none() {
+            // levelInit's single-player starting RUs are replaced by the mission's own RUsSet.
+            game.resource_units = game.level.resource_units.clone();
+            if game.resource_units.len() < 2 {
+                game.resource_units.resize(2, 0);
+            }
+        } else {
+            // The end of singlePlayerLoadNewLevel: the upgrades the research gives.
+            crate::upgrade::player_update_from_research(&mut universe, HUMAN_PLAYER);
+            game.hyper.fade = 1.0;
+            game.hyper.fade_reset = true;
         }
 
         let mut kas = Interpreter::new(script);
@@ -602,6 +730,74 @@ impl MissionRun {
         for _ in 0..n {
             self.step();
         }
+    }
+
+    /// `singlePlayerNisStoppedCB` for a held request: the NIS or NISlet the front end played
+    /// has ended, and its completion variable is set (`G_Nis<n>Complete` /
+    /// `G_Nislet<n>Complete`). A roll call the player asked for while it played
+    /// (`roll_call_requested`, 0x910224) begins now. Returns false when nothing was waiting.
+    pub fn nis_finished(&mut self, roll_call_requested: bool) -> bool {
+        let Some(req) = self.game.pending_nis.take() else { return false };
+        let name = match req {
+            NisRequest::Nis(n) => format!("G_Nis{n}Complete"),
+            NisRequest::Nislet(n) => format!("G_Nislet{n}Complete"),
+        };
+        self.kas.set_var(None, var_hash(&name), 1);
+        self.game.log(LogKind::Flow, format!("{req:?} finished: {name} = 1"));
+        if roll_call_requested {
+            let _ = self.hyperspace_button();
+        }
+        true
+    }
+
+    /// The hyperspace button (`HyperspaceRollCallBegin`); see [`crate::campaign`].
+    pub fn hyperspace_button(&mut self) -> Result<(), crate::campaign::HyperspaceRefused> {
+        crate::campaign::hyperspace_button(&mut self.universe, &mut self.game)
+    }
+
+    /// The hyperspace button with the debug override (the original's C key): the jump is
+    /// allowed before the mission offers it.
+    pub fn force_hyperspace(&mut self) -> Result<(), crate::campaign::HyperspaceRefused> {
+        self.game.hyper.hyperspace_override = true;
+        self.hyperspace_button()
+    }
+
+    /// The roll call's "go now" button.
+    pub fn hyperspace_go_now(&mut self) -> bool {
+        crate::campaign::go_now(&mut self.universe, &mut self.game)
+    }
+
+    /// The roll call's "emergency hyperspace" button.
+    pub fn emergency_hyperspace(&mut self) -> bool {
+        crate::campaign::emergency_hyperspace(&mut self.universe, &mut self.game)
+    }
+
+    /// The fleet has jumped and the next mission is due.
+    pub fn mission_complete(&self) -> bool {
+        self.game.hyper.level_complete
+    }
+
+    /// What reaches the next mission, once [`mission_complete`](Self::mission_complete).
+    pub fn carry(&self) -> Option<crate::campaign::Carry> {
+        crate::campaign::Carry::take(&self.universe, &self.game)
+    }
+
+    /// Every ship's hyperspace window state, arriving and leaving: `(ship, hsState, clipt)`
+    /// for ships whose window is open (renderers clip the hull with it).
+    pub fn hyperspace_windows(&self) -> Vec<(ShipId, u32, f32)> {
+        let mut v: Vec<(ShipId, u32, f32)> = self
+            .game
+            .arriving
+            .iter()
+            .filter(|a| a.hs_state != hs_effect::INACTIVE)
+            .filter_map(|a| Some((a.ship?, a.hs_state, a.clipt)))
+            .collect();
+        for (&id, r) in &self.game.hyper.ships {
+            if !matches!(r.hs_state, hs_effect::INACTIVE | hs_effect::FINISHED) && self.universe.ship(id).is_some() && self.universe.ship_list.contains(&id) {
+                v.push((id, r.hs_state, r.clipt));
+            }
+        }
+        v
     }
 
     /// The current state hash of a team, by label name.
@@ -634,8 +830,8 @@ fn fleet_modifier(game: &Game, statics: &StaticWorld, mission: u32) -> f32 {
     for f in &game.fleet {
         let cost = |t: ShipType| statics.ship(t).filter(|s| s.ship_class != Some(ShipClass::Mothership)).map_or(0.0, |s| s.build_cost as f32);
         total = st(ld(total) + ld(cost(f.ship_type)));
-        for &d in &f.docked {
-            total = st(ld(total) + ld(cost(d)));
+        for d in &f.docked {
+            total = st(ld(total) + ld(cost(d.ship_type)));
         }
     }
     total = st(ld(game.resource_units.first().copied().unwrap_or(0) as f32) + ld(total));
@@ -683,16 +879,23 @@ fn start_point(game: &Game) -> [f32; 4] {
 
 /// `singlePlayerGameUpdate` (0x5148f0), the parts that run before the mission's exit.
 fn single_player_update(u: &mut Universe, kas: &mut Interpreter, game: &mut Game) {
+    crate::campaign::fade_update(u, game);
     // G_PlayNis / G_PlayNislet requests (variables at mission scope, destroyed when seen).
     if let Some(n) = kas.remove_var(None, var_hash("G_PlayNis")) {
-        if n != 0 {
+        if n != 0 && game.config.hold_nis {
+            game.log(LogKind::Flow, format!("NIS {n} requested (waiting for the front end)"));
+            game.pending_nis = Some(NisRequest::Nis(n));
+        } else if n != 0 {
             game.log(LogKind::Flow, format!("NIS {n} requested: not played (counts as finished)"));
             kas.set_var(None, var_hash(&format!("G_Nis{n}Complete")), 1);
         }
     }
     if let Some(n) = kas.var(None, var_hash("G_PlayNislet")) {
         kas.remove_var(None, var_hash("G_PlayNislet"));
-        if n != 0 {
+        if n != 0 && game.config.hold_nis {
+            game.log(LogKind::Flow, format!("NISlet {n} of mission {} requested (waiting for the front end)", game.config.mission));
+            game.pending_nis = Some(NisRequest::Nislet(n));
+        } else if n != 0 {
             let until = st(ld(u.total_time_elapsed) + ld(game.config.nislet_seconds));
             game.log(LogKind::Flow, format!("NISlet {n} of mission {} requested: not played (finishes at {until:.3}s)", game.config.mission));
             game.nislet = Some((n, until));
@@ -706,14 +909,25 @@ fn single_player_update(u: &mut Universe, kas: &mut Interpreter, game: &mut Game
         }
     }
 
+    crate::campaign::update_midlevel(u, game);
     match game.sp_state {
         sp_state::START_KAS => {
+            if game.hyper.level_complete {
+                // The next level is due: nothing runs until it is loaded.
+                return;
+            }
             game.sp_state = sp_state::KAS_STARTED;
             game.log(LogKind::Flow, format!("kasMissionStart(\"mission{:02}\")", game.config.mission));
+            if crate::campaign::fades_in(game.config.mission) && game.fleet.iter().any(|f| f.carried) {
+                game.hyper.fade_arrival_pending = true;
+            }
             let mut host = crate::kas_host::SimHost { u, g: game };
             kas.start(&mut host);
         }
         sp_state::ARRIVING => arrival_update(u, kas, game),
+        sp_state::WAITING_ROLLCALL | sp_state::WAITING_FLEET_COMMAND | sp_state::SHIPS_LEAVING | sp_state::WHITEOUT | sp_state::FAILED => {
+            crate::campaign::update(u, game);
+        }
         _ => {}
     }
 }
@@ -724,11 +938,12 @@ pub(crate) fn begin_arrival(game: &mut Game) {
     game.sp_state = sp_state::ARRIVING;
     game.log(LogKind::Flow, "hyperspacing ships in (state 9)");
     let fleet = std::mem::take(&mut game.fleet);
-    for f in fleet {
+    let ids = std::mem::take(&mut game.hyper.fleet_ids);
+    for (k, f) in fleet.into_iter().enumerate() {
         let mothership = f.ship_type == ShipType::sMothership;
         game.arriving.push(ArrivingShip {
             ship_type: f.ship_type,
-            ship: None,
+            ship: ids.get(k).copied().flatten(),
             offset: f.offset,
             state: ship_hs::INITIAL,
             time: 0.0,
@@ -738,7 +953,8 @@ pub(crate) fn begin_arrival(game: &mut Game) {
             hs_flags: 0,
             mothership,
             clamped_to_mothership: f.module,
-            docked: f.docked,
+            docked: f.docked.clone(),
+            entry: f.carried.then(|| Box::new(f)),
         });
     }
 }
@@ -747,11 +963,17 @@ pub(crate) fn begin_arrival(game: &mut Game) {
 /// arriving ship steps through `UpdateArrivingShip`; when all are in, `G_ShipsHaveArrived`.
 fn arrival_update(u: &mut Universe, kas: &mut Interpreter, game: &mut Game) {
     let sp = start_point(game);
-    let mut all = true;
-    for i in 0..game.arriving.len() {
-        let done = update_arriving_ship(u, game, i, sp);
-        all &= done;
-    }
+    let carried = game.arriving.iter().any(|a| a.entry.is_some());
+    let all = if carried && crate::campaign::fades_in(game.config.mission) {
+        crate::campaign::fade_in_arrival(u, game, sp)
+    } else {
+        let mut all = true;
+        for i in 0..game.arriving.len() {
+            let done = update_arriving_ship(u, game, i, sp);
+            all &= done;
+        }
+        all
+    };
     if !all {
         return;
     }
@@ -760,12 +982,52 @@ fn arrival_update(u: &mut Universe, kas: &mut Interpreter, game: &mut Game) {
     game.sp_state = sp_state::NONE;
     game.log(LogKind::Flow, "all ships arrived: G_ShipsHaveArrived = 1 (state 0)");
     let arrived = std::mem::take(&mut game.arriving);
+    if carried {
+        crate::campaign::arrival_complete(u, game);
+        return;
+    }
     // clAutoLaunch / LaunchAllInternalShipsOfPlayerThatMustBeLaunched: the ships that
     // travelled docked come out.
     for a in &arrived {
         let Some(host) = a.ship else { continue };
-        for (k, &t) in a.docked.iter().enumerate() {
-            launch_new_ship(u, game, t, host, k);
+        for (k, d) in a.docked.iter().enumerate() {
+            launch_new_ship(u, game, d.ship_type, host, k);
+        }
+    }
+}
+
+/// The ship of arriving entry `i`, created when it re-enters the universe (in the original it
+/// kept its identity in the hyperspace list; here it is created now and gets the next ship
+/// number). A carried ship comes without the mission's starting modules (its own modules are
+/// entries of their own) and with the ships that travelled inside it.
+pub(crate) fn create_arriving_ship(u: &mut Universe, game: &mut Game, i: usize) -> Option<ShipId> {
+    if let Some(id) = game.arriving[i].ship {
+        return Some(id);
+    }
+    let t = game.arriving[i].ship_type;
+    let made = match game.arriving[i].entry.clone() {
+        Some(e) => crate::campaign::create_carried_ship(u, &e),
+        None => u.add_ship(t, HUMAN_PLAYER, Vector::ZERO, None),
+    };
+    match made {
+        Ok(id) => {
+            game.arriving[i].ship = Some(id);
+            if game.arriving[i].mothership {
+                if game.level.motherships.is_empty() {
+                    game.level.motherships.push(None);
+                }
+                game.level.motherships[HUMAN_PLAYER] = Some(id);
+            } else if game.arriving[i].clamped_to_mothership {
+                if let Some(ms) = game.arriving.iter().find(|o| o.mothership).and_then(|o| o.ship) {
+                    level::attach_module(u, &mut game.level, id, ms);
+                }
+            }
+            Some(id)
+        }
+        Err(e) => {
+            game.log(LogKind::Warning, format!("{t}: {e}"));
+            game.arriving[i].state = 0;
+            None
         }
     }
 }
@@ -794,30 +1056,8 @@ fn launch_new_ship(u: &mut Universe, game: &mut Game, t: ShipType, host: ShipId,
 fn update_arriving_ship(u: &mut Universe, game: &mut Game, i: usize, sp: [f32; 4]) -> bool {
     let now = u.total_time_elapsed;
     let tw = game.sp_tweaks.clone();
-    if game.arriving[i].ship.is_none() {
-        // The ship re-enters the universe (in the original it kept its identity in the
-        // hyperspace list; here it is created now and gets the next ship number).
-        let t = game.arriving[i].ship_type;
-        match u.add_ship(t, HUMAN_PLAYER, Vector::ZERO, None) {
-            Ok(id) => {
-                game.arriving[i].ship = Some(id);
-                if game.arriving[i].mothership {
-                    if game.level.motherships.is_empty() {
-                        game.level.motherships.push(None);
-                    }
-                    game.level.motherships[HUMAN_PLAYER] = Some(id);
-                } else if game.arriving[i].clamped_to_mothership {
-                    if let Some(ms) = game.arriving.iter().find(|o| o.mothership).and_then(|o| o.ship) {
-                        level::attach_module(u, &mut game.level, id, ms);
-                    }
-                }
-            }
-            Err(e) => {
-                game.log(LogKind::Warning, format!("{t}: {e}"));
-                game.arriving[i].state = 0;
-                return true;
-            }
-        }
+    if game.arriving[i].ship.is_none() && create_arriving_ship(u, game, i).is_none() {
+        return true;
     }
     let a = game.arriving[i].clone();
     let id = a.ship.expect("arriving ship exists");
@@ -908,6 +1148,11 @@ fn update_arriving_ship(u: &mut Universe, game: &mut Game, i: usize, sp: [f32; 4
     }
 }
 
+/// `PutShipOutsideAt` for the campaign's fade-in arrival.
+pub(crate) fn put_ship_outside_at_pub(u: &mut Universe, id: ShipId, p: Vector, yaw: f32) {
+    put_ship_outside_at(u, id, p, yaw);
+}
+
 /// `PutShipOutsideAt`: back in the universe at `p` with the default orientation turned by `yaw`.
 fn put_ship_outside_at(u: &mut Universe, id: ShipId, p: Vector, yaw: f32) {
     if let Some(s) = u.ships.get_mut(id) {
@@ -916,6 +1161,7 @@ fn put_ship_outside_at(u: &mut Universe, id: ShipId, p: Vector, yaw: f32) {
         s.posinfo.velocity = Vector::ZERO;
         s.rotinfo.coordsys = DEFAULT_SHIP_MATRIX;
     }
+    crate::campaign::bring_outside(u, id);
     level::rotate_yaw(u, id, yaw);
 }
 
@@ -936,48 +1182,53 @@ fn hs_step(u: &mut Universe, game: &mut Game, i: usize, tw: &SpTweaks) {
 /// `hsUpdate` (the hyperspace effect's clip plane and state changes). Returns true when the
 /// collapse ended (the original then deletes the window effect).
 fn hs_update(a: &mut ArrivingShip, tw: &SpTweaks) -> bool {
-    let s = a.hs_state;
+    hs_update_fields(&mut a.hs_state, &mut a.clipt, &mut a.rate, a.hs_flags, tw)
+}
+
+/// [`hs_update`] on the fields themselves (arriving and leaving ships keep them apart).
+pub(crate) fn hs_update_fields(hs_state: &mut u32, clipt: &mut f32, rate: &mut f32, hs_flags: u32, tw: &SpTweaks) -> bool {
+    let s = *hs_state;
     if s == hs_effect::INACTIVE || s == hs_effect::FINISHED {
         return false;
     }
     let limit: f64 = match s {
         hs_effect::POPUP_INTO | hs_effect::POPUP_OUTOF | hs_effect::COLLAPSE_INTO | hs_effect::COLLAPSE_OUTOF => {
-            a.clipt = st(ld(a.clipt) - ld(a.rate) * 2.5);
+            *clipt = st(ld(*clipt) - ld(*rate) * 2.5);
             0.0
         }
         _ => {
-            let k = if 0.0 <= a.clipt {
-                if tw.clipt_pos_thresh <= a.clipt {
+            let k = if 0.0 <= *clipt {
+                if tw.clipt_pos_thresh <= *clipt {
                     tw.clipt_pos_start
                 } else {
                     tw.clipt_pos_scalar
                 }
-            } else if a.clipt <= tw.clipt_neg_thresh {
+            } else if *clipt <= tw.clipt_neg_thresh {
                 tw.clipt_neg_finish
             } else {
                 tw.clipt_neg_scalar
             };
-            a.clipt = st(ld(a.clipt) - ld(st(ld(a.rate) * ld(k))));
+            *clipt = st(ld(*clipt) - ld(st(ld(*rate) * ld(k))));
             -1.0
         }
     };
-    if !(ld(a.clipt) < limit) {
+    if !(ld(*clipt) < limit) {
         return false;
     }
-    if a.hs_flags & 1 != 0 {
-        a.clipt = limit as f32;
+    if hs_flags & 1 != 0 {
+        *clipt = limit as f32;
         return false;
     }
-    a.clipt = 1.0;
+    *clipt = 1.0;
     let mut ended = false;
-    a.hs_state = match s {
+    *hs_state = match s {
         hs_effect::POPUP_INTO => hs_effect::SLICING_INTO,
         hs_effect::POPUP_OUTOF => hs_effect::SLICING_OUTOF,
         hs_effect::SLICING_INTO => hs_effect::COLLAPSE_INTO,
         hs_effect::SLICING_OUTOF => hs_effect::COLLAPSE_OUTOF,
         _ => {
-            a.clipt = -2.0;
-            a.rate = 0.0;
+            *clipt = -2.0;
+            *rate = 0.0;
             ended = true;
             if s == hs_effect::COLLAPSE_INTO {
                 hs_effect::FINISHED
@@ -1000,6 +1251,13 @@ impl DataSource for GameDataSource<'_> {
     fn exists(&self, path: &str) -> bool {
         self.0.contains(path)
     }
+}
+
+/// A NIS the mission asked for (the number in `G_PlayNis` / `G_PlayNislet`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NisRequest {
+    Nis(i32),
+    Nislet(i32),
 }
 
 /// A presentation call made by KAS, recorded as data.
@@ -1055,6 +1313,7 @@ mod tests {
             mothership: false,
             clamped_to_mothership: false,
             docked: Vec::new(),
+            entry: None,
         };
         let mut seen = vec![a.hs_state];
         for _ in 0..1000 {

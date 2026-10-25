@@ -412,6 +412,31 @@ pub fn add_level_mine(u: &mut Universe, position: Vector) -> Option<MissileId> {
     Some(mid)
 }
 
+/// `univAddMissile` (0x53bd20): a free missile of `race`'s missile statics, as the NIS makes
+/// for its `Missile` paths. It has no launcher, owner or target; it belongs to player 0 when
+/// its race is player 0's and to player 1 otherwise, does 48 points of damage as bullet type
+/// 9 and lives 12.26 s. It joins the nearest blob while still at the origin (the caller
+/// places it afterwards, as the original does) and the universe lists. `None` without
+/// missile statics for the race.
+pub fn add_missile(u: &mut Universe, race: ShipRace) -> Option<MissileId> {
+    let statics = u.statics.clone();
+    let mst = statics.missiles.get(race.index()).and_then(Option::as_ref)?;
+    let (mid, number) = next_id(u);
+    let mut m = Missile::blank(mid, race, kind::MISSILE);
+    m.number = number;
+    m.rotinfo.coordsys = Matrix { m: [0.0; 9] };
+    m.travel_dist = st(ld(u.phys_time_elapsed) * ld(mst.header.max_velocity));
+    init_from_statics(&mut m, mst);
+    m.bullet_type = 9;
+    m.total_lifetime = f32::from_bits(0x4144_28f6);
+    let local = u.players.first().map(|p| p.race);
+    m.player = Some(if local == Some(race) { 0 } else { 1.min(u.players.len().saturating_sub(1)) });
+    m.damage = 48.0;
+    u.missiles.insert(m);
+    link(u, mid, None);
+    Some(mid)
+}
+
 /// The per-frame missile loop of `univUpdate`: guidance (missiles or mines), physics, and the
 /// ones whose life is over go on the delete list.
 pub fn update_all(u: &mut Universe) {

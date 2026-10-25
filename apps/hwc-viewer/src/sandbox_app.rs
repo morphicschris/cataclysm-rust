@@ -206,6 +206,7 @@ impl App {
                 "r" => sb.research(),
                 "g" => sb.gather(),
                 "h" => sb.halt(),
+                "j" => sb.hyperspace_button(),
                 "i" => {
                     sb.interpolate = !sb.interpolate;
                     sb.status = format!(

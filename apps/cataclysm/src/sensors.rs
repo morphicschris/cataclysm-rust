@@ -910,7 +910,7 @@ impl Sensors {
                 }
                 match r.kind {
                     hwc_sim::resource::ResourceKind::Asteroid(_) => ASTEROID_COLOR,
-                    hwc_sim::resource::ResourceKind::DustCloud(_) => DUST_COLOR,
+                    hwc_sim::resource::ResourceKind::DustCloud(_) | hwc_sim::resource::ResourceKind::Nebula(_) => DUST_COLOR,
                 }
             };
             if !fog.explored(r.position) {

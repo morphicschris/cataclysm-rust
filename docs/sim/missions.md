@@ -142,6 +142,51 @@ pointers, pings, tutorial flags, `DeleteShipsWhenMissionEnds`. Variables, timers
 `Random` (stream 6), `ThisTeamIs` and the KAS pause are the interpreter's. Anything else falls
 through to `unhandled`, which logs the call (`Unimplemented`) and returns 0.
 
+
+## Campaign: from one mission to the next (`campaign.rs`)
+
+The original keeps the ships that jump as ship objects in `ShipsInHyperspace` while
+`singlePlayerLoadNewLevel` (0x515da0) deletes everything else, resets the universe (keeping the
+game clock and the player structure: RUs, technology, research topics and labs; `suPlayerInit`
+clears the upgrade state that `suPlayerUpdateFromResearch` rebuilds) and loads the next level.
+Here the end of the jump gives a `Carry` (`MissionRun::carry`): the hyperspace list in order with
+what is docked inside each ship (type, offset from the mothership along its heading/right/up
+axes, module flag, colour scheme, tactics, attributes), the player, the clock and the random
+streams. `MissionRun::start_campaign` starts mission N+1 from it: `spWipeUnavailableModulesInHyperspace`
+drops the mission modules the new mission does not have (built modules stay; mission 4 loses the
+docking bay), the fleet modifier is computed from the carried ships and RUs, the level is loaded,
+and the carried ships are created in hyperspace (out of the universe lists) so that the mission's
+start finds the player's mothership. `Carry::to_text`/`from_text` is the file form
+(`hwc-viewer --carry`), `Carry::warp` the `warp.script` fleet for starting at any mission.
+
+The jump (`singlePlayerGameUpdate` states 2-5, `HyperspaceRollCallBegin`): allowed once the mission
+creates its "Hyperspace" objective (`objectiveAndFleetIntelligenceCreate` sets 0xaaf94c) or with the
+debug override (the original's C key, `MissionRun::force_hyperspace`), not while a ship is under
+construction. Missions 1, 2, 5, 7, 15, 17 (table 0x88a35c) have no roll call: after 5 s every ship
+that can dock docks instantly (`clDock` purpose 9) and the capital ships and modules go straight
+into hyperspace. The others order the small ships to dock and wait for the roll call
+(`CalculateRollCall`, `OrientHyperspacingShips`: capital ships fly to within `HYPERSPACE_RANGE` and
+turn to the mothership's heading; `hyperspace_go_now`, `emergency_hyperspace` are the two buttons),
+then 2.5 s, then each ship goes through its window (`UpdateHyperspacingShip`). State 5 is the
+whiteout and the between-missions movie (not played), then ships marked by
+`DeleteShipsWhenMissionEnds` are wiped. Arrival: missions with table 0x88a3a8 set (4, 5, 6, ...)
+fade the whole fleet in at the start point and put docked ships outside at once
+(`spLaunchDockedShipsOnArrival`); the others use `UpdateArrivingShip` per ship and then
+`clAutoLaunch` with the auto-launch the player had.
+
+Mid-level hyperspace (`TeamHyperspaceOut/In/InNear`, `ShipsHyperspaceOut/In/InDefault`,
+`ShipsCreateHyperspace`, `HyperspaceDelay`): `spHyperspaceSelectionOut/In` and
+`UpdateMidLevelHyperspacingShips`; ships marked to start in hyperspace (attribute 0x80) go at once.
+
+Headless: `cargo run --release -p hwc-sim --example campaign -- <install> [--from N] [--to M]
+[--budget S] [--carry-dir DIR] [--log]`; the scripted test orders are `hwc_sim::autoplay`.
+Viewer: `hwc-viewer <install> --mission N [--carry FILE] [--save-carry FILE] [--autoplay
+[--budget S]]` (J is the hyperspace button / roll call "go now").
+
+Known differences: the military parade is not modelled (ships keep their offsets as they are when
+the jump starts; warp fleets are lined up beside the mothership); carried ships get new ship
+numbers when the level loads; NIS levels between missions and the movies are not played.
+
 ## Known differences from the original
 
 * NIS and NISlets are not played (the completion variables are set; `--nislet` delays them).

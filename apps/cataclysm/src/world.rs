@@ -406,7 +406,7 @@ impl World {
             .iter()
             .filter_map(|r| match r.kind {
                 ResourceKind::Asteroid(k) => Some(k),
-                ResourceKind::DustCloud(_) => None,
+                ResourceKind::DustCloud(_) | ResourceKind::Nebula(_) => None,
             })
             .collect();
         for k in kinds {
@@ -439,7 +439,7 @@ impl World {
             .iter()
             .all(|r| match r.kind {
                 ResourceKind::Asteroid(k) => self.resource_art.contains_key(&k),
-                ResourceKind::DustCloud(_) => true,
+                ResourceKind::DustCloud(_) | ResourceKind::Nebula(_) => true,
             })
     }
 
@@ -1212,7 +1212,7 @@ impl World {
                 .and_then(|a| a.as_ref())
                 .and_then(|a| a.gpu.as_ref())
                 .map_or(50.0, |g| g.bounds().1),
-            ResourceKind::DustCloud(_) => 200.0,
+            ResourceKind::DustCloud(_) | ResourceKind::Nebula(_) => 200.0,
         }
     }
 

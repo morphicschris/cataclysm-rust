@@ -32,6 +32,8 @@ pub enum ResourceKind {
     Asteroid(u8),
     /// Dust cloud of type 0..3.
     DustCloud(u8),
+    /// A nebula chunk (`OBJ_NebulaType`, type 0), see [`crate::nebula`].
+    Nebula(u8),
 }
 
 /// A resource object (`Resource` / `Asteroid` / `DustCloud`, 0x1b4 bytes).
@@ -98,6 +100,7 @@ pub fn info(u: &Universe, kind: ResourceKind) -> Option<&ResourceInfo> {
     match kind {
         ResourceKind::Asteroid(t) => u.statics.asteroids.get(t as usize)?.as_ref().map(|a| &a.info),
         ResourceKind::DustCloud(t) => u.statics.dust_clouds.get(t as usize)?.as_ref().map(|a| &a.info),
+        ResourceKind::Nebula(t) => u.statics.nebulae.get(t as usize)?.as_ref().map(|a| &a.info),
     }
 }
 
@@ -133,7 +136,7 @@ pub fn add_resource(u: &mut Universe, kind: ResourceKind, position: Vector) -> O
         // The smallest asteroids are minor objects (`SOF_...4`, kept out of the blobs).
         ResourceKind::Asteroid(0) => 0x0010_4007,
         ResourceKind::Asteroid(_) => 0x0010_4003,
-        ResourceKind::DustCloud(_) => 0x0018_4003,
+        ResourceKind::DustCloud(_) | ResourceKind::Nebula(_) => 0x0018_4003,
     };
     let r = Resource {
         id,
@@ -169,6 +172,7 @@ pub fn update_all_pos_vel(u: &mut Universe) {
         let stat = match kind {
             ResourceKind::Asteroid(t) => statics.asteroids.get(t as usize).and_then(|a| a.as_ref()).map(|a| a.info.clone()),
             ResourceKind::DustCloud(t) => statics.dust_clouds.get(t as usize).and_then(|a| a.as_ref()).map(|a| a.info.clone()),
+            ResourceKind::Nebula(t) => statics.nebulae.get(t as usize).and_then(|a| a.as_ref()).map(|a| a.info.clone()),
         };
         let r = &mut u.base.resources.list[i];
         if r.flags & 0x84 == 0 {
@@ -546,6 +550,11 @@ pub fn collect_resources(u: &mut Universe, ship: ShipId, r: ResourceId) -> bool 
         let f = st(ld(rr.resource_value as f32) / ld(ri.resource_value as f32));
         rr.scale = f.min(1.0);
     }
+    if let (ResourceKind::Nebula(_), Some(ri)) = (rr.kind, rinfo.as_ref()) {
+        // HandleNebulaScaling: the attached tendrils fade with the units left.
+        let f = st(ld(rr.resource_value as f32) / ld(ri.resource_value as f32));
+        crate::nebula::fade_attached_tendrils(u, r, f);
+    }
     true
 }
 
@@ -627,6 +636,7 @@ fn worker_update_beam(u: &mut Universe, ship: ShipId, res: Option<ResourceId>) {
                     s.base.harvest_state = match r.kind {
                         ResourceKind::Asteroid(_) => 4,
                         ResourceKind::DustCloud(_) => 5,
+                        ResourceKind::Nebula(_) => 6,
                     };
                     s.base.harvest_effect = true;
                     if matches!(r.kind, ResourceKind::Asteroid(_)) {
@@ -747,6 +757,10 @@ fn resourcer_harvests(u: &mut Universe, ship: ShipId, res: Option<ResourceId>) {
 pub fn delete_dead_resources(u: &mut Universe) {
     let dead = std::mem::take(&mut u.base.resources.dead);
     for r in dead {
+        if u.base.resources.get(r).is_some_and(|x| matches!(x.kind, ResourceKind::Nebula(_))) {
+            // univFreeResourceContents: the chunk's tendrils go out.
+            crate::nebula::delete_chunk(u, r);
+        }
         u.base.resources.list.retain(|x| x.id != r);
         let todo = u.commands.todo.clone();
         for c in todo {
@@ -761,6 +775,36 @@ pub fn delete_dead_resources(u: &mut Universe) {
             }
         }
     }
+}
+
+/// `univReallyDeleteThisResourceRightNow` (0x5440f0): the resource leaves the universe at once,
+/// with no death effect and without waiting for [`delete_dead_resources`] (`nisStop` deletes
+/// the asteroids of an NIS this way). Commands harvesting it forget it first
+/// (`clResourceDied`), then it leaves the resource list and the render list.
+///
+/// The other references the original clears (bullets and missiles aimed at or owned by the
+/// resource, ramming frigates, KAS target lists, the sensors manager and pings) only ever
+/// name ships here, so there is nothing to clear; effects owned by the resource are detached
+/// by the next [`effects::sync_owners`]. It is also taken off the dead list, should it be on
+/// it, so it is not deleted twice.
+pub fn really_delete_resource(u: &mut Universe, id: ResourceId) {
+    if u.base.resources.get(id).is_none() {
+        return;
+    }
+    let todo = u.commands.todo.clone();
+    for c in todo {
+        let harvesting = u.commands.get(c).is_some_and(|cmd| cmd.collect.resource == Some(id));
+        if harvesting && u.commands.get(c).is_some_and(|cmd| cmd.order == order::COLLECT_RESOURCE) {
+            turn_off_any_resourcing_effects(u, c);
+        }
+        if let Some(cmd) = u.commands.get_mut(c) {
+            if cmd.collect.resource == Some(id) {
+                cmd.collect.resource = None;
+            }
+        }
+    }
+    u.base.resources.list.retain(|r| r.id != id);
+    u.base.resources.dead.retain(|&r| r != id);
 }
 
 // -------------------------------------------------------------------------------- effects

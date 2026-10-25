@@ -22,6 +22,10 @@ use crate::object::{sof, special, ShipId};
 use crate::statics::{ShipRace, ShipType};
 use crate::universe::Universe;
 
+mod ai_ui;
+mod orders;
+mod select;
+
 /// Flags that keep a ship out of `FindShipsInside` (`SOF_Hide | SOF_Dead`).
 const HIDDEN_OR_DEAD: u32 = sof::HIDE | sof::DEAD;
 /// `kasfSpawnEffect` (0x4932d0): the named effect on every ship of the selection, attached
@@ -228,6 +232,10 @@ impl SimHost<'_> {
 }
 
 impl KasRuntime for SimHost<'_> {
+    select::select_methods!();
+    orders::orders_methods!();
+    ai_ui::ai_ui_methods!();
+
     fn unhandled(&mut self, cx: &Cx, func: FuncId) -> i32 {
         let team = cx.team.map(|t| self.g.name(t)).unwrap_or_else(|| "-".into());
         self.log(LogKind::Unimplemented, format!("{} (team {team})", func.name()));
@@ -735,6 +743,102 @@ impl KasRuntime for SimHost<'_> {
 
     // ---- game state --------------------------------------------------------------------
 
+    // ---- mid-level hyperspace -----------------------------------------------------------
+
+    fn team_hyperspace_out(&mut self, cx: &Cx) {
+        if cx.team.is_none() {
+            return;
+        }
+        let sel = crate::campaign::filter_disabled(self.u, &self.team_ships(cx));
+        command::remove_ships_from_doing_stuff(self.u, &sel);
+        crate::campaign::hyperspace_selection_out(self.u, self.g, &sel);
+        self.g.hyper.kas_delay = 0.0;
+    }
+
+    fn ships_hyperspace_out(&mut self, _cx: &Cx, ships: Ships) {
+        let v = self.ships(ships);
+        if v.is_empty() {
+            return;
+        }
+        let sel = crate::campaign::filter_disabled(self.u, &v);
+        command::remove_ships_from_doing_stuff(self.u, &sel);
+        crate::campaign::hyperspace_selection_out(self.u, self.g, &sel);
+        self.g.hyper.kas_delay = 0.0;
+    }
+
+    fn team_hyperspace_in(&mut self, cx: &Cx, destination: Point) {
+        if cx.team.is_none() {
+            return;
+        }
+        let d = self.point4(destination).unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        let sel = self.team_ships(cx);
+        crate::campaign::hyperspace_selection_in(self.u, self.g, &sel, d);
+        self.g.hyper.kas_delay = 0.0;
+    }
+
+    fn team_hyperspace_in_near(&mut self, cx: &Cx, destination: Point, distance: i32) {
+        if cx.team.is_none() {
+            return;
+        }
+        let near = self.point(destination).unwrap_or(Vector::ZERO);
+        let draws = [self.u.randy.random(6), self.u.randy.random(6), self.u.randy.random(6)];
+        let p = orders::random_standoff(draws, near, st(fild_i32(distance)));
+        let mut d = [p.x, p.y, p.z, 1.0];
+        orders::clamp_to_world(&mut d, self.u.world_bounds);
+        let sel = self.team_ships(cx);
+        crate::campaign::hyperspace_selection_in(self.u, self.g, &sel, d);
+        self.g.hyper.kas_delay = 0.0;
+    }
+
+    fn ships_hyperspace_in(&mut self, _cx: &Cx, ships: Ships, point: Point) {
+        let v = self.ships(ships);
+        if v.is_empty() {
+            return;
+        }
+        let d = self.point4(point).unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        crate::campaign::hyperspace_selection_in(self.u, self.g, &v, d);
+        self.g.hyper.kas_delay = 0.0;
+    }
+
+    fn ships_hyperspace_in_default(&mut self, _cx: &Cx, ships: Ships) {
+        // Each ship comes back where it is (its position when it left).
+        for id in self.ships(ships) {
+            let Some(p) = self.pos(id) else { continue };
+            crate::campaign::hyperspace_selection_in(self.u, self.g, &[id], [p.x, p.y, p.z, 1.0]);
+            self.g.hyper.kas_delay = 0.0;
+        }
+    }
+
+    fn ships_create_hyperspace(&mut self, cx: &Cx, created_ships: Ships, shiptype: Str<'_>, count: i32, dest: Point, owner: i32) {
+        // kasfShipsCreateHyperspace: create, mark to start in hyperspace, send to hyperspace
+        // (at once, because of the mark) and bring in at `dest`.
+        self.ships_create(cx, created_ships, shiptype, count, owner);
+        let v = self.ships(created_ships);
+        for &id in &v {
+            if let Some(s) = self.u.ships.get_mut(id) {
+                s.attributes |= crate::campaign::START_IN_HYPERSPACE;
+            }
+        }
+        if !v.is_empty() {
+            let sel = crate::campaign::filter_disabled(self.u, &v);
+            command::remove_ships_from_doing_stuff(self.u, &sel);
+            crate::campaign::hyperspace_selection_out(self.u, self.g, &sel);
+            self.g.hyper.kas_delay = 0.0;
+            let d = self.point4(dest).unwrap_or([0.0, 0.0, 0.0, 1.0]);
+            crate::campaign::hyperspace_selection_in(self.u, self.g, &v, d);
+            self.g.hyper.kas_delay = 0.0;
+        }
+        for &id in &v {
+            if let Some(s) = self.u.ships.get_mut(id) {
+                s.attributes &= !crate::campaign::START_IN_HYPERSPACE;
+            }
+        }
+    }
+
+    fn hyperspace_delay(&mut self, _cx: &Cx, milliseconds: i32) {
+        self.g.hyper.kas_delay = st(fild_i32(milliseconds) * 0.001);
+    }
+
     fn start_level_by_hyperspacing_ships(&mut self, _cx: &Cx) {
         mission::begin_arrival(self.g);
     }
@@ -755,7 +859,15 @@ impl KasRuntime for SimHost<'_> {
                 self.g.resource_units.resize(p + 1, 0);
             }
             self.g.resource_units[p] = r_us;
+            // kasfRUsSet writes the player's resourceUnits.
+            if let Some(pl) = self.u.base.players.get_mut(p) {
+                pl.resource_units = r_us;
+            }
         }
+    }
+
+    fn r_us_get(&mut self, _cx: &Cx, player: i32) -> i32 {
+        usize::try_from(player).ok().and_then(|p| self.u.base.players.get(p)).map_or(0, |p| p.resource_units)
     }
 
     fn get_world_resources(&mut self, _cx: &Cx) -> i32 {
@@ -807,6 +919,14 @@ impl KasRuntime for SimHost<'_> {
         let mut full = Self::str_text(full_text);
         if full.is_empty() {
             full = brief.clone();
+        }
+        // objectiveAndFleetIntelligenceCreate: a label that exists is not created again; the
+        // "hyperspace" objective is what makes the hyperspace button work (0xaaf94c).
+        if self.g.objectives.iter().any(|o| o.label.eq_ignore_ascii_case(&label)) {
+            return;
+        }
+        if label.eq_ignore_ascii_case("hyperspace") {
+            self.g.hyper.player_can_hyperspace = true;
         }
         self.log(LogKind::Objective, format!("ObjectiveCreate {label:?}: {brief}"));
         self.g.objectives.push(Objective { label, brief, full, primary: true, complete: false });

@@ -1482,6 +1482,29 @@ impl EffectRenderer {
         );
     }
 
+    /// [`prepare_lens_flares`](Self::prepare_lens_flares) with the NIS sun flare after the
+    /// particle flares while an NIS plays (`nisStart` lists it; see
+    /// [`crate::nis_sun::NisSunFlare`]).
+    pub fn prepare_lens_flares_with_nis_sun(
+        &mut self,
+        flares: &mut [LensFlare],
+        sun: Option<&mut crate::nis_sun::NisSunFlare>,
+        view: &FxView,
+        occluded: Option<&dyn Fn(Vec3, Vec3, f32) -> bool>,
+    ) {
+        let Some(set) = &self.flare_set else { return };
+        crate::nis_sun::lens_flare_pass_with_nis_sun(
+            flares,
+            &mut self.flare_states,
+            sun,
+            set,
+            self.flare_texture,
+            view,
+            occluded,
+            &mut self.frame,
+        );
+    }
+
     /// The geometry prepared for this frame.
     pub fn frame(&self) -> &FxFrameData {
         &self.frame

@@ -118,6 +118,10 @@ pub struct OrbitCamera {
     pub ignore_zoom: bool,
     /// Mouse sensitivity multiplier (1.0 at the default options setting).
     pub mouse_sens: f32,
+    /// `Camera.upvector` (+0x34) when it is not world +z: the NIS camera's bank
+    /// (`nisCamPathUpdate` sets it from the camera path's orientation; the view is
+    /// `gluLookAt(eye, lookat, upvector)`). `None` for the game camera, whose up is +z.
+    pub up_vector: Option<Vec3>,
 }
 
 impl OrbitCamera {
@@ -133,6 +137,7 @@ impl OrbitCamera {
             farthest_zoom: tweaks.max_zoomout_distance,
             ignore_zoom: false,
             mouse_sens: 1.0,
+            up_vector: None,
         }
     }
 
@@ -159,8 +164,30 @@ impl OrbitCamera {
         self.look_at + Vec3::new(d * cd * ca, d * cd * sa, -d * sd)
     }
 
+    /// The view's up direction: [`up_vector`](Self::up_vector), else world +z.
     pub fn up(&self) -> Vec3 {
-        Vec3::Z
+        self.up_vector.unwrap_or(Vec3::Z)
+    }
+
+    /// Places the camera at `eye` looking at `look_at` (distance, angle and declination are
+    /// derived; the declination is not clamped), with `up` as the view's up direction (`None`
+    /// for +z). This is how the NIS camera (`nisCamPathUpdate`: eye, look-at point and up
+    /// vector) drives the view. Does nothing when `eye` and `look_at` (nearly) coincide or
+    /// are not finite.
+    pub fn set_eye_look_up(&mut self, eye: Vec3, look_at: Vec3, up: Option<Vec3>) {
+        let d = eye - look_at;
+        let dist = d.length();
+        if !dist.is_finite() || dist <= 1e-3 {
+            return;
+        }
+        self.look_at = look_at;
+        self.distance = dist;
+        self.angle = d.y.atan2(d.x);
+        if self.angle < 0.0 {
+            self.angle += TAU;
+        }
+        self.declination = (-d.z / dist).clamp(-1.0, 1.0).asin();
+        self.up_vector = up.filter(|v| v.is_finite() && v.length_squared() > 0.0);
     }
 
     pub fn rotate_angle(&mut self, radians: f32) {
@@ -290,6 +317,31 @@ mod tests {
         c.ignore_zoom = true;
         c.zoom(0.5);
         assert_eq!(c.distance, 150.0);
+    }
+
+    #[test]
+    fn explicit_up_vector_banks_the_view() {
+        let mut c = OrbitCamera::new(CameraTweaks::default(), 100.0);
+        let eye = Vec3::new(100.0, 0.0, 0.0);
+        c.set_eye_look_up(eye, Vec3::ZERO, None);
+        assert!((c.eye() - eye).length() < 1e-3);
+        assert_eq!(c.up(), Vec3::Z);
+        // Banked 90 degrees: the world's +y is the picture's up.
+        c.set_eye_look_up(eye, Vec3::ZERO, Some(Vec3::Y));
+        let v = c.view();
+        let up_in_view = v.transform_vector3(Vec3::Y);
+        assert!((up_in_view - Vec3::Y).length() < 1e-5);
+        let z_in_view = v.transform_vector3(Vec3::Z);
+        assert!(z_in_view.y.abs() < 1e-5);
+        // The sky rotation banks the same way.
+        let r = c.view_rotation().transform_vector3(Vec3::Y);
+        assert!((r - Vec3::Y).length() < 1e-5);
+        // A zero or non-finite up falls back to +z; coinciding points change nothing.
+        c.set_eye_look_up(eye, Vec3::ZERO, Some(Vec3::ZERO));
+        assert_eq!(c.up(), Vec3::Z);
+        let before = c;
+        c.set_eye_look_up(Vec3::ONE, Vec3::ONE, Some(Vec3::X));
+        assert_eq!(c, before);
     }
 
     #[test]

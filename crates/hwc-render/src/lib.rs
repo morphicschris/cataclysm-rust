@@ -20,6 +20,8 @@ pub mod gpu;
 pub mod lighting;
 pub mod lod;
 pub mod mesh;
+pub mod nebula;
+pub mod nis_sun;
 pub mod render_state;
 pub mod tga;
 pub mod trails;
@@ -37,6 +39,8 @@ pub use gpu::{
 pub use lighting::SceneLighting;
 pub use lod::{LodSelector, LodTable};
 pub use mesh::{mesh_to_world, Skeleton};
+pub use nebula::NebulaRenderer;
+pub use nis_sun::NisSunFlare;
 pub use render_state::ShipRenderState;
 
 pub use wgpu;

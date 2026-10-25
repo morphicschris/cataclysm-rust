@@ -65,6 +65,8 @@ use crate::overlay::Overlay;
 use crate::sim::Sim;
 use crate::text::TextFont;
 
+mod nebula_view;
+
 const SELECT_COLOR: [f32; 4] = [0.2, 1.0, 0.3, 0.9];
 const BOX_COLOR: [f32; 4] = [0.4, 0.9, 1.0, 0.8];
 const PLATE_COLOR: [f32; 4] = [0.3, 0.6, 1.0, 0.55];
@@ -102,7 +104,7 @@ const ACTION_NOTE_SECONDS: f64 = 4.0;
 /// How long the key hint shows after a mission starts (seconds of real time).
 const KEY_HINT_SECONDS: f64 = 30.0;
 /// The quick keys of mission mode (the real managers are in `hwc-ui` / the game).
-pub const MISSION_KEY_HINT: &str = "keys: click/drag select, M move, A attack, G harvest, H halt, F formation, B queue a ship, R start research, L launch, U auto-launch, C focus, Space pause";
+pub const MISSION_KEY_HINT: &str = "keys: click/drag select, M move, A attack, G harvest, H halt, F formation, B queue a ship, R start research, L launch, U auto-launch, C focus, J hyperspace, Space pause";
 /// One universe update in seconds.
 const TICK: f32 = 1.0 / 16.0;
 /// How long notes and location cards stay up (game seconds).
@@ -260,8 +262,15 @@ pub struct Sandbox {
     /// The simulation runs the original's effects (see the module notes).
     effects_on: bool,
     fx_renderer: Option<hwc_render::EffectRenderer>,
+    neb_renderer: Option<hwc_render::NebulaRenderer>,
     resource_art: BTreeMap<u8, Option<ResourceArt>>,
     pub audio: Option<Audio>,
+    /// Scripted test orders playing the mission (`--autoplay`).
+    pub autoplay: Option<hwc_sim::autoplay::Autoplay>,
+    /// Where to write the carry-over once the fleet has jumped (`--save-carry`), and whether
+    /// it was written.
+    pub save_carry: Option<String>,
+    carry_saved: bool,
     hud: MissionHud,
     font: Option<TextFont>,
     small_font: Option<TextFont>,
@@ -364,8 +373,12 @@ impl Sandbox {
             effects: Vec::new(),
             effects_on: false,
             fx_renderer: None,
+            neb_renderer: None,
             resource_art: BTreeMap::new(),
             audio: None,
+            autoplay: None,
+            save_carry: None,
+            carry_saved: false,
             hud: MissionHud::default(),
             font,
             small_font,
@@ -485,7 +498,7 @@ impl Sandbox {
             .iter()
             .filter_map(|r| match r.kind {
                 ResourceKind::Asteroid(k) => Some(k),
-                ResourceKind::DustCloud(_) => None,
+                ResourceKind::DustCloud(_) | ResourceKind::Nebula(_) => None,
             })
             .collect();
         for k in kinds {
@@ -506,7 +519,7 @@ impl Sandbox {
     fn resource_kinds_loaded(&self) -> bool {
         self.universe().base.resources.list.iter().all(|r| match r.kind {
             ResourceKind::Asteroid(k) => self.resource_art.contains_key(&k),
-            ResourceKind::DustCloud(_) => true,
+            ResourceKind::DustCloud(_) | ResourceKind::Nebula(_) => true,
         })
     }
 
@@ -588,7 +601,12 @@ impl Sandbox {
     /// follows it at the simulation rate: effects, sounds, mission cues, animations and trails.
     pub fn step(&mut self) {
         self.snapshot();
+        nebula_view::set_camera(self.sim.universe_mut(), &self.camera);
+        if let (Some(ap), Some(run)) = (self.autoplay.as_mut(), self.sim.mission_mut()) {
+            ap.tick(run);
+        }
         self.sim.step();
+        self.write_carry_when_done();
         // Ships built or arriving since the last update need their art.
         if let Err(e) = self.load_art() {
             eprintln!("warning: {e}");
@@ -724,19 +742,51 @@ impl Sandbox {
         }
     }
 
-    /// Hyperspace effect state of each arriving ship (mission only): `(state, clipt)`.
+    /// Hyperspace effect state of each ship arriving or leaving (mission only):
+    /// `(state, clipt)`.
     fn hyperspace(&self) -> BTreeMap<ShipId, (u32, f32)> {
         self.sim
             .mission()
             .map(|m| {
-                m.game
-                    .arriving
-                    .iter()
-                    .filter(|a| a.hs_state != hs_effect::INACTIVE)
-                    .filter_map(|a| Some((a.ship?, (a.hs_state, a.clipt))))
+                m.hyperspace_windows()
+                    .into_iter()
+                    .map(|(id, state, clipt)| (id, (state, clipt)))
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// The hyperspace button (J): the jump when the mission offers it, or the roll call's
+    /// "go now" while it is up.
+    pub fn hyperspace_button(&mut self) {
+        let Some(run) = self.sim.mission_mut() else { return };
+        let note = if run.game.sp_state == hwc_sim::mission::sp_state::WAITING_ROLLCALL {
+            if run.hyperspace_go_now() {
+                "roll call: go now".to_string()
+            } else {
+                "hyperspace under way".to_string()
+            }
+        } else {
+            match run.hyperspace_button() {
+                Ok(()) => "hyperspace".to_string(),
+                Err(e) => format!("hyperspace refused: {e:?}"),
+            }
+        };
+        self.status = note;
+    }
+
+    /// Writes the carry-over file once the mission's fleet is in hyperspace.
+    fn write_carry_when_done(&mut self) {
+        if self.carry_saved {
+            return;
+        }
+        let Some(path) = self.save_carry.clone() else { return };
+        let Some(c) = self.sim.mission().and_then(|m| m.carry()) else { return };
+        match std::fs::write(&path, c.to_text()) {
+            Ok(()) => println!("mission {} complete: carry-over written to {path}", c.mission),
+            Err(e) => eprintln!("{path}: {e}"),
+        }
+        self.carry_saved = true;
     }
 
     /// Animations triggered by the simulation's state, and the trail ring update, once per tick.
@@ -1186,6 +1236,11 @@ impl Sandbox {
                 fx.draw(renderer, encoder, color, depth);
             }
         }
+        if nebula_view::prepare(&mut self.neb_renderer, renderer, self.sim.universe(), &self.camera, size) {
+            if let Some(n) = self.neb_renderer.as_mut() {
+                n.draw(renderer, encoder, color, depth);
+            }
+        }
     }
 
     /// Renders a prepared frame offscreen.
@@ -1196,6 +1251,8 @@ impl Sandbox {
         frame: &Frame,
     ) -> Result<Vec<u8>, String> {
         let effects = self.prepare_effects(renderer, (target.width, target.height), frame);
+        let nebulae = nebula_view::prepare(&mut self.neb_renderer, renderer, self.sim.universe(), &self.camera, (target.width, target.height));
+        let mut neb = self.neb_renderer.take();
         let mut fx = self.fx_renderer.take();
         let out = {
             let (ships, states) = self.instances(frame);
@@ -1208,9 +1265,13 @@ impl Sandbox {
                 if let Some(fx) = fx.as_mut().filter(|_| effects) {
                     fx.draw(r, enc, c, d);
                 }
+                if let Some(n) = neb.as_mut().filter(|_| nebulae) {
+                    n.draw(r, enc, c, d);
+                }
             })
         };
         self.fx_renderer = fx;
+        self.neb_renderer = neb;
         out
     }
 
@@ -2078,7 +2139,7 @@ mod tests {
             return;
         };
         let assets = GameAssets::open(std::path::Path::new(&dir)).unwrap();
-        let run = crate::mission::start(&assets, 1, 2).unwrap();
+        let run = crate::mission::start(&assets, 1, 2, None).unwrap();
         let mut sb = Sandbox::mission(assets, run, false).unwrap();
         let mut checked = false;
         while sb.universe().update_counter < 400 && !checked {
@@ -2141,7 +2202,7 @@ mod tests {
         let Ok(audio) = assets.reopen().and_then(|gd| Audio::new(gd, true, false)) else {
             return;
         };
-        let run = crate::mission::start(&assets, 1, 2).unwrap();
+        let run = crate::mission::start(&assets, 1, 2, None).unwrap();
         let mut sb = Sandbox::mission(assets, run, false).unwrap();
         sb.audio = Some(audio);
         let Ok((device, queue)) = hwc_render::headless_device() else {

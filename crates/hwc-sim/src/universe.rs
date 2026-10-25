@@ -187,6 +187,8 @@ pub struct Universe {
     /// The effect system (see [`crate::effects`]); `None`: no effects, and dead ships leave at
     /// once.
     pub effects: Option<Box<crate::effects::Effects>>,
+    /// The level's nebulae (`nebNebulae`, see [`crate::nebula`]).
+    pub nebulae: crate::nebula::Nebulae,
 }
 
 impl Universe {
@@ -236,6 +238,7 @@ impl Universe {
             shockwaves: Default::default(),
             hulks: Vec::new(),
             effects: None,
+            nebulae: Default::default(),
         };
         crate::base::init(&mut u);
         u
@@ -295,6 +298,8 @@ impl Universe {
             }
         }
 
+        // Nebula fog and chunk wobble (`nebSetFog`).
+        crate::nebula::set_fog(self);
         // Build manager and research.
         crate::base::after_blobs(self);
         hooks.before_bullet_collisions(self);

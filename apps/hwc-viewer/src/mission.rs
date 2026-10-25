@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use hwc_sim::campaign::Carry;
 use hwc_sim::level::LevelState;
 use hwc_sim::mission::{
     load_kas_mission, mission_script_name, LogKind, MissionConfig, MissionRun,
@@ -152,8 +153,9 @@ pub fn level_presentation(level: &LevelState) -> (Option<String>, Option<String>
     (find("Background"), find("Lighting"))
 }
 
-/// Starts mission `n` with call logging on (the cue reader needs it).
-pub fn start(assets: &GameAssets, n: u32, skill: i32) -> Result<MissionRun, String> {
+/// Starts mission `n` with call logging on (the cue reader needs it). Missions after the
+/// first need the fleet of the one before: the carry-over file, or else the `warp.script` fleet.
+pub fn start(assets: &GameAssets, n: u32, skill: i32, carry: Option<&str>) -> Result<MissionRun, String> {
     let name = mission_script_name(n);
     let script = load_kas_mission(&assets.data, &name).map_err(|e| e.to_string())?;
     let options = LoadOptions {
@@ -165,7 +167,22 @@ pub fn start(assets: &GameAssets, n: u32, skill: i32) -> Result<MissionRun, Stri
     let mut config = MissionConfig::new(n);
     config.skill = skill;
     config.log_calls = true;
-    MissionRun::start(statics, tweaks, assets, script, config).map_err(|e| e.to_string())
+    let carry = match carry {
+        Some(f) => {
+            let text = std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?;
+            Some(Carry::from_text(&text, statics.clone(), tweaks.clone()).map_err(|e| format!("{f}: {e}"))?)
+        }
+        None if n > 1 => Some(
+            Carry::warp(statics.clone(), tweaks.clone(), assets, n)
+                .ok_or_else(|| format!("mission {n}: no --carry file and no warp.script fleet"))?,
+        ),
+        None => None,
+    };
+    match carry {
+        Some(c) => MissionRun::start_campaign(statics, tweaks, assets, script, config, &c),
+        None => MissionRun::start(statics, tweaks, assets, script, config),
+    }
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

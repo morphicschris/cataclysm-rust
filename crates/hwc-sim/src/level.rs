@@ -410,6 +410,8 @@ fn resource_obj_type(s: &str) -> Option<u32> {
         Some(4)
     } else if s.eq_ignore_ascii_case("DustCloud") {
         Some(5)
+    } else if s.eq_ignore_ascii_case("Nebula") {
+        Some(3)
     } else {
         None
     }
@@ -1032,6 +1034,10 @@ fn resources_line(u: &mut Universe, src: &dyn DataSource, dir: &str, field: &str
         VolumeShape::Cylinder
     } else if layout.eq_ignore_ascii_case("Rectangle") {
         VolumeShape::Rectangle
+    } else if layout.eq_ignore_ascii_case("Nebula") {
+        // nebGo over (radius, length, roty) with 10000 chunks and `number` tendrils.
+        crate::nebula::neb_go(u, src, centre, Vector::new(radius, length, roty), crate::nebula::LEVEL_CHUNKS, number.max(0) as u32, attributes);
+        return;
     } else {
         state.unmodelled.push(("Resources".into(), field.to_string()));
         return;

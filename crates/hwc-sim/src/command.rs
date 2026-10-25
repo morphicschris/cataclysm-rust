@@ -2009,6 +2009,36 @@ pub(crate) fn remove_ship_from_being_targeted(u: &mut Universe, dead: ShipId) {
     }
 }
 
+/// `shipHasJustDisappeared` (`RemoveShipFromBeingTargeted` with flag 8): the ship left the
+/// universe (into hyperspace); attack and special orders drop it as a target whoever sees it,
+/// while docking with it and launches from it carry on.
+pub fn ship_has_just_disappeared(u: &mut Universe, gone: ShipId) {
+    let todo = u.commands.todo.clone();
+    for cid in todo {
+        let Some(c) = u.commands.get_mut(cid) else { continue };
+        if (c.attributes & attr::PASSIVE_ATTACKING != 0 || c.order == order::ATTACK) && remove_from_selection(&mut c.attack_targets, gone) {
+            let sel = c.selection.clone();
+            for id in sel {
+                let s = u.ships.ship_mut(id);
+                if s.attack.target == Some(gone) {
+                    s.attack.events |= crate::object::attack_event::ENEMY_TARGET_DIED;
+                    s.attack.target = None;
+                }
+            }
+        }
+        let c = u.commands.get_mut(cid).expect("command");
+        if c.order == order::SPECIAL && remove_from_selection(&mut c.special_targets, gone) {
+            let sel = c.selection.clone();
+            for id in sel {
+                if u.ships.get(id).is_some_and(|s| s.base.salvage.target == Some(gone)) {
+                    u.ships.ship_mut(id).base.salvage.dock_point = None;
+                    crate::salvage::reset(u, id);
+                }
+            }
+        }
+    }
+}
+
 /// `RemoveShipFromBeingTargeted` with the cloaking flag (`shipHasJustCloaked`): commands of
 /// players that no longer see the ship drop it as a target.
 pub fn remove_invisible_target(u: &mut Universe, gone: ShipId) {

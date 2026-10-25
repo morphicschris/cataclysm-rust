@@ -64,6 +64,12 @@ of an install, because the mission script comes from cataclysm.exe):
   the mission runs live with the sandbox controls for the player's ships; objectives,
   subtitles and skipped NIS sequences are shown as overlay text
   --skill <0-2>           difficulty (default 2)
+  --carry <file>          the fleet from the previous mission (written by --save-carry or the
+                          hwc-sim campaign example); without it missions after 1 start with
+                          the warp.script fleet
+  --save-carry <file>     write the carry-over once the fleet has jumped (J = hyperspace)
+  --autoplay              scripted test orders play the mission and press hyperspace
+    --budget <s>          seconds after the fleet arrives before autoplay forces the jump
   --shots <names>         with --screenshot: images when these first happen: arrival,
                           launch, combat, subtitle, objective, asteroids (within --ticks max,
                           default 4000)
@@ -98,6 +104,14 @@ struct Options {
     follow: bool,
     mission: Option<u32>,
     skill: i32,
+    /// `--carry FILE`: the fleet carried over from the previous mission.
+    carry: Option<String>,
+    /// `--save-carry FILE`: write the carry-over when the mission's fleet has jumped.
+    save_carry: Option<String>,
+    /// `--autoplay`: the scripted test orders play the mission (and press hyperspace).
+    autoplay: bool,
+    /// `--budget S`: seconds after the arrival before autoplay forces the jump.
+    budget: Option<f32>,
     mute: bool,
     soft_limit: bool,
     shots: Vec<String>,
@@ -171,6 +185,10 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 o.skill = v.parse().map_err(|_| format!("--skill: bad value {v:?}"))?;
             }
             "--mute" => o.mute = true,
+            "--carry" => o.carry = Some(value()?),
+            "--save-carry" => o.save_carry = Some(value()?),
+            "--autoplay" => o.autoplay = true,
+            "--budget" => o.budget = Some(num(value()?)?),
             "--soft-limit" => o.soft_limit = true,
             "--shots" => {
                 o.shots = value()?
@@ -316,12 +334,17 @@ fn setup_sandbox(o: &Options) -> Result<sandbox::Sandbox, String> {
     let audio_data = assets.reopen();
     let mut sb = match o.mission {
         Some(n) => {
-            let run = mission::start(&assets, n, o.skill)?;
+            let run = mission::start(&assets, n, o.skill, o.carry.as_deref())?;
             if o.screenshot.is_none() {
                 println!("{}", sandbox::MISSION_KEY_HINT);
                 println!("(B and R are quick keys; the build and research managers are in the game, cataclysm.exe)");
             }
-            sandbox::Sandbox::mission(assets, run, o.interpolate)?
+            let mut sb = sandbox::Sandbox::mission(assets, run, o.interpolate)?;
+            if o.autoplay {
+                sb.autoplay = Some(hwc_sim::autoplay::Autoplay::new((o.budget.unwrap_or(900.0) * 16.0) as u32));
+            }
+            sb.save_carry = o.save_carry.clone();
+            sb
         }
         None => {
             let name = o.sandbox.as_deref().unwrap_or("fleet");
@@ -463,6 +486,34 @@ fn sandbox_screenshots(mut sb: sandbox::Sandbox, o: &Options, out: &str) -> Resu
     Ok(())
 }
 
+/// The points of the mothership's hyperspace arrival the `kuunlan` shots capture: (tag,
+/// `hsState`, `clipt` at or below which it is taken).
+const KUUNLAN_STAGES: [(&str, u32, f32); 7] = [
+    ("1_popup", hwc_sim::mission::hs_effect::POPUP_OUTOF, 0.5),
+    ("2_slice_start", hwc_sim::mission::hs_effect::SLICING_OUTOF, 0.8),
+    ("3_slice_front", hwc_sim::mission::hs_effect::SLICING_OUTOF, 0.3),
+    ("4_slice_mid", hwc_sim::mission::hs_effect::SLICING_OUTOF, -0.3),
+    ("5_slice_end", hwc_sim::mission::hs_effect::SLICING_OUTOF, -0.85),
+    ("6_collapse", hwc_sim::mission::hs_effect::COLLAPSE_OUTOF, 0.5),
+    ("7_collapse_end", hwc_sim::mission::hs_effect::COLLAPSE_OUTOF, 0.1),
+];
+
+/// The next `kuunlan` stage the mothership has reached, if not taken yet.
+fn kuunlan_stage(run: &hwc_sim::mission::MissionRun, done: &mut Vec<&'static str>) -> Option<String> {
+    let a = run.game.arriving.iter().find(|a| a.mothership)?;
+    for (tag, state, clipt) in KUUNLAN_STAGES {
+        if done.contains(&tag) {
+            continue;
+        }
+        if a.hs_state == state && a.clipt <= clipt {
+            done.push(tag);
+            return Some(format!("kuunlan_{tag}"));
+        }
+        return None;
+    }
+    None
+}
+
 /// Mission captures when things first happen: the fleet arriving from hyperspace (the
 /// mothership mid-slice), the docked ships launching, the first hit anywhere (the camera moves
 /// there), the first objective.
@@ -473,6 +524,7 @@ fn mission_shots(mut sb: sandbox::Sandbox, o: &Options, out: &str) -> Result<(),
     let mut wanted: Vec<String> = o.shots.clone();
     let mut launched_at = None;
     let mut combat_at: Option<(u32, glam::Vec3)> = None;
+    let mut kuunlan_done: Vec<&'static str> = Vec::new();
     while !wanted.is_empty() && sb.universe().update_counter < max {
         sb.step();
         let tick = sb.universe().update_counter;
@@ -500,6 +552,30 @@ fn mission_shots(mut sb: sandbox::Sandbox, o: &Options, out: &str) -> Result<(),
         if take.is_none() && want("objective") && !run.game.objectives.is_empty() {
             take = Some("objective");
         }
+        // The fleet leaving at the end of the mission: the mothership in its window.
+        if take.is_none()
+            && want("jump")
+            && run.game.hyper.ships.iter().any(|(id, r)| {
+                Some(*id) == run.universe.base.players[0].mothership
+                    && r.hs_state == hs_effect::SLICING_INTO
+                    && r.clipt < 0.3
+            })
+        {
+            take = Some("jump");
+        }
+        // A side view of the mothership, square to its heading, so the window shows edge-on to
+        // the camera as it opens, slices and collapses.
+        let kuunlan = if want("kuunlan") {
+            kuunlan_stage(run, &mut kuunlan_done).and_then(|tag| {
+                let u = sb.universe();
+                let m = run.game.arriving.iter().find(|a| a.mothership).and_then(|a| a.ship).and_then(|id| u.ship(id))?;
+                let p = m.posinfo.position;
+                let h = m.rotinfo.coordsys.col(2);
+                Some((tag, glam::Vec3::new(p.x, p.y, p.z), h.y.atan2(h.x)))
+            })
+        } else {
+            None
+        };
         // The mission's nearest asteroid to the mothership, with the field around it.
         let asteroid_at = (want("asteroids") && run.game.ships_have_arrived)
             .then(|| {
@@ -535,6 +611,22 @@ fn mission_shots(mut sb: sandbox::Sandbox, o: &Options, out: &str) -> Result<(),
         if let Some(tag) = take {
             cap.shoot(&mut sb, None, &shot_path(out, tag, true))?;
             wanted.retain(|w| w != tag);
+        }
+        if let Some((tag, p, heading)) = kuunlan {
+            // From the side and from ahead of the ship, a little off its axis.
+            let saved = (sb.camera.look_at, sb.camera.distance, sb.camera.angle, sb.camera.declination, sb.focus.clone());
+            sb.focus.clear();
+            sb.camera.look_at = p;
+            sb.camera.declination = -0.25;
+            for (view, offset, distance) in [("side", 1.15, 9000.0), ("front", 0.4, 7000.0)] {
+                sb.camera.distance = distance;
+                sb.camera.angle = heading + offset;
+                cap.shoot(&mut sb, None, &shot_path(out, &format!("{tag}_{view}"), true))?;
+            }
+            (sb.camera.look_at, sb.camera.distance, sb.camera.angle, sb.camera.declination, sb.focus) = saved;
+        }
+        if kuunlan_done.len() >= KUUNLAN_STAGES.len() {
+            wanted.retain(|w| w != "kuunlan");
         }
         if let Some(p) = asteroid_at {
             let saved = (sb.camera.look_at, sb.camera.distance, sb.focus.clone());
