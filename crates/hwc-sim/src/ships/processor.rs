@@ -3,6 +3,10 @@
 //! is a beam that picks the most damaged friendly ship in its cone and range and gives it
 //! `twRepairRate[class]` health per second (to its most damaged module first) until it is
 //! whole, out of reach or gone.
+//!
+//! With effects attached each beam shows the original's `EGT_REPAIR_BEAM` effect, steered from
+//! here; a beam whose effect ends by itself lets go of its target, as in the original
+//! (`ProcessorStopBeamOnShip`).
 
 use hwc_math::fastmath::fsqrt;
 use hwc_math::fpu::{ld, st};
@@ -19,6 +23,12 @@ pub const UPGRADE_AUTO_REPAIR: u32 = 0x4_0000;
 pub const MAX_BEAMS: usize = 4;
 /// The shortest stopwatch time the beams use.
 const MIN_WAIT: f32 = 0.001;
+/// Effect handle slots of the beams (+0x798 of each).
+const SLOT_BEAM: u32 = 220;
+/// Special-purpose slot of the beams (`EGT_REPAIR_BEAM`, 0xae7048).
+const REPAIR_BEAM_EFFECT: usize = 18;
+/// The widest a beam is drawn (0x8a2320).
+const MAX_BEAM_WIDTH: f32 = 250.0;
 
 /// One repair beam (8 dwords at +0x77c: ship, dock point, target, stopwatch, effect).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -197,6 +207,7 @@ fn retarget_wait(u: &Universe) -> f32 {
 }
 
 fn stop_beam(u: &mut Universe, id: ShipId, i: usize) {
+    crate::effects::delete_slot(u, id, SLOT_BEAM + i as u32);
     let now = u.total_time_elapsed;
     let wait = retarget_wait(u);
     if let Some(b) = spec_mut(u, id).and_then(|p| p.beams.get_mut(i)) {
@@ -224,6 +235,9 @@ fn beams_usable(u: &Universe, id: ShipId) -> bool {
 /// or out of reach, and look for new ones when the beams' stopwatches run out.
 pub fn update_repair_beams(u: &mut Universe, id: ShipId) {
     let n = spec(u, id).map_or(0, |p| p.beams.len());
+    for i in 0..n {
+        beam_effect_ended(u, id, i);
+    }
     if !beams_usable(u, id) {
         for i in 0..n {
             stop_beam(u, id, i);
@@ -283,9 +297,45 @@ pub fn update_repair_beams(u: &mut Universe, id: ShipId) {
 fn update_beam_effect(u: &mut Universe, id: ShipId, i: usize) {
     let Some(b) = spec_mut(u, id).and_then(|p| p.beams.get_mut(i)) else { return };
     let Some(target) = b.target else { return };
+    let point = b.point;
     if !b.effect {
         b.effect = true;
         u.special_events.push(crate::universe::SpecialEvent::Special { ship: id, effect: crate::ships::Effect::Beam { target } });
+    }
+    if u.effects.is_none() {
+        return;
+    }
+    let Some((pos, _)) = beam_origin(u, id, point) else { return };
+    let Some(t) = u.ships.get(target) else { return };
+    let tp = t.posinfo.position;
+    let r = u.statics.ship(t.ship_type).map_or(0.0, |s| s.header.coll.coll_sphere_size);
+    let width = if MAX_BEAM_WIDTH < r { MAX_BEAM_WIDTH } else { r };
+    let mut dir = Vector::new(st(ld(tp.x) - ld(pos.x)), st(ld(tp.y) - ld(pos.y)), st(ld(tp.z) - ld(pos.z)));
+    let dist = hwc_math::fastmath::fmath_sqrt_double((ld(dir.z) * ld(dir.z) + ld(dir.y) * ld(dir.y)) + ld(dir.x) * ld(dir.x));
+    let k = st(1.0 / ld(st(dist)));
+    dir = Vector::new(st(ld(k) * ld(dir.x)), st(ld(k) * ld(dir.y)), st(ld(k) * ld(dir.z)));
+    let cs = hwc_math::Matrix::coord_sys_from_heading(dir);
+    let vel = u.ships.ship(id).posinfo.velocity;
+    let slot = SLOT_BEAM + i as u32;
+    match crate::shockwave::fx::handle(u, id, slot) {
+        Some(e) => crate::shockwave::fx::place(u, e, Some(pos), Some(vel), Some(cs)),
+        None => {
+            let Some(effect) = crate::shockwave::fx::special(u, REPAIR_BEAM_EFFECT) else { return };
+            if !crate::effects::frequency_ok(u, effect) {
+                return;
+            }
+            let params = [crate::effects::pf(st(dist)), crate::effects::pf(width)];
+            let e = crate::effects::create(u, effect, None, Some(pos), Some(vel), Some(cs), 1.0, 0, &params);
+            crate::effects::set_slot(u, id, slot, e);
+        }
+    }
+}
+
+/// `ProcessorStopBeamOnShip` for an effect that ended by itself: the beam showing it stops.
+fn beam_effect_ended(u: &mut Universe, id: ShipId, i: usize) {
+    let slot = SLOT_BEAM + i as u32;
+    if crate::effects::slot(u, id, slot).is_some() && crate::shockwave::fx::handle(u, id, slot).is_none() {
+        stop_beam(u, id, i);
     }
 }
 

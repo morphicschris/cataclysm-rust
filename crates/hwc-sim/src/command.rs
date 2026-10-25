@@ -357,6 +357,7 @@ pub fn remove_ships_from_doing_stuff(u: &mut Universe, ships: &[ShipId]) {
                     order::DOCK => crate::dock::remove_ship_from_docking(u, id),
                     order::LAUNCH_SHIP => crate::dock::remove_ship_from_launching(u, id),
                     order::COLLECT_RESOURCE => {
+                        crate::resource::stop_beam_effect(u, id);
                         let s = u.ships.ship_mut(id);
                         s.base.harvest_effect = false;
                         s.base.harvest_state = 0;
@@ -1018,6 +1019,9 @@ pub fn cl_process(u: &mut Universe) {
 
 /// `RemoveShipFromAttacking`: the ship drops its targets, pairing and manoeuvre.
 pub fn remove_ship_from_attacking(u: &mut Universe, id: ShipId) {
+    if u.ships.get(id).and_then(|s| u.statics.ship(s.ship_type)).is_some_and(|st| st.ship_class == Some(crate::statics::ShipClass::Resource)) {
+        crate::resource::remove_resourcer_from_attacking(u, id);
+    }
     let Some(s) = u.ships.get_mut(id) else { return };
     s.attack.multiple_targets = None;
     s.attack.target = None;
@@ -1115,6 +1119,7 @@ fn free_last_order(u: &mut Universe, cid: CommandId) {
         }
         order::COLLECT_RESOURCE => {
             for &id in &cmd.selection {
+                crate::resource::stop_beam_effect(u, id);
                 let s = u.ships.ship_mut(id);
                 s.base.harvest_effect = false;
                 s.base.harvest_state = 0;
@@ -1154,6 +1159,11 @@ pub fn delete_command(u: &mut Universe, cid: CommandId) {
     }
     if cmd.attributes & attr::PASSIVE_ATTACKING != 0 || cmd.order == order::ATTACK {
         attack_cleanup(u, cid);
+    }
+    if cmd.order == order::COLLECT_RESOURCE {
+        for &id in &cmd.selection {
+            crate::resource::stop_beam_effect(u, id);
+        }
     }
     u.commands.delete(cid);
 }

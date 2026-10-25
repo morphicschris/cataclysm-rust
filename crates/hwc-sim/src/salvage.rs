@@ -240,6 +240,11 @@ pub fn reset(u: &mut Universe, ship: ShipId) {
     if u.ships.ship(ship).base.clamp.as_ref().is_some_and(|c| c.host.is_some()) {
         crate::clamp::unclamp(u, ship);
     }
+    // The beam effect is deleted outright here, self-deleting or not.
+    if let Some(e) = crate::effects::slot(u, ship, crate::resource::FX_SLOT_BEAM) {
+        crate::effects::delete(u, e);
+        crate::effects::set_slot(u, ship, crate::resource::FX_SLOT_BEAM, None);
+    }
     u.ships.ship_mut(ship).base.harvest_effect = false;
     if u.ships.ship(ship).base.salvage.dock_point.is_some() {
         release_point(u, ship);
@@ -267,6 +272,28 @@ pub fn reset(u: &mut Universe, ship: ShipId) {
     let s = u.ships.ship_mut(ship);
     s.base.salvage = base::SalvageSpec::default();
     s.special_flags &= !4;
+}
+
+/// `salvStartTractorBeam` (0x4f2ef0): the salvager's tractor beam (its race's tractor-beam
+/// effect), owned by the salvager and following its position, orientation and scale but not
+/// its velocity (the effect's own velocity is cleared). Kept in the beam slot the harvest
+/// effects use (+0x38c).
+pub fn start_tractor_beam(u: &mut Universe, ship: ShipId) {
+    let Some(fx) = u.effects.as_ref() else { return };
+    let Some(s) = u.ships.get(ship) else { return };
+    let lod = fx.tables.tractor_beam.get(s.ship_race.index()).and_then(|l| l.as_deref());
+    let mut id = None;
+    if let Some(e) = fx.pick(lod) {
+        if crate::effects::frequency_ok(u, e) {
+            use crate::effects::attach;
+            // The ship's scale (+0x33c) is 1.
+            id = crate::effects::create(u, e, Some(crate::effects::FxOwner::Ship(ship)), None, None, None, 1.0, attach::POSITION | attach::COORDSYS | attach::NLIPS, &[]);
+            if let Some(ef) = id.and_then(|e| u.effects.as_mut().and_then(|fx| fx.world.effects.iter_mut().find(|x| x.id == e))) {
+                ef.velocity = Vector::ZERO;
+            }
+        }
+    }
+    crate::effects::set_slot(u, ship, crate::resource::FX_SLOT_BEAM, id);
 }
 
 /// The command callback when a salvager leaves its special order.
@@ -501,6 +528,7 @@ fn special_target(u: &mut Universe, ship: ShipId, _cid: CommandId, targets: &[Sh
                 let pt = spec.dock_point.and_then(|i| statics.ship(u.ships.ship(t).ship_type).and_then(|s| s.dock.as_ref()).and_then(|d| d.points.get(i)).and_then(|p| p.dock_type)).map_or(-1, |x| x.index() as i32);
                 if pt != DPT_SALVAGE_LATCH {
                     u.ships.ship_mut(ship).base.harvest_effect = true;
+                    start_tractor_beam(u, ship);
                 }
                 u.ships.ship_mut(ship).base.salvage.latching = false;
                 command::cl_halt(u, &[t]);

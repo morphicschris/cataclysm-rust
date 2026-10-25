@@ -15,6 +15,7 @@ use crate::aiship::fly_to_point_avoiding_objs;
 use crate::aitrack;
 use crate::base::{self, special2, HarvestFn};
 use crate::command::{self, order};
+use crate::effects;
 use crate::object::CommandId;
 use crate::object::{sof, ShipId};
 use crate::statics::{ResourceInfo, ShipType};
@@ -407,6 +408,7 @@ pub fn process_collect_resource(u: &mut Universe, cid: CommandId) -> bool {
             if !dropped {
                 harvest_step(u, ship, Some(r));
                 if u.base.resources.get(r).is_some_and(|x| x.not_accessible != 0) {
+                    turn_off_any_resourcing_effects(u, cid);
                     u.ships.ship_mut(ship).base.harvest_effect = false;
                     if let Some(c) = u.commands.get_mut(cid) {
                         c.collect.resource = None;
@@ -415,6 +417,7 @@ pub fn process_collect_resource(u: &mut Universe, cid: CommandId) -> bool {
                 }
                 return false;
             }
+            stop_beam_effect(u, ship);
             u.ships.ship_mut(ship).base.harvest_effect = false;
             if let Some(c) = u.commands.get_mut(cid) {
                 c.collect.resource = None;
@@ -459,6 +462,7 @@ pub fn process_collect_resource(u: &mut Universe, cid: CommandId) -> bool {
             }
         }
     } else {
+        stop_beam_effect(u, ship);
         u.ships.ship_mut(ship).base.harvest_effect = false;
         if let Some(c) = u.commands.get_mut(cid) {
             c.collect.resource = None;
@@ -576,6 +580,7 @@ fn worker_facing(u: &mut Universe, ship: ShipId, target: Vector, check_only: boo
 /// (mesh animation, immediate here) and harvests with its beam.
 fn worker_update_beam(u: &mut Universe, ship: ShipId, res: Option<ResourceId>) {
     let Some(r) = res.and_then(|r| u.base.resources.get(r).cloned()) else {
+        stop_beam_effect(u, ship);
         let s = u.ships.ship_mut(ship);
         s.base.harvest_effect = false;
         s.base.harvest_state = 0;
@@ -586,6 +591,7 @@ fn worker_update_beam(u: &mut Universe, ship: ShipId, res: Option<ResourceId>) {
     if st_ != 7 {
         let far = !aitrack::within_distance(u.ships.ship(ship), r.position, 3000.0);
         if matches!(st_, 4..=6) && (!worker_facing(u, ship, r.position, true) || far) {
+            stop_beam_effect(u, ship);
             let s = u.ships.ship_mut(ship);
             s.base.harvest_effect = false;
             s.base.harvest_state = 7;
@@ -623,6 +629,9 @@ fn worker_update_beam(u: &mut Universe, ship: ShipId, res: Option<ResourceId>) {
                         ResourceKind::DustCloud(_) => 5,
                     };
                     s.base.harvest_effect = true;
+                    if matches!(r.kind, ResourceKind::Asteroid(_)) {
+                        worker_beam_effect(u, ship, &r, EGT_WORKER_RESOURCE_SOLID);
+                    }
                 }
             } else if s.base.mad_anim == -1 || s.base.mad_done {
                 s.base.mad_anim = 0;
@@ -632,6 +641,8 @@ fn worker_update_beam(u: &mut Universe, ship: ShipId, res: Option<ResourceId>) {
         }
         4..=6 => {
             u.ships.ship_mut(ship).base.harvest_effect = true;
+            let slot = if u.ships.ship(ship).base.harvest_state == 4 { EGT_WORKER_RESOURCE_SOLID } else { EGT_VORTEX_EFFECT };
+            worker_beam_effect(u, ship, &r, slot);
             collect_resources(u, ship, r.id);
         }
         7 => {
@@ -675,8 +686,9 @@ fn resourcer_harvests(u: &mut Universe, ship: ShipId, res: Option<ResourceId>) {
     }
     match state {
         1 | 2 => {
-            let (_, _, range) = range_of(u);
+            let (t, _, range) = range_of(u);
             if state == 2 || range <= ld(tw.base.asteroid_harvest_range) {
+                turn_harvest_effect_on(u, ship, &r, t);
                 let s = u.ships.ship_mut(ship);
                 s.base.harvest_effect = true;
                 s.base.harvest_state = 3;
@@ -691,13 +703,18 @@ fn resourcer_harvests(u: &mut Universe, ship: ShipId, res: Option<ResourceId>) {
         }
         3 => {
             let (t, d, range) = range_of(u);
+            if effects::slot(u, ship, FX_SLOT_BEAM).is_none() {
+                turn_harvest_effect_on(u, ship, &r, t);
+            }
             u.ships.ship_mut(ship).base.harvest_effect = true;
             if ld(tw.base.asteroid_max_harvest_range) < range {
+                stop_beam_effect(u, ship);
                 let s = u.ships.ship_mut(ship);
                 s.base.harvest_effect = false;
                 s.base.harvest_state = 1;
                 return;
             }
+            modify_harvest_effect(u, ship, &r, t);
             collect_resources(u, ship, r.id);
             let inv = st(1.0 / ld(d));
             let mut dir = Vector::new(st(ld(inv) * ld(t.x)), st(ld(inv) * ld(t.y)), st(ld(inv) * ld(t.z)));
@@ -733,6 +750,10 @@ pub fn delete_dead_resources(u: &mut Universe) {
         u.base.resources.list.retain(|x| x.id != r);
         let todo = u.commands.todo.clone();
         for c in todo {
+            let harvesting = u.commands.get(c).is_some_and(|cmd| cmd.collect.resource == Some(r));
+            if harvesting && u.commands.get(c).is_some_and(|cmd| cmd.order == order::COLLECT_RESOURCE) {
+                turn_off_any_resourcing_effects(u, c);
+            }
             if let Some(cmd) = u.commands.get_mut(c) {
                 if cmd.collect.resource == Some(r) {
                     cmd.collect.resource = None;
@@ -740,6 +761,156 @@ pub fn delete_dead_resources(u: &mut Universe) {
             }
         }
     }
+}
+
+// -------------------------------------------------------------------------------- effects
+
+/// The effect slot of the ship's beam effect: the one pointer (+0x38c) the original keeps for
+/// the harvest beam of resource collectors, the workers' grinder beam and the salvagers'
+/// tractor beam.
+pub const FX_SLOT_BEAM: u32 = 300;
+
+/// `EGT_VORTEX_EFFECT`: the workers' beam on dust clouds.
+const EGT_VORTEX_EFFECT: usize = 22;
+/// `EGT_WORKER_RESOURCE_SOLID`: the workers' beam on asteroids.
+const EGT_WORKER_RESOURCE_SOLID: usize = 38;
+
+/// The ship's beam effect, if it has one and it still runs.
+pub fn beam_effect(u: &Universe, ship: ShipId) -> Option<hwc_fx::runtime::EffectId> {
+    effects::slot(u, ship, FX_SLOT_BEAM).filter(|&e| effects::exists(u, e))
+}
+
+/// The way the original lets go of the beam effect (`stopRepairEffect`,
+/// `TurnOffAnyResourcingEffects`, `removeResourcerFromAttacking` and the inline copies in
+/// the harvest routines): a self-deleting effect is told its age in its third variable and
+/// left to end by itself, any other is deleted. The ship forgets it either way.
+pub fn stop_beam_effect(u: &mut Universe, ship: ShipId) {
+    let Some(e) = effects::slot(u, ship, FX_SLOT_BEAM) else { return };
+    effects::set_slot(u, ship, FX_SLOT_BEAM, None);
+    let Some(fx) = u.effects.as_mut() else { return };
+    let Some(stat) = fx.world.effect(e).map(|ef| ef.stat) else { return };
+    if fx.world.lib.statics[stat].special_ops & hwc_fx::compiler::ESO_SELF_DELETING != 0 {
+        if let Some(ef) = fx.world.effects.iter_mut().find(|x| x.id == e) {
+            let age = ef.time_elapsed.to_bits();
+            if let Some(v) = ef.variables.get_mut(2) {
+                *v = age;
+            }
+        }
+    } else {
+        fx.world.delete_effect(e);
+    }
+}
+
+/// `TurnOffAnyResourcingEffects` (0x4ecee0): the beam of the command's ship goes off.
+pub fn turn_off_any_resourcing_effects(u: &mut Universe, cid: CommandId) {
+    if let Some(&ship) = u.commands.get(cid).and_then(|c| c.selection.first()) {
+        stop_beam_effect(u, ship);
+    }
+}
+
+/// `removeResourcerFromAttacking` (0x4ed920), from `RemoveShipFromAttacking` for ships of
+/// the resource class.
+pub fn remove_resourcer_from_attacking(u: &mut Universe, ship: ShipId) {
+    stop_beam_effect(u, ship);
+}
+
+/// A beam from `from` towards `to`: the unit heading, its coordinate system and the length
+/// (`fmathSqrtDouble` of the squared length, then scaled by its float reciprocal).
+fn beam_frame(from: Vector, to: Vector) -> (Matrix, f32) {
+    let d = Vector::new(st(ld(to.x) - ld(from.x)), st(ld(to.y) - ld(from.y)), st(ld(to.z) - ld(from.z)));
+    let len = st(hwc_math::fastmath::fmath_sqrt_double(d.mag_sq_ext()));
+    let inv = st(1.0 / ld(len));
+    let h = Vector::new(st(ld(inv) * ld(d.x)), st(ld(inv) * ld(d.y)), st(ld(inv) * ld(d.z)));
+    (Matrix::coord_sys_from_heading(h), len)
+}
+
+/// The harvest nozzle of a resource collector in world orientation (`ship->staticinfo`
+/// +0x3f8 turned by the ship's coordinate system), relative to the ship.
+fn nozzle_offset(u: &Universe, ship: ShipId) -> Option<Vector> {
+    let s = u.ships.get(ship)?;
+    let nozzle = u.statics.ship(s.ship_type)?.res_nozzle.as_ref()?;
+    Some(s.rotinfo.coordsys.mul_vec(nozzle.position))
+}
+
+/// `TurnHarvestEffectOn` (0x4ecf50): the collector's harvest beam (the race's asteroid or
+/// gaseous resourcing effect) from its nozzle towards the resource, `traj` being the ship's
+/// trajectory to the resource. Owned by the ship and moving with it; the parameters are the
+/// beam length and the resource's bounding radius.
+fn turn_harvest_effect_on(u: &mut Universe, ship: ShipId, r: &Resource, traj: Vector) {
+    let Some(fx) = u.effects.as_ref() else { return };
+    let Some(off) = nozzle_offset(u, ship) else { return };
+    let s = u.ships.ship(ship);
+    let (pos, vel) = (s.posinfo.position, s.posinfo.velocity);
+    let gaseous = usize::from(!matches!(r.kind, ResourceKind::Asteroid(_)));
+    let lod = fx.tables.resource.get(s.ship_race.index() * 2 + gaseous).and_then(|l| l.as_deref());
+    let effect = fx.pick(lod);
+    let size = info(u, r.kind).map_or(0.0, |i| i.header.coll.coll_sphere_size);
+    let (cs, len) = beam_frame(off, traj);
+    let at = Vector::new(st(ld(off.x) + ld(pos.x)), st(ld(off.y) + ld(pos.y)), st(ld(off.z) + ld(pos.z)));
+    let mut id = None;
+    if let Some(e) = effect {
+        if effects::frequency_ok(u, e) {
+            let flags = effects::attach::VELOCITY | effects::attach::NLIPS;
+            id = effects::create(u, e, Some(effects::FxOwner::Ship(ship)), Some(at), Some(vel), Some(cs), 1.0, flags, &[effects::pf(len), effects::pf(size)]);
+        }
+    }
+    effects::set_slot(u, ship, FX_SLOT_BEAM, id);
+}
+
+/// `ModifyHarvestEffect` (0x4ed090): the running harvest beam follows the nozzle and the
+/// resource (position, orientation and its two parameters).
+fn modify_harvest_effect(u: &mut Universe, ship: ShipId, r: &Resource, traj: Vector) {
+    let Some(e) = beam_effect(u, ship) else { return };
+    let Some(off) = nozzle_offset(u, ship) else { return };
+    let pos = u.ships.ship(ship).posinfo.position;
+    let size = info(u, r.kind).map_or(0.0, |i| i.header.coll.coll_sphere_size);
+    let (cs, len) = beam_frame(off, traj);
+    let Some(fx) = u.effects.as_mut() else { return };
+    if let Some(ef) = fx.world.effects.iter_mut().find(|x| x.id == e) {
+        ef.position = Vector::new(st(ld(off.x) + ld(pos.x)), st(ld(off.y) + ld(pos.y)), st(ld(off.z) + ld(pos.z)));
+        ef.coordsys = cs;
+        if ef.variables.len() < 2 {
+            ef.variables.resize(2, 0);
+        }
+        ef.variables[0] = len.to_bits();
+        ef.variables[1] = size.to_bits();
+    }
+}
+
+/// `WorkerBeamEffect` (0x5c3780): the worker's beam from its `gun0` point (one update ahead
+/// along its velocity) to the resource: started with special effect `slot` when the worker
+/// has none, otherwise moved and turned to follow. The effect has no owner; its parameters
+/// are the beam length and half the resource's avoidance radius.
+fn worker_beam_effect(u: &mut Universe, ship: ShipId, r: &Resource, slot: usize) {
+    let Some(fx) = u.effects.as_ref() else { return };
+    let s = u.ships.ship(ship);
+    let Some(gun) = u.statics.ship(s.ship_type).and_then(|st_| st_.dock.as_ref()).and_then(|d| d.points.iter().find(|p| p.name.eq_ignore_ascii_case("gun0"))) else { return };
+    let off = s.rotinfo.coordsys.mul_vec(gun.position);
+    let dt = u.phys_time_elapsed;
+    let (p, v) = (s.posinfo.position, s.posinfo.velocity);
+    let from = Vector::new(
+        st(ld(dt) * ld(v.x) + ld(off.x) + ld(p.x)),
+        st(ld(st(ld(dt) * ld(v.y))) + ld(off.y) + ld(p.y)),
+        st(ld(st(ld(dt) * ld(v.z))) + ld(off.z) + ld(p.z)),
+    );
+    let (cs, len) = beam_frame(from, r.position);
+    let avoid = info(u, r.kind).map_or(0.0, |i| i.header.coll.avoid_coll_sphere_size);
+    let effect = fx.pick(fx.tables.special_effect(slot));
+    if let Some(e) = effects::slot(u, ship, FX_SLOT_BEAM) {
+        if let Some(ef) = u.effects.as_mut().and_then(|fx| fx.world.effects.iter_mut().find(|x| x.id == e)) {
+            ef.position = from;
+            ef.coordsys = cs;
+        }
+        return;
+    }
+    let mut id = None;
+    if let Some(e) = effect {
+        if effects::frequency_ok(u, e) {
+            let half = st(ld(avoid) * 0.5);
+            id = effects::create(u, e, None, Some(from), Some(v), Some(cs), 1.0, effects::attach::VELOCITY, &[effects::pf(len), effects::pf(half)]);
+        }
+    }
+    effects::set_slot(u, ship, FX_SLOT_BEAM, id);
 }
 
 /// The multiplayer resource trickle at the start of `univUpdate`: every `regenerateRUrate`

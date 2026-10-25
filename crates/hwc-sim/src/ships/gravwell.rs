@@ -13,7 +13,7 @@
 
 use hwc_math::fastmath::fsqrt;
 use hwc_math::fpu::{ld, st};
-use hwc_math::random::RAN_GAME;
+use hwc_math::random::{RAN_ETG_CAT, RAN_GAME};
 use hwc_math::Vector;
 
 use crate::object::{sof, special, ShipId};
@@ -54,6 +54,39 @@ pub struct GravWellSpec {
     pub ready: bool,
     /// +0x658: the well has collapsed.
     pub derelict: bool,
+    /// When each caught ship may show its caught effect again (the caught ship's +0x328).
+    pub caught_effect_time: CaughtEffectTimes,
+}
+
+/// The caught ships' effect timers ([`GravWellSpec::caught_effect_time`]). Effect state: set
+/// only with effects, left out of comparisons and of the debug output (and so of the world
+/// hash).
+#[derive(Clone, Default)]
+pub struct CaughtEffectTimes(pub Vec<(ShipId, f32)>);
+
+impl CaughtEffectTimes {
+    fn get(&self, ship: ShipId) -> f32 {
+        self.0.iter().find(|(s, _)| *s == ship).map_or(0.0, |&(_, t)| t)
+    }
+
+    fn set(&mut self, ship: ShipId, t: f32) {
+        match self.0.iter_mut().find(|(s, _)| *s == ship) {
+            Some(e) => e.1 = t,
+            None => self.0.push((ship, t)),
+        }
+    }
+}
+
+impl PartialEq for CaughtEffectTimes {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for CaughtEffectTimes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("..")
+    }
 }
 
 /// Per-type statics (`GravWellGeneratorStaticInit` 0x5aeab0).
@@ -158,12 +191,96 @@ pub fn attack(u: &mut Universe, id: ShipId, target: ShipId) {
     crate::attack::attack_passive(u, id, target, 4000.0, 3000.0);
 }
 
-/// `turnoffGravwell` (0x5aed00).
+/// `turnoffGravwell` (0x5aed00): the well lets everything go, its field effect is left to
+/// finish by itself and the switch-off effect plays.
 pub fn turn_off(u: &mut Universe, id: ShipId) {
     if let Some(g) = spec_mut(u, id) {
         g.field_on = false;
     }
     release_all(u, id);
+    let_field_effect_go(u, id);
+    field_effect(u, id, OFF_EFFECT_SLOT);
+}
+
+/// `EGT_GRAVWELL_ON`, `EGT_GRAVWELL_OFF` and `EGT_CAUGHT_GRAVWELL` in the special-purpose
+/// effect table.
+const ON_EFFECT_SLOT: usize = 8;
+const OFF_EFFECT_SLOT: usize = 9;
+const CAUGHT_EFFECT_SLOT: usize = 19;
+/// The well's field effect (+0x65c) among the per-ship effect slots.
+const FIELD_EFFECT: u32 = 100;
+/// The second variable of a field effect that runs until it is told to stop.
+const RUNS_UNTIL_STOPPED: f32 = 999_999.0;
+/// The range of seconds after which a caught ship shows its caught effect again (0x8ba578).
+const CAUGHT_EFFECT_INTERVAL: [f32; 2] = [3.0, 5.0];
+
+/// The well's switch-on or switch-off effect: on the well, attached to it in every respect,
+/// with the well's race as parameter. Returns it.
+fn field_effect(u: &mut Universe, id: ShipId, slot: usize) -> Option<hwc_fx::runtime::EffectId> {
+    let fx = u.effects.as_ref()?;
+    let effect = fx.pick(fx.tables.special_effect(slot))?;
+    if !crate::effects::in_render_list(u, id.into()) {
+        return None;
+    }
+    let s = u.ships.ship(id);
+    let (pos, cs) = (s.posinfo.position, s.rotinfo.coordsys);
+    let race = u.statics.ship(s.ship_type).map_or(0, |st| st.ship_race.index() as u32);
+    let flags = crate::effects::EAF_ALL_BUT_NLIPS | crate::effects::attach::NLIPS;
+    crate::effects::create(u, effect, Some(id.into()), Some(pos), None, Some(cs), 1.0, flags, &[race])
+}
+
+/// The switch-on effect, kept as the well's field effect while it runs until stopped.
+fn start_field_effect(u: &mut Universe, id: ShipId) {
+    let Some(e) = field_effect(u, id, ON_EFFECT_SLOT) else { return };
+    let lasting = u.effects.as_ref().and_then(|fx| fx.world.effect(e)).and_then(|ef| ef.variables.get(1).copied()).is_some_and(|v| f32::from_bits(v) == RUNS_UNTIL_STOPPED);
+    crate::effects::set_slot(u, id, FIELD_EFFECT, lasting.then_some(e));
+}
+
+/// The well's field effect loses its owner and is told how long it ran (its second
+/// variable), so that it winds down by itself.
+fn let_field_effect_go(u: &mut Universe, id: ShipId) {
+    let Some(e) = crate::effects::slot(u, id, FIELD_EFFECT) else { return };
+    crate::effects::set_slot(u, id, FIELD_EFFECT, None);
+    let Some(fx) = u.effects.as_mut() else { return };
+    if let Some(ef) = fx.world.effects.iter_mut().find(|x| x.id == e) {
+        ef.owner = None;
+        let age = ef.time_elapsed.to_bits();
+        if let Some(v) = ef.variables.get_mut(1) {
+            *v = age;
+        }
+    }
+}
+
+/// `runShipEffect` (0x5aeb40): a caught ship's effect, on the ship and attached to it in
+/// every respect, with its bounding-sphere radius as parameter; the ship shows it again 3 to
+/// 5 seconds later (drawn from the effect stream).
+fn caught_effect(u: &mut Universe, well: ShipId, ship: ShipId) {
+    let Some(fx) = u.effects.as_ref() else { return };
+    let Some(effect) = fx.pick(fx.tables.special_effect(CAUGHT_EFFECT_SLOT)) else { return };
+    if !crate::effects::in_render_list(u, ship.into()) || !crate::effects::frequency_ok(u, effect) {
+        return;
+    }
+    let s = u.ships.ship(ship);
+    let (pos, vel, cs) = (s.posinfo.position, s.posinfo.velocity, s.rotinfo.coordsys);
+    let radius = u.statics.ship(s.ship_type).map_or(0.0, |st| st.header.coll.coll_sphere_size);
+    let flags = crate::effects::EAF_ALL_BUT_NLIPS | crate::effects::attach::NLIPS;
+    crate::effects::create(u, effect, Some(ship.into()), Some(pos), Some(vel), Some(cs), 1.0, flags, &[crate::effects::pf(radius)]);
+    let [lo, hi] = CAUGHT_EFFECT_INTERVAL;
+    let delay = if hi <= lo {
+        lo
+    } else {
+        let r = u.effects.as_mut().expect("effects").world.randy.random(RAN_ETG_CAT);
+        let x = st((ld(hi) - ld(lo)) * f64::from(r) * ld(f32::from_bits(0x2f80_0000)) + ld(lo));
+        if x < lo {
+            lo
+        } else {
+            x.min(hi)
+        }
+    };
+    let at = st(ld(delay) + ld(u.total_time_elapsed));
+    if let Some(g) = spec_mut(u, well) {
+        g.caught_effect_time.set(ship, at);
+    }
 }
 
 /// `GravWellGeneratorSpecialActivate` (0x5aee40): the special toggles the field (it can only
@@ -181,7 +298,8 @@ pub fn special_activate(u: &mut Universe, id: ShipId) -> bool {
     }
     if g.time_on < st_.operation_time {
         g.field_on = true;
-        // (The opening animation, speech and the field effect are presentation.)
+        // (The opening animation and speech are presentation.)
+        start_field_effect(u, id);
     }
     true
 }
@@ -248,10 +366,14 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
     }
     if spec(u, id).is_some_and(|g| g.time_on < st_.operation_time) {
         if st_.scan_rate & u.update_counter == st_.scan_rate {
+            if crate::effects::slot(u, id, FIELD_EFFECT).is_none() {
+                start_field_effect(u, id);
+            }
             add_objects_in_proximity(u, id);
         }
     } else {
         release_all(u, id);
+        let_field_effect_go(u, id);
         let g = spec_mut(u, id).expect("spec");
         g.field_on = false;
         g.derelict = true;
@@ -270,7 +392,9 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
             remove_ship_refs(u, id, h.ship);
             continue;
         }
-        // (The caught-ship effect is presentation.)
+        if u.effects.is_some() && spec(u, id).is_some_and(|g| g.caught_effect_time.get(h.ship) < now) {
+            caught_effect(u, id, h.ship);
+        }
         let s = u.ships.ship_mut(h.ship);
         s.dont_apply_force_ever |= 1;
         match h.state {

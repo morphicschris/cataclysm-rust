@@ -24,6 +24,19 @@ use crate::universe::Universe;
 
 /// Flags that keep a ship out of `FindShipsInside` (`SOF_Hide | SOF_Dead`).
 const HIDDEN_OR_DEAD: u32 = sof::HIDE | sof::DEAD;
+/// `kasfSpawnEffect` (0x4932d0): the named effect on every ship of the selection, attached
+/// to the ship in every way (the scale passed is 0, the ship's own is used), with the ship's
+/// bounding radius and `param` (as a float) for parameters. No frequency limit applies. An
+/// effect name that was never loaded starts nothing.
+pub fn spawn_effect(u: &mut Universe, ships: &[ShipId], name: &str, param: i32) {
+    let Some(stat) = u.effects.as_ref().and_then(|fx| fx.named(name)) else { return };
+    let p = crate::effects::pf(st(fild_i32(param)));
+    for &id in ships {
+        let Some(size) = u.ships.get(id).and_then(|s| u.statics.ship(s.ship_type)).map(|st_| st_.header.coll.coll_sphere_size) else { continue };
+        crate::effects::create(u, stat, Some(crate::effects::FxOwner::Ship(id)), None, None, None, 0.0, crate::effects::attach::FULL, &[crate::effects::pf(size), p]);
+    }
+}
+
 /// Marker for a ship hidden by KAS while it was already hidden (`HideShips` / `UnhideShips`).
 const HIDDEN_TWICE: u32 = 0x0800_0000;
 /// Special flags 2 (+0x1cc) bit: not under the player's control.
@@ -1021,6 +1034,11 @@ impl KasRuntime for SimHost<'_> {
             return;
         }
         crate::ships::cl_special(self.u, &sel, &t);
+    }
+
+    fn spawn_effect(&mut self, _cx: &Cx, ships: Ships, effect: Str<'_>, effect_param: i32) {
+        let list = self.ships(ships);
+        spawn_effect(self.u, &list, &Self::str_text(effect), effect_param);
     }
 
     fn music_play(&mut self, _cx: &Cx, track_num: i32) {

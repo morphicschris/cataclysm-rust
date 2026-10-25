@@ -144,6 +144,27 @@ pub fn bullet_near_ship(u: &mut Universe, ship: ShipId, b: BulletId) -> bool {
     field_effect(u, ship, b)
 }
 
+/// `EGT_BULLET_DEFLECT` in the special-purpose effect table.
+const DEFLECT_EFFECT_SLOT: usize = 12;
+
+/// The deflection effect of `univDFGFieldEffect` (when hit effects are on): owned by the
+/// frigate, at the bullet, facing away from the frigate, moving and scaled with the frigate,
+/// with the bullet's damage (upgrade multiplier against armour 0 times its damage, times the
+/// frigate's scale) as its parameter.
+fn deflect_effect(u: &mut Universe, dfg: ShipId, b: BulletId, frame: Matrix) {
+    let Some(fx) = u.effects.as_ref() else { return };
+    let Some(effect) = fx.pick(fx.tables.special_effect(DEFLECT_EFFECT_SLOT)) else { return };
+    if !fx.options.hit || !crate::effects::in_render_list(u, dfg.into()) || !crate::effects::frequency_ok(u, effect) {
+        return;
+    }
+    let bl = u.bullets.bullet(b);
+    let scale = 1.0f32;
+    let damage = st(ld(scale) * (ld(crate::damage::weapon_damage(bl.bullet_type, 0)) * ld(bl.damage)));
+    let at = bl.posinfo.position;
+    let flags = crate::effects::attach::VELOCITY | crate::effects::attach::NLIPS;
+    crate::effects::create(u, effect, Some(dfg.into()), Some(at), None, Some(frame), scale, flags, &[crate::effects::pf(damage)]);
+}
+
 /// `univDFGFieldEffect` (0x5ab470): an enemy bullet in the field. Returns true when it was a
 /// big-gun shell (which detonates and is removed).
 pub fn field_effect(u: &mut Universe, dfg: ShipId, b: BulletId) -> bool {
@@ -171,7 +192,7 @@ pub fn field_effect(u: &mut Universe, dfg: ShipId, b: BulletId) -> bool {
     let mut away = Vector::new(st(ld(bp.x) - ld(dpos.x)), st(ld(bp.y) - ld(dpos.y)), st(ld(bp.z) - ld(dpos.z)));
     away.normalize();
     let frame = Matrix::coord_sys_from_heading(away);
-    // (The deflection effect is presentation.)
+    deflect_effect(u, dfg, b, frame);
     let r = u.randy.random(RAN_GAME) % (st_.angle_variance.wrapping_add(1));
     let deg = st(f64::from(r) * ld(0.017_453_292f32));
     let flip = u.randy.random(RAN_GAME) & 1 != 0;

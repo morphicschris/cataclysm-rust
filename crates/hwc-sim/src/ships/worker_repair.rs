@@ -13,6 +13,10 @@
 //! The worker's jack is a mesh animation in the original (open before the beam starts, closed
 //! `jackRetractTime` seconds after the last repair). The simulation has no animation clock: an
 //! animation counts as finished one update after it starts.
+//!
+//! With effects attached the beam is the original's `EGT_REPAIR_BEAM` effect. As in the
+//! original, a beam whose effect cannot start (no effect, or too many of them) does not count
+//! as on: the worker then keeps no beam length to back off to.
 
 use hwc_math::fastmath::fsqrt;
 use hwc_math::fpu::{ld, st};
@@ -29,6 +33,11 @@ const ANIM_OPEN: i32 = 0;
 const ANIM_CLOSE: i32 = 1;
 /// "Never" for the jack timer (0x6258d727).
 const NEVER: f32 = f32::from_bits(0x6258_d727);
+/// Effect handle slot of the repair beam (+0x674).
+const SLOT_REPAIR_BEAM: u32 = 210;
+/// Special-purpose slot of the repair beam (`EGT_REPAIR_BEAM`, 0xae7048).
+const REPAIR_BEAM_EFFECT: usize = 18;
+
 /// `aitrackHeadingFunc` accuracy while facing the target (0x3f7d70a4).
 const FACE_ACCURACY: f32 = f32::from_bits(0x3f7d_70a4);
 
@@ -391,6 +400,34 @@ pub fn release_target(u: &mut Universe, id: ShipId) {
     if let Some(t) = target.and_then(|t| u.ships.get_mut(t)) {
         t.worker_repair.repairers -= 1;
     }
+    crate::effects::delete_slot(u, id, SLOT_REPAIR_BEAM);
+}
+
+/// The world position of the worker's beam point.
+fn beam_point(u: &Universe, id: ShipId) -> Vector {
+    let rs = repair_statics(u.statics.ship(u.ships.ship(id).ship_type).expect("statics"));
+    crate::shockwave::fx::local_to_world(u, id, rs.beam_point)
+}
+
+/// The width the repair beam is drawn with at `len`: as wide as a 10 degree cone, else as a
+/// 26 degree cone or the target's diameter, whichever is less, when that is wider.
+fn beam_width(u: &Universe, target: ShipId, len: f64) -> f32 {
+    let narrow = st(2.0 * 0.174_532_923_847_436_9f64.tan());
+    let wide = st(2.0 * 0.453_785_602_003_335_95f64.tan());
+    let r = u.statics.ship(u.ships.ship(target).ship_type).map_or(0.0, |s| s.header.coll.coll_sphere_size);
+    let diameter = st(ld(r) + ld(r));
+    let a = ld(narrow) * len;
+    let b = st(ld(wide) * len);
+    let cap = if diameter < b { diameter } else { b };
+    if a <= ld(cap) {
+        if b <= diameter {
+            b
+        } else {
+            diameter
+        }
+    } else {
+        st(a)
+    }
 }
 
 /// `WorkerRepairBeamEffect` (0x5c2c60): the beam starts; its length is the distance from the
@@ -400,10 +437,30 @@ fn beam_effect(u: &mut Universe, id: ShipId) {
     if u.ships.get(target).is_none() {
         return;
     }
-    let rs = repair_statics(u.statics.ship(u.ships.ship(id).ship_type).expect("statics"));
-    let s = u.ships.ship(id);
-    let o = s.rotinfo.coordsys.mul_vec(rs.beam_point);
-    let p = Vector::new(st(ld(o.x) + ld(s.posinfo.position.x)), st(ld(o.y) + ld(s.posinfo.position.y)), st(ld(o.z) + ld(s.posinfo.position.z)));
+    let p = beam_point(u, id);
+    if u.effects.is_some() {
+        let effect = crate::shockwave::fx::special(u, REPAIR_BEAM_EFFECT);
+        let Some(effect) = effect.filter(|&e| crate::effects::frequency_ok(u, e)) else {
+            u.ships.ship_mut(id).worker_repair.beam_effect = false;
+            return;
+        };
+        let (me, t) = (u.ships.ship(id), u.ships.ship(target));
+        let cs = hwc_math::Matrix::coord_sys_from_heading(crate::aiship::trajectory(me, t));
+        let vel = me.posinfo.velocity;
+        let len_ext = distance_to_box(u, p, target);
+        let len = st(len_ext);
+        let width = beam_width(u, target, len_ext);
+        let w = &mut u.ships.ship_mut(id).worker_repair;
+        w.beam = true;
+        w.beam_length = len;
+        let flags = crate::effects::attach::COORDSYS | crate::effects::attach::VELOCITY | crate::effects::attach::NLIPS;
+        let params = [crate::effects::pf(len), crate::effects::pf(width)];
+        let e = crate::effects::create(u, effect, Some(id.into()), Some(p), Some(vel), Some(cs), 1.0, flags, &params);
+        crate::effects::set_slot(u, id, SLOT_REPAIR_BEAM, e);
+        u.ships.ship_mut(id).worker_repair.beam_effect = e.is_some();
+        u.special_events.push(crate::universe::SpecialEvent::Special { ship: id, effect: crate::ships::Effect::Beam { target } });
+        return;
+    }
     let len = st(distance_to_box(u, p, target));
     let w = &mut u.ships.ship_mut(id).worker_repair;
     w.beam = true;
@@ -475,6 +532,10 @@ pub fn repair_update(u: &mut Universe, id: ShipId, targets: &mut Vec<ShipId>) ->
             false
         }
         state::REPAIRING => {
+            if let Some(e) = crate::shockwave::fx::handle(u, id, SLOT_REPAIR_BEAM) {
+                let p = beam_point(u, id);
+                crate::shockwave::fx::place(u, e, Some(p), None, None);
+            }
             move_to_target(u, id);
             let w = u.ships.ship(id).worker_repair;
             let keep_open = if w.anim != ANIM_OPEN {

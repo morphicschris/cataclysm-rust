@@ -264,6 +264,9 @@ pub enum Order {
     ComputerPlayer { player: usize, difficulty: i32, primary_enemy: Option<usize> },
     /// Turn on fog of war for a (local) player.
     FogOfWar { player: usize },
+    /// Set the ships' health to a fraction of their maximum (as KAS `SetHealth` does), to stage
+    /// deaths quickly.
+    SetHealth { ships: Vec<usize>, fraction: f32 },
 }
 
 /// A resource object to place.
@@ -403,6 +406,13 @@ impl Run {
                     p.ai_primary_enemy = *primary_enemy;
                 }
             }
+            Order::SetHealth { ships, fraction } => {
+                for id in sel(ships) {
+                    let t = self.universe.ships.ship(id).ship_type;
+                    let max = self.universe.statics.ship(t).map_or(0.0, |st| st.health.max_health);
+                    self.universe.ships.ship_mut(id).health = hwc_math::fpu::st(hwc_math::fpu::ld(max) * hwc_math::fpu::ld(*fraction));
+                }
+            }
             Order::FogOfWar { player } => {
                 crate::fow::create_for_local_player(&mut self.universe, *player);
             }
@@ -501,6 +511,41 @@ pub fn scenario(name: &str) -> Option<Scenario> {
                 resource_units: Vec::new(),
             })
         }
+        // Three multi-beam frigates finish off a badly damaged Taiidan frigate.
+        "frigate_death" => Some(Scenario {
+            name: "frigate_death",
+            players: vec![ShipRace::Somtaaw, ShipRace::Taiidan],
+            spawns: vec![
+                Spawn { ship_type: sMultiBeamFrigate, player: 0, position: v(-1800.0, -500.0, 0.0) },
+                Spawn { ship_type: sMultiBeamFrigate, player: 0, position: v(-1800.0, 500.0, 0.0) },
+                Spawn { ship_type: tStandardFrigate, player: 1, position: v(600.0, 0.0, 0.0) },
+            ],
+            orders: vec![
+                (0, Order::Tactics { ships: vec![2], tactics: crate::object::tactics::NEUTRAL }),
+                (0, Order::SetHealth { ships: vec![2], fraction: 0.12 }),
+                (1, Order::Attack { ships: vec![0, 1], targets: vec![2] }),
+            ],
+            resources: Vec::new(),
+            resource_units: Vec::new(),
+        }),
+        // Frigates finish off a nearly dead Beast mothership: a big death.
+        "big_death" => Some(Scenario {
+            name: "big_death",
+            players: vec![ShipRace::Somtaaw, ShipRace::Beast],
+            spawns: vec![
+                Spawn { ship_type: sMultiBeamFrigate, player: 0, position: v(-4000.0, -600.0, 0.0) },
+                Spawn { ship_type: sMultiBeamFrigate, player: 0, position: v(-4000.0, 600.0, 0.0) },
+                Spawn { ship_type: sMultiBeamFrigate, player: 0, position: v(-4200.0, 0.0, 300.0) },
+                Spawn { ship_type: bMothership, player: 1, position: v(1500.0, 0.0, 0.0) },
+            ],
+            orders: vec![
+                (0, Order::Tactics { ships: vec![3], tactics: crate::object::tactics::NEUTRAL }),
+                (0, Order::SetHealth { ships: vec![3], fraction: 0.004 }),
+                (1, Order::Attack { ships: vec![0, 1, 2], targets: vec![3] }),
+            ],
+            resources: Vec::new(),
+            resource_units: Vec::new(),
+        }),
         // A Somtaaw base: the mothership (with its starting modules), four workers harvesting an
         // asteroid field, a docking bay and two recon ships queued at the mothership.
         "base" => {

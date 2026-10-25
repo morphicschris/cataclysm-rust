@@ -210,16 +210,48 @@ pub fn field_take_damage(u: &mut Universe, id: ShipId, bullet: &Bullet) {
 }
 
 /// `SentinelFieldDamageEffect` (0x5c1650): a missile hits the field (whole points of its
-/// damage).
-fn field_missile_damage(u: &mut Universe, id: ShipId, damage: f32) {
+/// damage), showing the missile's hit effect where it is.
+fn field_missile_damage(u: &mut Universe, id: ShipId, missile: &crate::missile::Missile) {
+    let damage = missile.damage;
     let now = u.total_time_elapsed;
+    if let Some(f) = spec_mut(u, id) {
+        f.last_hit = now;
+    }
+    field_hit_effect(u, id, missile);
     let Some(f) = spec_mut(u, id) else { return };
-    f.last_hit = now;
     f.strength = st(ld(f.strength) - ftol(ld(damage)) as Ext);
     if f.strength < 0.0 {
         f.down = true;
     }
     u.special_events.push(SpecialEvent::Special { ship: id, effect: Effect::FieldHit });
+}
+
+/// The hit effect a missile carries (`missile->hitEffect`, +0x204): the gun-hit event of the
+/// firing ship's race and the missile's bullet type (`missileShoot`); level mines use the
+/// mine row (bullet type 9) of their owner's race (`scriptSetMineCB`).
+fn missile_hit_lod(u: &Universe, m: &crate::missile::Missile) -> Option<Vec<usize>> {
+    let fx = u.effects.as_ref()?;
+    let (race, bullet_type) = if m.level_mine_tag == 6 {
+        (u.players.get(m.player?)?.race.index(), 9)
+    } else {
+        (m.race.index(), m.bullet_type as usize)
+    };
+    fx.tables.gun_event(race, bullet_type, crate::effects::GUN_HIT).map(<[usize]>::to_vec)
+}
+
+/// The effect part of `SentinelFieldDamageEffect`: the missile's hit effect at the missile,
+/// facing its way and moving with the sentinel, scaled by the sentinel, with the parameters
+/// 100 (integer) and 0 (when hit effects are on).
+fn field_hit_effect(u: &mut Universe, id: ShipId, m: &crate::missile::Missile) {
+    let Some(fx) = u.effects.as_ref() else { return };
+    let lod = missile_hit_lod(u, m);
+    let Some(effect) = fx.pick(lod.as_deref()) else { return };
+    if !fx.options.hit || !crate::effects::in_render_list(u, id.into()) || !crate::effects::frequency_ok(u, effect) {
+        return;
+    }
+    let vel = u.ships.ship(id).posinfo.velocity;
+    let scale = 1.0;
+    crate::effects::create(u, effect, None, Some(m.posinfo.position), Some(vel), Some(m.rotinfo.coordsys), scale, 0, &[100, 0]);
 }
 
 /// `FUN_004361a0`: whether the ray from `p1` through `p2` (beyond `p2` too) crosses the
@@ -332,7 +364,7 @@ pub fn missile_hits_field(u: &mut Universe, sentinel: ShipId, missile: &crate::m
     let ahead = Vector::new(st(ld(v.x) + ld(p.x)), st(ld(v.y) + ld(p.y)), st(ld(v.z) + ld(p.z)));
     for (sp, a, b) in triangles(u, sentinel) {
         if ray_hits_triangle(p, ahead, sp, a, b).0 {
-            field_missile_damage(u, sentinel, missile.damage);
+            field_missile_damage(u, sentinel, missile);
             return true;
         }
     }

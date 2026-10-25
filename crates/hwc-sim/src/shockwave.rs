@@ -403,12 +403,15 @@ fn update(u: &mut Universe, i: usize) -> bool {
     if !(ld(t) > 0.0) {
         return true;
     }
+    let first = !u.shockwaves.waves[i].started;
+    if first {
+        let wm = &mut u.shockwaves.waves[i];
+        wm.started = true;
+        wm.radius = wm.start_radius;
+        create_effect(u, i);
+    }
     {
         let wm = &mut u.shockwaves.waves[i];
-        if !wm.started {
-            wm.started = true;
-            wm.radius = wm.start_radius;
-        }
         wm.radius = st(ld(t) * ld(wm.speed) + ld(wm.start_radius));
     }
     let w = u.shockwaves.waves[i];
@@ -439,10 +442,13 @@ fn update(u: &mut Universe, i: usize) -> bool {
     }
     if w.kind == kind::DREADNOUGHT || w.kind == kind::NOMAD_PULSE {
         // The sparks on the ring are presentation, but they draw from the particle stream.
+        // (They stay on the simulation's own particle stream, effects or not, so that what
+        // else draws from it does not depend on the effects.)
         let n = SPARK_ODDS - 1;
         if u.randy.random(RAN_PARTICLE_STREAM).is_multiple_of(n) {
-            u.randy.random(RAN_PARTICLE_STREAM);
-            spark_angle(u);
+            let az = u.randy.random(RAN_PARTICLE_STREAM);
+            let polar = spark_angle(u);
+            create_spark(u, &w, az, polar);
         }
     }
     true
@@ -485,6 +491,147 @@ pub fn update_all(u: &mut Universe) {
             u.shockwaves.waves.remove(i);
         }
     }
+}
+
+/// Effect helpers shared by the shock waves and the special ships (repair beams, the rammer's
+/// cutting beam, the big-gun charge...): special-purpose effect lookups and the effect handles
+/// the original keeps in its ship structures.
+pub(crate) mod fx {
+    use hwc_fx::runtime::EffectId;
+    use hwc_math::fpu::{ld, st};
+    use hwc_math::{Matrix, Vector};
+
+    use crate::effects;
+    use crate::object::ShipId;
+    use crate::universe::Universe;
+
+    /// `etgFireEffectsEnabled`.
+    pub fn fire_enabled(u: &Universe) -> bool {
+        u.effects.as_ref().is_some_and(|fx| fx.options.fire)
+    }
+
+    /// `etgHitEffectsEnabled`.
+    pub fn hit_enabled(u: &Universe) -> bool {
+        u.effects.as_ref().is_some_and(|fx| fx.options.hit)
+    }
+
+    /// The level of detail effects are picked at (`ship->currentLOD`).
+    pub fn lod(u: &Universe) -> u8 {
+        u.effects.as_ref().map_or(0, |fx| fx.options.lod)
+    }
+
+    /// Special-purpose slot `slot` at the level of detail, when `LOD < nLevels`.
+    pub fn special(u: &Universe, slot: usize) -> Option<usize> {
+        let fx = u.effects.as_ref()?;
+        fx.pick(fx.tables.special_effect(slot))
+    }
+
+    /// The first level of special-purpose slot `slot` (callers that read `level[0]`).
+    pub fn special_first(u: &Universe, slot: usize) -> Option<usize> {
+        u.effects.as_ref()?.tables.special_effect(slot)?.first().copied()
+    }
+
+    /// Special-purpose slot `slot` at `min(nLevels - 1, LOD)`.
+    pub fn special_clamped(u: &Universe, slot: usize) -> Option<usize> {
+        let fx = u.effects.as_ref()?;
+        fx.pick_clamped(fx.tables.special_effect(slot))
+    }
+
+    /// The effect a ship keeps in `slot`, if it still exists. An effect that ended by itself
+    /// drops out of the slot (the original clears the pointer when the effect object goes:
+    /// the ships' `RemoveTargetRef` callbacks).
+    pub fn handle(u: &mut Universe, ship: ShipId, slot: u32) -> Option<EffectId> {
+        let e = effects::slot(u, ship, slot)?;
+        if effects::exists(u, e) {
+            Some(e)
+        } else {
+            effects::set_slot(u, ship, slot, None);
+            None
+        }
+    }
+
+    /// Moves an effect the game code steers itself (writes into the effect object).
+    pub fn place(u: &mut Universe, e: EffectId, position: Option<Vector>, velocity: Option<Vector>, coordsys: Option<Matrix>) {
+        let Some(fx) = u.effects.as_mut() else { return };
+        let Some(ef) = fx.world.effects.iter_mut().find(|x| x.id == e) else { return };
+        if let Some(p) = position {
+            ef.position = p;
+        }
+        if let Some(v) = velocity {
+            ef.velocity = v;
+        }
+        if let Some(c) = coordsys {
+            ef.coordsys = c;
+        }
+    }
+
+    /// `consumeLocalToWorld`: a point in a ship's coordinates in the world.
+    pub fn local_to_world(u: &Universe, ship: ShipId, local: Vector) -> Vector {
+        let s = u.ships.ship(ship);
+        let o = s.rotinfo.coordsys.mul_vec(local);
+        let p = s.posinfo.position;
+        Vector::new(st(ld(o.x) + ld(p.x)), st(ld(o.y) + ld(p.y)), st(ld(o.z) + ld(p.z)))
+    }
+}
+
+/// Special-purpose slot of the spark the Dreadnought and Nomad waves throw off
+/// (`EGT_SHOCKWAVE_STAR`, 0xae7084).
+const SPARK_EFFECT: usize = 33;
+/// The orientation of every wave effect (0x889f48) and of the sparks (0x8ab820).
+const WAVE_COORDSYS: hwc_math::Matrix = hwc_math::Matrix { m: [1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0] };
+const SPARK_COORDSYS: hwc_math::Matrix = hwc_math::Matrix { m: [0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, 0.0] };
+/// `2 pi / 2^32` (0x720b2c): a random number as an angle.
+const RANDOM_TO_ANGLE: f32 = 1.462_918_1e-9;
+
+/// `swCreateEffect` (0x510b20): the wave's effect (the template's special-purpose slot), at
+/// its centre, told how many waves there are, its radius and speed, how big it is a minute on
+/// and how long it has left to grow.
+fn create_effect(u: &mut Universe, i: usize) {
+    let w = u.shockwaves.waves[i];
+    if w.effect < 0 || u.effects.is_none() {
+        return;
+    }
+    let Some(effect) = fx::special_first(u, w.effect as usize) else { return };
+    if !crate::effects::frequency_ok(u, effect) {
+        return;
+    }
+    let count = u.shockwaves.waves.len() as f32;
+    let params = [
+        crate::effects::pf(count),
+        crate::effects::pf(w.radius),
+        crate::effects::pf(w.speed),
+        crate::effects::pf(st(ld(w.speed) * 60.0 + ld(w.radius))),
+        crate::effects::pf(st((ld(w.max_radius) - ld(w.radius)) / ld(w.speed))),
+    ];
+    let flags = crate::effects::EAF_ALL_BUT_NLIPS | crate::effects::attach::NLIPS;
+    crate::effects::create(u, effect, None, Some(w.centre), Some(Vector::ZERO), Some(WAVE_COORDSYS), 1.0, flags, &params);
+}
+
+/// The spark of `swUpdate`: a point on the ring at the random angles, flying outwards with
+/// the wave.
+fn create_spark(u: &mut Universe, w: &Shockwave, azimuth_random: u32, polar: f32) {
+    if u.effects.is_none() {
+        return;
+    }
+    let az = st(f64::from(azimuth_random) * ld(RANDOM_TO_ANGLE));
+    let sp = ld(polar).sin();
+    let d1 = az_cos_sin(az).0 * sp;
+    let e2 = az_cos_sin(az).1 * sp;
+    let d3 = ld(polar).cos();
+    let r = ld(w.radius);
+    let pos = Vector::new(st(ld(st(r * d1)) + ld(w.centre.x)), st(e2 * r + ld(w.centre.y)), st(ld(st(r * d3)) + ld(w.centre.z)));
+    let s = ld(w.speed);
+    let vel = Vector::new(st(ld(st(d1)) * s), st(ld(st(e2)) * s), st(ld(st(d3)) * s));
+    let Some(effect) = fx::special_first(u, SPARK_EFFECT) else { return };
+    if !crate::effects::frequency_ok(u, effect) {
+        return;
+    }
+    let flags = crate::effects::EAF_ALL_BUT_NLIPS | crate::effects::attach::NLIPS;
+    crate::effects::create(u, effect, None, Some(pos), Some(vel), Some(SPARK_COORDSYS), 1.0, flags, &[]);
+}
+
+fn az_cos_sin(az: f32) -> (f64, f64) {
+    (ld(az).cos(), ld(az).sin())
 }
 
 #[cfg(test)]

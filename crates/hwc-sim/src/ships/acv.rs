@@ -294,6 +294,7 @@ pub fn fire_emp(u: &mut Universe, group: &[ShipId], centre: ShipId) {
             a.emp_target = None;
         }
         u.special_events.push(SpecialEvent::Special { ship: acv, effect: Effect::EmpBlast { radius } });
+        emp_effect(u, acv);
     }
     let joined: Vec<ShipId> = group.iter().copied().filter(|&s| s != centre).collect();
     if let Some(a) = spec_mut(u, centre) {
@@ -307,6 +308,24 @@ pub fn fire_emp(u: &mut Universe, group: &[ShipId], centre: ShipId) {
         }
     }
 }
+
+/// The pulse effect of one firing ACV in `ACVFireEMP` (`EGT_ELECTRO_MAGNETIC_PULSE`, always its
+/// first level): at the ACV, oriented like it, standing still but attached to it in every
+/// respect, with no parameters.
+fn emp_effect(u: &mut Universe, acv: ShipId) {
+    let Some(fx) = u.effects.as_ref() else { return };
+    let Some(effect) = fx.tables.special_effect(EMP_EFFECT_SLOT).and_then(|l| l.first().copied()) else { return };
+    if !crate::effects::frequency_ok(u, effect) {
+        return;
+    }
+    let s = u.ships.ship(acv);
+    let (pos, cs) = (s.posinfo.position, s.rotinfo.coordsys);
+    let flags = crate::effects::EAF_ALL_BUT_NLIPS | crate::effects::attach::NLIPS;
+    crate::effects::create(u, effect, Some(acv.into()), Some(pos), Some(Vector::ZERO), Some(cs), 1.0, flags, &[]);
+}
+
+/// `EGT_ELECTRO_MAGNETIC_PULSE` in the special-purpose effect table.
+const EMP_EFFECT_SLOT: usize = 23;
 
 /// `ACVSpecialActivate` (0x5a8f70): a ready ACV fires its EMP alone; one that is busy drops
 /// its EMP target. Always done.

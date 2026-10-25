@@ -137,6 +137,7 @@ pub fn create(u: &mut Universe, id: ShipId, gi: usize, source: Option<ShipId>, t
         t.recently_fired_upon = crate::object::RECENT_ATTACK_DURATION;
     }
     u.events.push(crate::universe::SimEvent::GunFired { ship: id, gun: gi, bullet: bid });
+    crate::effects::bullet_fired(u, id, gi, bid, target);
     Some(bid)
 }
 
@@ -280,6 +281,7 @@ pub fn update_pos_vel(u: &mut Universe, bid: BulletId) -> bool {
 
 /// `univUpdateAllPosVelBullets` (0x53e0c0).
 pub fn update_all(u: &mut Universe) {
+    crate::effects::begin_bullet_pass(u);
     let list = u.bullet_list.clone();
     for bid in list {
         let Some(b) = u.bullets.get(bid) else { continue };
@@ -290,6 +292,7 @@ pub fn update_all(u: &mut Universe) {
             energy_homing(u, bid);
         }
         if update_pos_vel(u, bid) {
+            crate::effects::bullet_expired(u, bid);
             // (Burst bullets explode at the end of their flight: pointExplosionInSpace with
             // the burst radius; the burst attack is not modelled.)
             delete(u, bid);
@@ -299,6 +302,7 @@ pub fn update_all(u: &mut Universe) {
 
 /// Removes a bullet from the universe.
 pub fn delete(u: &mut Universe, bid: BulletId) {
+    crate::effects::bullet_removed(u, bid);
     crate::ships::bullet_freed(u, bid);
     u.blobs.object_died(ObjRef::Bullet(bid));
     u.bullet_list.retain(|&b| b != bid);

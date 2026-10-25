@@ -392,3 +392,25 @@ with unchanged positions (the hive's six swarmers are new ship-table entries and
 is hashed); `harness::world_hash_with` leaving out the swarmers and the special state reproduces
 the previous hash exactly, which the golden test checks. Extra orders: `Special`, `Mine`,
 `ComputerPlayer`, `FogOfWar`.
+
+## Effects (`crates/hwc-sim/src/effects`)
+
+With `effects::attach(&mut universe, &EffectData::load_from(src))` the universe owns an
+`hwc_fx::FxWorld` and creates the ETG effects where `cataclysm.exe` calls `etgEffectCreate`:
+bullet creation (bullet effect attached to the bullet, muzzle flash), bullet and missile hits,
+bullet expiry (self-deleting effects let go and get their age in variable 3; burst explosions),
+missile launch and death, killer collisions, damage effects (`dmgShipThink` from
+`univSetupShipForControl`), deaths (`univDeleteDeadShip`, including the big-death groups with 10
+parameters), hyperspace windows, and the special abilities, resourcing, salvage and KAS
+`SpawnEffect` in their modules. The scripts run once per update after the ships moved, before
+`univDeleteDeadShips`; `deleteParentShip` wipes a dead ship, `hideParentShip` hides it,
+`damageDone` frees its damage slot.
+
+A dead ship with a death effect stays as a hulk (`Universe::hulks`, out of `ship_list` so that no
+search finds it; the original keeps it in `ShipList` flagged `SOF_Dead`) and keeps moving until
+its explosion deletes it (`destprojectilesmall.ebg`: 2 s, `bigdeath.ebg`: 10 s). This changes the
+world hash of runs with effects attached (the hulks are hashed as ships); without effects
+nothing changes. The simulation side is camera independent: every object counts as in the
+render list, the level of detail is 0, every effect counts as drawn (`FxWorld::assume_drawn`) and
+drawing uses its own random generator (`FxWorld::draw_randy`), so the hash does not depend on
+what is drawn. Effect randomness stays in the effect world's streams (0, 7, 25, 26).

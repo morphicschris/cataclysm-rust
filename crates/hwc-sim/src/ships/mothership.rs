@@ -17,8 +17,10 @@
 //! * Every mothership's death sends out a shock wave ([`crate::shockwave`] type 2).
 //!
 //! The Beast cascade calls inside these callbacks (`beastCascadeInit/Update/Close/RemoveShip`)
-//! belong to the Beast module and are not made from here. Presentation-only parts (the charge
-//! effect, speech, the health warnings, the launch manager's module slots) are left out.
+//! belong to the Beast module and are not made from here. Presentation-only parts (speech, the
+//! health warnings, the launch manager's module slots) are left out; with effects attached the
+//! big gun's charge shows the original's `EGT_BIG_GUN_CHARGING` effect, spinning ever faster at
+//! the muzzle.
 
 use hwc_math::fastmath::fsqrt;
 use hwc_math::fpu::{ld, st};
@@ -54,6 +56,11 @@ pub const BIG_GUN_BULLET_TYPE: u32 = 0x12;
 /// The big gun must have been idle for its fire time less this many seconds; it also charges
 /// for this long.
 const BIG_GUN_CHARGE_TIME: f32 = 11.0;
+/// Effect handle slot of the big gun's charge (+0x680).
+const SLOT_CHARGE: u32 = 230;
+/// Special-purpose slot of the charge (`EGT_BIG_GUN_CHARGING`, 0xae7070).
+const CHARGE_EFFECT: usize = 28;
+
 /// Seconds the mothership turns before it charges anyway (0x8bb178).
 const AIM_TIME: f32 = 20.0;
 /// Cosine within which the mothership counts as aimed (0x8bb188).
@@ -340,6 +347,7 @@ pub fn big_gun_order(u: &mut Universe, cid: CommandId) {
         m.target = target;
         m.state = big_gun::AIMING;
     }
+    crate::effects::delete_slot(u, ms, SLOT_CHARGE);
 }
 
 /// `MothershipSpecialActivate` (0x5b6a70): the special key stands the big gun down.
@@ -415,20 +423,65 @@ fn fire_big_gun(u: &mut Universe, id: ShipId) {
     if m.state == big_gun::CHARGING && ld(BIG_GUN_CHARGE_TIME) < ld(now) - ld(m.charge_start) {
         m.state = big_gun::FIRING;
         m.charge_anim = 0;
+        // The charge effect ends by itself; the mothership lets go of it.
+        crate::effects::set_slot(u, id, SLOT_CHARGE, None);
     }
+    steer_charge_effect(u, id);
+}
+
+/// `MothershipBigGunChargeEffect` (0x5b7d80): the charge at the big gun's muzzle (not attached:
+/// [`steer_charge_effect`] moves it).
+fn charge_effect(u: &mut Universe, id: ShipId) {
+    let Some(effect) = shockwave::fx::special_first(u, CHARGE_EFFECT) else { return };
+    if !shockwave::fx::fire_enabled(u) || !crate::effects::frequency_ok(u, effect) {
+        return;
+    }
+    let Some(gi) = big_gun_index(u, id) else { return };
+    let s = u.ships.ship(id);
+    let Some(stat) = u.statics.ship(s.ship_type) else { return };
+    let Some(muzzle) = stat.guns.as_ref().and_then(|g| g.get(gi)).map(|g| g.position) else { return };
+    let cs = s.rotinfo.coordsys;
+    let nlips = stat.scale_cap;
+    let at = shockwave::fx::local_to_world(u, id, muzzle);
+    let flags = crate::effects::EAF_ALL_BUT_NLIPS | crate::effects::attach::NLIPS;
+    let e = crate::effects::create(u, effect, None, Some(at), Some(Vector::ZERO), Some(cs), nlips, flags, &[]);
+    crate::effects::set_slot(u, id, SLOT_CHARGE, e);
+}
+
+/// The rest of `MothershipFireBigGun`: the charge effect stays at the muzzle, turning about
+/// its axis by `((now - start) / 3)^2`.
+fn steer_charge_effect(u: &mut Universe, id: ShipId) {
+    let Some(e) = shockwave::fx::handle(u, id, SLOT_CHARGE) else { return };
+    let Some(gi) = big_gun_index(u, id) else { return };
+    let now = u.total_time_elapsed;
+    let start = spec(u, id).map_or(0.0, |m| m.charge_start);
+    let s = u.ships.ship(id);
+    let Some(muzzle) = u.statics.ship(s.ship_type).and_then(|st| st.guns.as_ref()?.get(gi).map(|g| g.position)) else { return };
+    let cs = s.rotinfo.coordsys;
+    let at = shockwave::fx::local_to_world(u, id, muzzle);
+    let a = (ld(now) - ld(start)) / 3.0;
+    let a = a * a;
+    // (The original hands `matMakeRotAboutZ` the sine as the cosine and the other way round.)
+    let spin = hwc_math::Matrix::rot_about_z(st(a.sin()), st(a.cos()));
+    shockwave::fx::place(u, e, Some(at), None, Some(cs.mul_mat(&spin)));
 }
 
 /// `MothershipUpdateBigGunEffects` (0x5b7a60): charge if the module is still there.
 fn start_charge(u: &mut Universe, id: ShipId) {
     let now = u.total_time_elapsed;
     let has = has_big_gun_module(u, id);
-    let Some(m) = spec_mut(u, id) else { return };
+    if spec(u, id).is_none() {
+        return;
+    }
     if has {
+        charge_effect(u, id);
+        let m = spec_mut(u, id).expect("spec");
         m.state = big_gun::CHARGING;
         m.charge_anim = 1;
         m.charge_start = now;
         u.ships.ship_mut(id).autostabilize_ship = false;
     } else {
+        let m = spec_mut(u, id).expect("spec");
         m.state = big_gun::RECOVERING;
     }
 }
@@ -503,6 +556,7 @@ fn big_gun_housekeep(u: &mut Universe, id: ShipId) {
                 if !has_big_gun_module(u, id) {
                     spec_mut(u, id).expect("spec").state = big_gun::RECOVERING;
                 } else {
+                    charge_effect(u, id);
                     let m = spec_mut(u, id).expect("spec");
                     m.state = big_gun::CHARGING;
                     m.charge_anim = 1;
@@ -744,11 +798,12 @@ pub fn remove_ship_refs(u: &mut Universe, id: ShipId, gone: ShipId) {
         if let Some(m) = spec_mut(u, id) {
             m.state = big_gun::RECOVERING;
         }
+        crate::effects::delete_slot(u, id, SLOT_CHARGE);
     }
 }
 
-/// `MothershipRemoveBigGunTarget` (0x5b7700): drops the charge effect when it goes (effects
-/// are not modelled).
+/// `MothershipRemoveBigGunTarget` (0x5b7700): drops the charge effect when it goes (the effect
+/// handle is checked where it is used, see [`steer_charge_effect`]).
 pub fn remove_big_gun_target(u: &mut Universe, id: ShipId, gone: ShipId) {
     let _ = (u, id, gone);
 }

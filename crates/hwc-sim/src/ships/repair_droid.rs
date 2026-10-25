@@ -9,6 +9,9 @@
 //! (`droidCreateArray` from `univCreateShip`); [`update_array`] is meant to be driven with the
 //! ship's level-0 hull mesh ([`HullMesh`]) by whoever presents the droids. Without a mesh the
 //! droids still fly between their dock points but never land on the hull.
+//!
+//! With effects attached each spark is the original's welding effect (`EGT_WELDING_EFFECT`) on
+//! the host, at the hull point, facing the droid.
 
 use hwc_math::fpu::{ld, st};
 use hwc_math::Vector;
@@ -310,6 +313,37 @@ pub fn is_valid_predock_pos(point: &crate::statics::DockStaticPoint, p: Vector) 
     dot >= ld(lim)
 }
 
+/// Special-purpose slot of the sparks (`EGT_WELDING_EFFECT`, 0xae7050).
+const WELDING_EFFECT: usize = 20;
+
+/// The spark of a welding droid (in `droidUpdateArray`): on the host at the hull point `at`,
+/// facing the droid at `droid` (both in the host's coordinates), told how far away the droid
+/// is.
+fn weld_effect(u: &mut Universe, id: ShipId, at: Vector, droid: Vector) {
+    if u.effects.is_none() {
+        return;
+    }
+    let s = u.ships.ship(id);
+    let cs = s.rotinfo.coordsys;
+    let p = s.posinfo.position;
+    let world = |v: Vector| {
+        let o = cs.mul_vec(v);
+        Vector::new(st(ld(o.x) + ld(p.x)), st(ld(o.y) + ld(p.y)), st(ld(o.z) + ld(p.z)))
+    };
+    let spark = world(at);
+    let to = world(droid);
+    let mut dir = Vector::new(st(ld(to.x) - ld(spark.x)), st(ld(to.y) - ld(spark.y)), st(ld(to.z) - ld(spark.z)));
+    let dist = st(hwc_math::fastmath::fmath_sqrt_double((ld(dir.z) * ld(dir.z) + ld(dir.y) * ld(dir.y)) + ld(dir.x) * ld(dir.x)));
+    dir.normalize();
+    let heading = hwc_math::Matrix::coord_sys_from_heading(dir);
+    let Some(effect) = crate::shockwave::fx::special_clamped(u, WELDING_EFFECT) else { return };
+    if !crate::shockwave::fx::hit_enabled(u) || !crate::effects::frequency_ok(u, effect) || !crate::effects::in_render_list(u, id.into()) {
+        return;
+    }
+    let params = [0x20, crate::effects::pf(5.0), crate::effects::pf(dist)];
+    crate::effects::create(u, effect, Some(id.into()), Some(spark), None, Some(heading), 1.0, crate::effects::attach::POSITION, &params);
+}
+
 fn hull_full(u: &Universe, id: ShipId) -> bool {
     let s = u.ships.ship(id);
     let max = u.statics.ship(s.ship_type).map_or(0.0, |st| st.health.max_health);
@@ -414,6 +448,7 @@ pub fn update_array(u: &mut Universe, id: ShipId, mesh: Option<&dyn HullMesh>, f
                         if speed_sq <= 50.0 {
                             let at = on_vertex.map_or(Vector::ZERO, |(p, _)| p);
                             arr.sparks.push(at);
+                            weld_effect(u, id, at, d.position);
                         }
                         let r = u.randy.random(RAN_DROIDS) % 100;
                         d.spark_time = st(f64::from(r) * 0.02 + ld(now) + 0.5);

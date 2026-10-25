@@ -1,8 +1,16 @@
 //! Sandbox and mission mode: a live `hwc-sim` universe rendered with the game camera. Ships can
 //! be selected (click or drag a box), ordered to move on the movement plane (`M` then click; a
 //! simple version of the game's move pie plate is drawn), put into formation (`F` cycles) and
-//! ordered to attack (`A` then click an enemy). Bullets and beams are drawn as effect lines, hits
-//! as sparks, deaths as an expanding glow, and every ship has a health bar.
+//! ordered to attack (`A` then click an enemy). Every ship has a health bar.
+//!
+//! Effects are the original's: the simulation runs the ETG effects where `cataclysm.exe` creates
+//! them (`hwc_sim::effects`: muzzle flashes, bullet and beam effects, hits, damage smoke, deaths,
+//! hyperspace windows, special abilities) and each frame they are drawn with
+//! [`hwc_render::EffectRenderer`], lens flares hidden behind ships by collision-box ray tests.
+//! Bullets without an effect are drawn as the original's one-pixel lines in the bullet colour.
+//! Effect sounds (`playSound`) play through [`Audio`]. Without the `ETG` data (or with
+//! `HWC_VIEWER_NO_EFFECTS` set) the older stand-ins are drawn: weapon-coloured lines, hit
+//! sparks and explosion glows.
 //!
 //! Base building: mothership modules are separate ships clamped to the hull, asteroids are
 //! drawn with their meshes, harvesting beams and docking traffic are shown, `B` queues a ship at
@@ -173,6 +181,8 @@ pub struct Frame {
     items: Vec<Item>,
     poses: Vec<Option<Vec<Option<Mat4>>>>,
     pub effects: EffectBatch,
+    /// The ETG effects to draw this frame.
+    pub fx_list: hwc_fx::RenderList,
 }
 
 enum ItemKind {
@@ -247,6 +257,9 @@ pub struct Sandbox {
     /// The camera keeps looking at these ships (the game's camera focus).
     pub focus: Vec<ShipId>,
     effects: Vec<Effect>,
+    /// The simulation runs the original's effects (see the module notes).
+    effects_on: bool,
+    fx_renderer: Option<hwc_render::EffectRenderer>,
     resource_art: BTreeMap<u8, Option<ResourceArt>>,
     pub audio: Option<Audio>,
     hud: MissionHud,
@@ -349,6 +362,8 @@ impl Sandbox {
             ui_clock: 0.0,
             focus: Vec::new(),
             effects: Vec::new(),
+            effects_on: false,
+            fx_renderer: None,
             resource_art: BTreeMap::new(),
             audio: None,
             hud: MissionHud::default(),
@@ -356,9 +371,25 @@ impl Sandbox {
             small_font,
         };
         sb.set_lighting("hsf\\default.hsf");
+        sb.attach_effects();
         sb.load_art()?;
         sb.snapshot();
         Ok(sb)
+    }
+
+    /// Compiles the ETG effects and attaches them to the universe (before its first update).
+    fn attach_effects(&mut self) {
+        if std::env::var_os("HWC_VIEWER_NO_EFFECTS").is_some() || self.sim.universe().effects.is_some() {
+            self.effects_on = self.sim.universe().effects.is_some();
+            return;
+        }
+        let data = hwc_sim::effects::EffectData::load_from(&self.src);
+        if data.is_empty() {
+            eprintln!("warning: no ETG effects found; drawing stand-in effects");
+            return;
+        }
+        hwc_sim::effects::attach(self.sim.universe_mut(), &data);
+        self.effects_on = true;
     }
 
     pub fn universe(&self) -> &Universe {
@@ -572,8 +603,14 @@ impl Sandbox {
                 }
         });
         let events = self.universe().events.clone();
+        let stand_ins = !self.effects_on;
         for e in &events {
             match e {
+                SimEvent::BulletHit { ship, .. } if !stand_ins => {
+                    if let Some(f) = self.fx.get_mut(ship) {
+                        f.tint.flash(0.1);
+                    }
+                }
                 SimEvent::BulletHit { position, ship, .. } => {
                     self.effects.push(Effect {
                         position: v3(*position),
@@ -587,7 +624,7 @@ impl Sandbox {
                 }
                 SimEvent::ShipDied {
                     position, radius, ..
-                } => self.effects.push(Effect {
+                } if stand_ins => self.effects.push(Effect {
                     position: v3(*position),
                     radius: *radius,
                     start: now,
@@ -597,7 +634,8 @@ impl Sandbox {
             }
         }
         if let Some(a) = &mut self.audio {
-            a.sim_events(self.sim.universe());
+            a.sim_events(self.sim.universe(), !self.effects_on);
+            a.effect_events(self.sim.universe());
         }
         self.poll_mission();
         self.update_ship_fx();
@@ -704,7 +742,8 @@ impl Sandbox {
     /// Animations triggered by the simulation's state, and the trail ring update, once per tick.
     fn update_ship_fx(&mut self) {
         let u = self.sim.universe();
-        let live: Vec<ShipId> = u.ship_list.clone();
+        // Dead ships stay (as hulks) until their explosion deletes them.
+        let live: Vec<ShipId> = u.ship_list.iter().chain(&u.hulks).copied().collect();
         self.fx.retain(|id, _| live.contains(id));
         for id in live {
             let Some(s) = u.ship(id) else { continue };
@@ -834,7 +873,7 @@ impl Sandbox {
         self.universe()
             .ships
             .iter()
-            .filter(|s| s.flags & hwc_sim::object::sof::HIDE == 0)
+            .filter(|s| hwc_sim::effects::ship_drawn(self.universe(), s.id))
             .map(|s| {
                 let (p, m) = Self::transform_of(s);
                 let m = match (a < 1.0, self.previous.get(&s.id)) {
@@ -872,7 +911,9 @@ impl Sandbox {
             items: Vec::new(),
             poses: Vec::new(),
             effects: EffectBatch::default(),
+            fx_list: hwc_fx::RenderList::default(),
         };
+        let effects_on = self.effects_on;
         let transforms = self.render_transforms();
         let sim = &self.sim;
         let u = sim.universe();
@@ -918,7 +959,8 @@ impl Sandbox {
                     hs_plane(state, clipt, fl)
                 }),
             };
-            if let (Some((state, clipt)), Some(st), None) = (hs, st, host) {
+            // (With effects the window is the original's HyperWindow effect.)
+            if let (Some((state, clipt)), Some(st), None, false) = (hs, st, host, effects_on) {
                 hyperspace_window(&mut frame.effects, transform, st, state, clipt);
             }
             let max_velocity = if s.max_velocity_copy > 0.0 {
@@ -996,12 +1038,19 @@ impl Sandbox {
             frame.poses.push(None);
         }
         self.combat_effects(&mut frame.effects, glow_texture);
+        if self.effects_on {
+            hwc_sim::effects::draw(self.sim.universe_mut(), &mut frame.fx_list);
+        }
         frame
     }
 
     /// Bullets, beams, harvesting beams, hit sparks and explosion glows as effect primitives.
     fn combat_effects(&self, out: &mut EffectBatch, glow: EffectTexture) {
         let u = self.universe();
+        if self.effects_on {
+            original_bullets(u, out);
+            return;
+        }
         for &bid in &u.bullet_list {
             let b = u.bullets.bullet(bid);
             let p = v3(b.posinfo.position);
@@ -1115,7 +1164,7 @@ impl Sandbox {
 
     /// Draws a prepared frame (window path).
     pub fn render(
-        &self,
+        &mut self,
         renderer: &mut Renderer,
         encoder: &mut hwc_render::wgpu::CommandEncoder,
         color: &hwc_render::wgpu::TextureView,
@@ -1123,29 +1172,74 @@ impl Sandbox {
         size: (u32, u32),
         frame: &Frame,
     ) {
-        let (ships, states) = self.instances(frame);
-        let scene = self.scene(&ships);
-        let extras = SceneExtras {
-            ship_states: &states,
-            effects: Some(&frame.effects),
-        };
-        renderer.render_ex(encoder, color, depth, size, &scene, &extras);
+        {
+            let (ships, states) = self.instances(frame);
+            let scene = self.scene(&ships);
+            let extras = SceneExtras {
+                ship_states: &states,
+                effects: Some(&frame.effects),
+            };
+            renderer.render_ex(encoder, color, depth, size, &scene, &extras);
+        }
+        if self.prepare_effects(renderer, size, frame) {
+            if let Some(fx) = self.fx_renderer.as_mut() {
+                fx.draw(renderer, encoder, color, depth);
+            }
+        }
     }
 
     /// Renders a prepared frame offscreen.
     pub fn render_offscreen(
-        &self,
+        &mut self,
         renderer: &mut Renderer,
         target: &hwc_render::OffscreenTarget,
         frame: &Frame,
     ) -> Result<Vec<u8>, String> {
-        let (ships, states) = self.instances(frame);
-        let scene = self.scene(&ships);
-        let extras = SceneExtras {
-            ship_states: &states,
-            effects: Some(&frame.effects),
+        let effects = self.prepare_effects(renderer, (target.width, target.height), frame);
+        let mut fx = self.fx_renderer.take();
+        let out = {
+            let (ships, states) = self.instances(frame);
+            let scene = self.scene(&ships);
+            let extras = SceneExtras {
+                ship_states: &states,
+                effects: Some(&frame.effects),
+            };
+            target.render_ex_with(renderer, &scene, &extras, |r, enc, c, d| {
+                if let Some(fx) = fx.as_mut().filter(|_| effects) {
+                    fx.draw(r, enc, c, d);
+                }
+            })
         };
-        target.render_ex(renderer, &scene, &extras)
+        self.fx_renderer = fx;
+        out
+    }
+
+    /// Builds the effect geometry of a frame for this camera, with the lens flares (each new
+    /// flare hidden when a ship's collision box lies between it and the eye, the original's
+    /// `collCheckRectLine` test). False when there is nothing to draw.
+    fn prepare_effects(&mut self, renderer: &Renderer, size: (u32, u32), frame: &Frame) -> bool {
+        if !self.effects_on {
+            return false;
+        }
+        let fx = self.fx_renderer.get_or_insert_with(|| {
+            let mut fx = hwc_render::EffectRenderer::new(renderer);
+            if !fx.load_lens_flares(renderer, &self.src, LENS_FLARE_SET) {
+                eprintln!("warning: lens flare set {LENS_FLARE_SET} not found");
+            }
+            fx
+        });
+        let view = hwc_render::FxView::from_orbit(&self.camera, size.0, size.1);
+        fx.prepare(renderer, &self.src, &frame.fx_list, &view, &self.lighting);
+        let u = self.sim.universe_mut();
+        let Some(world) = u.effects.as_mut() else { return true };
+        let mut flares = std::mem::take(&mut world.world.lens_flares);
+        let u = self.sim.universe();
+        let occluded = |pos: Vec3, dir: Vec3, dist: f32| flare_occluded(u, pos, dir, dist);
+        fx.prepare_lens_flares(&mut flares, &view, Some(&occluded));
+        if let Some(world) = self.sim.universe_mut().effects.as_mut() {
+            world.world.lens_flares = flares;
+        }
+        true
     }
 
     fn view_proj(&self, size: (u32, u32)) -> Mat4 {
@@ -1654,7 +1748,7 @@ impl Sandbox {
         // The game draws health bars for the selection; the scenario sandbox shows all of them.
         let all = !self.is_mission();
         for s in u.ships.iter().filter(|s| {
-            s.flags & hwc_sim::object::sof::HIDE == 0
+            s.flags & (hwc_sim::object::sof::HIDE | hwc_sim::object::sof::DEAD) == 0
                 && s.flags & hwc_sim::base::SOF_MODULE == 0
                 && (all || self.selection.contains(&s.id))
         }) {
@@ -1791,6 +1885,55 @@ impl Sandbox {
 }
 
 /// Why `factory` cannot queue a `t` (the build manager's checks, first failing one).
+/// The lens-flare set the game loads (`lensflare\\ps-50-300mm-zoom`).
+const LENS_FLARE_SET: &str = "ps-50-300mm-zoom";
+
+/// Whether a ship's collision box hides a lens flare at `pos` (looking along `dir` towards the
+/// eye, `dist` away).
+fn flare_occluded(u: &Universe, pos: Vec3, dir: Vec3, dist: f32) -> bool {
+    let p = hwc_math::Vector::new(pos.x, pos.y, pos.z);
+    let d = hwc_math::Vector::new(dir.x, dir.y, dir.z);
+    u.ships.iter().filter(|s| hwc_sim::effects::ship_drawn(u, s.id)).any(|s| {
+        u.statics.ship(s.ship_type).is_some_and(|st| {
+            let (t, _) = hwc_sim::collision::rect_line(s, st, p, d, dist);
+            t > 0.0
+        })
+    })
+}
+
+/// The bullets the original draws itself (`rndRenderObject`): those without an effect, as a
+/// one-pixel line from the bullet along its length in the bullet colour. Beams are not drawn
+/// in their first update and Beast infection beams never.
+fn original_bullets(u: &Universe, out: &mut EffectBatch) {
+    use hwc_sim::bullet::weapon;
+    let with_effect = u.effects.as_ref().map(|fx| &fx.bullet_effect);
+    for &bid in &u.bullet_list {
+        if with_effect.is_some_and(|m| m.contains_key(&bid)) {
+            continue;
+        }
+        let b = u.bullets.bullet(bid);
+        if b.weapon == weapon::BEASTINFECT || (b.weapon == weapon::ION && b.time_lived <= TICK) {
+            continue;
+        }
+        let p = v3(b.posinfo.position);
+        let c = b.color;
+        let color = [
+            (c & 0xff) as f32 / 255.0,
+            ((c >> 8) & 0xff) as f32 / 255.0,
+            ((c >> 16) & 0xff) as f32 / 255.0,
+            1.0,
+        ];
+        out.lines.push(FxLine {
+            from: p,
+            to: p + v3(b.length_vec),
+            from_color: color,
+            to_color: color,
+            width: 1.0,
+            blend: Blend::Alpha,
+        });
+    }
+}
+
 fn build_refusal(u: &Universe, factory: ShipId, t: ShipType) -> &'static str {
     use hwc_sim::construction as cm;
     let Some(f) = u.ship(factory) else { return "(no factory)" };

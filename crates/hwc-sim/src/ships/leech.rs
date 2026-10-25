@@ -12,7 +12,7 @@
 
 use hwc_math::fastmath::fmath_sqrt_double;
 use hwc_math::fpu::{ld, st};
-use hwc_math::random::RAN_GAME;
+use hwc_math::random::{RAN_GAME, RAN_PARTICLE_STREAM};
 use hwc_math::{Matrix, Vector};
 
 use crate::command::order;
@@ -179,21 +179,52 @@ pub fn is_active(u: &Universe, id: ShipId) -> bool {
     spec(u, id).is_some_and(|s| s.state != state::IDLE)
 }
 
-/// `LeechPlayDrainEffect` (0x5b1360): the drain effect of health mode. Presentation only (the
-/// original replays it after 3 to 4 seconds, from the particle random stream; here after 3).
+/// `LeechPlayDrainEffect` (0x5b1360): the drain effect of health mode.
+///
+/// With effects, as the original: when the leech has a drain effect
+/// (`EGT_LEECH_VENT_EFFECT` at the lower of its and its target's level of detail) that may
+/// start now, it starts on the leech (attached in position and orientation, parameters 1.0
+/// and 1.0) and is replayed after 3 to 5 seconds drawn from the particle stream. Without
+/// effects it is replayed after 3 seconds.
 fn play_drain_effect(u: &mut Universe, id: ShipId, mode: u8) {
     if mode != state::DRAIN_HEALTH {
         return;
     }
-    let Some(t) = spec(u, id).and_then(|s| s.target) else {
-        return;
-    };
-    u.special_events.push(SpecialEvent::Special {
-        ship: id,
-        effect: Effect::Beam { target: t },
-    });
+    if let Some(t) = spec(u, id).and_then(|s| s.target) {
+        u.special_events.push(SpecialEvent::Special {
+            ship: id,
+            effect: Effect::Beam { target: t },
+        });
+    }
     let now = u.total_time_elapsed;
-    l(u, id).effect_time = st(ld(now) + 3.0);
+    if u.effects.is_some() {
+        drain_effect(u, id);
+        return;
+    }
+    if spec(u, id).and_then(|s| s.target).is_some() {
+        l(u, id).effect_time = st(ld(now) + 3.0);
+    }
+}
+
+/// `EGT_LEECH_VENT_EFFECT` in the special-purpose effect table.
+const DRAIN_EFFECT_SLOT: usize = 25;
+
+/// The effect part of `LeechPlayDrainEffect` (see [`play_drain_effect`]).
+fn drain_effect(u: &mut Universe, id: ShipId) {
+    let Some(fx) = u.effects.as_ref() else { return };
+    // The lower of the two ships' levels of detail: both are the simulation's.
+    let Some(effect) = fx.pick(fx.tables.special_effect(DRAIN_EFFECT_SLOT)) else { return };
+    if !crate::effects::frequency_ok(u, effect) {
+        return;
+    }
+    if crate::effects::in_render_list(u, id.into()) {
+        let one = crate::effects::pf(1.0);
+        let flags = crate::effects::attach::POSITION | crate::effects::attach::COORDSYS;
+        crate::effects::create(u, effect, Some(id.into()), None, None, None, 0.0, flags, &[one, one]);
+    }
+    let r = u.effects.as_mut().expect("effects").world.randy.random(RAN_PARTICLE_STREAM);
+    let now = u.total_time_elapsed;
+    l(u, id).effect_time = st((f64::from(r) * ld(f32::from_bits(0x3000_0000)) + 3.0) + ld(now));
 }
 
 /// The leech point `idx` of the target type.

@@ -107,6 +107,10 @@ code, the callback code, `End`.
   from the owner), drag, integration (skipped for some owner states), spin about Z (with
   `matMakeRotAboutZ(sin, cos)` — the arguments are swapped, as in HW1). Deletion waits until the
   effect has been drawn once or four updates.
+* `FxWorld::assume_drawn` (off by default) treats every effect as drawn for this rule and
+  `FxWorld::draw_randy` gives drawing its own generator; a simulation that must not depend on
+  rendering sets both (`hwc_sim::effects`). `FxWorld::run_update` runs the effect pass without
+  advancing the clock, for callers that keep `universe_time` equal to their universe clock.
 * Particles advance in `etgEffectDraw` by `universe.totaltimeelapsed - lastUpdated`, so at the
   universe rate regardless of frame rate. New effects appended during the update loop are
   updated in the same pass.

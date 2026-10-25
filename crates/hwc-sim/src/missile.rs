@@ -378,6 +378,7 @@ pub fn shoot(u: &mut Universe, id: ShipId, gi: usize, target: Option<ShipId>, fo
         t.recently_fired_upon = crate::object::RECENT_ATTACK_DURATION;
     }
     u.special_events.push(SpecialEvent::MissileFired { ship: id, gun: gi, missile: mid });
+    crate::effects::missile_fired(u, id, mid, h);
     Some(mid)
 }
 
@@ -1097,10 +1098,12 @@ pub fn collided_with_ship(u: &mut Universe, tid: ShipId, mid: MissileId, t: f32,
             s.getting_rocked = Some(oid);
             s.recent_attacker = Some(oid);
             s.recently_attacked = crate::object::RECENT_ATTACK_DURATION;
-            crate::damage::apply_damage_to_target(u, tid, damage, m.bullet_type as i32, crate::damage::how::KILLED_BY_PLAYER, oplayer as i32, Some(oid));
+            let fatal = crate::damage::apply_damage_to_target(u, tid, damage, m.bullet_type as i32, crate::damage::how::KILLED_BY_PLAYER, oplayer as i32, Some(oid));
+            crate::effects::missile_hit(u, mid, ObjRef::Ship(tid), t, damage, u32::from(fatal));
         }
         None => {
-            crate::damage::apply_damage_to_target(u, tid, damage, m.bullet_type as i32, crate::damage::how::KILLED_BY_UNKNOWN, 99, None);
+            let fatal = crate::damage::apply_damage_to_target(u, tid, damage, m.bullet_type as i32, crate::damage::how::KILLED_BY_UNKNOWN, 99, None);
+            crate::effects::missile_hit(u, mid, ObjRef::Ship(tid), t, damage, u32::from(fatal));
         }
     }
 }
@@ -1123,7 +1126,8 @@ fn collided_with_mine(u: &mut Universe, nid: MissileId, mid: MissileId, t: f32, 
     }
     let position = m.posinfo.position.add_scaled(m.heading(), t);
     u.special_events.push(SpecialEvent::MissileHit { missile: mid, target: ObjRef::Missile(nid), position });
-    apply_damage(u, nid, m.damage, m.bullet_type as i32);
+    let fatal = apply_damage(u, nid, m.damage, m.bullet_type as i32);
+    crate::effects::missile_hit(u, mid, ObjRef::Missile(nid), t, m.damage, u32::from(fatal));
 }
 
 /// `ApplyDamageToTarget` for a missile or mine: it dies when its health runs out.
@@ -1174,6 +1178,7 @@ pub fn delete_dead(u: &mut Universe) {
     for (mid, bullet_type) in dead {
         let Some(m) = u.missiles.get(mid) else { continue };
         u.special_events.push(SpecialEvent::MissileDied { missile: mid, position: m.posinfo.position, exploded: bullet_type >= 0, mine: m.kind == kind::MINE });
+        crate::effects::missile_died(u, mid, bullet_type);
         u.blobs.object_died(ObjRef::Missile(mid));
         // (Bullets and other missiles never aim at missiles in this simulation, so there are
         // no references to clear.)

@@ -138,6 +138,8 @@ pub struct Universe {
     pub render_list: Vec<ObjRef>,
     /// The ships that died this update (`ShipsToDeleteList`), removed at its end.
     pub dead_ships: Vec<ShipId>,
+    /// The `deathBy` (`EDT_*` explosion type) of each entry of [`Universe::dead_ships`].
+    pub dead_ship_death_by: Vec<i32>,
     pub players: Vec<Player>,
     /// `universe.shipNumber`: the next ship id.
     pub ship_number: u16,
@@ -177,6 +179,14 @@ pub struct Universe {
     pub mine_formations: Vec<crate::ships::minelayer::MineFormation>,
     /// Shock waves in flight and the big-gun shells they push (see [`crate::shockwave`]).
     pub shockwaves: crate::shockwave::Shockwaves,
+    /// Dead ships waiting for their death effect to delete them (`deleteParentShip`). The
+    /// original leaves them in `ShipList` flagged `SOF_Dead`; here they move out of
+    /// [`Universe::ship_list`] so that no search finds them, still move (careen), and are
+    /// drawn until hidden. Only used with [`Universe::effects`].
+    pub hulks: Vec<ShipId>,
+    /// The effect system (see [`crate::effects`]); `None`: no effects, and dead ships leave at
+    /// once.
+    pub effects: Option<Box<crate::effects::Effects>>,
 }
 
 impl Universe {
@@ -202,6 +212,7 @@ impl Universe {
             derelict_list: Vec::new(),
             render_list: Vec::new(),
             dead_ships: Vec::new(),
+            dead_ship_death_by: Vec::new(),
             players: players.iter().enumerate().map(|(i, &r)| Player::new(i, r)).collect(),
             ship_number: 0,
             update_counter: 0,
@@ -223,6 +234,8 @@ impl Universe {
             kas_naggarok_emp: None,
             mine_formations: Vec::new(),
             shockwaves: Default::default(),
+            hulks: Vec::new(),
+            effects: None,
         };
         crate::base::init(&mut u);
         u
@@ -261,6 +274,7 @@ impl Universe {
         self.total_time_elapsed = st(ld(self.total_time_elapsed) + ld(dt));
         self.update_counter = self.update_counter.wrapping_add(1);
         self.phys_time_elapsed = dt;
+        crate::effects::begin_update(self);
         // The multiplayer resource trickle.
         crate::resource::resource_trickle(self);
 
@@ -299,8 +313,13 @@ impl Universe {
             crate::resource::update_all_pos_vel(self);
             self.update_all_pos_vel_ships();
             crate::shockwave::update_all(self);
+        } else {
+            // While paused only the damage effects are kept up to date.
+            for id in self.ship_list.clone().into_iter().chain(self.hulks.clone()) {
+                crate::effects::damage::ship_think(self, id);
+            }
         }
-        // (Effects update here.)
+        crate::effects::update(self);
         crate::damage::delete_dead_ships(self);
         crate::resource::delete_dead_resources(self);
         crate::missile::delete_dead(self);
@@ -317,6 +336,7 @@ impl Universe {
         for &id in &list {
             let Some(ship) = self.ships.get(id) else { continue };
             if ship.flags & sof::DONT_APPLY_PHYSICS != 0 {
+                crate::effects::damage::ship_think(self, id);
                 if crate::clamp::host_of(self, id).is_some() {
                     crate::clamp::follow_host(self, id);
                 }
@@ -345,6 +365,22 @@ impl Universe {
                 let new = self.ships.ship(id).posinfo.position;
                 crate::fow::move_viewer(self, id, old, new);
             }
+            self.housekeep(id);
+        }
+        // The hulks drift and spin on until their death effects delete them.
+        for id in self.hulks.clone() {
+            let Some(ship) = self.ships.get(id) else { continue };
+            let Some(stat) = statics.ship(ship.ship_type) else { continue };
+            let ctx = PhysContext {
+                dt: self.phys_time_elapsed,
+                update_counter: self.update_counter,
+                single_player: self.single_player,
+                world_bounds: self.world_bounds,
+                max_vel: self.max_velocity_context(ship),
+                now: self.total_time_elapsed,
+            };
+            let tw = &self.tweaks;
+            physics::update_ship(self.ships.ship_mut(id), stat, tw, &ctx);
             self.housekeep(id);
         }
         for host in hosts {
@@ -490,7 +526,8 @@ impl Universe {
             }
         }
         s.flags &= !sof::FORMATION_SETTLED;
-        // (Damage effects and engine trails are updated here.)
+        crate::effects::damage::ship_think(self, id);
+        // (Engine trails are updated here.)
     }
 
     /// Per-ship upkeep after all ships moved (`univShipThink` 0x53f850).

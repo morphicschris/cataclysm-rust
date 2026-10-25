@@ -844,6 +844,7 @@ fn update_arriving_ship(u: &mut Universe, game: &mut Game, i: usize, sp: [f32; 4
                 s.flags &= !sof::HYPERSPACE;
                 s.flags |= sof::HIDE;
             }
+            crate::effects::hyperspace::note_state(u, id, ship_hs::WAITING, game.arriving[i].hs_state);
             false
         }
         ship_hs::WAITING => {
@@ -857,13 +858,25 @@ fn update_arriving_ship(u: &mut Universe, game: &mut Game, i: usize, sp: [f32; 4
             let a = &mut game.arriving[i];
             a.state = ship_hs::DECELERATING;
             a.time = st(ld(tw.decelerate_time) + ld(now));
-            // hsStart(ship, HYPERSPACE_SLICE_RATE, arriving)
+            // hsStart(ship, HYPERSPACE_SLICE_RATE, arriving, hsShouldDisplayEffect(ship))
             a.rate = tw.slice_rate;
             a.clipt = 1.0;
             a.hs_state = hs_effect::POPUP_OUTOF;
+            let hs_state = a.hs_state;
+            let display = crate::effects::hyperspace::should_display(u, id);
+            crate::effects::hyperspace::start(u, id, hs_state, display);
+            crate::effects::hyperspace::note_state(u, id, ship_hs::DECELERATING, hs_state);
             false
         }
         ship_hs::DECELERATING => {
+            // hsContinue: the original re-places the window each time the ship is drawn; here
+            // once per update, with the state the last frame was drawn with.
+            if a.hs_state != hs_effect::INACTIVE && a.hs_state != hs_effect::FINISHED {
+                let display = crate::effects::hyperspace::should_display(u, id);
+                if display {
+                    crate::effects::hyperspace::continue_effect(u, id, a.hs_state, a.clipt, false);
+                }
+            }
             match a.hs_state {
                 hs_effect::INACTIVE => {
                     a.time < now
@@ -872,7 +885,7 @@ fn update_arriving_ship(u: &mut Universe, game: &mut Game, i: usize, sp: [f32; 4
                     // Wait while another capital ship is still popping out or done.
                     let others = game.arriving.iter().enumerate().any(|(j, o)| j != i && (o.hs_state == hs_effect::POPUP_OUTOF || o.hs_state == hs_effect::FINISHED));
                     if !others {
-                        hs_update(&mut game.arriving[i], &tw);
+                        hs_step(u, game, i, &tw);
                     }
                     false
                 }
@@ -881,12 +894,12 @@ fn update_arriving_ship(u: &mut Universe, game: &mut Game, i: usize, sp: [f32; 4
                     // only affects the timing above).
                     let waiting = a.mothership && game.arriving.iter().enumerate().any(|(j, o)| j != i && o.hs_state != hs_effect::INACTIVE);
                     if !waiting {
-                        hs_update(&mut game.arriving[i], &tw);
+                        hs_step(u, game, i, &tw);
                     }
                     false
                 }
                 _ => {
-                    hs_update(&mut game.arriving[i], &tw);
+                    hs_step(u, game, i, &tw);
                     false
                 }
             }
@@ -906,11 +919,26 @@ fn put_ship_outside_at(u: &mut Universe, id: ShipId, p: Vector, yaw: f32) {
     level::rotate_yaw(u, id, yaw);
 }
 
-/// `hsUpdate` (the hyperspace effect's clip plane and state changes).
-fn hs_update(a: &mut ArrivingShip, tw: &SpTweaks) {
+/// `hsUpdate` on an arriving ship, with its effect side: the window effect is deleted when
+/// the collapse ends.
+fn hs_step(u: &mut Universe, game: &mut Game, i: usize, tw: &SpTweaks) {
+    let a = &mut game.arriving[i];
+    let ended = hs_update(a, tw);
+    let (state, hs_state) = (a.state, a.hs_state);
+    if let Some(id) = a.ship {
+        if ended {
+            crate::effects::hyperspace::finish(u, id);
+        }
+        crate::effects::hyperspace::note_state(u, id, state, hs_state);
+    }
+}
+
+/// `hsUpdate` (the hyperspace effect's clip plane and state changes). Returns true when the
+/// collapse ended (the original then deletes the window effect).
+fn hs_update(a: &mut ArrivingShip, tw: &SpTweaks) -> bool {
     let s = a.hs_state;
     if s == hs_effect::INACTIVE || s == hs_effect::FINISHED {
-        return;
+        return false;
     }
     let limit: f64 = match s {
         hs_effect::POPUP_INTO | hs_effect::POPUP_OUTOF | hs_effect::COLLAPSE_INTO | hs_effect::COLLAPSE_OUTOF => {
@@ -934,13 +962,14 @@ fn hs_update(a: &mut ArrivingShip, tw: &SpTweaks) {
         }
     };
     if !(ld(a.clipt) < limit) {
-        return;
+        return false;
     }
     if a.hs_flags & 1 != 0 {
         a.clipt = limit as f32;
-        return;
+        return false;
     }
     a.clipt = 1.0;
+    let mut ended = false;
     a.hs_state = match s {
         hs_effect::POPUP_INTO => hs_effect::SLICING_INTO,
         hs_effect::POPUP_OUTOF => hs_effect::SLICING_OUTOF,
@@ -949,6 +978,7 @@ fn hs_update(a: &mut ArrivingShip, tw: &SpTweaks) {
         _ => {
             a.clipt = -2.0;
             a.rate = 0.0;
+            ended = true;
             if s == hs_effect::COLLAPSE_INTO {
                 hs_effect::FINISHED
             } else {
@@ -956,6 +986,7 @@ fn hs_update(a: &mut ArrivingShip, tw: &SpTweaks) {
             }
         }
     };
+    ended
 }
 
 /// The game's files through [`hwc_formats::gamedata::GameData`] as a [`DataSource`].

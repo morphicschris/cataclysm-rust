@@ -155,8 +155,24 @@ impl Audio {
         self.sys.play_speech(ev, variable, -1, 0)
     }
 
-    /// Sounds for one universe update's events.
-    pub fn sim_events(&mut self, u: &Universe) {
+    /// Sounds the effect scripts asked for in the last update (`playSound`: the sound plays at
+    /// the effect).
+    pub fn effect_events(&mut self, u: &Universe) {
+        for e in hwc_sim::effects::events(u) {
+            if let hwc_fx::FxEvent::Sound { event, position, .. } = *e {
+                let emitter = Emitter {
+                    position: [position.x, position.y, position.z],
+                    is_ship: false,
+                    ..Default::default()
+                };
+                self.sys.play_event(Some(&emitter), event, &mut ShipSounds::default());
+            }
+        }
+    }
+
+    /// Sounds for one universe update's events. `stand_ins`: also play hit and explosion
+    /// sounds by ship class (without effects, whose scripts play the original's).
+    pub fn sim_events(&mut self, u: &Universe, stand_ins: bool) {
         for e in &u.events {
             match *e {
                 SimEvent::GunFired { ship, gun, .. } => {
@@ -178,6 +194,7 @@ impl Audio {
                     let slot = self.ships.entry(ship).or_default();
                     self.sys.play_event(Some(&emitter), event::GUN_SHOT, slot);
                 }
+                SimEvent::BulletHit { .. } if !stand_ins => {}
                 SimEvent::BulletHit { ship, position, beam, .. } => {
                     let small = u
                         .ship(ship)
@@ -194,6 +211,9 @@ impl Audio {
                 SimEvent::ShipDied { ship, ship_type, position, .. } => {
                     if let Some(mut slot) = self.ships.remove(&ship) {
                         self.sys.stop_burst(&mut slot);
+                    }
+                    if !stand_ins {
+                        continue;
                     }
                     let class = u.statics.ship(ship_type).and_then(|st| st.ship_class);
                     let emitter = Emitter {

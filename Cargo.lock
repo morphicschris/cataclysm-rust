@@ -824,6 +824,7 @@ name = "hwc-sim"
 version = "0.1.0"
 dependencies = [
  "hwc-formats",
+ "hwc-fx",
  "hwc-kas",
  "hwc-math",
 ]
@@ -863,6 +864,7 @@ dependencies = [
  "glam",
  "hwc-audio",
  "hwc-formats",
+ "hwc-fx",
  "hwc-kas",
  "hwc-math",
  "hwc-render",

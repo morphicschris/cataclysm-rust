@@ -109,8 +109,9 @@ impl Default for Owner {
 /// Requests from effect scripts to the rest of the game.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FxEvent {
-    /// `playSound(event)`.
-    Sound { effect: EffectId, owner: Option<OwnerId>, event: u32 },
+    /// `playSound(event)` (`soundEffect`: the effect itself is the sound's object, so it plays
+    /// at the effect's position).
+    Sound { effect: EffectId, owner: Option<OwnerId>, event: u32, position: Vector },
     /// `playChatter(event)` (only with an owner).
     Chatter { effect: EffectId, owner: OwnerId, event: u32 },
     /// `deathCries()`.
@@ -189,6 +190,7 @@ enum ArgKind {
 }
 
 /// The effect world.
+#[derive(Clone)]
 pub struct FxWorld {
     pub lib: Library,
     pub pat: Pat,
@@ -207,6 +209,15 @@ pub struct FxWorld {
     pub owners: HashMap<OwnerId, Owner>,
     pub events: Vec<FxEvent>,
     pub warnings: Vec<String>,
+    /// Treat every effect as drawn when deciding how long a deleted effect lingers (the
+    /// original deletes a drawn effect at once and an undrawn one after four updates). Off by
+    /// default; a simulation that must not depend on what was drawn turns it on, which gives
+    /// every effect the on-screen behaviour.
+    pub assume_drawn: bool,
+    /// When set, the render-time random draws (electric-bolt jitter) use this generator
+    /// instead of [`FxWorld::randy`], so drawing does not move the streams the effect scripts
+    /// use. Off (`None`) by default, as in the original, where both share stream 0.
+    pub draw_randy: Option<Randy>,
     next_id: EffectId,
     exec: Exec,
     call_stack: Vec<(usize, u32)>,
@@ -272,6 +283,8 @@ impl FxWorld {
             owners: HashMap::new(),
             events: Vec::new(),
             warnings: Vec::new(),
+            assume_drawn: false,
+            draw_randy: None,
             next_id: 1,
             exec: Exec::default(),
             call_stack: Vec::new(),
@@ -449,7 +462,8 @@ impl FxWorld {
         Some(self.create_effect(stat, None, Some(position), Some(Vector::ZERO), Some(coordsys), 1.0, 0, params))
     }
 
-    fn delete_effect(&mut self, id: EffectId) {
+    /// `etgEffectDelete` + `univDeleteEffect`: remove an effect and free its particle systems.
+    pub fn delete_effect(&mut self, id: EffectId) {
         if let Some(i) = self.effects.iter().position(|e| e.id == id) {
             let e = self.effects.remove(i);
             self.free_blocks(&e);
@@ -474,7 +488,7 @@ impl FxWorld {
     }
 
     /// `etgFrequencyExceeded` (consumes a stream-26 number unless the limit is reached).
-    fn frequency_exceeded(&mut self, stat: usize) -> bool {
+    pub fn frequency_exceeded(&mut self, stat: usize) -> bool {
         let now = self.universe_time;
         let s = &self.lib.statics[stat];
         if s.history.is_empty() {
@@ -513,6 +527,12 @@ impl FxWorld {
     /// universe clock first, as `univUpdate` does).
     pub fn update(&mut self, dt: f32) {
         self.universe_time = st(ld(self.universe_time) + ld(dt));
+        self.run_update(dt);
+    }
+
+    /// The effect pass of `univUpdate` without advancing the clock, for a caller that keeps
+    /// [`FxWorld::universe_time`] equal to its own universe clock.
+    pub fn run_update(&mut self, dt: f32) {
         let mut i = 0;
         while i < self.effects.len() {
             if self.effect_update(i, dt) {
@@ -598,7 +618,7 @@ impl FxWorld {
         }
         let fl = e.effect_flags;
         let del = u32::from(self.exec.delete);
-        if fl & EF_RENDERED != 0 {
+        if fl & EF_RENDERED != 0 || self.assume_drawn {
             return (fl & EM_TO_BE_DELETED) | del != 0;
         }
         if (fl & EM_TO_BE_DELETED) != 0 || del != 0 {
@@ -1475,7 +1495,7 @@ impl FxWorld {
             }
             Fun::SoundEffect => {
                 let e = &self.effects[ei];
-                self.events.push(FxEvent::Sound { effect: e.id, owner: e.owner, event: a[0] });
+                self.events.push(FxEvent::Sound { effect: e.id, owner: e.owner, event: a[0], position: e.position });
             }
             Fun::ChatterEventPlay => {
                 if let Some(o) = self.effects[ei].owner {
@@ -1849,6 +1869,10 @@ impl FxWorld {
                     sys.position = e.position;
                 }
                 let data = WorldData { lib: &self.lib, effects: &self.effects, random_offsets: &self.random_offsets };
+                let randy = match self.draw_randy.as_mut() {
+                    Some(r) => r,
+                    None => &mut self.randy,
+                };
                 let hits = crate::emit::emit_system_with(
                     &mut sys,
                     &data,
@@ -1856,7 +1880,7 @@ impl FxWorld {
                     &scaled,
                     owner.as_ref(),
                     &self.lib,
-                    &mut self.randy,
+                    randy,
                     &mut self.lens_flares,
                     list,
                 );

@@ -712,8 +712,12 @@ fn killer_collision(u: &mut Universe, a: ShipId, b: ShipId) {
         return;
     }
     let d = if sa.health <= sb.health { sa.health } else { sb.health };
+    let sa_attr = sa.attributes;
     crate::damage::apply_damage_to_target(u, a, d, 0, crate::damage::how::KILLED_BY_COLLISION, 99, Some(b));
     crate::damage::apply_damage_to_target(u, b, d, 0, crate::damage::how::KILLED_BY_COLLISION, 99, Some(a));
+    // The explosion at the killer ship (the one with the attribute).
+    let killer = if sa_attr & 0x200 != 0 { a } else { b };
+    crate::effects::killer_collision(u, killer, d);
 }
 
 /// `collCheckRectBumpCollision` for the ship modules.

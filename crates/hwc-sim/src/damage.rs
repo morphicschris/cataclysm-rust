@@ -72,22 +72,35 @@ pub fn weapon_damage(bullet_type: u32, armour: u32) -> f32 {
 /// friendly-fire modifiers, the "under attack" state, then the damage. `apply` is false for
 /// hits that only make an effect.
 pub fn bullet_collided_with_target(u: &mut Universe, apply: bool, tid: ShipId, bid: crate::object::BulletId, t: f32, side: i32) {
+    let hit = bullet_collided_inner(u, apply, tid, bid, t, side);
+    // The hit effect, with the damage done and `ApplyDamageToTarget`'s result (1.0f when the
+    // hit did no damage).
+    if let Some((damage, fatal)) = hit {
+        crate::effects::bullet_hit(u, bid, ObjRef::Ship(tid), t, damage, fatal);
+    }
+}
+
+/// [`bullet_collided_with_target`] without the effect; returns the effect's damage and
+/// "fatal" parameters (`None`: the ship or bullet is gone).
+fn bullet_collided_inner(u: &mut Universe, apply: bool, tid: ShipId, bid: crate::object::BulletId, t: f32, side: i32) -> Option<(f32, u32)> {
+    const NO_DAMAGE: u32 = 0x3f80_0000;
     let statics = u.statics.clone();
-    let Some(b) = u.bullets.get(bid).cloned() else { return };
+    let b = u.bullets.get(bid).cloned()?;
     // A big-gun shell detonates on whatever it hits (`MothershipBigGunBulletHit2`).
     if b.bullet_type == crate::ships::mothership::BIG_GUN_BULLET_TYPE {
         crate::ships::mothership::big_gun_bullet_hit(u, bid, b.posinfo.position);
     }
-    if !apply || u.ships.get(tid).is_none() {
-        return;
+    let ship = u.ships.get(tid)?;
+    let stat = statics.ship(ship.ship_type)?;
+    let mut damage = st(ld(weapon_damage(b.bullet_type, ship.armour_level)) * ld(b.damage));
+    if !apply {
+        return Some((damage, NO_DAMAGE));
     }
     // A sentinel whose force field is up: the field takes the hit instead.
     if crate::ships::sentinel::absorbs_hit(u, tid, &b) {
-        return;
+        return Some((damage, NO_DAMAGE));
     }
-    let Some(ship) = u.ships.get(tid) else { return };
-    let Some(stat) = statics.ship(ship.ship_type) else { return };
-    let mut damage = st(ld(weapon_damage(b.bullet_type, ship.armour_level)) * ld(b.damage));
+    let ship = u.ships.get(tid)?;
     let tw = u.tweaks.combat.clone();
     if !stat.header.immobile && ship.flags & sof::NOT_BUMPABLE == 0 && ship.special_flags & 0x1000_0000 == 0 {
         let k = ld(b.mass) / ld(u.phys_time_elapsed);
@@ -129,10 +142,12 @@ pub fn bullet_collided_with_target(u: &mut Universe, apply: bool, tid: ShipId, b
             s.getting_rocked = Some(oid);
             s.recent_attacker = Some(oid);
             s.recently_attacked = crate::object::RECENT_ATTACK_DURATION;
-            apply_damage_to_target(u, tid, damage, b.bullet_type as i32, how::KILLED_BY_PLAYER, oplayer as i32, Some(oid));
+            let fatal = apply_damage_to_target(u, tid, damage, b.bullet_type as i32, how::KILLED_BY_PLAYER, oplayer as i32, Some(oid));
+            Some((damage, u32::from(fatal)))
         }
         None => {
-            apply_damage_to_target(u, tid, damage, b.bullet_type as i32, how::KILLED_BY_UNKNOWN, 99, None);
+            let fatal = apply_damage_to_target(u, tid, damage, b.bullet_type as i32, how::KILLED_BY_UNKNOWN, 99, None);
+            Some((damage, u32::from(fatal)))
         }
     }
 }
@@ -231,27 +246,28 @@ pub fn add_ship_to_delete_list(u: &mut Universe, id: ShipId, bullet_type: i32) {
         let s = u.ships.ship_mut(id);
         s.rotinfo.torque.z = st(r2 + ld(s.rotinfo.torque.z));
     }
-    queue_for_deletion(u, id, bullet_type == -1);
+    queue_for_deletion(u, id, bullet_type, bullet_type == -1);
 }
 
 /// The second half of the Somtaaw mothership's death (`MothershipHouseKeep`, state 2): it is
 /// dead now and goes like any other ship, without the careen.
 pub fn finish_ship_death(u: &mut Universe, id: ShipId, bullet_type: i32) {
-    let _ = bullet_type;
     let Some(s) = u.ships.get_mut(id) else { return };
     s.flags |= sof::DEAD;
-    queue_for_deletion(u, id, false);
+    queue_for_deletion(u, id, bullet_type, false);
 }
 
 /// The explosion, its shock wave and the place on the delete list.
-fn queue_for_deletion(u: &mut Universe, id: ShipId, scuttle: bool) {
+fn queue_for_deletion(u: &mut Universe, id: ShipId, bullet_type: i32, scuttle: bool) {
     let statics = u.statics.clone();
     let Some(stat) = u.ships.get(id).and_then(|s| statics.ship(s.ship_type)) else { return };
     let s = u.ships.ship(id);
     let explosion_type = stat.custom_entries.iter().find(|(k, _)| k == "explosionType").map(|(_, v)| v.split_whitespace().next().unwrap_or("").to_string());
     u.events.push(SimEvent::ShipDied { ship: id, ship_type: s.ship_type, position: s.posinfo.position, radius: stat.header.coll.coll_sphere_size, explosion_type });
     shockwave(u, id, scuttle);
+    let death_by = crate::effects::death_by(u, id, bullet_type);
     u.dead_ships.push(id);
+    u.dead_ship_death_by.push(death_by);
 }
 
 /// The shock wave of an exploding ship (0x540fa0): pushes and spins everything impactable
@@ -322,26 +338,53 @@ fn shockwave(u: &mut Universe, id: ShipId, scuttle: bool) {
 }
 
 /// `univDeleteDeadShips` / `univDeleteDeadShip`: everything that refers to the dead ships lets
-/// go of them, then they leave the universe.
+/// go of them and their explosions start; then they leave the universe (with effects, they
+/// stay as hulks until the explosion deletes them).
 pub fn delete_dead_ships(u: &mut Universe) {
     while !u.dead_ships.is_empty() {
         let id = u.dead_ships.remove(0);
-        delete_dead_ship(u, id);
+        let death_by = if u.dead_ship_death_by.is_empty() { 0 } else { u.dead_ship_death_by.remove(0) };
+        delete_dead_ship(u, id, death_by);
     }
 }
 
-/// `univReallyDeleteThisShipRightNow`: remove a ship immediately (cancelled hulls).
+/// `univReallyDeleteThisShipRightNow`: remove a ship immediately (cancelled hulls), no
+/// explosion.
 pub fn really_delete_ship(u: &mut Universe, id: ShipId) {
-    u.dead_ships.retain(|&d| d != id);
-    delete_dead_ship(u, id);
+    if let Some(i) = u.dead_ships.iter().position(|&d| d == id) {
+        u.dead_ships.remove(i);
+        if i < u.dead_ship_death_by.len() {
+            u.dead_ship_death_by.remove(i);
+        }
+    }
+    delete_dead_ship(u, id, -1);
 }
 
-fn delete_dead_ship(u: &mut Universe, id: ShipId) {
+fn delete_dead_ship(u: &mut Universe, id: ShipId, death_by: i32) {
+    if u.ships.get(id).is_none() {
+        return;
+    }
+    let fx = u.effects.is_some();
+    retire_dead_ship(u, id, !fx);
+    // The explosion; it deletes the hulk when it is done (`deleteParentShip`). Without an
+    // explosion the ship goes now (the original would leave it in the universe).
+    if fx && crate::effects::start_death_effect(u, id, death_by).is_some() {
+        u.hulks.push(id);
+        return;
+    }
+    wipe_ship(u, id);
+}
+
+/// The part of `univDeleteDeadShip` that makes everything let go of the ship: it is dead,
+/// no longer in the ship or impactable lists or the blobs, and no one refers to it.
+fn retire_dead_ship(u: &mut Universe, id: ShipId, fow_now: bool) {
     let Some(s) = u.ships.get_mut(id) else { return };
     s.posinfo.force = Vector::ZERO;
     s.rotinfo.torque = Vector::ZERO;
     s.flags = (s.flags & !sof::SELECTABLE) | sof::DEAD;
     let (tactics, leader) = (s.tactics, s.attack.leader);
+    // `stopRepairEffect`: its harvest, salvage or repair beam stops.
+    crate::resource::stop_beam_effect(u, id);
     if tactics == crate::object::tactics::EVASIVE {
         if let Some(l) = leader.and_then(|l| u.ships.get_mut(l)) {
             l.chatter_bits |= 2;
@@ -389,12 +432,28 @@ fn delete_dead_ship(u: &mut Universe, id: ShipId) {
         crate::ships::remove_ship_refs(u, o, id);
     }
     crate::missile::remove_ship_references(u, id);
-    crate::fow::remove_viewer(u, id);
+    if fow_now {
+        crate::fow::remove_viewer(u, id);
+    }
     // The base layer lets go (factories, docking, clamping, labs, support units...).
     crate::base::ship_died(u, id);
     u.blobs.object_died(ObjRef::Ship(id));
     u.ships.ship_mut(id).coll_my_blob = None;
     crate::command::cl_ship_died(u, id);
+    u.ship_list.retain(|&s| s != id);
+    u.impactable_list.retain(|&o| o != ObjRef::Ship(id));
+}
+
+/// `univWipeShipOutOfExistence`: the ship leaves the universe for good.
+pub fn wipe_ship(u: &mut Universe, id: ShipId) {
+    if u.ships.get(id).is_none() {
+        return;
+    }
+    if let Some(i) = u.hulks.iter().position(|&h| h == id) {
+        u.hulks.remove(i);
+        crate::fow::remove_viewer(u, id);
+    }
+    crate::effects::ship_wiped(u, id);
     u.ship_list.retain(|&s| s != id);
     u.impactable_list.retain(|&o| o != ObjRef::Ship(id));
     u.space_obj_list.retain(|&o| o != ObjRef::Ship(id));

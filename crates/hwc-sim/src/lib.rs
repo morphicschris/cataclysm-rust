@@ -34,6 +34,7 @@ pub mod construction;
 pub mod damage;
 pub mod disable;
 pub mod dock;
+pub mod effects;
 #[cfg(test)]
 mod dock_rows;
 pub mod flightman;

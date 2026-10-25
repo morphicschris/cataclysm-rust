@@ -11,10 +11,15 @@
 //! The states (`+0x638`): 0 idle, 1 turning towards the target, 2 closing in, 3 charging,
 //! 5 pushing (4 is never entered).
 //!
-//! Not reproduced: the effects, animations, sounds, chatter and trail scaling of the original
+//! With effects attached the rammer makes the original's effects: the impact when it latches on
+//! (`EGT_RAMMING_FRIGATE_IMPACT_EFFECT`), the vents of its collapsing bow
+//! (`EGT_RAM_VENT`) and the cutting beam while it pushes (`EGT_BULLET_CUTTING_BEAM`).
+//!
+//! Not reproduced: the animations, sounds, chatter and trail scaling of the original
 //! (presentation only; the state changes are reported as [`Effect::State`] events), and the
-//! snap-point ray test against the target's polygon mesh (`meshShipSegmentCollide`), which uses
-//! the target's collision box here (the simulation has no ship meshes).
+//! ray tests against the target's polygon mesh (`meshShipSegmentCollide`: the snap point and the
+//! cutting beam's length), which use the target's collision box here (the simulation has no
+//! ship meshes).
 
 use hwc_math::fastmath::fsqrt;
 use hwc_math::fpu::{ld, st, Ext};
@@ -22,6 +27,7 @@ use hwc_math::{Matrix, Vector};
 
 use crate::disable::Stopwatch;
 use crate::object::{Ship, ShipId};
+use crate::shockwave::fx;
 use crate::ships::{Effect, ShipSpec, TypeStatics};
 use crate::statics::{ShipClass, ShipStaticInfo, ShipType};
 use crate::universe::{SpecialEvent, Universe};
@@ -90,6 +96,26 @@ const PUSH_ROTATE_MAX: f32 = 400.0;
 const RAM_SPEED_BONUS: f32 = f32::from_bits(0x3f19_999a);
 /// Start duration of every stopwatch (0.01 s).
 const INIT_TIMER: f32 = f32::from_bits(0x3c23_d70a);
+
+/// Effect handle slot of the cutting beam (+0x674).
+const SLOT_CUTTING_BEAM: u32 = 200;
+/// Special-purpose slots: the impact (0xae7080), the cutting beam (0xae7094) and the vents
+/// (0xae70a4).
+const IMPACT_EFFECT: usize = 32;
+const CUTTING_BEAM_EFFECT: usize = 37;
+const VENT_EFFECT: usize = 41;
+/// The vents only show at the finer levels of detail (0x8bbbb4).
+const VENT_MAX_LOD: u8 = 3;
+/// The collapse is far enough along for the vents after this long (0x8bbb9c).
+const VENT_DELAY: f32 = f32::from_bits(0x3e99_999a);
+/// The bow corners the vents blow from (`RammingFrigateGetSnapBounds`, 0x8bbba0..0x8bbbb0):
+/// starboard top, port top, starboard bottom, port bottom.
+const VENT_POINTS: [Vector; 4] =
+    [Vector::new(37.0, -50.0, -43.0), Vector::new(-34.0, -50.0, -43.0), Vector::new(37.0, 50.0, -43.0), Vector::new(-34.0, 50.0, -43.0)];
+/// Where the cutting beam starts, in the rammer's coordinates (0x8bbbcc, 0x91cea8, 0x8bbbd0),
+/// and how far it reaches (0x8bbbd4).
+const CUTTING_BEAM_POINT: Vector = Vector::new(-75.0, 0.0, -25.0);
+const CUTTING_BEAM_REACH: f32 = 2000.0;
 
 /// The snap points, in the order `RammingFrigateFindSnapPoint` looks them up.
 const SNAP_POINTS: [&str; 9] =
@@ -237,6 +263,7 @@ pub fn set_state(u: &mut Universe, id: ShipId, new: u8) {
     let Some(old) = spec(u, id).map(|r| r.state) else { return };
     let now = u.total_time_elapsed;
     let wait = ram_statics(u, t).wait_after_push;
+    crate::effects::delete_slot(u, id, SLOT_CUTTING_BEAM);
     if old == state::PUSHING && new != state::PUSHING {
         crate::clamp::unclamp(u, id);
         if let Some(r) = spec_mut(u, id) {
@@ -373,6 +400,7 @@ pub fn remove_target_ref(u: &mut Universe, id: ShipId, gone: ShipId) {
 
 /// `RammingFrigateDied` (0x5bb450).
 pub fn died(u: &mut Universe, id: ShipId) {
+    crate::effects::delete_slot(u, id, SLOT_CUTTING_BEAM);
     if let Some(r) = spec_mut(u, id) {
         r.beam_on = false;
         r.target = None;
@@ -459,9 +487,14 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
     }
     let Some(r) = spec(u, id) else { return };
     let target = r.target;
-    if r.collapsing && r.collapse_timer.expired(now) {
-        if let Some(r) = spec_mut(u, id) {
-            r.collapsing = false;
+    let (collapsing, collapse) = (r.collapsing, r.collapse_timer);
+    if collapsing {
+        if collapse.expired(now) {
+            if let Some(r) = spec_mut(u, id) {
+                r.collapsing = false;
+            }
+        } else if ld(VENT_DELAY) < ld(now) - ld(collapse.start) {
+            vent_effects(u, id);
         }
     }
     let Some(tid) = target else { return };
@@ -662,7 +695,18 @@ fn apply_ram_damage(u: &mut Universe, id: ShipId, rs: &RammingStatics, dt: f32) 
         return;
     }
     let Some(tid) = r.target else { return };
-    if !r.beam_on {
+    let beam_on = r.beam_on;
+    if u.effects.is_some() {
+        match fx::handle(u, id, SLOT_CUTTING_BEAM) {
+            None => cutting_beam_effect(u, id, tid),
+            Some(e) => {
+                let at = fx::local_to_world(u, id, CUTTING_BEAM_POINT);
+                let cs = u.ships.ship(id).rotinfo.coordsys;
+                fx::place(u, e, Some(at), None, Some(cs));
+            }
+        }
+    }
+    if !beam_on {
         if let Some(r) = spec_mut(u, id) {
             r.beam_on = true;
         }
@@ -671,6 +715,85 @@ fn apply_ram_damage(u: &mut Universe, id: ShipId, rs: &RammingStatics, dt: f32) 
     let per_sec = if has_upgrade(u, id, UPGRADE_CUTTING_BEAM) { rs.cutting_damage_upgraded } else { rs.cutting_damage };
     let player = u.ships.ship(id).player as i32;
     crate::damage::apply_damage_to_target(u, tid, st(ld(dt) * ld(per_sec)), 0, crate::damage::how::KILLED_BY_PLAYER, player, Some(id));
+}
+
+/// `RammingFrigateImpactEffect` (0x5bc3b0): the cutting beam, from the bow along the heading
+/// to where it meets the target (no beam when it does not, or starts inside it). Its last
+/// parameter picks the upgraded beam's look (Somtaaw 2, Beast 1).
+fn cutting_beam_effect(u: &mut Universe, id: ShipId, target: ShipId) {
+    let Some(effect) = fx::special_first(u, CUTTING_BEAM_EFFECT) else { return };
+    if !fx::fire_enabled(u) || !crate::effects::frequency_ok(u, effect) {
+        return;
+    }
+    let me = u.ships.ship(id);
+    let cs = me.rotinfo.coordsys;
+    let h = me.heading();
+    let start = fx::local_to_world(u, id, CUTTING_BEAM_POINT);
+    let Some(t) = u.ships.get(target) else { return };
+    let Some(tstat) = u.statics.ship(t.ship_type) else { return };
+    let (hit_t, _) = crate::collision::rect_line(t, tstat, start, h, CUTTING_BEAM_REACH);
+    if hit_t < 0.0 {
+        return;
+    }
+    let hit = start.add_scaled(h, hit_t);
+    let dist = st(Vector::distance_ext(start, hit));
+    if dist == 0.0 {
+        return;
+    }
+    let look = match me.ship_type {
+        _ if !crate::upgrade::has_upgrade(me, UPGRADE_CUTTING_BEAM) => 0,
+        ShipType::sRammingFrigate => 2,
+        ShipType::bRammingFrigate => 1,
+        _ => 0,
+    };
+    let params = [0, 0, crate::effects::pf(dist), look];
+    let flags = crate::effects::EAF_ALL_BUT_NLIPS | crate::effects::attach::NLIPS;
+    let e = crate::effects::create(u, effect, None, Some(start), Some(Vector::ZERO), Some(cs), 1.0, flags, &params);
+    crate::effects::set_slot(u, id, SLOT_CUTTING_BEAM, e);
+}
+
+/// `RammingFrigateRestartEffect` (0x5ba410): the impact when the rammer latches on, riding
+/// with it.
+fn restart_effect(u: &mut Universe, id: ShipId) {
+    let Some(effect) = fx::special(u, IMPACT_EFFECT) else { return };
+    if !fx::hit_enabled(u) || !crate::effects::frequency_ok(u, effect) {
+        return;
+    }
+    let flags = crate::effects::EAF_ALL_BUT_NLIPS | crate::effects::attach::NLIPS;
+    crate::effects::create(u, effect, Some(id.into()), None, None, None, 1.0, flags, &[]);
+}
+
+/// The vents of `RammingFrigateHouseKeep` while the bow collapses: one from the starboard top
+/// corner pointing to port, and the pushes (`RammingFrigatePushEffect`, 0x5bc260) from the other
+/// three corners, all moving with the rammer.
+fn vent_effects(u: &mut Universe, id: ShipId) {
+    if u.effects.is_none() {
+        return;
+    }
+    let [p2, p3, p4, p5] = VENT_POINTS.map(|p| fx::local_to_world(u, id, p));
+    let mut across = Vector::new(st(ld(p4.x) - ld(p2.x)), st(ld(p4.y) - ld(p2.y)), st(ld(p4.z) - ld(p2.z)));
+    across.normalize();
+    let back = Vector::new(-across.x, -across.y, -across.z);
+    vent(u, id, p2, across);
+    vent(u, id, p3, across);
+    vent(u, id, p4, back);
+    vent(u, id, p5, back);
+}
+
+/// One vent at `at` blowing along `dir` (the level of detail is its parameter).
+fn vent(u: &mut Universe, id: ShipId, at: Vector, dir: Vector) {
+    let Some(effect) = fx::special_first(u, VENT_EFFECT) else { return };
+    if !fx::hit_enabled(u) || !crate::effects::frequency_ok(u, effect) {
+        return;
+    }
+    let lod = fx::lod(u);
+    if lod >= VENT_MAX_LOD {
+        return;
+    }
+    let vel = u.ships.ship(id).posinfo.velocity;
+    let cs = Matrix::coord_sys_from_heading(dir);
+    let flags = crate::effects::EAF_ALL_BUT_NLIPS | crate::effects::attach::NLIPS;
+    crate::effects::create(u, effect, None, Some(at), Some(vel), Some(cs), 1.0, flags, &[u32::from(lod)]);
 }
 
 /// `RammingFrigateCheckCollision` (0x5bc950): the rammer's own contact test with its target
@@ -839,6 +962,7 @@ fn check_bump(u: &mut Universe, r: ShipId, bumped: ShipId) {
             if let Some(s) = spec_mut(u, r) {
                 s.push_heading = rh;
             }
+            restart_effect(u, r);
             return;
         }
     } else if let Some(h) = hit {
