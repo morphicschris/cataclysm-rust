@@ -298,3 +298,105 @@ fn modern_hud_hidden_in_the_intro_letterbox() {
         "the readout shows in the letterbox"
     );
 }
+
+/// Mission 1 with every modern panel up: acolytes and recons queued at the Kuun-Lan (the
+/// build queue), the player's ships selected (the selected-ships panel), a ship built (the
+/// system log); then the three new panels folded from the options. Screenshots
+/// `m1_full_hud_<size>.png` and `m1_full_hud_collapsed_<size>.png`.
+fn full_hud(size: (i32, i32), tag: &str) {
+    use hwc_sim::statics::ShipType;
+    use hwc_ui::ingame::{modern_build, modern_log, modern_panel, modern_selected};
+    let Some(mut rig) = rig(size) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut game = rig.mission_one();
+    let g = &mut *game;
+    let mut frames = 0;
+    while !(g.world.run().game.ships_have_arrived
+        && g.world.run().game.sp_state == sp_state::NONE
+        && !boxed(g))
+    {
+        rig.frame(g);
+        frames += 1;
+        assert!(frames < 16 * 600, "mission 1 never left its intro");
+    }
+    let ms = g.world.universe().base.players[0]
+        .mothership
+        .expect("the player's mothership");
+    {
+        let u = g.world.universe_mut();
+        u.base.players[0].resource_units = 50_000;
+        for (t, n) in [(ShipType::sAcolyte, 6), (ShipType::sRecon, 2)] {
+            if hwc_sim::construction::queue_build(u, ms, t, n) == 0 {
+                hwc_sim::construction::build_jobs_add(u, ms, t, n);
+            }
+        }
+    }
+    // Until a ship is built (its message) with more still queued.
+    let built = |g: &Game| {
+        !g.ui.state().view.messages.is_empty() && !g.ui.state().view.jobs.is_empty()
+    };
+    let mut n = 0;
+    while !built(g) && n < 16 * 300 {
+        rig.frame(g);
+        n += 1;
+    }
+    let u = g.world.universe();
+    g.selection = u
+        .ship_list
+        .iter()
+        .copied()
+        .filter(|&id| crate::host::selectable(u, id))
+        .filter(|&id| u.ship(id).is_some_and(|s| s.player == 0 && Some(id) != Some(ms)))
+        .collect();
+    for _ in 0..8 {
+        rig.frame(g);
+    }
+    assert!(rig.shot(g, &format!("m1_full_hud_{tag}")));
+    let view = g.ui.state().view.clone();
+    let a = modern_panel::arrange(&g.ui.fe, size.0, size.1, &view);
+    assert!(a.build.is_some(), "no build queue at {tag}");
+    assert!(a.log.is_some(), "no system log at {tag}");
+    assert!(
+        a.selected.is_some() || view.selection.is_empty(),
+        "no selected-ships panel at {tag}"
+    );
+    let r = a.rects();
+    for i in 0..r.len() {
+        for j in i + 1..r.len() {
+            assert!(!modern_hud::overlaps(r[i], r[j]), "{:?} / {:?} at {tag}", r[i], r[j]);
+        }
+    }
+    for k in [
+        modern_build::EXPANDED_KEY,
+        modern_log::EXPANDED_KEY,
+        modern_selected::EXPANDED_KEY,
+    ] {
+        g.ui.fe.game.options.set_bool(k, false);
+    }
+    rig.frame(g);
+    assert!(rig.shot(g, &format!("m1_full_hud_collapsed_{tag}")));
+    for k in [
+        modern_build::EXPANDED_KEY,
+        modern_log::EXPANDED_KEY,
+        modern_selected::EXPANDED_KEY,
+    ] {
+        g.ui.fe.game.options.set_bool(k, true);
+    }
+}
+
+#[test]
+fn full_modern_hud_in_mission_one_1080p() {
+    full_hud((1920, 1080), "1920x1080");
+}
+
+#[test]
+fn full_modern_hud_in_mission_one_768() {
+    full_hud((1024, 768), "1024x768");
+}
+
+#[test]
+fn full_modern_hud_in_mission_one_640() {
+    full_hud((640, 480), "640x480");
+}

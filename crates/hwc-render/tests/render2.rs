@@ -693,3 +693,66 @@ fn frigate_trails_follow_their_engines() {
         save_png(&dir.join(file), w, h, &img);
     }
 }
+
+/// The Kuun-Lan's nav lights are cut by the hull's clip plane (the hyperspace window), as
+/// `RenderNAVLights` draws them between `hsContinue` and `hsEnd`: with every part of the ship
+/// still in hyperspace nothing is drawn, lights included; with half of it out, only the lights
+/// on that half show. Image: `screenshots/render2/nav_lights_clipped.png` (no clip, half,
+/// all).
+#[test]
+fn nav_lights_follow_the_hyperspace_clip() {
+    let Some(mut ctx) = setup() else { return };
+    let (_d, levels, mothership) = ship(&ctx, "race_sect", "smothership");
+    let (centre, radius) = levels[0].bounds();
+    let cam = camera(
+        mesh_to_world().transform_point3(centre),
+        radius * 2.4,
+        60.0,
+        -20.0,
+    );
+    let instances = [ShipInstance {
+        ship: &mothership,
+        transform: mesh_to_world(),
+        // Long after the start delays: most lights are mid-blink.
+        age: 40.0,
+    }];
+    let shot = |ctx: &mut Ctx, plane: Option<glam::Vec4>, nav_lights: bool| {
+        let states = [ShipRenderState {
+            clip_plane: plane,
+            ..Default::default()
+        }];
+        let extras = SceneExtras {
+            ship_states: &states,
+            effects: None,
+        };
+        let target = OffscreenTarget::new(&ctx.renderer, TILE.0, TILE.1);
+        let scene = Scene {
+            camera: &cam,
+            lighting: &ctx.lighting,
+            background: None,
+            ships: &instances,
+            nav_lights,
+        };
+        target.render_ex(&mut ctx.renderer, &scene, &extras).unwrap()
+    };
+    let changed = |a: &[u8], b: &[u8]| {
+        a.chunks(4)
+            .zip(b.chunks(4))
+            .filter(|(p, q)| p[..3] != q[..3])
+            .count()
+    };
+    // Mesh space: the window plane faces along the heading (+Z).
+    let half = glam::Vec4::new(0.0, 0.0, 1.0, -centre.z);
+    let all = glam::Vec4::new(0.0, 0.0, 1.0, -1.0e7);
+    let free = (shot(&mut ctx, None, true), shot(&mut ctx, None, false));
+    let cut = (shot(&mut ctx, Some(half), true), shot(&mut ctx, Some(half), false));
+    let gone = shot(&mut ctx, Some(all), true);
+    let lights_free = changed(&free.0, &free.1);
+    let lights_cut = changed(&cut.0, &cut.1);
+    eprintln!("nav light pixels: whole ship {lights_free}, half out {lights_cut}, all in {}", lit_pixels(&gone));
+    assert!(lights_free > 0, "the Kuun-Lan shows no nav lights");
+    assert!(lights_cut < lights_free, "the clip plane does not cut the nav lights");
+    assert_eq!(lit_pixels(&gone), 0, "nav lights show while the whole ship is in hyperspace");
+    let (w, h, img) = montage(&[free.0, cut.0, gone]);
+    save_png(&out_dir().join("nav_lights_clipped.png"), w, h, &img);
+}

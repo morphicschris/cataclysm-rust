@@ -117,6 +117,14 @@ pub struct State {
     objectives_header: Option<Rect>,
     /// The modern resources panel's header (its collapse toggle) as laid out.
     resources_header: Option<Rect>,
+    /// The modern build queue, system log and selected-ships panels: their state, and their
+    /// headers as laid out.
+    pub modern_build: crate::ingame::modern_build::PanelState,
+    pub modern_log: crate::ingame::modern_log::PanelState,
+    pub modern_selected: crate::ingame::modern_selected::PanelState,
+    build_header: Option<Rect>,
+    log_header: Option<Rect>,
+    selected_header: Option<Rect>,
     /// Where the modern panels are this frame (they take clicks on them).
     modern_panels: Vec<Rect>,
     /// A cutscene is up (the letterbox, an NIS, fleet intel): the modern panels hide.
@@ -180,6 +188,11 @@ impl State {
 
     pub fn set_mouse(&mut self, x: i32, y: i32) {
         self.mouse = (x, y);
+    }
+
+    /// The pointer as last seen.
+    pub fn mouse_pos(&self) -> (i32, i32) {
+        self.mouse
     }
 
     pub fn load_icons(&mut self, text: &str) {
@@ -272,10 +285,17 @@ pub fn layout(fe: &mut Fe) {
     ig.overlay
         .modern_objectives
         .remember(v.player.mission, v.time, &v.objectives);
+    // The system log flashes its folded header on a new message.
+    let clock = ig.overlay.clock;
+    ig.overlay.modern_log.note(clock, &v.messages);
     // A fold chosen over a full-screen manager lasts until it closes.
     if !crate::ingame::full_screen_manager(ig.manager) {
-        ig.overlay.modern_objectives.over_manager = None;
-        ig.overlay.modern_hud.over_manager = None;
+        let o = &mut ig.overlay;
+        o.modern_objectives.over_manager = None;
+        o.modern_hud.over_manager = None;
+        o.modern_build.over_manager = None;
+        o.modern_log.over_manager = None;
+        o.modern_selected.over_manager = None;
     }
     let (w, h) = fe.screen_size();
     let view = &fe.game.ig.view;
@@ -287,36 +307,37 @@ pub fn layout(fe: &mut Fe) {
     let lh = crate::text::height(&lf);
     let modern = crate::ingame::modern_hud::enabled(&fe.game.options);
     let bar = bar_top(st, view, h, th, modern);
+    // The modern panels (none with the original HUD or in a cutscene).
+    let arr = crate::ingame::modern_panel::arrange(fe, w, h, view);
     let mut lines = Vec::new();
-    if st.shown(view, SELECTED) {
-        // The modern readout takes the top-right corner: the list starts under it.
-        let list_top = crate::ingame::modern_hud::top_reserve(fe, w, h);
+    if modern {
+        // The selected-ships panel's rows stand for the original's lines.
+        if let Some(l) = &arr.selected {
+            let g = crate::ingame::modern_selected::groups(&view.selection);
+            for r in &l.rows {
+                if let Some(g) = g.get(r.index) {
+                    lines.push((g.ship_type, g.owner, r.rect));
+                }
+            }
+        }
+    } else if st.shown(view, SELECTED) {
         for (i, (t, owner, _, _)) in groups(&view.selection).into_iter().enumerate() {
-            let y = list_top + 10 + i as i32 * lh;
+            let y = st.top + 10 + i as i32 * lh;
             lines.push((t, owner, Rect::new(w - 150, y, w, y + lh)));
         }
     }
     let mut objective_rects = Vec::new();
-    let mut objectives_header = None;
-    let mut resources_header = None;
-    let mut modern_panels = Vec::new();
-    let show_modern = modern && !st.cutscene;
-    if show_modern && st.shown(view, PLAYERINFO) {
-        let l = crate::ingame::modern_hud::panel(fe, w, h, view);
-        resources_header = Some(l.header);
-        modern_panels.push(l.panel);
-    }
-    if st.shown(view, OBJECTIVES) && modern {
-        let p = crate::ingame::modern_objectives::panel(fe, w, h, view);
-        if let Some(p) = p.filter(|_| show_modern) {
-            objectives_header = Some(p.header);
+    let objectives_header = arr.objectives.as_ref().map(|p| p.header);
+    let resources_header = arr.resources.as_ref().map(|p| p.header);
+    let modern_panels = arr.rects();
+    if modern {
+        if let Some(p) = &arr.objectives {
             // Destroyed objectives are not the game's any more: no click.
             objective_rects = p
                 .items
                 .iter()
                 .filter_map(|i| i.live.map(|l| (l, i.rect)))
                 .collect();
-            modern_panels.push(p.panel);
         }
     } else if st.shown(view, OBJECTIVES) && !view.objectives.is_empty() {
         let mut y = bar + th + 4;
@@ -327,7 +348,12 @@ pub fn layout(fe: &mut Fe) {
         }
     }
     let mut message_rects = Vec::new();
-    if st.shown(view, GAMEMESSAGE) {
+    if modern {
+        // The system log's messages about a ship focus it, as the original's lines do.
+        if let Some(l) = &arr.log {
+            message_rects = l.items.iter().map(|i| (i.message, i.rect)).collect();
+        }
+    } else if st.shown(view, GAMEMESSAGE) {
         let base = bar.min(h);
         let scroll = st.message_scroll;
         let newest = view.messages.len().saturating_sub(1 + scroll);
@@ -349,6 +375,9 @@ pub fn layout(fe: &mut Fe) {
     o.objective_rects = objective_rects;
     o.objectives_header = objectives_header;
     o.resources_header = resources_header;
+    o.build_header = arr.build.as_ref().map(|p| p.header);
+    o.log_header = arr.log.as_ref().map(|p| p.header);
+    o.selected_header = arr.selected.as_ref().map(|p| p.header);
     o.modern_panels = modern_panels;
     o.message_rects = message_rects;
     o.view_buttons = view_buttons;
@@ -414,25 +443,7 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool, x: i32, y: i32) -> bool
     }
     let o = &fe.game.ig.overlay;
     if let Some(&(t, owner, _)) = o.lines.iter().find(|l| l.2.contains(x, y)) {
-        let multi = fe.input.down.iter().any(|k| {
-            fe.game
-                .ig
-                .keys
-                .of(keys::MULTIPLE_SELECT)
-                .iter()
-                .any(|b| b.key == *k)
-        });
-        if multi {
-            let d = &mut fe.game.ig.overlay.deselect;
-            if !d.contains(&(t, owner)) {
-                d.push((t, owner));
-            }
-        } else {
-            fe.game.ig.request(GameRequest::SelectType {
-                ship_type: t,
-                owner,
-            });
-        }
+        click_line(fe, t, owner);
         return true;
     }
     if let Some(&(i, _)) = o.objective_rects.iter().find(|l| l.1.contains(x, y)) {
@@ -440,17 +451,50 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool, x: i32, y: i32) -> bool
         return true;
     }
     if let Some(&(i, _)) = o.message_rects.iter().find(|l| l.1.contains(x, y)) {
-        if let Some(ship) = fe.game.ig.view.messages.get(i).and_then(|m| m.ship) {
-            fe.game.ig.request(GameRequest::Sound(0x108));
-            fe.game.ig.request(GameRequest::FocusShip(ship));
+        if click_message(fe, i) {
             return true;
         }
     }
+    let o = &fe.game.ig.overlay;
     if let Some((_, _, a)) = o.view_buttons.iter().find(|b| b.0.contains(x, y)).cloned() {
         crate::ingame::execute_action(fe, a, true);
         return true;
     }
     false
+}
+
+/// A click on a line of the selected-ship list (`moProcessClick`): it selects that type, or
+/// with the multiple-select key held marks it to leave the selection on the key's release.
+fn click_line(fe: &mut Fe, t: ShipType, owner: Owner) {
+    let multi = fe.input.down.iter().any(|k| {
+        fe.game
+            .ig
+            .keys
+            .of(keys::MULTIPLE_SELECT)
+            .iter()
+            .any(|b| b.key == *k)
+    });
+    if multi {
+        let d = &mut fe.game.ig.overlay.deselect;
+        if !d.contains(&(t, owner)) {
+            d.push((t, owner));
+        }
+    } else {
+        fe.game.ig.request(GameRequest::SelectType {
+            ship_type: t,
+            owner,
+        });
+    }
+}
+
+/// A click on message `i`: one about a ship focuses it. Whether it did.
+fn click_message(fe: &mut Fe, i: usize) -> bool {
+    let Some(ship) = fe.game.ig.view.messages.get(i).and_then(|m| m.ship) else {
+        return false;
+    };
+    fe.game.ig.request(GameRequest::Sound(0x108));
+    fe.game.ig.request(GameRequest::FocusShip(ship));
+    true
 }
 
 /// `moProcessClick` on objective `i` of the game's list: the hyperspace entry jumps, the
@@ -502,11 +546,30 @@ pub fn modern_click(fe: &mut Fe, x: i32, y: i32) -> bool {
         layout(fe);
         return true;
     }
+    type Toggle = (Option<Rect>, fn(&mut Fe));
+    let toggles: [Toggle; 3] = [
+        (o.build_header, crate::ingame::modern_build::toggle),
+        (o.log_header, crate::ingame::modern_log::toggle),
+        (o.selected_header, crate::ingame::modern_selected::toggle),
+    ];
+    if let Some((_, toggle)) = toggles
+        .iter()
+        .find(|(r, _)| r.is_some_and(|r| r.contains(x, y)))
+    {
+        toggle(fe);
+        layout(fe);
+        return true;
+    }
     if !over_modern_panel(fe, x, y) {
         return false;
     }
+    let o = &fe.game.ig.overlay;
     if let Some(&(i, _)) = o.objective_rects.iter().find(|l| l.1.contains(x, y)) {
         click_objective(fe, i);
+    } else if let Some(&(t, owner, _)) = o.lines.iter().find(|l| l.2.contains(x, y)) {
+        click_line(fe, t, owner);
+    } else if let Some(&(i, _)) = o.message_rects.iter().find(|l| l.1.contains(x, y)) {
+        click_message(fe, i);
     }
     true
 }
@@ -520,11 +583,32 @@ pub fn draw_modern_panels(fe: &mut Fe, canvas: &mut Canvas) {
     let st = &fe.game.ig.overlay;
     let (clock, mouse) = (st.clock, st.mouse);
     let (objectives, info) = (st.shown(&view, OBJECTIVES), st.shown(&view, PLAYERINFO));
+    let arr = crate::ingame::modern_panel::arrange(fe, canvas.width, canvas.height, &view);
     if objectives {
         crate::ingame::modern_objectives::draw(fe, canvas, &view, clock, mouse);
     }
     if info {
         crate::ingame::modern_hud::draw(fe, canvas, &view, clock, mouse);
+    }
+    draw_modern_lists(fe, canvas, &arr, &view);
+}
+
+/// The modern build queue, system log and selected ships, as arranged.
+fn draw_modern_lists(
+    fe: &Fe,
+    canvas: &mut Canvas,
+    arr: &crate::ingame::modern_panel::Arrangement,
+    view: &HostView,
+) {
+    let (clock, mouse) = (fe.game.ig.overlay.clock, fe.game.ig.overlay.mouse);
+    if let Some(l) = &arr.build {
+        crate::ingame::modern_build::draw(fe, canvas, l, view, mouse);
+    }
+    if let Some(l) = &arr.log {
+        crate::ingame::modern_log::draw(fe, canvas, l, view, clock);
+    }
+    if let Some(l) = &arr.selected {
+        crate::ingame::modern_selected::draw(fe, canvas, l, &view.selection);
     }
 }
 
@@ -595,14 +679,29 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
     if options.get_bool("ShowTaskbarBackdrop") && !view.player.tutorial {
         canvas.blend_rect(Rect::new(0, bar, w, h), BACKDROP);
     }
+    // The modern panels (none with the original HUD or in a cutscene).
+    let arr = crate::ingame::modern_panel::arrange(fe, w, h, &view);
+    let list_h = font(fe, FONT_LIST).map_or(0, |f| crate::text::height(&f));
     let mut lines = Vec::new();
-    if st.shown(&view, SELECTED) {
+    if st.shown(&view, SELECTED) && !modern {
         let bd = st.backdrop(&view, SELECTED);
-        draw_ship_list(fe, canvas, &view.selection, false, bd, &mut lines);
+        draw_ship_list(fe, canvas, &view.selection, false, bd, st.top + 10, &mut lines);
     }
+    let st = &fe.game.ig.overlay;
     if st.shown(&view, SELECTING) {
         let bd = st.backdrop(&view, SELECTING);
-        draw_ship_list(fe, canvas, &view.selecting, true, bd, &mut Vec::new());
+        // Under the selected ships: the modern panels, or the original's list.
+        let y = if modern {
+            arr.selected
+                .as_ref()
+                .map(|l| l.below)
+                .or(arr.resources.as_ref().map(|l| l.bottom))
+                .unwrap_or(st.top)
+                + 10
+        } else {
+            st.top + 10 + groups(&view.selection).len() as i32 * list_h + 10
+        };
+        draw_ship_list(fe, canvas, &view.selecting, true, bd, y, &mut Vec::new());
     }
     let _ = lines;
     let st = &fe.game.ig.overlay;
@@ -651,29 +750,45 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
         }
     }
     let st = &fe.game.ig.overlay;
-    if st.shown(&view, GAMEMESSAGE) {
+    if st.shown(&view, GAMEMESSAGE) && !modern {
         draw_messages(fe, canvas, &view, bar.min(h));
     }
     let st = &fe.game.ig.overlay;
-    // The modern objectives panel takes the top-left corner: these columns go under it.
-    let objectives_up = st.shown(&view, OBJECTIVES) && !st.cutscene;
-    let left_top = crate::ingame::modern_objectives::left_top(fe, w, h, &view, objectives_up);
+    // The modern objectives panel takes the top-left corner: these columns go under it, the
+    // player names under the build queue too.
+    let names = st.shown(&view, PLAYERNAMES) && !view.player_names.is_empty();
+    let below_objectives = arr.objectives.as_ref().map_or(st.top, |p| p.below.max(st.top));
+    let left_top = arr.left_below().map_or(st.top, |y| y.max(st.top));
     let mut left_y = left_top + 20;
-    if st.shown(&view, PLAYERNAMES) && !view.player_names.is_empty() {
+    if names {
         left_y = draw_player_names(fe, canvas, &view, left_top);
     }
     let st = &fe.game.ig.overlay;
     let bottom = bar + 5 * th + 10;
-    let mid = left_y + (bottom - left_y) / 2;
-    if st.shown(&view, CONSTRUCTION) {
+    // Where the original's columns would go under the objectives panel alone.
+    let natural_y = if names {
+        below_objectives + 20 + view.player_names.len() as i32 * (th + 2)
+    } else {
+        below_objectives + 20
+    };
+    let mid = natural_y + (bottom - natural_y) / 2;
+    if st.shown(&view, CONSTRUCTION) && !modern {
         let bd = st.backdrop(&view, CONSTRUCTION);
         draw_construction(fe, canvas, &view, left_y + 32, mid - 17, bd);
     }
     let st = &fe.game.ig.overlay;
     if st.shown(&view, RESEARCH) {
         let bd = st.backdrop(&view, RESEARCH);
-        draw_research(fe, canvas, &view, mid + 32, bottom - 17, bd);
+        // The research list keeps its place unless the build queue reaches it, and ends
+        // above the system log.
+        let top = (mid + 32).max(left_y + 12);
+        let end = arr
+            .log
+            .as_ref()
+            .map_or(bottom - 17, |l| (bottom - 17).min(l.panel.y0 - 4));
+        draw_research(fe, canvas, &view, top, end, bd);
     }
+    draw_modern_lists(fe, canvas, &arr, &view);
     let st = &fe.game.ig.overlay;
     if st.shown(&view, PLAYERINFO) {
         if crate::ingame::modern_hud::enabled(&options) {
@@ -711,18 +826,14 @@ fn draw_ship_list(
     ships: &[ShipInfo],
     selecting: bool,
     backdrop: bool,
+    top: i32,
     lines: &mut Vec<(ShipType, Owner, Rect)>,
 ) {
     let Some(f) = font(fe, FONT_LIST) else { return };
     let h = crate::text::height(&f);
     let st = &fe.game.ig.overlay;
     let x = canvas.width - 150;
-    let reserve = crate::ingame::modern_hud::top_reserve(fe, canvas.width, canvas.height);
-    let mut y = st.top.max(reserve) + 10;
-    if selecting {
-        let groups = groups(&fe.game.ig.view.selection);
-        y += groups.len() as i32 * h + 20 - 10;
-    }
+    let mut y = top;
     let groups = groups(ships);
     let mut rect = None;
     for &(_, _, n, ref name) in &groups {

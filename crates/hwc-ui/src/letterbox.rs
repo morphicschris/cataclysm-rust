@@ -19,9 +19,17 @@ pub const GREY: u8 = 128;
 pub const SOUND_IN: u32 = 0x123;
 pub const SOUND_OUT: u32 = 0x124;
 
-/// Height of each bar at a screen size (`NIS_LetterHeight`).
+/// Height of each bar at a screen size (`NIS_LetterHeight`): what is left of a 1.85:1
+/// picture the full width of the screen.
 pub fn bar_height(width: i32, height: i32) -> i32 {
     (height - width * 20 / 37) / 2
+}
+
+/// Height of each bar with [`Letterbox::tall`]: never less than on a 4:3 screen of the same
+/// height (14% of it, as the original looks in its 4:3 modes), so the bars still show on a
+/// wide screen. The same as [`bar_height`] on 4:3 and narrower screens.
+pub fn tall_bar_height(width: i32, height: i32) -> i32 {
+    bar_height(width, height).max(bar_height(height * 4 / 3, height))
 }
 
 /// The letterbox state (`nisScissorFadeIn/Out/Time`, `nisScissorFade`, `nisFullyScissored`).
@@ -34,6 +42,10 @@ pub struct Letterbox {
     pub fade: f32,
     /// The bars are fully in.
     pub fully: bool,
+    /// The bars are as tall as on a 4:3 screen of the same height ([`tall_bar_height`]; a
+    /// user-requested change, the default in the game: on a 16:9 screen the original's 1.85:1
+    /// picture leaves bars of only 2% of the height). Off: [`bar_height`], as the original.
+    pub tall: bool,
     clock: f32,
 }
 
@@ -63,9 +75,34 @@ impl Letterbox {
         self.fade_out = frames as f32 / FRAME_RATE;
     }
 
-    /// `nisScissorBarsReset`.
+    /// One mission wide-screen call, with its own frame count: `kasfWideScreenIn` and its
+    /// Cataclysm variants (`...InDontCloseSensors`, `kasWideScreenInHyperspace`, all the same
+    /// body) when `coming_in`, else `kasfWideScreenOut`. Returns the UI sound the call plays:
+    /// [`SOUND_IN`] unless the bars are already fully in, [`SOUND_OUT`] always.
+    pub fn wide_screen_call(&mut self, coming_in: bool, frames: i32) -> Option<u32> {
+        if coming_in {
+            self.wide_screen_in(frames).then_some(SOUND_IN)
+        } else {
+            self.wide_screen_out(frames);
+            Some(SOUND_OUT)
+        }
+    }
+
+    /// `nisScissorBarsReset` (the bar shape stays).
     pub fn reset(&mut self) {
-        *self = Letterbox::default();
+        *self = Letterbox {
+            tall: self.tall,
+            ..Letterbox::default()
+        };
+    }
+
+    /// Height of each bar fully in on a `width` x `height` screen.
+    pub fn full_height(&self, width: i32, height: i32) -> i32 {
+        if self.tall {
+            tall_bar_height(width, height)
+        } else {
+            bar_height(width, height)
+        }
     }
 
     /// One step of `nisUpdateTask`'s scissor part. Returns true on the step the bars are fully in.
@@ -112,12 +149,25 @@ impl Letterbox {
         self.fade != 0.0 || self.fully
     }
 
+    /// Height of each bar [`draw`](Self::draw) draws on a `width` x `height` screen (0 when
+    /// none).
+    pub fn drawn_height(&self, width: i32, height: i32) -> i32 {
+        let full = self.full_height(width, height);
+        if self.fade != 0.0 {
+            (full as f32 * self.fade) as i32
+        } else if self.fully {
+            full
+        } else {
+            0
+        }
+    }
+
     /// The bars over the finished picture.
     pub fn draw(&self, canvas: &mut Canvas) {
         let (w, h) = (canvas.width, canvas.height);
-        let full = bar_height(w, h);
+        let full = self.full_height(w, h);
         if self.fade != 0.0 {
-            let y = (full as f32 * self.fade) as i32;
+            let y = self.drawn_height(w, h);
             let a = (self.fade * 255.0).round().clamp(0.0, 255.0) as u8;
             for r in [Rect::new(0, 0, w, y), Rect::new(0, h - y, w, h)] {
                 canvas.fill_rect(r, [GREY, GREY, GREY, 255]);
@@ -139,6 +189,22 @@ mod tests {
     fn heights() {
         assert_eq!(bar_height(640, 480), 67);
         assert_eq!(bar_height(1024, 768), 107);
+        // 16:9: the original's bars are thin; the tall ones keep the 4:3 share.
+        assert_eq!(bar_height(1600, 900), 18);
+        assert_eq!(bar_height(1920, 1080), 21);
+        assert_eq!(tall_bar_height(1600, 900), 126);
+        assert_eq!(tall_bar_height(1920, 1080), 151);
+        assert_eq!(tall_bar_height(640, 480), 67);
+        assert_eq!(tall_bar_height(1280, 1024), bar_height(1280, 1024));
+        let mut l = Letterbox {
+            tall: true,
+            fully: true,
+            ..Letterbox::default()
+        };
+        assert_eq!(l.drawn_height(1600, 900), 126);
+        l.reset();
+        assert!(l.tall && !l.fully);
+        assert_eq!(Letterbox::default().full_height(1600, 900), 18);
     }
 
     #[test]
@@ -165,6 +231,38 @@ mod tests {
             l.tick();
         }
         assert!(!l.active());
+    }
+
+    /// Mission calls with their own frame counts: the bars take `frames / 30` s each way, a
+    /// call while fully in is silent, and a call out in the middle of the way in turns back
+    /// from nothing.
+    #[test]
+    fn wide_screen_calls_use_their_frame_counts() {
+        let mut l = Letterbox::default();
+        assert_eq!(l.wide_screen_call(true, 45), Some(SOUND_IN));
+        let mut steps = 0;
+        while !l.tick() {
+            steps += 1;
+        }
+        // 1.5 s at 16 steps a second.
+        assert_eq!(steps, 24);
+        assert_eq!(l.wide_screen_call(true, 90), None, "already in: no sound");
+        assert!(l.fully);
+        assert_eq!(l.wide_screen_call(false, 15), Some(SOUND_OUT));
+        let mut steps = 0;
+        while l.active() {
+            l.tick();
+            steps += 1;
+        }
+        assert!(steps <= 9, "0.5 s out took {steps} steps");
+        assert_eq!(l.wide_screen_call(true, 90), Some(SOUND_IN));
+        for _ in 0..10 {
+            l.tick();
+        }
+        assert!(l.fade > 0.0 && !l.fully);
+        assert_eq!(l.wide_screen_call(false, 90), Some(SOUND_OUT));
+        assert_eq!((l.fade_in, l.fade), (0.0, 0.0));
+        assert_eq!(l.fade_out, 3.0);
     }
 
     #[test]

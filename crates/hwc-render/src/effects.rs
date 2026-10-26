@@ -97,6 +97,17 @@ pub struct Strip {
     pub blend: Blend,
 }
 
+/// A flat triangle in pixel coordinates (x right, y down, in the target's logical pixels)
+/// with a colour per corner, drawn over the background and under the ships, alpha blended as
+/// a CPU canvas blends: the interpolated alpha is cut to 8 bits (truncated) first. A 2D layer
+/// drawn this way matches the same shapes filled on the CPU to within one step of 8-bit
+/// rounding (e.g. the sensors manager's range discs).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PixelTriangle {
+    pub points: [Vec2; 3],
+    pub colors: [[f32; 4]; 3],
+}
+
 /// Which engine-glow mesh to draw (Homeworld's `misc\EngineGlows` set, four detail levels each).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GlowMeshKind {
@@ -168,6 +179,8 @@ pub struct EffectBatch {
     pub strips: Vec<Strip>,
     pub lines: Vec<Line>,
     pub flares: Vec<FlareQuad>,
+    /// Drawn right after the background, before the ships.
+    pub pixel_triangles: Vec<PixelTriangle>,
 }
 
 impl EffectBatch {
@@ -178,6 +191,7 @@ impl EffectBatch {
         self.strips.clear();
         self.lines.clear();
         self.flares.clear();
+        self.pixel_triangles.clear();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -187,6 +201,7 @@ impl EffectBatch {
             && self.strips.is_empty()
             && self.lines.is_empty()
             && self.flares.is_empty()
+            && self.pixel_triangles.is_empty()
     }
 
     /// Adds an untextured quad `a b c d` (in order around its edge) as two triangles.
@@ -214,6 +229,7 @@ impl EffectBatch {
         self.strips.extend(other.strips.iter().cloned());
         self.lines.extend_from_slice(&other.lines);
         self.flares.extend_from_slice(&other.flares);
+        self.pixel_triangles.extend_from_slice(&other.pixel_triangles);
     }
 }
 
@@ -266,6 +282,8 @@ pub struct TessellatedEffects {
     pub line_runs: Vec<DrawRun>,
     pub screen: Vec<EffectGpuVertex>,
     pub screen_runs: Vec<DrawRun>,
+    /// [`EffectBatch::pixel_triangles`] in normalised device coordinates.
+    pub pixel: Vec<EffectGpuVertex>,
 }
 
 fn push_run(runs: &mut Vec<DrawRun>, texture: EffectTexture, blend: Blend, first: u32, count: u32) {
@@ -418,6 +436,16 @@ impl EffectBatch {
                 });
             }
             push_run(&mut out.screen_runs, f.texture, f.blend, first, 6);
+        }
+        let size = cam.viewport.max(Vec2::ONE);
+        for t in &self.pixel_triangles {
+            for (p, &color) in t.points.iter().zip(&t.colors) {
+                out.pixel.push(EffectGpuVertex {
+                    position: [p.x / size.x * 2.0 - 1.0, 1.0 - p.y / size.y * 2.0, 0.0],
+                    color,
+                    uv: [0.5, 0.5],
+                });
+            }
         }
         out
     }

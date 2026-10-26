@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! # hwc options v1
-//! MusicVolume = 60
+//! MusicVolume = 45
 //! PlayerName = "Fleet Commander"
 //! ```
 //!
@@ -66,7 +66,9 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     ("Equalizer5", 0),
     ("Equalizer6", 0),
     ("Equalizer7", 0),
-    ("MusicVolume", 60),
+    // A user-requested change: the music starts 25% quieter than the original's 60 (slider
+    // level 0.615 -> 0.461). A value saved in the options file is kept.
+    ("MusicVolume", 45),
     ("SFXVolume", 75),
     ("SpeechVolume", 75),
     ("VoiceCommands", 1),
@@ -145,13 +147,21 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // the window's pixels under the scaled interface; 0: at the 640x480 layout's pixels
     // (`--scene-res`).
     ("hwcSceneAtWindow", 1),
-    // 1: the modern HUD (RU / SU bars top right, objectives panel top left); 0: the
-    // original's SU / RU / time box and objectives list, bottom (`--hud`).
+    // 1: the modern HUD (resources and selected ships top right, objectives and build queue
+    // top left, system log bottom left); 0: the original's SU / RU / time box, objectives
+    // list, construction list, messages and selected-ship list (`--hud`).
     ("hwcModernHud", 1),
     // The modern objectives panel: 1 expanded, 0 collapsed (its header toggles it).
     ("hwcObjectivesExpanded", 1),
     // The modern resources panel (RU / SU / time, top right): 1 expanded, 0 collapsed.
     ("hwcResourcesExpanded", 1),
+    // The modern build queue (top left, under the objectives): 1 expanded, 0 collapsed.
+    ("hwcBuildQueueExpanded", 1),
+    // The modern system log (game messages, bottom left): 1 expanded, 0 collapsed.
+    ("hwcSystemLogExpanded", 1),
+    // The modern selected-ships panel (top right, under the resources): 1 expanded, 0
+    // collapsed.
+    ("hwcSelectedExpanded", 1),
     // Registry values.
     ("deviceIndex", -1),
     ("screenWidth", 640),
@@ -392,11 +402,25 @@ hwcSmoothZoom = 0
         assert_eq!(back.get("SFXVolume"), 75);
     }
 
+    /// The music starts 25% quieter than the original's 60 (a user-requested change); a value
+    /// saved in the options file, or imported from `Cataclysm.cfg`, wins.
+    #[test]
+    fn music_volume_default_is_lowered_but_saved_values_are_kept() {
+        assert_eq!(Options::default().get("MusicVolume"), 45);
+        let (saved, _) = Options::from_text("MusicVolume = 60\n");
+        assert_eq!(saved.get("MusicVolume"), 60);
+        let (other, _) = Options::from_text("SFXVolume = 10\n");
+        assert_eq!(other.get("MusicVolume"), 45);
+        let mut imported = Options::default();
+        imported.import_original_cfg("MusicVolume 80\n");
+        assert_eq!(imported.get("MusicVolume"), 80);
+    }
+
     #[test]
     fn bad_lines_are_reported() {
         let (o, errors) = Options::from_text("MusicVolume = loud\nnot a line\n# ok\nSFXVolume=3\n");
         assert_eq!(errors.len(), 2);
-        assert_eq!(o.get("MusicVolume"), 60);
+        assert_eq!(o.get("MusicVolume"), 45);
         assert_eq!(o.get("SFXVolume"), 3);
     }
 

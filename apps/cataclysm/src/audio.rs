@@ -370,6 +370,9 @@ mod tests {
     fn slider_levels() {
         assert_eq!(slider_level(0), 0.0);
         assert!((slider_level(60) - 0.615).abs() < 1e-6);
+        // The default music level (45, lowered from the original's 60 at the user's request).
+        let default = hwc_ui::options::Options::default().get("MusicVolume");
+        assert!((slider_level(default) - 0.461_25).abs() < 1e-6);
         assert_eq!(slider_level(100), 1.0);
         assert_eq!(slider_level(-5), 0.0);
     }

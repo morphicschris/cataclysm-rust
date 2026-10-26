@@ -16,8 +16,9 @@
 
 use std::f32::consts::TAU;
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use hwc_formats::script::ScriptFile;
+use hwc_render::effects::PixelTriangle;
 use hwc_render::OrbitCamera;
 use hwc_sim::fow::{FowGrid, OUTSIDE};
 use hwc_sim::level::SmTweaks;
@@ -28,6 +29,7 @@ use hwc_ui::canvas::{Canvas, Color};
 use hwc_ui::options::Options;
 
 use crate::host::PLAYER;
+use crate::profile;
 use crate::world::World;
 
 /// UI sound events of the sensors manager.
@@ -890,9 +892,76 @@ fn ring_fade_under(
     }
 }
 
+/// [`ring_fade`] as triangles for the GPU ([`PixelTriangle`]s, drawn in the background pass
+/// right over the backdrop): the inner polygon opaque, and between it and the outer polygon
+/// one trapezoid per segment fading from opaque to clear. The CPU's fade is linear along each
+/// segment's apothem (`(e1 - d) / (e1 - e0)` with `e = r * cos(half) / cos(local)`), which the
+/// trapezoid's interpolated alpha reproduces exactly; with the alpha cut to 8 bits as the
+/// canvas does, the picture is the same to within one step of rounding.
+pub fn ring_fade_triangles(c: &Circle, r1: f32, segments: i32, col: Color, out: &mut Vec<PixelTriangle>) {
+    let n = segments.max(3);
+    let step = TAU / n as f32;
+    let centre = Vec2::new(c.x, c.y);
+    let [r, g, b] = [col[0], col[1], col[2]].map(|v| f32::from(v) / 255.0);
+    let solid = [r, g, b, 1.0];
+    let clear = [r, g, b, 0.0];
+    // Angles from straight down (x right, y down), a vertex at 0.
+    let at = |j: i32, radius: f32| {
+        let a = j as f32 * step;
+        centre + Vec2::new(a.sin(), a.cos()) * radius
+    };
+    for j in 0..n {
+        let (p0, p1) = (at(j, c.r), at(j + 1, c.r));
+        let (q0, q1) = (at(j, r1), at(j + 1, r1));
+        out.push(PixelTriangle {
+            points: [centre, p0, p1],
+            colors: [solid; 3],
+        });
+        out.push(PixelTriangle {
+            points: [p0, q0, q1],
+            colors: [solid, clear, clear],
+        });
+        out.push(PixelTriangle {
+            points: [p0, q1, p1],
+            colors: [solid, clear, solid],
+        });
+    }
+}
+
+/// Two triangles covering a `w` x `h` screen in one colour.
+pub fn full_screen_triangles(w: f32, h: f32, color: [f32; 4], out: &mut Vec<PixelTriangle>) {
+    let [a, b, c, d] = [Vec2::ZERO, Vec2::new(w, 0.0), Vec2::new(w, h), Vec2::new(0.0, h)];
+    out.push(PixelTriangle {
+        points: [a, b, c],
+        colors: [color; 3],
+    });
+    out.push(PixelTriangle {
+        points: [a, c, d],
+        colors: [color; 3],
+    });
+}
+
 /// Rings (`primRingFade2`) drawn in order: centre and inner radius, outer radius, segments,
 /// colour. A ring drawn later fills its inside opaquely, so what earlier rings would draw there
 /// is never seen and is not drawn (the picture is the same as drawing every ring whole).
+/// The disc count and the pixels of their bounding boxes, for the profile.
+fn count_rings(rings: &[(Circle, f32, i32, Color)], size: (u32, u32)) {
+    if !profile::enabled() {
+        return;
+    }
+    profile::count("sm.discs", rings.len() as u64);
+    let (w, h) = (size.0 as f32, size.1 as f32);
+    let px: f32 = rings
+        .iter()
+        .map(|(c, outer, _, _)| {
+            let x = ((c.x + outer).min(w) - (c.x - outer).max(0.0)).max(0.0);
+            let y = ((c.y + outer).min(h) - (c.y - outer).max(0.0)).max(0.0);
+            x * y
+        })
+        .sum();
+    profile::count("sm.disc_box_px", px as u64);
+}
+
 fn draw_rings(canvas: &mut Canvas, rings: Vec<(Circle, f32, i32, Color)>) {
     if rings.len() >= usize::from(u16::MAX) {
         for (c, outer, segments, col) in rings {
@@ -981,20 +1050,57 @@ impl Sensors {
         time.rem_euclid(f) <= f * 0.5
     }
 
-    /// The 2D layer drawn before the meshes: range discs, universe bounds, explored cells,
+    /// The layer the GPU draws over the backdrop in the background pass ([`PixelTriangle`]s):
+    /// the backdrop's dimming (`btgSetColourMultiplier`) or, with the backdrop off, the clear
+    /// colour, then the sensor range discs (`smSensorRangesDraw`, see
+    /// [`ring_fade_triangles`]). [`draw_under`](Self::draw_under) with `discs_drawn` follows on
+    /// the CPU.
+    pub fn background_layer(&self, inp: &SceneInput) -> Vec<PixelTriangle> {
+        let _p = profile::span("sm.range_discs");
+        let (w, h) = (inp.size.0 as f32, inp.size.1 as f32);
+        let mut out = Vec::new();
+        let (clear, dim) = self.background();
+        if self.toggles.background {
+            if dim < 1.0 {
+                // Black over the backdrop keeps `k = 1 - alpha` of it, rounded; the CPU kept
+                // `floor(c * dim)`. With `k` the largest step of 1/255 below `dim` the two
+                // agree for every 8-bit value at the manager's dim of one half.
+                let k = ((dim * 255.0).ceil() - 1.0).max(0.0) / 255.0;
+                full_screen_triangles(w, h, [0.0, 0.0, 0.0, 1.0 - k], &mut out);
+            }
+        } else {
+            let c = [clear[0], clear[1], clear[2]].map(|v| f32::from(v) / 255.0);
+            full_screen_triangles(w, h, [c[0], c[1], c[2], 1.0], &mut out);
+        }
+        if self.toggles.ranges {
+            let rings = self.range_rings(inp);
+            count_rings(&rings, inp.size);
+            for (c, outer, segments, col) in &rings {
+                ring_fade_triangles(c, *outer, *segments, *col, &mut out);
+            }
+        }
+        profile::count("sm.layer_triangles", out.len() as u64);
+        out
+    }
+
+    /// The 2D layer drawn before the meshes: range discs (unless `discs_drawn`: the GPU drew
+    /// them, [`background_layer`](Self::background_layer)), universe bounds, explored cells,
     /// mines and resources.
-    pub fn draw_under(&self, canvas: &mut Canvas, inp: &SceneInput) {
+    pub fn draw_under(&self, canvas: &mut Canvas, inp: &SceneInput, discs_drawn: bool) {
         let u = inp.world.universe();
         let fog = Fog::of(u);
-        if self.toggles.ranges {
+        if self.toggles.ranges && !discs_drawn {
+            let _p = profile::span("sm.range_discs");
             self.draw_ranges(canvas, inp);
         }
         if self.toggles.universe_extents {
+            let _p = profile::span("sm.bounds");
             self.draw_bounds(canvas, inp);
         }
         if let Some(g) = fog.grid {
             self.draw_fog(canvas, inp, g);
         }
+        let _p = profile::span("sm.mines_resources");
         // Mines.
         for &mid in &u.missile_list {
             let Some(m) = u.missiles.get(mid) else {
@@ -1037,8 +1143,16 @@ impl Sensors {
         }
     }
 
-    /// `smSensorRangesDraw`.
+    /// `smSensorRangesDraw` on the CPU.
     fn draw_ranges(&self, canvas: &mut Canvas, inp: &SceneInput) {
+        let rings = self.range_rings(inp);
+        count_rings(&rings, inp.size);
+        draw_rings(canvas, rings);
+    }
+
+    /// `smSensorRangesDraw`'s discs, farthest first: centre and inner radius, outer radius,
+    /// segments, colour.
+    fn range_rings(&self, inp: &SceneInput) -> Vec<(Circle, f32, i32, Color)> {
         let u = inp.world.universe();
         let eye = inp.world.camera.eye();
         struct Disc {
@@ -1106,7 +1220,7 @@ impl Sensors {
             let col = col_blend(col_blend(RANGE_FAR, RANGE_NEAR, t), bg, f);
             rings.push((c, outer, segments, col));
         }
-        draw_rings(canvas, rings);
+        rings
     }
 
     /// `smUniverseBoundsDraw`: brackets at the universe box's corners.
@@ -1139,6 +1253,7 @@ impl Sensors {
 
     /// `fowRender`: the outline of the explored (and, as an option, the occupied) cells.
     fn draw_fog(&self, canvas: &mut Canvas, inp: &SceneInput, g: &FowGrid) {
+        let fow = profile::span("sm.fow_pass");
         let mut lines = Vec::new();
         if self.toggles.areas_occupied {
             fog_lines(g, Layer::Occupied, &mut lines);
@@ -1148,9 +1263,12 @@ impl Sensors {
         } else if self.toggles.areas_visited {
             fog_lines(g, Layer::Explored, &mut lines);
         }
+        drop(fow);
         if lines.is_empty() {
             return;
         }
+        let _p = profile::span("sm.explored_outlines");
+        profile::count("sm.outline_lines", lines.len() as u64);
         let eye = inp.world.camera.eye();
         let mut dmin = f32::INFINITY;
         let mut dmax = 0.0f32;
@@ -1181,6 +1299,7 @@ impl Sensors {
     /// The layer drawn after the meshes: ship points and icons (`smShipsDraw`). The pings and
     /// then the hot-key numbers ([`Sensors::draw_hotkey_numbers`]) follow.
     pub fn draw_over(&self, canvas: &mut Canvas, inp: &SceneInput, meshes_drawn: &[ShipId]) {
+        let _p = profile::span("sm.ship_points");
         let u = inp.world.universe();
         let fog = Fog::of(u);
         let (w, h) = (inp.size.0 as f32, inp.size.1 as f32);
@@ -1250,6 +1369,7 @@ impl Sensors {
 
     /// `smShipHotkeyNumbersDraw`: drawn after the pings.
     pub fn draw_hotkey_numbers(&self, canvas: &mut Canvas, inp: &SceneInput) {
+        let _p = profile::span("sm.hotkeys");
         self.draw_hotkeys(canvas, inp);
     }
 

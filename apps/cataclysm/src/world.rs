@@ -1518,13 +1518,16 @@ impl World {
     }
 
     /// Renders only the background (the sensors manager's backdrop), or the clear colour
-    /// when `background` is off.
+    /// when `background` is off, with `layer`'s pixel triangles over it, into `out` (RGBA
+    /// rows of the whole target).
     pub fn render_background(
         &self,
         renderer: &mut Renderer,
         target: &hwc_render::OffscreenTarget,
         background: bool,
-    ) -> Result<Vec<u8>, String> {
+        layer: &EffectBatch,
+        out: &mut [u8],
+    ) -> Result<(), String> {
         let scene = Scene {
             camera: &self.camera,
             lighting: &self.lighting,
@@ -1536,18 +1539,25 @@ impl World {
             ships: &[],
             nav_lights: false,
         };
-        target.render_ex(renderer, &scene, &SceneExtras::default())
+        let extras = SceneExtras {
+            ship_states: &[],
+            effects: Some(layer),
+        };
+        target.render_ex_into(renderer, &scene, &extras, out)
     }
 
     /// Renders the frame's ships for which `keep(id, mesh_level)` holds over a black clear,
-    /// with no background and no effects (the sensors manager's ship meshes).
+    /// with no background and no effects (the sensors manager's ship meshes), reading back
+    /// the rectangle `region` (`x, y, w, h`; all of the target for `None`). Returns the rows
+    /// and the rectangle read.
     pub fn render_ships_only(
         &self,
         renderer: &mut Renderer,
         target: &hwc_render::OffscreenTarget,
         frame: &Frame,
+        region: Option<[u32; 4]>,
         keep: impl Fn(ShipId, bool) -> bool,
-    ) -> Result<Option<Vec<u8>>, String> {
+    ) -> Result<Option<RegionPixels>, String> {
         let (all, all_states) = self.instances(frame);
         let mut ships = Vec::new();
         let mut states = Vec::new();
@@ -1571,7 +1581,10 @@ impl World {
             ship_states: &states,
             effects: None,
         };
-        target.render_ex(renderer, &scene, &extras).map(Some)
+        let region = target.clamp_region(region);
+        target
+            .render_ex_region(renderer, &scene, &extras, region)
+            .map(|rgba| Some((rgba, region)))
     }
 
     /// Bounding radius of an asteroid kind's mesh (for picking).
@@ -1720,6 +1733,9 @@ fn construction_state(s: &hwc_sim::Ship, coll: &hwc_sim::statics::header::Static
 
 /// The hyperspace clip plane in ship space for effect state `state` (`hsGetEquation`): points
 /// with `plane . (p, 1) >= 0` are drawn.
+/// RGBA rows read back from part of a picture, and the rectangle (`x, y, w, h`) they cover.
+pub type RegionPixels = (Vec<u8>, [u32; 4]);
+
 fn hs_plane(state: u32, clipt: f32, forward_length: f32) -> Option<Vec4> {
     let fl = forward_length;
     Some(match state {

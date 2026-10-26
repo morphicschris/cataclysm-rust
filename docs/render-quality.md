@@ -12,6 +12,9 @@ because the original's screens are laid out by its own `.fib` files and have no 
 | FXAA | `--fxaa on\|off` | `hwcFxaa = 1/0` | off |
 | Scene at window resolution in scaled front-end modes | `--scene-res window\|layout` | `hwcSceneAtWindow = 1/0` | window |
 | Smooth wheel zoom | `--zoom smooth\|original` | `hwcSmoothZoom = 1/0` | smooth (asked for by the user) |
+| Cutscene / fleet-intel letterbox at least as tall as on a 4:3 screen | `--letterbox tall\|original` | `hwcOriginalLetterbox = 0/1` | tall (asked for by the user: the original's 1.85:1 bars are 18-21 pixels on a 16:9 screen) |
+| Default music volume | (options screen) | `MusicVolume = 0..100` | 45, the original's 60 lowered 25% at the user's request; a saved value is kept |
+| Frame profile | `--profile` or `HWC_PROFILE=1` | - | off: prints a per-section CPU / GPU breakdown once a second |
 
 ## The resolution the 3D view is drawn at
 

@@ -123,6 +123,8 @@ struct App {
     focus_zoom: Option<bool>,
     zoom_clear: Option<bool>,
     render_list: Option<bool>,
+    /// `--letterbox` (None: the options file).
+    tall_letterbox: Option<bool>,
     /// `--no-vsync`.
     no_vsync: bool,
     /// `--frame-times`: the 3D frame's draw times, printed every few seconds.
@@ -232,6 +234,7 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         focus_zoom: args.focus_zoom,
         zoom_clear: args.zoom_clear,
         render_list: args.render_list,
+        tall_letterbox: args.tall_letterbox,
         no_vsync: args.no_vsync,
         frame_times: args.frame_times.then(FrameTimes::default),
     };
@@ -326,7 +329,17 @@ the last frames drawn:
     }
 
     fn present(&mut self, canvas: &Canvas, viewport: (f32, f32, f32, f32)) {
-        self.presenter.upload(&self.device, &self.queue, canvas);
+        // The canvas's pixels are already RGBA8 rows: uploaded as they are, without a copy.
+        let span = crate::profile::span("upload");
+        let size = (canvas.width.max(1) as u32, canvas.height.max(1) as u32);
+        let rgba = canvas.pixels.as_flattened();
+        crate::profile::count("upload_bytes", rgba.len() as u64);
+        if rgba.len() == (size.0 * size.1 * 4) as usize {
+            self.presenter.upload_rgba(&self.device, &self.queue, size, rgba);
+        } else {
+            self.presenter.upload(&self.device, &self.queue, canvas);
+        }
+        drop(span);
         self.present_uploaded(viewport, None);
     }
 
@@ -339,11 +352,16 @@ the last frames drawn:
         viewport: (f32, f32, f32, f32),
         scene: &wgpu::TextureView,
     ) {
+        let span = crate::profile::span("upload");
+        crate::profile::count("upload_bytes", rgba.len() as u64);
         self.presenter.upload_rgba(&self.device, &self.queue, size, rgba);
+        drop(span);
         self.present_uploaded(viewport, Some(scene));
     }
 
     fn present_uploaded(&mut self, viewport: (f32, f32, f32, f32), scene: Option<&wgpu::TextureView>) {
+        // Includes the wait for a swap-chain image (vsync).
+        let _p = crate::profile::span("present");
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -635,6 +653,9 @@ impl App {
                         hwc_render::OFFSCREEN_FORMAT,
                     );
                     r.set_msaa_support(&gpu.msaa_counts);
+                    if crate::profile::enabled() && !r.set_gpu_timing(true) {
+                        eprintln!("cataclysm: --profile: no GPU timestamp queries here, CPU times only");
+                    }
                     self.renderer = Some(r);
                 }
             }
@@ -676,6 +697,9 @@ impl App {
                     }
                     if let Some(v) = self.render_list {
                         game.world.render_list = v;
+                    }
+                    if let Some(v) = self.tall_letterbox {
+                        game.letterbox.tall = v;
                     }
                     if let Some(r) = &self.renderer {
                         let q = game.quality;
@@ -721,7 +745,11 @@ impl App {
         let mut animatic = None;
         let mut next = false;
         let mut nis_level_done = false;
-        for o in g.update(dt, &mut self.audio) {
+        crate::profile::frame_start();
+        let span = crate::profile::span("update");
+        let outcomes = g.update(dt, &mut self.audio);
+        drop(span);
+        for o in outcomes {
             match o {
                 game::Outcome::Leave => leave = true,
                 game::Outcome::Restart => restart = true,
@@ -770,7 +798,9 @@ impl App {
         g.present = (g.scene_at_window && self.session.scale != ScaleMode::Original)
             .then(|| (viewport.2.round().max(1.0) as u32, viewport.3.round().max(1.0) as u32));
         let started = Instant::now();
+        let span = crate::profile::span("render");
         g.render(r, size)?;
+        drop(span);
         if let Some(t) = &mut self.frame_times {
             t.add(started.elapsed().as_secs_f64() * 1e3, f64::from(dt) * 1e3);
         }
@@ -794,6 +824,7 @@ impl App {
             }
             None => gpu.present(g.canvas(), viewport),
         }
+        crate::profile::frame_end();
         Ok(true)
     }
 

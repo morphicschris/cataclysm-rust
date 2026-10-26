@@ -204,8 +204,11 @@ struct SpriteIn {
     @location(2) uv: vec2<f32>,
     // rgb tint, a: alpha scale
     @location(3) color: vec4<f32>,
-    // x: 0 alpha as stored, 1 alpha inverted, 2 alpha ignored
+    // x: 0 alpha as stored, 1 alpha inverted, 2 alpha ignored; y: 1 when `plane` clips
     @location(4) mode: vec2<f32>,
+    // Billboard: world-space clip plane (the ship's hyperspace window); the parts with
+    // `plane . (p, 1) < 0` are cut away, like the hull.
+    @location(5) plane: vec4<f32>,
 };
 
 struct SpriteOut {
@@ -213,6 +216,8 @@ struct SpriteOut {
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) mode: vec2<f32>,
+    // Signed distance to the clip plane (only read when mode.y is set).
+    @location(3) plane_distance: f32,
 };
 
 @vertex
@@ -225,6 +230,7 @@ fn vs_star(in: SpriteIn) -> SpriteOut {
     out.uv = in.uv;
     out.color = in.color;
     out.mode = in.mode;
+    out.plane_distance = 0.0;
     return out;
 }
 
@@ -237,11 +243,17 @@ fn vs_billboard(in: SpriteIn) -> SpriteOut {
     out.uv = in.uv;
     out.color = in.color;
     out.mode = in.mode;
+    // The corner back in world space: the plane cuts the quad as a user clip plane would.
+    let world = (frame.inv_view * v).xyz;
+    out.plane_distance = dot(in.plane.xyz, world) + in.plane.w;
     return out;
 }
 
 @fragment
 fn fs_sprite(in: SpriteOut) -> @location(0) vec4<f32> {
+    if (in.mode.y > 0.5 && in.plane_distance < 0.0) {
+        discard;
+    }
     let t = textureSample(sprite_tex, sprite_sampler, in.uv);
     var a = t.a;
     if (in.mode.x > 1.5) {
@@ -292,6 +304,13 @@ fn vs_screen(
 fn fs_effect(in: EffectOut) -> @location(0) vec4<f32> {
     let t = textureSample(sprite_tex, sprite_sampler, in.uv);
     return vec4<f32>(t.rgb * in.color.rgb, t.a * in.color.a);
+}
+
+// Pixel triangles: a 2D layer blended like a CPU canvas (8-bit alpha, truncated).
+@fragment
+fn fs_pixel(in: EffectOut) -> @location(0) vec4<f32> {
+    let a = floor(clamp(in.color.a, 0.0, 1.0) * 255.0 + 1e-3) / 255.0;
+    return vec4<f32>(in.color.rgb, a);
 }
 
 // Lines: both end points come with every vertex; the vertex is pushed sideways in pixels.

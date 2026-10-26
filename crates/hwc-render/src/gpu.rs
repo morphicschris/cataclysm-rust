@@ -70,6 +70,8 @@ struct SpriteVertex {
     uv: [f32; 2],
     color: [f32; 4],
     mode: [f32; 2],
+    /// World-space clip plane of a billboard (used when `mode[1]` is 1).
+    plane: [f32; 4],
 }
 
 #[repr(C)]
@@ -257,8 +259,57 @@ pub struct Renderer {
     effect_buffer: DynamicBuffer,
     screen_buffer: DynamicBuffer,
     line_buffer: DynamicBuffer,
+    pixel_buffer: DynamicBuffer,
     effect_textures: Vec<wgpu::BindGroup>,
     glow_meshes: Vec<Option<(wgpu::Buffer, u32)>>,
+    /// GPU timing of offscreen renders ([`Renderer::set_gpu_timing`]).
+    timer: Option<GpuTimer>,
+    /// GPU milliseconds of the last offscreen render, when timed.
+    last_gpu_ms: Option<f64>,
+}
+
+/// Timestamp queries around an offscreen render's command encoder.
+struct GpuTimer {
+    queries: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    read: wgpu::Buffer,
+    /// Nanoseconds per timestamp tick.
+    period: f32,
+}
+
+impl GpuTimer {
+    /// Needs `TIMESTAMP_QUERY` and `TIMESTAMP_QUERY_INSIDE_ENCODERS`.
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<GpuTimer> {
+        let needed = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        if !device.features().contains(needed) {
+            return None;
+        }
+        let queries = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("gpu timer"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        });
+        let buffer = |usage, label| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: 16,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        Some(GpuTimer {
+            queries,
+            resolve: buffer(
+                wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                "gpu timer resolve",
+            ),
+            read: buffer(
+                wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                "gpu timer read",
+            ),
+            period: queue.get_timestamp_period(),
+        })
+    }
 }
 
 /// What the scene pipelines are built from, kept so they can be rebuilt for another sample
@@ -283,6 +334,8 @@ struct Pipelines {
     /// Indexed by blend: additive, alpha.
     effect_pipelines: [wgpu::RenderPipeline; 2],
     screen_pipelines: [wgpu::RenderPipeline; 2],
+    /// [`crate::effects::PixelTriangle`]s: alpha blended, the target's alpha kept.
+    pixel_pipeline: wgpu::RenderPipeline,
     line_pipelines: [wgpu::RenderPipeline; 2],
 }
 
@@ -324,7 +377,8 @@ impl PipelineKit {
             array_stride: std::mem::size_of::<SpriteVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &wgpu::vertex_attr_array![
-                0 => Float32x3, 1 => Float32x2, 2 => Float32x2, 3 => Float32x4, 4 => Float32x2
+                0 => Float32x3, 1 => Float32x2, 2 => Float32x2, 3 => Float32x4, 4 => Float32x2,
+                5 => Float32x4
             ],
         };
         let effect_vertex_layout = wgpu::VertexBufferLayout {
@@ -499,6 +553,28 @@ impl PipelineKit {
                 depth_write: false,
             })
         });
+        let pixel_pipeline = build(Spec {
+            label: "pixel triangles",
+            layout: sprite_pipeline_layout,
+            vs: "vs_screen",
+            fs: "fs_pixel",
+            vertex: vec![Some(effect_vertex_layout.clone())],
+            cull: None,
+            blend: Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::SrcAlpha,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            }),
+            depth_test: false,
+            depth_write: false,
+        });
         let line_pipelines = blends.map(|blend| {
             build(Spec {
                 label: "lines",
@@ -521,6 +597,7 @@ impl PipelineKit {
             glow_pipeline,
             effect_pipelines,
             screen_pipelines,
+            pixel_pipeline,
             line_pipelines,
         }
     }
@@ -761,8 +838,11 @@ impl Renderer {
             effect_buffer: DynamicBuffer::new("effects"),
             screen_buffer: DynamicBuffer::new("screen effects"),
             line_buffer: DynamicBuffer::new("lines"),
+            pixel_buffer: DynamicBuffer::new("pixel triangles"),
             effect_textures: Vec::new(),
             glow_meshes: Vec::new(),
+            timer: None,
+            last_gpu_ms: None,
         };
         let white = renderer.sprite_bind_group(&renderer.white, &renderer.linear_sampler);
         renderer.effect_textures.push(white);
@@ -771,6 +851,27 @@ impl Renderer {
 
     pub fn device(&self) -> &wgpu::Device {
         &self.device
+    }
+
+    /// Times each offscreen render on the GPU with timestamp queries (for profiling). Returns
+    /// whether the device can (it needs `TIMESTAMP_QUERY` and
+    /// `TIMESTAMP_QUERY_INSIDE_ENCODERS`, which [`request_device`] asks for when the adapter
+    /// has them).
+    pub fn set_gpu_timing(&mut self, on: bool) -> bool {
+        self.timer = if on {
+            self.timer.take().or_else(|| GpuTimer::new(&self.device, &self.queue))
+        } else {
+            None
+        };
+        self.last_gpu_ms = None;
+        self.timer.is_some()
+    }
+
+    /// GPU milliseconds of the last offscreen render (drawing, resolve, post passes and the
+    /// copy for the read-back), when [`set_gpu_timing`](Self::set_gpu_timing) is on; taken
+    /// once.
+    pub fn take_gpu_ms(&mut self) -> Option<f64> {
+        self.last_gpu_ms.take()
     }
 
     pub fn queue(&self) -> &wgpu::Queue {
@@ -1162,6 +1263,7 @@ impl Renderer {
                     true,
                     [tint[0], tint[1], tint[2], 1.0],
                     1.0,
+                    None,
                 );
             }
             star_batches.push(StarBatch {
@@ -1533,12 +1635,19 @@ impl Renderer {
         );
         self.line_buffer
             .upload(&self.device, &self.queue, bytemuck::cast_slice(&tess.lines));
+        self.pixel_buffer
+            .upload(&self.device, &self.queue, bytemuck::cast_slice(&tess.pixel));
 
-        // Nav lights: billboards built on the CPU each frame, grouped by texture.
+        // Nav lights: billboards built on the CPU each frame, grouped by texture. They are
+        // drawn with the hull's render state (`RenderNAVLights` runs between `hsContinue` and
+        // `hsEnd`, under the hyperspace clip plane, and with the hull's fade).
         let mut nav_vertices: Vec<SpriteVertex> = Vec::new();
         let mut nav_draws: Vec<(&wgpu::BindGroup, u32, u32)> = Vec::new();
         if scene.nav_lights {
-            for inst in scene.ships {
+            for (i, inst) in scene.ships.iter().enumerate() {
+                let state = extras.ship_states.get(i).unwrap_or(&default_state);
+                let plane = state.clip_plane.map(|p| plane_to_world(inst.transform, p));
+                let fade = state.fade.clamp(0.0, 1.0);
                 for (name, bind_group, has_alpha) in &inst.ship.nav_textures {
                     let first = nav_vertices.len() as u32;
                     for nav in &inst.ship.nav_lights {
@@ -1554,8 +1663,9 @@ impl Renderer {
                             centre.to_array(),
                             [nav.size / 2.0; 2],
                             false,
-                            [c[0], c[1], c[2], 1.0],
+                            [c[0], c[1], c[2], fade],
                             if *has_alpha { 0.0 } else { 2.0 },
+                            plane,
                         );
                     }
                     let count = nav_vertices.len() as u32 - first;
@@ -1619,6 +1729,14 @@ impl Renderer {
                     pass.draw(b.first_vertex..b.first_vertex + b.vertex_count, 0..1);
                 }
             }
+        }
+
+        // The 2D layer over the background, under the ships.
+        if let (Some(buffer), false) = (self.pixel_buffer.buffer(), tess.pixel.is_empty()) {
+            pass.set_pipeline(&self.pipes.pixel_pipeline);
+            pass.set_bind_group(3, &self.effect_textures[0], &[]);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..tess.pixel.len() as u32, 0..1);
         }
 
         let draw_item = |pass: &mut wgpu::RenderPass<'_>,
@@ -1792,7 +1910,8 @@ fn emp_lightning(
 
 /// Appends two triangles centred on `centre` with half extents `half`. Pixel-space quads
 /// (stars) have y pointing down; world-space billboards have y up. `mode` 1 inverts the
-/// bitmap's alpha, 2 ignores it (opaque bitmaps blend additively at full strength).
+/// bitmap's alpha, 2 ignores it (opaque bitmaps blend additively at full strength). A
+/// billboard with a `plane` is cut by it (world space) like the hull it belongs to.
 fn push_quad(
     out: &mut Vec<SpriteVertex>,
     centre: [f32; 3],
@@ -1800,6 +1919,7 @@ fn push_quad(
     y_down: bool,
     color: [f32; 4],
     mode: f32,
+    plane: Option<Vec4>,
 ) {
     let flip = if y_down { 1.0 } else { -1.0 };
     let corner = |sx: f32, sy: f32| SpriteVertex {
@@ -1807,7 +1927,8 @@ fn push_quad(
         corner: [sx * half[0], sy * half[1] * flip],
         uv: [(sx + 1.0) / 2.0, (sy + 1.0) / 2.0],
         color,
-        mode: [mode, 0.0],
+        mode: [mode, f32::from(u8::from(plane.is_some()))],
+        plane: plane.unwrap_or(Vec4::ZERO).to_array(),
     };
     let quad = [
         corner(-1.0, -1.0),
@@ -1846,7 +1967,10 @@ pub fn headless_device_with_msaa() -> Result<(wgpu::Device, wgpu::Queue, Vec<u32
 /// Opens `adapter`'s device with the adapter-specific format features when it has them (so
 /// MSAA can use 2 and 8 samples as well as WebGPU's 4).
 pub fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue), String> {
-    let wanted = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+    // Timestamp queries only for the profile (`Renderer::set_gpu_timing`).
+    let wanted = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+        | wgpu::Features::TIMESTAMP_QUERY
+        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
     let desc = wgpu::DeviceDescriptor {
         required_features: adapter.features() & wanted,
         ..Default::default()
@@ -1878,6 +2002,9 @@ pub struct OffscreenTarget {
     present: (wgpu::Texture, wgpu::TextureView),
     /// The finished picture at the logical size, copied to the CPU.
     readback: wgpu::Texture,
+    /// The mappable buffer the picture is copied into, kept between frames (allocating a
+    /// frame-sized buffer every frame cost about a millisecond on an integrated GPU).
+    readback_buffer: std::sync::Mutex<Option<(wgpu::Buffer, u64)>>,
 }
 
 /// Format used by [`OffscreenTarget`]; build the [`Renderer`] with it.
@@ -1993,6 +2120,7 @@ impl OffscreenTarget {
             post,
             present: (present_tex, present_view),
             readback: cur,
+            readback_buffer: std::sync::Mutex::new(None),
         }
     }
 
@@ -2063,6 +2191,65 @@ impl OffscreenTarget {
             &wgpu::TextureView,
         ),
     ) -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        self.render_region_with(renderer, scene, extras, None, Sink::Grow(&mut out), after)?;
+        Ok(out)
+    }
+
+    /// [`render_ex`](Self::render_ex) into `out`, which must hold the whole picture
+    /// (`width * height * 4` bytes): saves the allocation and a copy when the caller keeps
+    /// its own frame.
+    pub fn render_ex_into(
+        &self,
+        renderer: &mut Renderer,
+        scene: &Scene<'_>,
+        extras: &SceneExtras<'_>,
+        out: &mut [u8],
+    ) -> Result<(), String> {
+        let need = (self.width * self.height * 4) as usize;
+        if out.len() != need {
+            return Err(format!("render_ex_into: {} bytes for a {need}-byte picture", out.len()));
+        }
+        self.render_region_with(renderer, scene, extras, None, Sink::Fill(out), |_, _, _, _| {})
+    }
+
+    /// [`render_ex`](Self::render_ex), reading back only the rectangle `x, y, w, h` (clamped to
+    /// the target; rows of `w` pixels, top to bottom). For pictures that only cover part of
+    /// the target, it saves most of the copy back.
+    pub fn render_ex_region(
+        &self,
+        renderer: &mut Renderer,
+        scene: &Scene<'_>,
+        extras: &SceneExtras<'_>,
+        region: [u32; 4],
+    ) -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        self.render_region_with(renderer, scene, extras, Some(region), Sink::Grow(&mut out), |_, _, _, _| {})?;
+        Ok(out)
+    }
+
+    /// The rectangle `region` leaves of the target (all of it for `None`).
+    pub fn clamp_region(&self, region: Option<[u32; 4]>) -> [u32; 4] {
+        let [x, y, w, h] = region.unwrap_or([0, 0, self.width, self.height]);
+        let x = x.min(self.width.saturating_sub(1));
+        let y = y.min(self.height.saturating_sub(1));
+        [x, y, w.clamp(1, self.width - x), h.clamp(1, self.height - y)]
+    }
+
+    fn render_region_with(
+        &self,
+        renderer: &mut Renderer,
+        scene: &Scene<'_>,
+        extras: &SceneExtras<'_>,
+        region: Option<[u32; 4]>,
+        sink: Sink<'_>,
+        after: impl FnOnce(
+            &mut Renderer,
+            &mut wgpu::CommandEncoder,
+            &wgpu::TextureView,
+            &wgpu::TextureView,
+        ),
+    ) -> Result<(), String> {
         if renderer.sample_count() != self.plan.samples {
             return Err(format!(
                 "offscreen target made for {} samples, the renderer draws {}",
@@ -2072,6 +2259,9 @@ impl OffscreenTarget {
         }
         let device = renderer.device.clone();
         let mut encoder = device.create_command_encoder(&Default::default());
+        if let Some(t) = &renderer.timer {
+            encoder.write_timestamp(&t.queries, 0);
+        }
         renderer.render_ex(
             &mut encoder,
             &self.color_view,
@@ -2082,36 +2272,68 @@ impl OffscreenTarget {
         );
         after(renderer, &mut encoder, &self.color_view, &self.depth_view);
         self.finish(&mut encoder);
-        let row = self.width * 4;
+        let [rx, ry, rw, rh] = self.clamp_region(region);
+        let row = rw * 4;
         let padded =
             row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size: u64::from(padded) * u64::from(self.height),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        let size = u64::from(padded) * u64::from(rh);
+        let mut kept = self.readback_buffer.lock().map_err(|_| "readback buffer poisoned")?;
+        if kept.as_ref().is_none_or(|(_, s)| *s < size) {
+            // Room for the whole target, so a smaller region never needs a new one.
+            let full = u64::from(
+                (self.width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+                    * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT,
+            ) * u64::from(self.height);
+            let s = full.max(size);
+            *kept = Some((
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("readback"),
+                    size: s,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                }),
+                s,
+            ));
+        }
+        let buffer = &kept.as_ref().expect("readback buffer").0;
         encoder.copy_texture_to_buffer(
-            self.readback.as_image_copy(),
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.readback,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: rx, y: ry, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
             wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
+                buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded),
-                    rows_per_image: Some(self.height),
+                    rows_per_image: Some(rh),
                 },
             },
             wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
+                width: rw,
+                height: rh,
                 depth_or_array_layers: 1,
             },
         );
+        if let Some(t) = &renderer.timer {
+            encoder.write_timestamp(&t.queries, 1);
+            encoder.resolve_query_set(&t.queries, 0..2, &t.resolve, 0);
+            encoder.copy_buffer_to_buffer(&t.resolve, 0, &t.read, 0, 16);
+        }
         renderer.queue.submit([encoder.finish()]);
-        let slice = buffer.slice(..);
+        let slice = buffer.slice(..size);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
+        });
+        let timer_rx = renderer.timer.as_ref().map(|t| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            t.read.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            rx
         });
         device
             .poll(wgpu::PollType::Wait {
@@ -2125,15 +2347,42 @@ impl OffscreenTarget {
         let data = slice
             .get_mapped_range()
             .map_err(|e| format!("readback failed: {e}"))?;
-        let mut out = Vec::with_capacity((row * self.height) as usize);
-        for y in 0..self.height as usize {
-            let start = y * padded as usize;
-            out.extend_from_slice(&data[start..start + row as usize]);
+        let row = row as usize;
+        let rows = (0..rh as usize).map(|y| &data[y * padded as usize..y * padded as usize + row]);
+        match sink {
+            Sink::Grow(out) => {
+                out.clear();
+                out.reserve(row * rh as usize);
+                rows.for_each(|r| out.extend_from_slice(r));
+            }
+            Sink::Fill(out) => {
+                for (dst, r) in out.chunks_exact_mut(row).zip(rows) {
+                    dst.copy_from_slice(r);
+                }
+            }
         }
         drop(data);
         buffer.unmap();
-        Ok(out)
+        if let (Some(t), Some(rx)) = (&renderer.timer, timer_rx) {
+            if rx.recv().is_ok_and(|r| r.is_ok()) {
+                let ticks = t.read.slice(..).get_mapped_range().ok().map(|d| {
+                    let at = |i: usize| u64::from_le_bytes(d[i * 8..i * 8 + 8].try_into().unwrap_or([0; 8]));
+                    at(1).saturating_sub(at(0))
+                });
+                t.read.unmap();
+                renderer.last_gpu_ms = ticks.map(|n| n as f64 * f64::from(t.period) / 1e6);
+            }
+        }
+        Ok(())
     }
+}
+
+/// Where a read-back picture goes.
+enum Sink<'a> {
+    /// Appended to a cleared vector.
+    Grow(&'a mut Vec<u8>),
+    /// Into a slice of exactly its size.
+    Fill(&'a mut [u8]),
 }
 
 #[cfg(test)]

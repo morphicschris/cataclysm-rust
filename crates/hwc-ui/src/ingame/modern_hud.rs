@@ -280,7 +280,7 @@ pub struct Layout {
 }
 
 /// The scale of a canvas `height` lines tall.
-pub(crate) fn scale_for(height: i32) -> f32 {
+pub fn scale_for(height: i32) -> f32 {
     (height.max(1) as f32 / REF_HEIGHT).max(0.35)
 }
 
@@ -833,7 +833,7 @@ fn profile(a: f32, b: f32, from: i32, to: i32, sigma: f32) -> Vec<f32> {
 }
 
 /// Track, glow and fill of one bar. `glow` scales the glow (the SU pulse).
-fn draw_bar(canvas: &mut Canvas, bar: Rect, fraction: f32, sigma: f32, glow: f32) {
+pub(crate) fn draw_bar(canvas: &mut Canvas, bar: Rect, fraction: f32, sigma: f32, glow: f32) {
     let (x0, x1) = (bar.x0 as f32, bar.x1 as f32);
     let (y0, y1) = (bar.y0 as f32, bar.y1 as f32);
     for y in bar.y0..bar.y1 {

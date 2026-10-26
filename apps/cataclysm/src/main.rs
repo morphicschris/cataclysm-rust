@@ -20,6 +20,8 @@ mod hotkeys;
 mod hud_shots;
 mod intro;
 mod loading;
+#[cfg(test)]
+mod m1_checks;
 mod mission;
 mod movie_script;
 mod nebula_view;
@@ -30,6 +32,7 @@ mod pings;
 mod plate;
 mod play;
 mod preview;
+mod profile;
 #[cfg(test)]
 mod quality_shots;
 mod sensors;
@@ -74,6 +77,9 @@ options:
   --config <file>       options file (default: <data>/config/hwc-options.cfg, or
                         ./hwc-options.cfg when running from an install or archive)
   --no-sound            do not open an audio device
+                        (the music slider starts at 45, a user-requested change: the
+                        original's default is 60, this is 25% lower; a MusicVolume saved in the
+                        options file is kept)
   --tour <outdir>       render a scripted walk through the intro and the menus to PNG
                         files and exit
   --exit-after <s>      close the window after s seconds (smoke tests)
@@ -114,6 +120,10 @@ options:
                         top-right corner, in the style of the later Homeworld games) or
                         original (the SU / RU / time box, bottom right); options file:
                         hwcModernHud = 1/0
+  --letterbox <mode>    tall (default, a user-requested change: the cutscene and fleet-intel
+                        bars are never thinner than on a 4:3 screen of the same height, 14%
+                        of it each) or original (bars around a 1.85:1 picture: on a 16:9
+                        screen only 2% each); options file: hwcOriginalLetterbox = 0/1
 
 3D view quality (modern options, all off by default: the original look; see
 docs/render-quality.md for the measured costs):
@@ -140,6 +150,11 @@ docs/render-quality.md for the measured costs):
   scale 2 + MSAA 4 22-26 (cut to scale 1.70)
   --no-vsync            present without waiting for the display (for measuring)
   --frame-times         print the 3D frames' draw times every 240 frames
+  --profile             (or HWC_PROFILE=1) print a per-section breakdown of the frame once
+                        a second: CPU time of each step of the sensors manager's view (fog,
+                        range discs, explored outlines, points, meshes, pings, HUD) and of the
+                        main view, GPU time of each pass (timestamp queries, when the GPU has
+                        them), pixel and draw counts, canvas copies and the upload
 
   -h, --help            this text
 
@@ -178,6 +193,8 @@ pub struct Args {
     pub focus_zoom: Option<bool>,
     pub zoom_clear: Option<bool>,
     pub render_list: Option<bool>,
+    /// `--letterbox` (Some(true): tall); None: the options file.
+    pub tall_letterbox: Option<bool>,
     /// `--render-scale`, `--msaa`, `--fxaa`, `--scene-res` (None: the options file).
     pub render_scale: Option<f32>,
     pub msaa: Option<u32>,
@@ -211,6 +228,7 @@ fn parse_args() -> Result<Args, String> {
         focus_zoom: None,
         zoom_clear: None,
         render_list: None,
+        tall_letterbox: None,
         render_scale: None,
         msaa: None,
         fxaa: None,
@@ -297,6 +315,14 @@ fn parse_args() -> Result<Args, String> {
                     v => return Err(format!("unknown --draw-distance mode {v}")),
                 })
             }
+            "--letterbox" => {
+                a.tall_letterbox = Some(match value("--letterbox")?.to_ascii_lowercase().as_str() {
+                    "tall" => true,
+                    "original" => false,
+                    v => return Err(format!("unknown --letterbox mode {v}")),
+                })
+            }
+            "--profile" => crate::profile::enable(),
             "--hud" => {
                 let v = value("--hud")?;
                 let modern = hwc_ui::ingame::modern_hud::parse_mode(&v)

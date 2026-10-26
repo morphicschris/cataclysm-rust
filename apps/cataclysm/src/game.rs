@@ -10,13 +10,13 @@
 use std::rc::Rc;
 
 use glam::Vec3;
-use hwc_render::{OffscreenTarget, Renderer};
+use hwc_render::{EffectBatch, OffscreenTarget, Renderer};
 use hwc_sim::base::BaseEvent;
 use hwc_sim::harness::group_centre;
 use hwc_sim::statics::{ShipType, Technology};
 use hwc_sim::{command, dock, formation, ShipId};
 use hwc_ui::canvas::{Canvas, Color, Rect};
-use hwc_ui::letterbox::{self, Letterbox};
+use hwc_ui::letterbox::Letterbox;
 use hwc_ui::subtitle::{self, Subtitles};
 use hwc_ui::ingame::host::{Command, Formation, GameMessage, GameRequest, Owner};
 use hwc_ui::ingame::keys::{self, Action};
@@ -38,6 +38,7 @@ use crate::nis::{self, Kind as NisKind, NisRun};
 use hwc_nis::{Action as NisAction, Fired};
 use crate::sensors::{self, Phase, Sensors};
 use crate::plate::{self, Plate};
+use crate::profile;
 use crate::world::World;
 
 /// Pixels the pointer may move between press and release and still count as a click
@@ -49,10 +50,6 @@ const SELECTING_COLOR: Color = [192, 192, 0, 255];
 const PING_LEGEND_TEXT: Color = [0x40, 0x40, 0xff, 255];
 /// Right-button movement that still opens the menu (`MR_MouseMovementClickLimit`).
 const RIGHT_CLICK_LIMIT: f32 = 6.0;
-/// Frames the mission's letterbox takes to come in or go out. The simulation records only
-/// that `wideScreenIn...` / `wideScreenOut` ran, not their frame counts; every shipped call in
-/// mission 1 uses 90.
-const WIDE_SCREEN_FRAMES: i32 = 90;
 /// The mission-complete note stays this long before the game returns to the menu.
 const COMPLETE_TIME: f32 = 10.0;
 /// The debug key that forces the jump (`singlePlayerCheckDebugKeys`' C key; compiled out of
@@ -132,8 +129,10 @@ pub struct Game {
     pub subtitles: Option<Subtitles>,
     /// The NIS letterbox the mission's `wideScreenIn/Out` drive.
     pub letterbox: Letterbox,
-    /// The simulation's widescreen flag last seen.
-    wide_screen: bool,
+    /// The mission's wide-screen calls as they were applied, with the game time and whether
+    /// the sensors manager was open (tests).
+    #[cfg(test)]
+    pub wide_screen_log: Vec<(hwc_sim::mission::WideScreenEvent, bool)>,
     pub mode: Mode,
     mouse: (i32, i32),
     left_down: Option<(i32, i32)>,
@@ -160,6 +159,14 @@ pub struct Game {
     target_quality: hwc_render::RenderQuality,
     /// The scene layer is shown this frame.
     layer_active: bool,
+    /// Rows at the top and at the bottom of this frame covered by the letterbox bars, and
+    /// whether a fade or flash covered the whole picture: drawn over the scene, they must not
+    /// let the window-resolution scene show through where they match it (black bars over
+    /// black space).
+    layer_cover: (i32, bool),
+    /// The sensors manager's backdrop dimming and range discs drawn on the CPU canvas, and
+    /// its meshes read back whole, as before (for comparing the two).
+    pub sensors_cpu_layer: bool,
     /// The wheel eases the zoom (`hwcSmoothZoom`, `--zoom`): a user-requested change, on by
     /// default; off: the original's immediate step per notch.
     pub smooth_zoom: bool,
@@ -297,7 +304,8 @@ impl Game {
             messages: Vec::new(),
             subtitles: None,
             letterbox: Letterbox::default(),
-            wide_screen: false,
+            #[cfg(test)]
+            wide_screen_log: Vec::new(),
             mode: Mode::Select,
             mouse: (0, 0),
             left_down: None,
@@ -318,6 +326,8 @@ impl Game {
             scene_copy: Vec::new(),
             target_quality: hwc_render::RenderQuality::default(),
             layer_active: false,
+            layer_cover: (0, false),
+            sensors_cpu_layer: false,
             smooth_zoom: options.get("hwcSmoothZoom") != 0,
             scene_at_window: options.get("hwcSceneAtWindow") != 0,
             big_font: res.font("Arial_13.hff"),
@@ -351,6 +361,8 @@ impl Game {
         };
         // Mission 1's start sets the flag that keeps the letterbox of its first NIS.
         g.keep_letterbox_after_nis = g.world.mission_run().is_some_and(|r| r.game.config.mission == 1);
+        // `hwcOriginalLetterbox` 1: the original's 1.85:1 bars at any screen shape.
+        g.letterbox.tall = options.get("hwcOriginalLetterbox") == 0;
         g.world.lens_flares = options.get("enableLensFlare") != 0;
         g.world.full_detail = options.get("hwcFullDetailShips") != 0;
         g.world.focus_zoom = options.get("hwcFocusZoom") != 0;
@@ -2067,13 +2079,9 @@ impl Game {
         // The bars go when the NIS ends, unless mission 1's start asked to keep them.
         if self.keep_letterbox_after_nis {
             self.keep_letterbox_after_nis = false;
-            // The bars stay as the mission's widescreen: its next `wideScreenOut` takes them
-            // away (Mission 1 calls it when the first fleet-intel event ends, without a
-            // `wideScreenIn` of its own).
-            if let Some(r) = self.world.mission_run_mut() {
-                r.game.wide_screen = true;
-            }
-            self.wide_screen = true;
+            // The bars stay in: the mission's next `wideScreenOut` takes them away (Mission 1
+            // calls it when the first fleet-intel event ends; its `wideScreenIn` before that
+            // finds them fully in and does nothing).
         } else {
             self.letterbox.fully = false;
         }
@@ -2238,7 +2246,7 @@ impl Game {
             return;
         }
         let (w, h) = (self.canvas.width, self.canvas.height);
-        let full = letterbox::bar_height(w, h);
+        let full = self.letterbox.full_height(w, h);
         let bar = if self.letterbox.fade == 0.0 {
             full
         } else {
@@ -2304,25 +2312,38 @@ impl Game {
             self.target_quality = quality;
         }
         self.layer_active = false;
+        profile::count("canvas_px", (self.canvas.width.max(0) * self.canvas.height.max(0)) as u64);
+        let span = profile::span("prepare");
         self.world.prepare(renderer);
+        drop(span);
         let game_camera = self.nis.as_ref().map(|_| self.world.camera);
         if let Some(n) = &self.nis {
             n.view(&mut self.world);
         }
         if self.sensors.phase() == Phase::Sensors && self.nis.is_none() {
+            let _p = profile::span("sm.view");
             self.render_sensors(renderer, px)?;
         } else {
+            let _p = profile::span("main.view");
             // The main-view part of a sensors zoom uses the main camera's clip planes.
             let saved = self.world.camera.tweaks;
             if let Some(m) = self.sensors.main_camera() {
                 self.world.camera.tweaks = m.tweaks;
             }
+            let span = profile::span("main.frame_prep");
             let frame = self.world.frame(px);
+            drop(span);
             let target = self.target.as_ref().expect("target");
+            let span = profile::span("main.scene_pass");
             let rgba = self.world.render_offscreen(renderer, target, &frame);
+            drop(span);
+            gpu_profile(renderer, "main.scene");
+            let span = profile::span("main.scene_copy");
+            profile::count("canvas_copies", 1);
             for (dst, src) in self.canvas.pixels.iter_mut().zip(rgba?.as_chunks::<4>().0) {
                 *dst = [src[0], src[1], src[2], 255];
             }
+            drop(span);
             self.world.camera.tweaks = saved;
             if target.plan.present != px {
                 self.scene_copy.clone_from(&self.canvas.pixels);
@@ -2334,13 +2355,18 @@ impl Game {
         }
         self.draw_nis_fade();
         if !self.letterbox.fully && self.nis.is_none() {
+            let _p = profile::span("marks");
             self.draw_marks();
         }
         self.ui.letterboxed = self.letterbox.fully || self.nis.is_some();
+        let span = profile::span("hud");
         self.ui.draw(&mut self.canvas);
+        drop(span);
+        let _p = profile::span("fades_letterbox_subtitles");
         self.draw_hyperspace_fades();
         // Over everything: the letterbox bars, then the subtitles (`rndRenderTask`).
         self.letterbox.draw(&mut self.canvas);
+        self.layer_cover = (self.letterbox.drawn_height(self.canvas.width, self.canvas.height), self.full_screen_cover());
         if let Some(s) = self.subtitles.as_mut() {
             let now = self.world.universe().total_time_elapsed;
             let state = subtitle::DrawState {
@@ -2380,16 +2406,32 @@ impl Game {
     /// the pixels nothing was drawn over made transparent, and the full-resolution scene to
     /// show under it. Call after the last drawing into the canvas (the pointer).
     pub fn scene_layer(&self) -> Option<(Vec<u8>, &hwc_render::wgpu::TextureView)> {
-        if !self.layer_active || self.scene_copy.len() != self.canvas.pixels.len() {
+        if !self.layer_active || self.scene_copy.len() != self.canvas.pixels.len() || self.layer_cover.1 {
             return None;
         }
         let target = self.target.as_ref()?;
+        let w = self.canvas.width.max(1) as usize;
+        let h = self.canvas.height.max(0) as usize;
+        let bars = self.layer_cover.0.max(0) as usize;
         let mut rgba = Vec::with_capacity(self.canvas.pixels.len() * 4);
-        for (p, s) in self.canvas.pixels.iter().zip(&self.scene_copy) {
-            let a = if p[..3] == s[..3] { 0 } else { 255 };
+        for (i, (p, s)) in self.canvas.pixels.iter().zip(&self.scene_copy).enumerate() {
+            let y = i / w;
+            let covered = y < bars || y + bars >= h;
+            let a = if !covered && p[..3] == s[..3] { 0 } else { 255 };
             rgba.extend_from_slice(&[p[0], p[1], p[2], a]);
         }
         Some((rgba, target.present_view()))
+    }
+
+    /// Whether a fade or flash was drawn over the whole picture this frame (the NIS fade,
+    /// the single-player fade to black, the arrival flash, the hyperspace whiteout).
+    fn full_screen_cover(&self) -> bool {
+        let nis = self.nis.as_ref().is_some_and(|n| n.player.fade.level != 0.0);
+        let hyper = self.world.mission_run().is_some_and(|r| {
+            let h = &r.game.hyper;
+            (h.fade > 0.0 && self.nis.is_none()) || h.arrival_flash > 0.0 || h.whiteout
+        });
+        nis || hyper
     }
 
     /// What is under the pointer and which pointer shows (`mouseSetCursorSetting`).
@@ -2434,17 +2476,22 @@ impl Game {
 
     /// The letterbox and the subtitles, once a frame after the universe updates.
     fn update_presentation(&mut self, dt: f32, audio: &mut Option<Audio>) {
-        let wide = self.world.mission_run().is_some_and(|r| r.game.wide_screen);
-        if wide != self.wide_screen {
-            self.wide_screen = wide;
-            if wide {
-                if self.letterbox.wide_screen_in(WIDE_SCREEN_FRAMES) {
-                    sound(audio, letterbox::SOUND_IN);
-                }
-            } else {
-                self.letterbox.wide_screen_out(WIDE_SCREEN_FRAMES);
-                sound(audio, letterbox::SOUND_OUT);
+        // Every `wideScreenIn...` / `wideScreenOut` the mission made since the last frame, in
+        // order and with its own frame count. None of them closes the sensors manager
+        // (Cataclysm's `kasfWideScreenIn` has the body of `...InDontCloseSensors`); the bars
+        // are drawn over it as over the main view.
+        let events = self
+            .world
+            .mission_run_mut()
+            .map(|r| std::mem::take(&mut r.game.wide_screen_events))
+            .unwrap_or_default();
+        for e in events {
+            let coming_in = e.kind != hwc_sim::mission::WideScreenKind::Out;
+            if let Some(id) = self.letterbox.wide_screen_call(coming_in, e.frames) {
+                sound(audio, id);
             }
+            #[cfg(test)]
+            self.wide_screen_log.push((e, self.sensors.is_open()));
         }
         self.letterbox.update(dt);
         // Fleet intel holds the keyboard (`smFleetIntel`).
@@ -2488,16 +2535,9 @@ impl Game {
         let target = self.target.as_ref().expect("target");
         let (clear, dim) = self.sensors.background();
         let show_bg = self.sensors.toggles.background;
-        let rgba = self.world.render_background(renderer, target, show_bg)?;
-        for (dst, src) in self.canvas.pixels.iter_mut().zip(rgba.as_chunks::<4>().0) {
-            *dst = if show_bg {
-                let m = |c: u8| (f32::from(c) * dim) as u8;
-                [m(src[0]), m(src[1]), m(src[2]), 255]
-            } else {
-                clear
-            };
-        }
+        let span = profile::span("sm.frame_prep");
         let frame = self.world.frame(px);
+        drop(span);
         let groups: Vec<(u8, Vec<ShipId>)> = self
             .hotkeys
             .non_empty()
@@ -2512,7 +2552,46 @@ impl Game {
             time: self.real_time,
             font: font.as_deref(),
         };
-        self.sensors.draw_under(&mut self.canvas, &inp);
+        // The backdrop, dimmed, with the range discs over it: drawn on the GPU in one pass
+        // (the CPU's picture to within one step of 8-bit rounding), unless `sensors_cpu_layer`.
+        let gpu_layer = !self.sensors_cpu_layer;
+        let mut layer = EffectBatch::default();
+        if gpu_layer {
+            layer.pixel_triangles = self.sensors.background_layer(&inp);
+        }
+        // Read back straight into the canvas when it is the target's size.
+        let span = profile::span("sm.background_pass");
+        let whole = (target.width * target.height) as usize;
+        if self.canvas.pixels.len() == whole {
+            self.world.render_background(
+                renderer,
+                target,
+                show_bg,
+                &layer,
+                self.canvas.pixels.as_flattened_mut(),
+            )?;
+        } else {
+            let mut rgba = vec![0u8; whole * 4];
+            self.world.render_background(renderer, target, show_bg, &layer, &mut rgba)?;
+            for (dst, src) in self.canvas.pixels.iter_mut().zip(rgba.as_chunks::<4>().0) {
+                *dst = *src;
+            }
+        }
+        drop(span);
+        gpu_profile(renderer, "sm.background");
+        if !gpu_layer {
+            let _p = profile::span("sm.background_copy");
+            profile::count("canvas_copies", 1);
+            for dst in self.canvas.pixels.iter_mut() {
+                *dst = if show_bg {
+                    let m = |c: u8| (f32::from(c) * dim) as u8;
+                    [m(dst[0]), m(dst[1]), m(dst[2]), 255]
+                } else {
+                    clear
+                };
+            }
+        }
+        self.sensors.draw_under(&mut self.canvas, &inp, gpu_layer);
         let u = self.world.universe();
         let fog = sensors::Fog::of(u);
         let meshes: Vec<ShipId> = u
@@ -2521,21 +2600,44 @@ impl Game {
             .copied()
             .filter(|&id| frame.is_mesh(id) && self.sensors.draws_mesh(&inp, &fog, id))
             .collect();
+        profile::count("sm.meshes", meshes.len() as u64);
         if !meshes.is_empty() {
-            let rendered = self
-                .world
-                .render_ships_only(renderer, target, &frame, |id, _| meshes.contains(&id))?;
-            if let Some(rgba) = rendered {
-                for (dst, src) in self.canvas.pixels.iter_mut().zip(rgba.as_chunks::<4>().0) {
-                    if src[0] != 0 || src[1] != 0 || src[2] != 0 {
-                        *dst = [src[0], src[1], src[2], 255];
+            let span = profile::span("sm.meshes_pass");
+            // Only the part of the picture the meshes can cover is read back.
+            let region = (!self.sensors_cpu_layer)
+                .then(|| mesh_region(&self.world, px, &meshes))
+                .flatten();
+            let rendered = self.world.render_ships_only(
+                renderer,
+                target,
+                &frame,
+                region,
+                |id, _| meshes.contains(&id),
+            )?;
+            drop(span);
+            gpu_profile(renderer, "sm.meshes");
+            if let Some((rgba, [rx, ry, rw, rh])) = rendered {
+                let _p = profile::span("sm.meshes_copy");
+                profile::count("sm.meshes_px", u64::from(rw * rh));
+                let w = self.canvas.width.max(0) as usize;
+                for (row, src_row) in rgba.chunks_exact(rw as usize * 4).enumerate() {
+                    let at = (ry as usize + row) * w + rx as usize;
+                    let Some(dst_row) = self.canvas.pixels.get_mut(at..at + rw as usize) else {
+                        continue;
+                    };
+                    for (dst, src) in dst_row.iter_mut().zip(src_row.as_chunks::<4>().0) {
+                        if src[0] != 0 || src[1] != 0 || src[2] != 0 {
+                            *dst = [src[0], src[1], src[2], 255];
+                        }
                     }
                 }
             }
         }
         self.sensors.draw_over(&mut self.canvas, &inp, &meshes);
         let mut sounds = Vec::new();
+        let span = profile::span("sm.pings");
         self.draw_pings(px, &mut sounds);
+        drop(span);
         self.ping_sounds.extend(sounds);
         let inp = sensors::SceneInput {
             world: &self.world,
@@ -2770,6 +2872,43 @@ pub fn whiteout_colour(t: f32) -> Whiteout {
         let c = c.clamp(0, 255);
         let k = |v: f32| ((v as i32 * c) >> 8) as u8;
         Whiteout::Opaque([k(r), k(g), k(b), 255])
+    }
+}
+
+/// The screen rectangle (`x, y, w, h`) the sensors manager's ship meshes can cover: their
+/// collision spheres doubled, projected, with a margin; `None` (the whole picture) when one is
+/// behind the camera or the rectangles cover most of the screen anyway.
+fn mesh_region(world: &World, size: (u32, u32), ships: &[ShipId]) -> Option<[u32; 4]> {
+    let u = world.universe();
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for &id in ships {
+        let s = u.ship(id)?;
+        let r = u
+            .statics
+            .ship(s.ship_type)
+            .map_or(50.0, |st| st.header.coll.coll_sphere_size)
+            .max(20.0);
+        let p = glam::Vec3::new(s.coll.coll_position.x, s.coll.coll_position.y, s.coll.coll_position.z);
+        let c = sensors::project_sphere(world, size, p, r * 2.0)?;
+        let r = c.r + 4.0;
+        lo = [lo[0].min(c.x - r), lo[1].min(c.y - r)];
+        hi = [hi[0].max(c.x + r), hi[1].max(c.y + r)];
+    }
+    let (w, h) = (size.0 as f32, size.1 as f32);
+    let x0 = lo[0].floor().clamp(0.0, w);
+    let y0 = lo[1].floor().clamp(0.0, h);
+    let x1 = hi[0].ceil().clamp(0.0, w);
+    let y1 = hi[1].ceil().clamp(0.0, h);
+    if x1 <= x0 || y1 <= y0 || (x1 - x0) * (y1 - y0) > w * h * 0.5 {
+        return None;
+    }
+    Some([x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32])
+}
+
+/// The GPU time of the offscreen render just made, into the profile as pass `name`.
+fn gpu_profile(renderer: &mut Renderer, name: &'static str) {
+    if let Some(ms) = renderer.take_gpu_ms() {
+        profile::gpu_ms(name, ms);
     }
 }
 

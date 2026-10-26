@@ -309,7 +309,7 @@ archive, or `--config`) keeps every value under its original name, one per line:
 
 ```text
 # hwc options v1
-MusicVolume = 60
+MusicVolume = 45
 PlayerName = "Fleet Commander"
 ```
 
@@ -320,7 +320,7 @@ the engine's `colRGB` (`0xAABBGGRR` as a signed integer).
 
 | Option (default) | Control |
 | --- | --- |
-| `SpeechVolume` (75), `SFXVolume` (75), `MusicVolume` (60) | audio sliders, 0-100 |
+| `SpeechVolume` (75), `SFXVolume` (75), `MusicVolume` (45; the original's 60, lowered 25% at the user's request) | audio sliders, 0-100 |
 | `NumChannels` (8), `AutoChannel` (0) | channels slider (shown + 8, voices 8-32), Auto |
 | `SoundQuality` (0), `speakerSetting` (1), `Equalizer0-7` (0) | Advanced: quality, speakers (presets fill the equaliser), equaliser bands (value x 1.025) |
 | `VoiceCommands`, `VoiceStatus`, `VoiceChatter` (1), `opBattleChatter` (50) | Advanced: speech check boxes, chatter slider |
