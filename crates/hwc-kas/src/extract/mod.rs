@@ -196,7 +196,8 @@ pub fn find_missions(pe: &PeImage<'_>) -> Vec<MissionEntry> {
             i += 1;
         }
     }
-    let mut counts = std::collections::HashMap::new();
+    // Ordered, so a tie between call sites always resolves the same way.
+    let mut counts = std::collections::BTreeMap::new();
     for (t, _) in &sites {
         *counts.entry(*t).or_insert(0usize) += 1;
     }
