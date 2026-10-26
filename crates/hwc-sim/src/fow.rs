@@ -240,6 +240,30 @@ pub fn move_viewer(u: &mut Universe, id: ShipId, old: Vector, new: Vector) {
     u.fog.grids[player].as_mut().expect("grid").add_viewer_cells(nc, cells);
 }
 
+/// `rmTechSetAdd` / `rmTechSetSetMode` around a change of a technology set: for the keys that
+/// may change vision ranges (technology or mode -1, 2 and the sensors technology 0x1c) every
+/// viewer leaves the grid before `change` and comes back after it, with its new range.
+pub fn with_vision_refresh(u: &mut Universe, key: i32, change: impl FnOnce(&mut Universe)) {
+    let refresh = matches!(key, -1 | 2 | 0x1c) && u.fog.grids.iter().any(Option::is_some);
+    let ships = if refresh { u.ship_list.clone() } else { Vec::new() };
+    for &id in &ships {
+        remove_viewer(u, id);
+    }
+    change(u);
+    for &id in &ships {
+        add_viewer(u, id);
+    }
+}
+
+/// `rmTechSetAdd` on a player's technologies, with the fog refresh it makes.
+pub fn tech_add(u: &mut Universe, player: usize, tech: usize) {
+    with_vision_refresh(u, tech as i32, |u| {
+        if let Some(p) = u.base.players.get_mut(player) {
+            p.tech.add(tech);
+        }
+    });
+}
+
 /// `fowShipVisibleToPlayer` (0x479d90): whether `player` sees the ship through its fog (cloaked
 /// ships only when revealed to that player).
 pub fn ship_visible_to_player(u: &Universe, id: ShipId, player: usize) -> bool {

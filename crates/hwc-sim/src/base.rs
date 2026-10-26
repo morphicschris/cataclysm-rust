@@ -139,8 +139,8 @@ impl Techs {
         self.mode == Self::MODE_ALL || self.has.get(tech).is_some_and(|&v| v == 1)
     }
 
-    /// `rmTechSetAdd` (the fog-of-war refresh it does for sensor technologies is not
-    /// modelled).
+    /// `rmTechSetAdd` on the set alone; [`crate::fow::tech_add`] adds a player's technology
+    /// with the fog-of-war refresh the original makes.
     pub fn add(&mut self, tech: usize) {
         if let Some(v) = self.has.get_mut(tech) {
             *v = 1;
@@ -860,7 +860,10 @@ pub fn spawn_ship(u: &mut Universe, ship_type: ShipType, player: usize, position
 
 /// `univRemoveShipFromOutside` (0x542a30): the ship leaves the universe lists (it is going
 /// inside another ship) but keeps existing.
-pub fn remove_ship_from_outside(u: &mut Universe, id: ShipId) {
+/// `fow_viewer` is the original's second argument: the ship stops being a fog-of-war viewer
+/// (docking, the instant KAS docks, the end of a hyperspace jump), or stays one (the fleet
+/// leaving the level or going into mid-level hyperspace).
+pub fn remove_ship_from_outside(u: &mut Universe, id: ShipId, fow_viewer: bool) {
     u.blobs.object_died(ObjRef::Ship(id));
     let s = u.ships.ship_mut(id);
     s.coll_my_blob = None;
@@ -875,6 +878,9 @@ pub fn remove_ship_from_outside(u: &mut Universe, id: ShipId) {
     s.firing_at_us = None;
     s.recently_fired_upon = 0;
     s.getting_rocked = None;
+    if fow_viewer {
+        crate::fow::remove_viewer(u, id);
+    }
     // Bullets and other ships stop targeting it.
     crate::command::remove_ship_from_being_targeted(u, id);
 }
@@ -895,9 +901,9 @@ pub fn add_ship_to_outside(u: &mut Universe, id: ShipId, near: ShipId) {
     u.ships.ship_mut(id).flags &= !SOF_HIDE;
 }
 
-/// `univSetShipPosition`.
+/// `univSetShipPosition` (0x548180): moves the ship, and its fog-of-war viewer with it.
 pub fn set_ship_position(u: &mut Universe, id: ShipId, p: Vector) {
-    u.ships.ship_mut(id).posinfo.position = p;
+    crate::nis_support::set_ship_position(u, id, p);
 }
 
 /// `ShipSetDisableReason` (0x...): one of 13 reasons; the ship is disabled while any is set.

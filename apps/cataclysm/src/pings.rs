@@ -134,6 +134,20 @@ impl Tweaks {
     }
 }
 
+/// The `pingBob*` blob properties of the game's `ping.script`.
+pub fn blob_properties(source: &dyn hwc_ui::AssetSource) -> hwc_sim::tunables::BlobProperties {
+    struct Src<'a>(&'a dyn hwc_ui::AssetSource);
+    impl hwc_sim::statics::DataSource for Src<'_> {
+        fn read(&self, path: &str) -> Option<Vec<u8>> {
+            self.0.read(path)
+        }
+        fn exists(&self, path: &str) -> bool {
+            self.0.read(path).is_some()
+        }
+    }
+    hwc_sim::battle_ping::ping_blob_properties(Some(&Src(source)))
+}
+
 /// What a ping is centred on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Owner {
@@ -151,9 +165,10 @@ pub enum Eval {
     Proximity(ShipId),
     /// New ships: expires at its first evaluation.
     NewShip,
-    /// A battle: expires at its first evaluation (the battle chatter is the simulation's).
-    #[allow(dead_code)] // made once the simulation exposes its battle sub-blobs
-    Battle,
+    /// `pingBattlePingEvaluate`: a battle over the ships of its sub-blob. It expires at its
+    /// first evaluation (the battle chatter is the simulation's), or once the last of its
+    /// ships has died.
+    Battle { ships: Vec<ShipId> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -274,7 +289,6 @@ impl Pings {
     }
 
     /// `pingAnomalySelectionPingAdd`: a ping on the centre of some ships.
-    #[allow(dead_code)] // for KAS `PingAddShips`, once the simulation passes its pings on
     pub fn anomaly_ships(&mut self, u: &Universe, name: &str, ships: &[ShipId], now: f32) {
         let centre = selection_centre(u, ships).unwrap_or(Vector::ZERO);
         let eval = Eval::Anomaly { name: name.to_string(), ships: ships.to_vec(), object: None };
@@ -301,7 +315,6 @@ impl Pings {
 
     /// `pingAnomalyPingRemove`: every anomaly ping whose label starts with `name` (ignoring
     /// case); the count removed.
-    #[allow(dead_code)] // for KAS `PingRemove`, once the simulation passes its pings on
     pub fn anomaly_remove(&mut self, name: &str) -> usize {
         let before = self.list.len();
         let n = name.len();
@@ -322,13 +335,43 @@ impl Pings {
         self.list.push(p);
     }
 
-    /// A battle ping of `radius` around `centre` (`pingAttackPingsCreate`).
-    #[allow(dead_code)] // once the simulation exposes its battle sub-blobs
-    pub fn battle(&mut self, centre: Vector, radius: f32, now: f32) {
-        let mut p = Ping::new(centre, None, Eval::Battle, now);
+    /// A battle ping of `radius` around `centre` over `ships` (`pingAttackPingsCreate`).
+    pub fn battle(&mut self, centre: Vector, radius: f32, ships: Vec<ShipId>, now: f32) {
+        let mut p = Ping::new(centre, None, Eval::Battle { ships }, now);
         p.apply(&self.tweaks.battle, mask::BATTLE);
         p.size = radius;
         self.list.push(p);
+    }
+
+    /// `pingBattlePingsCreate` on a battle-ping frame: the simulation's battle sub-blobs
+    /// become pings, unless a battle ping is still in the list (then none are made).
+    pub fn battles(&mut self, battles: Vec<hwc_sim::battle_ping::BattlePing>, now: f32) {
+        if self.list.iter().any(|p| matches!(p.eval, Eval::Battle { .. })) {
+            return;
+        }
+        for b in battles {
+            self.battle(b.centre, b.radius, b.ships, now);
+        }
+    }
+
+    /// The mission script's ping calls (`kasfPingAddSingleShip`, `kasfPingAddShips`,
+    /// `kasfPingAddPoint`, `kasfPingRemove`), in the order it made them.
+    pub fn kas_orders(&mut self, u: &Universe, orders: Vec<hwc_sim::mission::PingOrder>, now: f32) {
+        use hwc_sim::mission::PingOrder;
+        for o in orders {
+            match o {
+                PingOrder::Ship { label, ship } => {
+                    // `pingAnomalyObjectPingAdd` on the ship, wherever it is now.
+                    let Some(at) = u.ship(ship).map(|s| s.posinfo.position) else { continue };
+                    self.anomaly_object(&label, Owner::Ship(ship), at, now);
+                }
+                PingOrder::Ships { label, ships } => self.anomaly_ships(u, &label, &ships, now),
+                PingOrder::Point { label, at } => self.anomaly_point(&label, at, now),
+                PingOrder::Remove { label } => {
+                    self.anomaly_remove(&label);
+                }
+            }
+        }
     }
 
     /// `ProximitySensorHouseKeep`: the local player's sensor found something.
@@ -371,7 +414,15 @@ impl Pings {
                     !ships.is_empty()
                 }
                 Eval::Proximity(s) => Owner::Ship(*s) != obj,
-                Eval::NewShip | Eval::Battle => true,
+                Eval::Battle { ships } => {
+                    if let Owner::Ship(id) = obj {
+                        if let Some(i) = ships.iter().position(|&s| s == id) {
+                            ships.swap_remove(i);
+                        }
+                    }
+                    !ships.is_empty()
+                }
+                Eval::NewShip => true,
             }
         });
     }
@@ -395,7 +446,7 @@ impl Pings {
                     true
                 }
                 Eval::Proximity(s) => sensor_found(*s),
-                Eval::NewShip | Eval::Battle => false,
+                Eval::NewShip | Eval::Battle { .. } => false,
             }
         });
     }
@@ -593,5 +644,81 @@ mod tests {
         assert_eq!(c[0].color, [25, 255, 25, 255]);
         assert_eq!(circle_segments(100.0), 20);
         assert_eq!(circle_segments(0.0), 32);
+    }
+
+    /// A universe with no game data: no ships.
+    fn empty_universe() -> Universe {
+        struct NoData;
+        impl hwc_sim::statics::DataSource for NoData {
+            fn read(&self, _: &str) -> Option<Vec<u8>> {
+                None
+            }
+            fn exists(&self, _: &str) -> bool {
+                false
+            }
+        }
+        let statics = hwc_sim::statics::StaticWorld::load_from(&NoData, hwc_sim::statics::LoadOptions::default());
+        Universe::new(
+            std::sync::Arc::new(statics),
+            hwc_sim::SimTweaks::default(),
+            &[hwc_sim::statics::ShipRace::Somtaaw, hwc_sim::statics::ShipRace::Taiidan],
+        )
+    }
+
+    #[test]
+    fn kas_ping_orders_become_anomaly_pings() {
+        use hwc_sim::mission::PingOrder;
+        let u = empty_universe();
+        let mut p = pings();
+        let at = Vector::new(1000.0, 2000.0, 3000.0);
+        p.kas_orders(
+            &u,
+            vec![
+                PingOrder::Point { label: "FleetIntel1".into(), at },
+                PingOrder::Point { label: "FleetIntel2".into(), at },
+                // A ship that is gone makes no ping.
+                PingOrder::Ship { label: "Gone".into(), ship: ShipId(77) },
+                PingOrder::Remove { label: "fleetintel2".into() },
+            ],
+            5.0,
+        );
+        assert_eq!(p.list.len(), 1);
+        let q = &p.list[0];
+        assert_eq!(q.mask, mask::ANOMALY);
+        assert_eq!(q.centre, at);
+        assert_eq!(q.color, [255, 255, 0, 255]);
+        assert!(matches!(&q.eval, Eval::Anomaly { name, .. } if name == "FleetIntel1"));
+        // Anomaly pings show whatever the fog hides.
+        let project = |_: Vector, r: f32| Some((10.0, 10.0, r / 100.0));
+        let (c, ..) = p.frame(5.0, Vector::ZERO, |_| None, project, |_| true, false);
+        assert_eq!(c.len(), 1);
+    }
+
+    #[test]
+    fn battle_pings_come_one_batch_at_a_time_and_go_with_their_ships() {
+        use hwc_sim::battle_ping::BattlePing;
+        let u = empty_universe();
+        let mut p = pings();
+        let battle = |x: f32, ships: Vec<ShipId>| BattlePing { centre: Vector::new(x, 0.0, 0.0), radius: 4000.0, ships };
+        p.battles(vec![battle(0.0, vec![ShipId(1), ShipId(2)]), battle(9000.0, vec![ShipId(3)])], 0.0);
+        assert_eq!(p.list.len(), 2);
+        assert!(p.list.iter().all(|q| q.mask == mask::BATTLE && q.size == 4000.0));
+        // While a battle ping is up no new ones are made.
+        p.battles(vec![battle(500.0, vec![ShipId(4)])], 0.1);
+        assert_eq!(p.list.len(), 2);
+        // The last ship of a battle dying ends its ping.
+        p.object_died(Owner::Ship(ShipId(3)), Vector::ZERO);
+        assert_eq!(p.list.len(), 1);
+        p.object_died(Owner::Ship(ShipId(1)), Vector::ZERO);
+        assert_eq!(p.list.len(), 1);
+        // Battle pings hide in the fog.
+        let project = |_: Vector, r: f32| Some((10.0, 10.0, r / 100.0));
+        let (c, ..) = p.frame(0.0, Vector::ZERO, |_| None, project, |_| true, false);
+        assert!(c.is_empty());
+        // The first evaluation ends it (the battle tweaks' evaluate period is 2 s).
+        p.update(&u, 0.5, |_| false);
+        assert_eq!(p.list.len(), 1);
+        p.update(&u, 2.5, |_| false);
+        assert!(p.list.is_empty());
     }
 }

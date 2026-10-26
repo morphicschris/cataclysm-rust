@@ -218,7 +218,7 @@ impl SimHost<'_> {
                 continue;
             }
             if self.u.ship_list.contains(&id) {
-                crate::base::remove_ship_from_outside(self.u, id);
+                crate::base::remove_ship_from_outside(self.u, id, true);
             }
             crate::dock::put_ship_inside(self.u, id, host);
         }
@@ -432,6 +432,11 @@ impl KasRuntime for SimHost<'_> {
         }
         command::remove_ships_from_doing_stuff(self.u, &sel);
         for &id in &sel {
+            // The human player's ships stop being its fog-of-war viewers as they change hands;
+            // ships coming over become viewers once they are out in the universe.
+            if self.u.ships.get(id).is_some_and(|s| s.player == HUMAN_PLAYER) {
+                crate::fow::remove_viewer(self.u, id);
+            }
             let Some(s) = self.u.ships.get_mut(id) else { continue };
             if s.player == HUMAN_PLAYER {
                 s.player = level::COMPUTER_PLAYER;
@@ -445,6 +450,9 @@ impl KasRuntime for SimHost<'_> {
                     s.special_flags2 |= NOT_PLAYER_CONTROLLED;
                 } else {
                     s.special_flags2 &= !NOT_PLAYER_CONTROLLED;
+                }
+                if self.u.ship_list.contains(&id) {
+                    crate::fow::add_viewer(self.u, id);
                 }
             }
         }
@@ -915,9 +923,7 @@ impl KasRuntime for SimHost<'_> {
         // (rmAddTechToPlayer: add, then suPlayerUpdateFromResearch).
         let t = Self::str_text(tech_name);
         if let Some(tech) = crate::statics::Technology::from_name(&t) {
-            if let Some(p) = self.u.base.players.get_mut(HUMAN_PLAYER) {
-                p.tech.add(tech.index());
-            }
+            crate::fow::tech_add(self.u, HUMAN_PLAYER, tech.index());
             crate::upgrade::player_update_from_research(self.u, HUMAN_PLAYER);
         } else {
             self.log(LogKind::Warning, format!("TechSet: unknown technology {t:?}"));

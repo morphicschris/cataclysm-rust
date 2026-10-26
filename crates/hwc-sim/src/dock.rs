@@ -682,6 +682,8 @@ pub fn put_ship_outside(u: &mut Universe, ship: ShipId, dw: ShipId, position: Ve
         }
         _ => {}
     }
+    // Out in the open at its new position, it sees again.
+    crate::fow::add_viewer(u, ship);
     if let Some(stat) = u.statics.clone().ship(u.ships.ship(ship).ship_type) {
         crate::physics::update_obj_rot_info(u.ships.ship_mut(ship), stat);
     }
@@ -1141,7 +1143,7 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
     match st_now {
         state::RESERVE => {
             if purpose_ == purpose::INSTANT || purpose_ == purpose::INSTANT_STAY {
-                base::remove_ship_from_outside(u, ship);
+                base::remove_ship_from_outside(u, ship, true);
                 put_ship_inside(u, ship, dw);
                 if u.ships.ship(dw).ship_type != ShipType::dRKO {
                     crate::ships::mimic::free_disguise(u, ship);
@@ -1213,7 +1215,7 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
                 }
                 let _ = dslip;
                 let point_type = reserved_point(u, ship, dw).and_then(|p| p.dock_type).map_or(-1, |t| t.index() as i32);
-                base::remove_ship_from_outside(u, ship);
+                base::remove_ship_from_outside(u, ship, true);
                 if purpose_ == purpose::RETIRE {
                     if u.ships.ship(ship).ship_race == ShipRace::Beast {
                         crate::research::acquire_ship_tech_on_dock(u, ship);
@@ -1378,7 +1380,7 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
             crate::ships::slipgate::open(u, dw);
             if u.ships.ship(ship).base.dock_timer < now {
                 if let Some(partner) = crate::ships::slipgate::partner(u, dw).filter(|&p| u.ships.get(p).is_some()) {
-                    base::remove_ship_from_outside(u, ship);
+                    base::remove_ship_from_outside(u, ship, true);
                     put_ship_inside(u, ship, partner);
                     let s = u.ships.ship_mut(ship);
                     s.base.dock_with = Some(partner);

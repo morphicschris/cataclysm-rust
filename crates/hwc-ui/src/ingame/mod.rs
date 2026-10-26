@@ -305,6 +305,11 @@ impl InGameUi {
                     self.fe.mouse_button(left, down);
                     return true;
                 }
+                // The button state is global in the original: a release after a manager has
+                // closed still lets go of the button the screens saw pressed.
+                if !down {
+                    self.fe.mouse_button(left, false);
+                }
                 let (x, y) = self.fe.mouse_pos();
                 popup::mouse_button(&mut self.fe, left, down, x, y)
                     || shipprint::mouse_button(&mut self.fe, left, down, x, y)
@@ -330,8 +335,11 @@ impl InGameUi {
             }
             InputEvent::KeyUp(code) => {
                 self.held.remove(&code);
+                // The key state is global in the original (`keyScanCode`): a key let go after
+                // its press closed a manager (Escape) is up for the screens too, or the next
+                // manager would not see its next press.
+                self.fe.key_up(code);
                 if self.fe.game.ig.manager.is_some() {
-                    self.fe.key_up(code);
                     return true;
                 }
                 self.key_action_up(code)

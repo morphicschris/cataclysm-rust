@@ -119,6 +119,8 @@ impl NisLevelRun {
             let mut game = Game::for_fleet(mission, crate::campaign::wipe_unavailable_modules(&c.fleet, mission));
             crate::campaign::create_fleet_in_hyperspace(&mut universe, &mut game);
         }
+        // singlePlayerLoadNewLevel(1, ..) ends with levelFogOfWarCreate too.
+        crate::fow::create_for_local_player(&mut universe, crate::mission::HUMAN_PLAYER);
         let sp = level.point(hwc_kas::kas_hash("StartPointPlayer")).unwrap_or([0.0; 4]);
         let centre_derelict = centre.map(|(t, inst)| {
             let found = level.derelicts.iter().position(|d| d.derelict_type.index() as i32 == t);

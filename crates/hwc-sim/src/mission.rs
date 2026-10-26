@@ -700,6 +700,9 @@ impl MissionRun {
                 game.level.derelicts.len()
             ),
         );
+        // levelFogOfWarCreate near the end of singlePlayerLoadNewLevel: the human player's grid
+        // over the world, its ships (not the fleet still in hyperspace) the first viewers.
+        crate::fow::create_for_local_player(&mut universe, HUMAN_PLAYER);
         if carry.is_none() {
             // levelInit's single-player starting RUs are replaced by the mission's own RUsSet.
             game.resource_units = game.level.resource_units.clone();

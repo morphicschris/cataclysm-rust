@@ -204,6 +204,8 @@ pub struct Game {
     queued_nis: Option<(NisRun, Vec<Fired>)>,
     /// The sensors manager's pings.
     pub pings: Pings,
+    /// The battle pings' blob properties (`pingBob*` of `ping.script`).
+    ping_blobs: hwc_sim::tunables::BlobProperties,
     /// The local player's proximity sensors' states after the last update.
     ping_sensor_states: Vec<(ShipId, i32)>,
     /// The level's own pings (anomalous derelicts) were made.
@@ -266,6 +268,7 @@ impl Game {
             .unwrap_or_default();
         let tweak = read("tweak.script");
         let pings = Pings::new(PingTweaks::from_script(read("ping.script").as_ref()));
+        let ping_blobs = pings::blob_properties(source.as_ref());
         let mut sensors = Sensors::new(tweaks, sensors::Toggles::from_options(&options), icons);
         sensors.instant = options.get("InstantTransition") != 0;
         let pointer = Pointer::new(hwc_ui::Resources::new(source.clone()));
@@ -327,6 +330,7 @@ impl Game {
             nis: None,
             keep_letterbox_after_nis: false,
             pings,
+            ping_blobs,
             ping_sensor_states: Vec::new(),
             pings_seeded: false,
             ping_sounds: Vec::new(),
@@ -1655,6 +1659,19 @@ impl Game {
     fn pings_after_step(&mut self, jobs_before: &[PendingJob]) {
         use hwc_sim::ships::{proximity, ShipSpec, TypeStatics};
         use hwc_sim::universe::SimEvent;
+        // The mission script's ping calls of this update, and the battles on a battle-ping
+        // frame (`univUpdate` -> `pingBattlePingsCreate`).
+        let (orders, battles) = {
+            let run = self.world.run_mut();
+            let orders = std::mem::take(&mut run.game.ping_orders);
+            let u = &mut run.universe;
+            let battles = if hwc_sim::battle_ping::is_battle_ping_frame(u) {
+                hwc_sim::battle_ping::battle_pings(u, &self.ping_blobs)
+            } else {
+                Vec::new()
+            };
+            (orders, battles)
+        };
         let run = self.world.run();
         let u = &run.universe;
         let now = u.total_time_elapsed;
@@ -1667,6 +1684,8 @@ impl Game {
                 }
             }
         }
+        p.kas_orders(u, orders, now);
+        p.battles(battles, now);
         for e in &u.events {
             match *e {
                 SimEvent::ShipDied { ship, position, .. } => {

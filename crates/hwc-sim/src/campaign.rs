@@ -693,7 +693,7 @@ fn jump_now(u: &mut Universe, game: &mut Game, id: ShipId) {
     calculate_hyperspace_time(u, game, id, ms);
     game.hyper.rec(id).state = leave_state::GONE;
     if u.ships.ship(id).flags & sof::HYPERSPACE == 0 {
-        crate::base::remove_ship_from_outside(u, id);
+        crate::base::remove_ship_from_outside(u, id, false);
         add_ship_to_hyperspace(u, game, id);
     }
 }
@@ -751,7 +751,7 @@ fn update_hyperspacing_ship(u: &mut Universe, game: &mut Game, id: ShipId, mid: 
             if u.ships.ship(id).flags & sof::HYPERSPACE != 0 {
                 return true;
             }
-            crate::base::remove_ship_from_outside(u, id);
+            crate::base::remove_ship_from_outside(u, id, true);
             if !mid && u.ships.ship(id).player != HUMAN_PLAYER {
                 // Ships of other players that went along are left behind.
                 crate::base::wipe_inside_ship(u, id);
@@ -1395,7 +1395,7 @@ pub(crate) fn hyperspace_selection_out(u: &mut Universe, game: &mut Game, ships:
             calculate_hyperspace_time(u, game, id, Some(lead));
             game.hyper.rec(id).state = leave_state::GONE;
             if u.ships.ship(id).flags & sof::HYPERSPACE == 0 {
-                crate::base::remove_ship_from_outside(u, id);
+                crate::base::remove_ship_from_outside(u, id, false);
                 add_ship_to_hyperspace(u, game, id);
                 game.hyper.rec(id).midlevel_out = false;
             }

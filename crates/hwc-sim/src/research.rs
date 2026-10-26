@@ -105,9 +105,9 @@ pub fn init_player(u: &mut Universe, player: usize, mode: i32) {
     };
     let ups: Vec<Techs> = (0..base::NUM_SHIP_TYPES).map(|i| if i < 0x21 { ship_type_upgrade_techs(u, i) } else { Techs::default() }).collect();
     let table = table_for(u, kind).clone();
+    crate::fow::with_vision_refresh(u, mode, |u| u.base.players[player].tech.set_mode(mode));
     let p = &mut u.base.players[player];
     p.can_do_research = true;
-    p.tech.set_mode(mode);
     p.research_table = kind;
     p.labs = [base::Lab::default(); NUM_LABS];
     p.topics.clear();
@@ -368,7 +368,6 @@ pub fn update_research(u: &mut Universe) {
             t.time_left = (f64::from(t.time_left) - step) as f32;
             if t.time_left < 0.0 {
                 let tech = t.tech;
-                p.tech.add(tech);
                 p.topics.retain(|x| x.id != id);
                 for lab in p.labs.iter_mut() {
                     if lab.topic == Some(id) {
@@ -376,6 +375,7 @@ pub fn update_research(u: &mut Universe) {
                         lab.topic = None;
                     }
                 }
+                crate::fow::tech_add(u, player, tech);
                 crate::upgrade::player_update_from_research(u, player);
                 u.base.events.push(BaseEvent::Researched { player, tech });
             }

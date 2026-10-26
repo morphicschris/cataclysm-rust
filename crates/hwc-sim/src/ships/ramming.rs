@@ -1064,9 +1064,6 @@ fn find_snap_point(u: &mut Universe, r: ShipId, bumped: ShipId) -> (bool, Option
     }
     if best.found {
         // `univSetShipPosition`: the fog-of-war viewer moves with the ship.
-        if crate::fow::provides_vision(u, r) {
-            crate::fow::move_viewer(u, r, p, best.position);
-        }
         crate::base::set_ship_position(u, r, best.position);
     }
     let mut found = best.found;

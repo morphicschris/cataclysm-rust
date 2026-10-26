@@ -263,7 +263,12 @@ fn frame(fe: &mut Fe) {
     fe.process(1.0 / 60.0);
 }
 
+/// A single click: the double-click time passes first, since the second press of a double
+/// click is not a press (`WM_LBUTTONDBLCLK`).
 fn click(fe: &mut Fe, x: i32, y: i32) {
+    for _ in 0..32 {
+        frame(fe);
+    }
     fe.mouse_move(x, y);
     frame(fe);
     fe.mouse_button(true, true);
@@ -521,4 +526,22 @@ fn controls_fire_the_engine_ui_sounds() {
     fe.mouse_move(500, 400);
     frame(&mut fe);
     assert!(fe.sounds.is_empty());
+}
+
+/// A quick second click in the same place is a double click, which replaces the press (the
+/// original's `WM_LBUTTONDBLCLK` sets only the double-click key): a button that takes no
+/// double clicks sees one click, and the click after the pair is a press again.
+#[test]
+fn a_double_click_is_not_a_second_press() {
+    let mut fe = setup();
+    click(&mut fe, 200, 156);
+    assert_eq!(fe.game.calls, ["DoThing"]);
+    // At once again: the second half of a double click.
+    for _ in 0..2 {
+        fe.mouse_button(true, true);
+        frame(&mut fe);
+        fe.mouse_button(true, false);
+        frame(&mut fe);
+    }
+    assert_eq!(fe.game.calls, ["DoThing", "DoThing"]);
 }

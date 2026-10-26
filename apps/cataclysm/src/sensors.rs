@@ -280,61 +280,92 @@ pub fn icon_index(u: &Universe, id: ShipId) -> Option<usize> {
     })
 }
 
+/// The fog-of-war mode (0x8ae4c8): 0 off, 1 the fog covers the grid only, 2 everything
+/// outside the grid is hidden as well. The game ships with 2 and never changes it.
+pub const FOG_MODE: i32 = 2;
+
 /// The local player's fog-of-war tests as the sensors manager makes them (`fowPointInGrid`,
-/// `fowPointGetViewerCount`, `fowPointIsExplored` in fog mode 2).
+/// `fowPointGetViewerCount`, `fowPointIsExplored` in [`FOG_MODE`]).
 pub struct Fog<'a> {
     pub grid: Option<&'a FowGrid>,
+    /// The fog mode the tests use ([`FOG_MODE`]).
+    pub mode: i32,
 }
 
 impl<'a> Fog<'a> {
     pub fn of(u: &'a Universe) -> Fog<'a> {
         Fog {
             grid: u.fog.grids.get(PLAYER).and_then(Option::as_ref),
+            mode: FOG_MODE,
         }
     }
 
+    /// The point's cell, when it lies in the grid (`fowPointInGrid`: inside the grid's box,
+    /// the lower faces included).
     fn cell(&self, p: hwc_math::Vector) -> Option<[i32; 3]> {
         let g = self.grid?;
+        let inside = |v: f32, o: f32, n: i32| o <= v && v < n as f32 * g.cell_size + o;
+        let in_grid = inside(p.x, g.origin.x, g.dims[0])
+            && inside(p.y, g.origin.y, g.dims[1])
+            && inside(p.z, g.origin.z, g.dims[2]);
+        if !in_grid {
+            return None;
+        }
         let (c, _) = g.point_to_cell(p, 0.0);
         (g.viewer_count(c) != OUTSIDE).then_some(c)
     }
 
-    /// Seen now (mines, enemy ships): outside the grid nothing is seen.
+    /// The fog test of `smShipsDraw` / `smMinesDraw` / `smEnemyShipVisible`: seen now. With
+    /// the fog off everything is seen; outside the grid only in mode 1.
     pub fn seen(&self, p: hwc_math::Vector) -> bool {
-        match (self.grid, self.cell(p)) {
-            (Some(g), Some(c)) => g.viewer_count(c) > 0,
-            _ => false,
+        if self.mode == 0 {
+            return true;
+        }
+        let Some(g) = self.grid else { return false };
+        match self.cell(p) {
+            Some(c) => g.viewer_count(c) > 0,
+            None => self.mode < 2,
         }
     }
 
-    /// `selFowPointHidden(p, FALSE)`: inside the grid and seen by none of the player's ships
-    /// (no grid, or outside it, hides nothing).
+    /// `selFowPointHidden(p, FALSE)`: not seen now by the local player (with the fog on, and
+    /// no grid, everything is hidden).
     pub fn point_hidden(&self, p: hwc_math::Vector) -> bool {
-        match (self.grid, self.cell(p)) {
-            (Some(g), Some(c)) => g.viewer_count(c) < 1,
-            _ => false,
-        }
+        self.mode != 0 && !self.seen(p)
     }
 
-    /// Ever seen (resources, slipgates).
+    /// Ever seen (resources, slipgates; `selFowPointHidden(p, TRUE)` negated).
     pub fn explored(&self, p: hwc_math::Vector) -> bool {
-        match (self.grid, self.cell(p)) {
-            (Some(g), Some(c)) => g.is_explored(c),
-            _ => false,
+        if self.mode == 0 {
+            return true;
+        }
+        let Some(g) = self.grid else { return false };
+        match self.cell(p) {
+            Some(c) => g.is_explored(c),
+            None => self.mode < 2,
         }
     }
 }
 
-/// Whether the local player sees a ship in the sensors view (`smShipsDraw`'s test): its own
-/// and allied ships always; others when not cloaked and in a cell its ships see now (all of
-/// them when there is no fog grid).
+/// Whether the local player sees a ship in the sensors view (`smShipsDraw`'s test, as
+/// `smEnemyShipVisible`): its own and allied ships always; when the local player is dead or
+/// has no fog grid, every ship; otherwise ships not cloaked and in a cell its ships see now.
+/// Outside the single-player game a Mimic disguised as one of the player's ships, or a ship
+/// hidden from the player (`univShipVisibleToPlayer`), is not seen either.
 pub fn ship_visible(u: &Universe, fog: &Fog, id: ShipId) -> bool {
     let Some(s) = u.ship(id) else { return false };
     if s.flags & sof::HIDE != 0 {
         return false;
     }
-    if allied(u, s.player) || fog.grid.is_none() {
+    let dead = u.base.players.get(PLAYER).is_some_and(|p| p.state == 1);
+    if allied(u, s.player) || dead || fog.grid.is_none() {
         return true;
+    }
+    if !u.single_player
+        && (hwc_sim::ships::mimic::is_disguised_as_player(u, id, PLAYER)
+            || !hwc_sim::visibility::visible_to_player(u, id, PLAYER))
+    {
+        return false;
     }
     !hwc_sim::cloak::is_cloaked(s) && fog.seen(s.posinfo.position)
 }
@@ -1512,6 +1543,37 @@ mod tests {
         for (a, b, _) in &lines[..12] {
             assert!(((*b - *a).length() - 6.0).abs() < 1e-3);
         }
+    }
+
+    /// `selFowPointHidden` / `smEnemyShipVisible` in fog mode 2: a point is seen only in a
+    /// cell one of the player's ships sees now; outside the grid, or with no grid, it is
+    /// hidden.
+    #[test]
+    fn fog_mode_two_hides_all_but_the_cells_seen_now() {
+        let mut g = FowGrid::new(
+            hwc_math::Vector::new(0.0, 0.0, 0.0),
+            hwc_math::Vector::new(30.0, 30.0, 30.0),
+            10.0,
+        );
+        // A viewer in cell (0, 0, 0) with range 0 sees the cells next to it.
+        g.add_viewer_cells([0, 0, 0], 1);
+        let fog = Fog { grid: Some(&g), mode: FOG_MODE };
+        let p = |x: f32, y: f32, z: f32| hwc_math::Vector::new(x, y, z);
+        assert!(fog.seen(p(5.0, 5.0, 5.0)));
+        assert!(!fog.point_hidden(p(15.0, 15.0, 15.0)));
+        assert!(fog.point_hidden(p(25.0, 25.0, 25.0)), "a cell no ship sees");
+        assert!(fog.explored(p(15.0, 5.0, 5.0)));
+        assert!(!fog.explored(p(25.0, 5.0, 5.0)));
+        assert!(fog.point_hidden(p(-5.0, 5.0, 5.0)), "outside the grid");
+        assert!(!fog.explored(p(-5.0, 5.0, 5.0)));
+        let none = Fog { grid: None, mode: FOG_MODE };
+        assert!(none.point_hidden(p(5.0, 5.0, 5.0)));
+        // Mode 1 leaves the outside of the grid open; mode 0 is no fog at all.
+        let one = Fog { grid: Some(&g), mode: 1 };
+        assert!(!one.point_hidden(p(-5.0, 5.0, 5.0)));
+        assert!(one.point_hidden(p(25.0, 25.0, 25.0)));
+        let off = Fog { grid: None, mode: 0 };
+        assert!(!off.point_hidden(p(25.0, 25.0, 25.0)) && off.explored(p(25.0, 25.0, 25.0)));
     }
 
     #[test]

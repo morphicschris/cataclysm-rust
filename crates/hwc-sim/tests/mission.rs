@@ -242,3 +242,39 @@ fn mission01_taiidan_resourcers_move_and_harvest() {
     assert!(moved, "the resource collectors move");
     assert!(harvested, "the resource collectors harvest");
 }
+
+/// `singlePlayerLoadNewLevel` ends with `levelFogOfWarCreate`: the human player gets a fog
+/// grid with its own ships as viewers, and the Taiidan harvesters and carriers far away are
+/// not seen through it at the start (`fowShipVisibleToPlayer`).
+#[test]
+fn mission01_starts_with_the_players_fog_of_war() {
+    let Some(d) = data() else { return };
+    let mut run = start(d);
+    assert!(run.universe.fog.grids.first().is_some_and(Option::is_some), "the human player's fog grid");
+    assert!(run.universe.fog.grids.iter().skip(1).all(Option::is_none), "only the local player has a grid");
+    // The fleet comes out of hyperspace and its ships become viewers.
+    let own_ships = |u: &hwc_sim::Universe| -> Vec<hwc_sim::ShipId> {
+        u.ship_list.iter().copied().filter(|&id| u.ship(id).is_some_and(|s| s.player == 0)).collect()
+    };
+    for _ in 0..3000 {
+        if !own_ships(&run.universe).is_empty() {
+            break;
+        }
+        run.step();
+    }
+    let u = &run.universe;
+    let grid = u.fog.grids[0].as_ref().unwrap();
+    let own = own_ships(u);
+    assert!(!own.is_empty(), "the fleet arrives");
+    for &id in &own {
+        if hwc_sim::fow::provides_vision(u, id) {
+            let s = u.ship(id).unwrap();
+            let n = grid.point_viewer_count(s.posinfo.position);
+            assert!(n > 0, "an own ship sees its own cell: {:?} at {:?} count {n} (update {}, grid {:?} {:?})", s.ship_type, s.posinfo.position, u.update_counter, grid.origin, grid.dims);
+        }
+    }
+    let enemies: Vec<_> = u.ship_list.iter().copied().filter(|&id| u.ship(id).is_some_and(|s| s.player == 1)).collect();
+    assert!(!enemies.is_empty(), "mission 1 has Taiidan ships");
+    let hidden = enemies.iter().filter(|&&id| !hwc_sim::fow::ship_visible_to_player(u, id, 0)).count();
+    assert!(hidden > 0, "some enemy ships start in the fog");
+}

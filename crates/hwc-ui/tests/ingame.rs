@@ -79,7 +79,10 @@ fn click_at(ui: &mut InGameUi, host: &mut MockHost, x: i32, y: i32) -> Vec<GameR
     out
 }
 
+/// Clicks a named control as a player would: not as the second half of a double click
+/// (which, as in the original, buttons do not see).
 fn click(ui: &mut InGameUi, host: &mut MockHost, name: &str) -> Vec<GameRequest> {
+    settle(ui, host);
     let a = ui
         .fe
         .find_atom(name)
@@ -776,4 +779,47 @@ fn every_in_game_screen_starts_and_draws() {
         big.save_png(&p.join("construction_manager_1024x768.png"))
             .unwrap();
     }
+}
+
+/// One Escape closes the build and research managers (`feScreenEscape` on the screen's
+/// default-back button), not two.
+#[test]
+fn one_escape_closes_a_manager() {
+    let Some(src) = source() else { return };
+    let mut ui = ui(src);
+    let mut host = MockHost::somtaaw();
+    frame(&mut ui, &mut host);
+    for open in [66u16, 82] {
+        key(&mut ui, &mut host, open);
+        assert!(ui.manager().is_some());
+        settle(&mut ui, &mut host);
+        key(&mut ui, &mut host, 27);
+        settle(&mut ui, &mut host);
+        assert_eq!(ui.manager(), None, "after one Escape: {:?}", ui.fe.stack_names());
+        // The same Escape must not go on to open the escape menu.
+        settle(&mut ui, &mut host);
+        assert!(ui.fe.stack_names().is_empty(), "{:?}", ui.fe.stack_names());
+    }
+}
+
+/// A quick second click on the selected row adds one ship, as the slow one does: the double
+/// click replaces the second press (`WM_LBUTTONDBLCLK`), it does not come on top of it.
+#[test]
+fn double_clicking_a_selected_row_adds_one() {
+    let Some(src) = source() else { return };
+    let mut ui = ui(src);
+    let mut host = MockHost::somtaaw();
+    frame(&mut ui, &mut host);
+    key(&mut ui, &mut host, 66);
+    let (x, y) = cm_row_pos(&ui, cm_row_of(&ui, 0x00));
+    // Select, then at once click again: one more.
+    click_at(&mut ui, &mut host, x, y);
+    click_at(&mut ui, &mut host, x, y);
+    assert_eq!(ui.state().cm.pending.get(&0x00), Some(&1));
+    // A third quick click starts a new pair: one more again.
+    click_at(&mut ui, &mut host, x, y);
+    assert_eq!(ui.state().cm.pending.get(&0x00), Some(&2));
+    settle(&mut ui, &mut host);
+    click_at(&mut ui, &mut host, x, y);
+    assert_eq!(ui.state().cm.pending.get(&0x00), Some(&3));
 }

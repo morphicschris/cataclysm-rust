@@ -33,13 +33,19 @@ fn frame(s: &mut Session) -> Vec<Request> {
     s.update(1.0 / 60.0)
 }
 
+/// Clicks a named control as a player would: not as the second half of a double click
+/// (which, as in the original, buttons do not see), so the double-click time passes first.
 fn click(s: &mut Session, name: &str) -> Vec<Request> {
+    let mut out = Vec::new();
+    for _ in 0..32 {
+        out.extend(frame(s));
+    }
     let a =
         s.fe.find_atom(name)
             .unwrap_or_else(|| panic!("no {name} on {:?}", s.fe.stack_names()));
     let r = s.fe.atom(a).rect();
     s.fe.mouse_move((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2);
-    let mut out = frame(s);
+    out.extend(frame(s));
     s.mouse_button(true, true);
     out.extend(frame(s));
     s.mouse_button(true, false);

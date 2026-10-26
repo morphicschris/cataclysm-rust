@@ -105,9 +105,7 @@ macro_rules! ai_ui_methods {
             }
             match crate::statics::Technology::from_name(&name) {
                 Some(tech) => {
-                    if let Some(p) = self.u.base.players.get_mut(ai) {
-                        p.tech.add(tech.index());
-                    }
+                    crate::fow::tech_add(self.u, ai, tech.index());
                     crate::upgrade::player_update_from_research(self.u, ai);
                 }
                 None => self.log(LogKind::Warning, format!("GiveTechToAI: {name:?} is not a valid technology")),

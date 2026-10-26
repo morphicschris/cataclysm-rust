@@ -224,6 +224,8 @@ pub struct FrontEnd<G> {
     /// Time in seconds since start, advanced by [`FrontEnd::process`].
     pub time: f64,
     last_press: Option<(f64, i32, i32)>,
+    /// The left button is down as the second press of a double click (no press of its own).
+    left_double_held: bool,
     /// UI sound events fired by the controls since the application last took them
     /// ([`crate::consts::sound`]).
     pub sounds: Vec<u32>,
@@ -264,6 +266,7 @@ impl<G> FrontEnd<G> {
             logged: HashSet::new(),
             time: 0.0,
             last_press: None,
+            left_double_held: false,
             sounds: Vec::new(),
         };
         fe.callback_add("SCREEN_Disappear", |fe, _| fe.current_screen_delete());
@@ -1796,14 +1799,24 @@ impl<G> FrontEnd<G> {
 
     pub fn mouse_button(&mut self, left: bool, down: bool) {
         if left {
-            if down && !self.input.left {
+            // As the original's window procedure: the second press of a double click is
+            // `WM_LBUTTONDBLCLK`, which sets only the double-click key (no left-button press),
+            // and the press after it starts a new pair.
+            if down && !self.input.left && !self.left_double_held {
                 let (x, y) = (self.input.mouse_x, self.input.mouse_y);
-                if let Some((t, px, py)) = self.last_press {
-                    if self.time - t < 0.5 && (px - x).abs() <= 4 && (py - y).abs() <= 4 {
-                        self.input.double_left = true;
-                    }
+                let double = self.last_press.is_some_and(|(t, px, py)| {
+                    self.time - t < 0.5 && (px - x).abs() <= 4 && (py - y).abs() <= 4
+                });
+                if double {
+                    self.input.double_left = true;
+                    self.left_double_held = true;
+                    self.last_press = None;
+                    return;
                 }
                 self.last_press = Some((self.time, x, y));
+            }
+            if !down {
+                self.left_double_held = false;
             }
             self.input.left = down;
         } else {

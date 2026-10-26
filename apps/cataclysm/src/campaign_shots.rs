@@ -567,6 +567,68 @@ fn band_boxes_and_sensors_pings() {
         rig.frame(g);
     }
     rig.shot(g, "12_m1_sensors_pings");
-    assert_eq!(g.pings.list.len(), 2);
+    // The two test pings, beside whatever the mission and its battles have up.
+    assert!(g.pings.list.iter().any(|p| p.mask == crate::pings::mask::NEW_SHIPS));
     assert_eq!(g.pings.anomaly_remove("testobj"), 1);
+}
+
+/// Mission 1's scripted intro: the script opens the sensors manager for the fleet intel and
+/// pings the Taiidan with `PingAddShips` / `PingAddPoint`; the pings are in the list and drawn
+/// while the letterbox is up (`13_m1_intel_pings`). The Taiidan ships no ship of the player
+/// sees are hidden by the fog of war in the sensors manager.
+#[test]
+fn intro_pings_show_in_the_fleet_intel_and_the_fog_hides_the_enemy() {
+    use crate::host::PLAYER;
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(1, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    let mut frames = 0;
+    let mut kas_pings = 0;
+    while frames < 16 * 600 {
+        let out = rig.frame(g);
+        assert!(!out.contains(&Outcome::NextMission));
+        frames += 1;
+        // The script's own pings (not the level's anomalous derelicts or big-gun shells).
+        kas_pings = g
+            .pings
+            .list
+            .iter()
+            .filter(|p| {
+                matches!(&p.eval, crate::pings::Eval::Anomaly { name, .. }
+                    if name != crate::pings::DERELICT_PING && name != crate::pings::BIG_GUN_PING)
+            })
+            .count();
+        if kas_pings > 0
+            && g.sensors.phase() == crate::sensors::Phase::Sensors
+            && !g.sensors.zooming()
+        {
+            break;
+        }
+    }
+    assert!(kas_pings > 0, "no anomaly pings from the mission script in {frames} frames");
+    assert_eq!(g.sensors.phase(), crate::sensors::Phase::Sensors, "the sensors manager is open");
+    for _ in 0..16 {
+        rig.frame(g);
+    }
+    rig.shot(g, "13_m1_intel_pings");
+    let u = g.world.universe();
+    let fog = crate::sensors::Fog::of(u);
+    assert!(fog.grid.is_some(), "the local player has a fog grid");
+    let enemies: Vec<_> = u
+        .ship_list
+        .iter()
+        .copied()
+        .filter(|&id| u.ship(id).is_some_and(|s| s.player != PLAYER))
+        .collect();
+    assert!(!enemies.is_empty());
+    let hidden = enemies
+        .iter()
+        .filter(|&&id| !crate::sensors::ship_visible(u, &fog, id))
+        .count();
+    assert!(hidden > 0, "every enemy ship is shown through the fog");
 }
