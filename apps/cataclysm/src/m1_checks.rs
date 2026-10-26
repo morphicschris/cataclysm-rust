@@ -97,7 +97,10 @@ pub fn mission_one_with(
         // The opening NIS plays in its own level, drawn every frame; then the mission's own
         // level loads with the fleet it held.
         let mut frames = 0;
-        while !game.update(DT, &mut rig.audio).contains(&Outcome::NisLevelDone) {
+        while !game
+            .update(DT, &mut rig.audio)
+            .contains(&Outcome::NisLevelDone)
+        {
             rig.render(&mut game);
             frames += 1;
             assert!(frames < 16 * 600, "the opening NIS did not end");
@@ -512,25 +515,134 @@ fn kuun_lan_arrival_nav_lights() {
     panic!("the Kuun-Lan never came half out of its hyperspace window");
 }
 
-/// Prints the fleet-intel trace of Mission 1 played as in a game: the opening NIS, the
-/// NISlets, speech and subtitles drawn every frame. `--ignored --nocapture`, release.
+/// The messages that start Mission 1's other KAS fleet-intel scenes (sent to `FleetIntel` by
+/// the mission's other teams as the battle goes): the Taiidan destroyer, the proximity
+/// sensors under attack, the resource collectors, the flank frigates.
+const SCENE_MESSAGES: [(u32, &str); 4] = [
+    (0x0f92dd92, "destroyer"),
+    (0x0f19cfe7, "proximity sensors"),
+    (0x04d89963, "resourcers"),
+    (0x0939002e, "flank frigates"),
+];
+
+/// One letterboxed fleet-intel scene: when its bars came in and went, why the intel event
+/// that took them away ended, and when its last subtitle or location card ran out.
+#[derive(Debug)]
+struct Scene {
+    /// None for the opening's scene, which keeps the NISlet's bars.
+    bars_in: Option<f32>,
+    bars_out: f32,
+    reason: Option<hwc_sim::mission::IntelEndReason>,
+    /// When the last speech subtitle or location card shown before the bars went expires
+    /// (`subTitleShortest` at least, as `subCreateNonScrollyLines` makes it).
+    cards_out: Option<f32>,
+}
+
+/// Mission 1 played as in a game (the opening NIS, the NISlets, speech with subtitles drawn
+/// every frame), with the KAS scenes the opening does not reach started by their messages
+/// once the script waits for one: its scenes from the trace.
+fn mission_one_intel_scenes() -> Option<Vec<Scene>> {
+    use crate::intel_trace::IntelTraceKind as K;
+    use hwc_kas::kas_hash;
+    let (mut game, mut rig) = mission_one_with((640, 480), true, true)?;
+    let g = &mut *game;
+    let shortest = g
+        .subtitles
+        .as_ref()
+        .map_or(0.0, |s| s.script.title_shortest);
+    let mut next = 0;
+    let mut idle = 0;
+    for _ in 0..16 * 60 * 16 {
+        rig.frame(g);
+        rig.render(g);
+        let run = g.world.run();
+        let now = run.universe.total_time_elapsed;
+        let waiting = run.team_state("FleetIntel") == Some(kas_hash("WAITMessage"))
+            && !g.letterbox.active()
+            && !g.letterbox.fully
+            && !g.subtitles.as_ref().is_some_and(|s| s.any_cards());
+        idle = if waiting { idle + 1 } else { 0 };
+        // After the opening's scenes (the raiders come at about 240 s), a few seconds idle.
+        if now > 300.0 && idle > 16 * 5 {
+            let Some(&(msg, what)) = SCENE_MESSAGES.get(next) else {
+                break;
+            };
+            eprintln!("{now:8.2}s sending the {what} scene's message");
+            g.world
+                .run_mut()
+                .kas
+                .post_message(kas_hash("FleetIntel"), None, msg);
+            next += 1;
+            idle = 0;
+        }
+    }
+    assert_eq!(
+        next,
+        SCENE_MESSAGES.len(),
+        "the script never waited for every scene"
+    );
+    let mut scenes = Vec::new();
+    let mut bars_in = None;
+    let mut reason = None;
+    let mut cards_out = None;
+    for e in &g.intel_trace.entries {
+        eprintln!("{:8.2}s {:?}", e.time, e.kind);
+        match e.kind {
+            K::Speech { seconds, .. } | K::LocationCard { seconds } => {
+                cards_out = Some(e.time + seconds.max(shortest));
+            }
+            K::IntelEnded(r) => reason = Some(r),
+            K::WideScreen { kind, .. } if kind != WideScreenKind::Out => {
+                bars_in.get_or_insert(e.time);
+            }
+            K::WideScreen { .. } => scenes.push(Scene {
+                bars_in: bars_in.take(),
+                bars_out: e.time,
+                reason: reason.take(),
+                cards_out,
+            }),
+            _ => {}
+        }
+    }
+    Some(scenes)
+}
+
+/// Mission 1's KAS fleet-intel scenes, the ones that bring up the sensors manager too: the
+/// bars of each go (`wideScreenOut`) when its last subtitle or location card runs out, as in
+/// the original, where every subtitle region running out of cards ends the intel event. None
+/// waits for `SUBMESSAGE_SAFETY_TIMEOUT` (the raiders' and the resource collectors' scenes
+/// end on a location card, which HW1's letterbox-only check missed). Release.
 #[test]
-#[ignore]
-fn intel_trace_dump() {
-    let Some((mut game, mut rig)) = mission_one_with((640, 480), true, true) else {
+fn intel_scenes_lose_their_bars_with_their_subtitles() {
+    let Some(scenes) = mission_one_intel_scenes() else {
         eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
         return;
     };
-    let g = &mut *game;
-    let minutes: usize = std::env::var("HWC_TRACE_MINUTES")
-        .ok()
-        .and_then(|m| m.parse().ok())
-        .unwrap_or(12);
-    for _ in 0..16 * 60 * minutes {
-        rig.frame(g);
-        rig.render(g);
+    for s in &scenes {
+        let late = s.cards_out.map(|c| s.bars_out - c);
+        eprintln!(
+            "bars in {:?} out {:7.2}s, cards out {:?}, {:?}, late {late:?}",
+            s.bars_in, s.bars_out, s.cards_out, s.reason
+        );
     }
-    for e in &g.intel_trace.entries {
-        eprintln!("{:8.2}s {:?}", e.time, e.kind);
+    // The opening (the NISlet's bars to the bombers), the raiders, and the four sent.
+    assert!(scenes.len() >= 6, "{} scenes", scenes.len());
+    assert!(scenes.iter().skip(1).all(|s| s.bars_in.is_some()));
+    for s in &scenes {
+        assert_eq!(
+            s.reason,
+            Some(hwc_sim::mission::IntelEndReason::Reported),
+            "the scene to {:.2} s ended on {:?}",
+            s.bars_out,
+            s.reason
+        );
+        // The mission's KAS runs once every 16 updates (`SP_KAS_UPDATE_FRAME`): up to a
+        // second after the card goes, as in the original.
+        let late = s.bars_out - s.cards_out.expect("no speech in the scene");
+        assert!(
+            (0.0..=1.0 + DT).contains(&late),
+            "the bars at {:.2} s went {late:.2} s after the scene's last card",
+            s.bars_out
+        );
     }
 }

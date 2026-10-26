@@ -441,7 +441,7 @@ pub struct Subtitles {
     pub missed: usize,
     /// `strCurLanguage`: 0 English (paged), others scroll.
     pub language: usize,
-    /// `subMessageEnded`: 1 when the last letterbox card expired, 2 when skipped.
+    /// `subMessageEnded`: 1 when the last card of a region expired, 2 when skipped.
     message_ended: u8,
     /// Counter for events of simulated subtitles and location cards.
     dummy_event: u32,
@@ -556,6 +556,17 @@ impl Subtitles {
         self.regions
             .iter()
             .any(|r| r.enabled && !r.cards.is_empty())
+    }
+
+    /// Whether any region has a card that has not run out by `now`: what
+    /// [`Subtitles::any_cards`] gives after the frame's draw (which drops the cards that ran
+    /// out), without waiting for one.
+    pub fn any_cards_left(&self, now: f32) -> bool {
+        self.regions
+            .iter()
+            .filter(|r| r.enabled)
+            .flat_map(|r| &r.cards)
+            .any(|c| now < c.created || now - c.created <= c.duration)
     }
 
     /// `subTitleAdd`: a fragment to show; joined with others of the same actor and event that
@@ -685,10 +696,8 @@ impl Subtitles {
             return;
         };
         let rect = self.regions[region].rect;
+        // No lines still lays out the region (it is left empty, as the original does).
         let lines = chop(&text, rect.x1 - rect.x0, |s| text::width(&font, s));
-        if lines.is_empty() {
-            return;
-        }
         if self.language >= 1 {
             self.scrolly(region, theme, &font, lines, seconds, now);
         } else {
@@ -981,7 +990,9 @@ impl Subtitles {
             canvas.blit(img, px, py, BlitMode::Blend);
             self.hud_top.portrait_bottom = Some(py + PICTURE_SIZE);
         }
-        if index == region::LETTERBOX && r.cards.is_empty() && !r.aborted && !r.continuous {
+        // Cataclysm reports the end when any region it draws runs out of cards (HW1 only
+        // looked at the letterbox region): a mission's location card ends its intel event too.
+        if r.cards.is_empty() && !r.aborted && !r.continuous {
             self.message_ended = 1;
         }
     }
@@ -1069,5 +1080,39 @@ mod tests {
         assert_eq!((rest, r, t, c), (&b"Hello"[..], 3, Some(15), false));
         let rest = Subtitles::controls(b"\\+#cX", &mut r, &mut t, &mut c);
         assert_eq!((rest, r, t, c), (&b"X"[..], 2, Some(14), true));
+    }
+
+    /// Cataclysm's `subTitlesDraw` reports the end of the event when any region it draws has
+    /// run out of cards: a location card's running out ends a fleet intel event as the
+    /// letterbox speech's does (HW1 looked at the letterbox region only).
+    #[test]
+    fn any_region_running_out_reports_the_end() {
+        let script = Script::parse(
+            "regionBounds 1, 80, 10, 620, 57
+regionBounds 3, 20, 200, 620, 240
+",
+        );
+        let res = Resources::new(Rc::new(crate::assets::MemorySource::default()));
+        let mut subs = Subtitles::new(script, &res, true, &[]);
+        let mut canvas = Canvas::new(640, 480);
+        let state = DrawState::default();
+        for (region, skipped) in [
+            (region::LOCATION_CARD, false),
+            (region::LETTERBOX, false),
+            (region::LOCATION_CARD, true),
+        ] {
+            let card = subs.card(THEME_LOCATION_CARD, 0, 0, 10.0, 8.0, b" ".to_vec());
+            let r = &mut subs.regions[region];
+            assert!(r.enabled);
+            r.cards = vec![card];
+            r.aborted = skipped;
+            subs.draw(&mut canvas, 17.9, None, state);
+            assert_eq!(subs.take_message_ended(), 0, "region {region}: still up");
+            subs.draw(&mut canvas, 18.1, None, state);
+            assert!(subs.regions[region].cards.is_empty());
+            // A skipped region reports through `skip` instead.
+            let want = u8::from(!skipped);
+            assert_eq!(subs.take_message_ended(), want, "region {region}");
+        }
     }
 }

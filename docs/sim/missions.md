@@ -338,7 +338,12 @@ time.
 * `HasShipBeenDiscovered` uses the human player's ships' `fowRadius` instead of the fog-of-war
   grid; enemy selection treats every ship as visible (no cloaking, no Mimic disguise).
 * `IntelEventEnded` only ends by the safety timeout unless `--speech` simulates the subtitle;
-  real speech/subtitle lengths are not known headless.
+  real speech/subtitle lengths are not known headless. In the game the front end reports the
+  end (`subMessageEnded`) when any subtitle region it draws runs out of cards, a location card
+  included (Cataclysm's `subTitlesDraw`; HW1 checked the letterbox region only), and the
+  safety timeout also waits for no card to be on screen (`subAnyCardsOnScreen`,
+  `Game::subtitles_on_screen`). Each end and its reason is in `Game::intel_ends`; the game
+  traces the presentation with `HWC_INTEL_TRACE=1`.
 * Derelicts and meteor storms are records, not simulation objects; `GetWorldResources` sums the
   static resource values of the recorded asteroids and dust clouds.
 * `HasShipBeenDiscovered` uses the player's ships' `fowRadius`; the original asks the local

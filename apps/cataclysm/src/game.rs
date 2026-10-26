@@ -7,7 +7,6 @@
 //! The window and the headless tests drive it the same way: [`Game::input`] for each event,
 //! [`Game::update`] once per frame, [`Game::render`] for the picture.
 
-use crate::intel_trace::IntelTraceKind;
 use std::rc::Rc;
 
 use glam::Vec3;
@@ -33,6 +32,7 @@ use crate::audio::Audio;
 use crate::bandbox;
 use crate::host::{selectable, sim_id, SimHost, PLAYER};
 use crate::hotkeys::{CarriedGroups, HotKeyGroups};
+use crate::intel_trace::IntelTraceKind;
 use crate::mission::{Cue, CueReader};
 use crate::nis::{self, Kind as NisKind, NisRun};
 use crate::pings::{self, Owner as PingOwner, Pings, Tweaks as PingTweaks};
@@ -131,6 +131,13 @@ pub struct Game {
     /// The targets the special-action menu was opened for by a `Ship_Special` band box
     /// (`pmOpenForTargets`); empty for the plain menu.
     pub(crate) special_targets: Vec<ShipId>,
+    /// The ship under the pointer when the open menu opened.
+    menu_target: Option<ShipId>,
+    /// The menu was open after the last check ([`Game::note_menu_open`]).
+    menu_was_open: bool,
+    /// The context target of the special action highlighted in the open menu
+    /// (`pmSetContextTarget`).
+    menu_context: Option<(hwc_sim::player_orders::SpecialItem, ShipId)>,
     /// The hot-key groups (`selHotKeyGroup`).
     pub hotkeys: HotKeyGroups,
     /// Groups coming from the mission before, held until the mission's own level loads (an NIS
@@ -336,6 +343,9 @@ impl Game {
             selection: Vec::new(),
             selecting: Vec::new(),
             special_targets: Vec::new(),
+            menu_target: None,
+            menu_was_open: false,
+            menu_context: None,
             hotkeys: HotKeyGroups::new(),
             carried_groups: None,
             group_fonts,
@@ -771,9 +781,10 @@ impl Game {
             self.plate_from_right = matches!(self.mode, Mode::Move(_));
             return;
         }
-        // `mrRightClickSmartOrder`: with a context-sensitive scheme the action under the
-        // pointer, otherwise (and in the sensors manager) the menu.
-        if !self.sensors.is_open() && self.context_scheme() {
+        // `mrRightClickSmartOrder`: with a context-sensitive scheme (or the user-requested
+        // right click) the action under the pointer, otherwise (and in the sensors manager)
+        // the menu.
+        if !self.sensors.is_open() && self.smart_right_click() {
             if let Some(h) = self.hover {
                 let in_sel = matches!(h, Hover::Ship(id) if self.selection.contains(&id));
                 if !in_sel && self.smart_order(h) {
@@ -806,6 +817,14 @@ impl Game {
         o.get("RightClick_CSA") != 0 || o.get("Homeworld_CSA") != 0
     }
 
+    /// A right click on an object does its context-sensitive action: with a context-sensitive
+    /// scheme, or with the user-requested right click ([`right_click_move`](Self::right_click_move))
+    /// unless Shift (which asks for the menu) is held.
+    fn smart_right_click(&self) -> bool {
+        self.context_scheme()
+            || (self.right_click_move && !self.ui.action_held(keys::MULTIPLE_SELECT))
+    }
+
     /// The classifier's action on an object (`mouseCursorActionClassify`).
     fn classify(&self, h: Hover) -> PointerAction {
         let sel = self.availability(&self.selection);
@@ -836,8 +855,101 @@ impl Game {
                 );
                 true
             }
+            // The special orders on the object (`mrSpecialTargetOrder(target, order)`).
+            (a, Hover::Ship(t)) => {
+                use hwc_sim::player_orders::TargetOrder as O;
+                let order = match a {
+                    PointerAction::Salvage => O::Salvage,
+                    PointerAction::Repair => O::Repair,
+                    PointerAction::Leech => O::Leech,
+                    PointerAction::Swarm => O::Swarm,
+                    PointerAction::Emp => O::Emp,
+                    PointerAction::BeastWeapon => O::Infect,
+                    PointerAction::Ramming => O::Ram,
+                    PointerAction::FireMissile => O::LinkMissiles,
+                    _ => return false,
+                };
+                let sel = self.selection.clone();
+                hwc_sim::player_orders::special_target_order(
+                    self.world.universe_mut(),
+                    PLAYER,
+                    &sel,
+                    Some(&[t]),
+                    order,
+                );
+                true
+            }
             _ => false,
         }
+    }
+
+    /// Notes the ship under the pointer when the menu opens (the user-requested right click
+    /// gives the menu's special actions that ship as their target).
+    fn note_menu_open(&mut self) {
+        let open = hwc_ui::ingame::popup::is_open(&self.ui.fe);
+        if open && !self.menu_was_open {
+            self.menu_target = match self.hover {
+                Some(Hover::Ship(id)) => Some(id),
+                _ => None,
+            };
+        }
+        self.menu_was_open = open;
+    }
+
+    /// The targets of a special action picked from the menu: the band-boxed ones, else (with
+    /// the user-requested right click) the ship the menu was opened over when it suits the
+    /// action, else the action's context target (`pmSetContextTarget`).
+    fn menu_targets(&self, item: hwc_sim::player_orders::SpecialItem) -> Vec<ShipId> {
+        if !self.special_targets.is_empty() {
+            return self.special_targets.clone();
+        }
+        let u = self.world.universe();
+        if self.right_click_move {
+            if let (Some(t), Some(kind)) = (self.menu_target, item.target_kind()) {
+                if hwc_sim::player_orders::is_special_target(u, PLAYER, t, kind) {
+                    return vec![t];
+                }
+            }
+        }
+        match self.menu_context {
+            Some((i, t)) if i == item && u.ship(t).is_some() => vec![t],
+            _ => Vec::new(),
+        }
+    }
+
+    /// While the menu is open: the highlighted special action's context target (the nearest
+    /// suitable object to the first selected ship, `pmUpdateHighlight` / `pmSetContextTarget`)
+    /// and the boxes the menu draws around its targets (`pmDrawItemTargetHighlights`).
+    fn update_menu_targets(&mut self) {
+        let p = &self.ui.fe.game.ig.popup;
+        if p.open.is_none() {
+            self.menu_context = None;
+            self.menu_target = None;
+            return;
+        }
+        let item = p
+            .highlight
+            .and_then(|i| p.items.get(i))
+            .and_then(|it| it.action)
+            .and_then(hwc_ui::ingame::command_of)
+            .and_then(crate::host::special_item);
+        if let (Some(item), true) = (item, self.special_targets.is_empty()) {
+            let u = self.world.universe();
+            self.menu_context =
+                hwc_sim::player_orders::context_target(u, PLAYER, &self.selection, item)
+                    .map(|t| (item, t));
+        }
+        let shown = item.map_or_else(Vec::new, |i| self.menu_targets(i));
+        let size = self.size();
+        let u = self.world.universe();
+        let boxes = shown
+            .into_iter()
+            .filter_map(|id| {
+                let (x, y, r) = Game::screen_pos(&self.world, size, id)?;
+                Some((x, y, r, hwc_sim::shockwave::is_ally(u, id, PLAYER)))
+            })
+            .collect();
+        self.ui.fe.game.ig.popup.target_boxes = boxes;
     }
 
     /// `selGetCommandAvailability` over a set of ships, as far as the simulation tells.
@@ -1454,12 +1566,32 @@ impl Game {
                 }
             }
             Command::Upgrade => hwc_sim::player_orders::mr_upgrade_ships(u, &sel),
-            // The special-action menu's items (`pmExecuteSpecialItem`), on the band-boxed
-            // targets the menu was opened for, if any.
+            // The special-action menu's items (`pmExecuteSpecialItem`) on the band-boxed targets
+            // the menu was opened for, else on the item's context target; the same orders'
+            // keys act without one (the repair key on each ship's nearest ally).
             c if crate::host::special_item(c).is_some() => {
                 let item = crate::host::special_item(c).expect("special item");
-                let targets = &self.special_targets;
-                hwc_sim::player_orders::execute_special(u, PLAYER, &sel, item, targets);
+                let from_menu = self
+                    .ui
+                    .fe
+                    .game
+                    .ig
+                    .popup
+                    .executed
+                    .take()
+                    .and_then(hwc_ui::ingame::command_of)
+                    == Some(c);
+                let targets = if from_menu {
+                    self.menu_targets(item)
+                } else {
+                    Vec::new()
+                };
+                let u = self.world.universe_mut();
+                if !from_menu && item == hwc_sim::player_orders::SpecialItem::Repair {
+                    hwc_sim::player_orders::repair_key(u, PLAYER, &sel);
+                } else {
+                    hwc_sim::player_orders::execute_special(u, PLAYER, &sel, item, &targets);
+                }
                 self.special_targets.clear();
             }
             other => self.post(&format!("{other:?}: not available yet")),
@@ -1823,14 +1955,18 @@ impl Game {
             }
         }
         self.real_time += dt;
+        self.note_menu_open();
         let requests = self.with_host(|ui, host| ui.update(host, dt));
         for r in requests {
             self.apply(r, audio, &mut out);
         }
+        self.ui.fe.game.ig.popup.executed = None;
+        self.note_menu_open();
         // The band-boxed special targets last as long as their menu.
         if self.ui.fe.game.ig.popup.open.is_none() {
             self.special_targets.clear();
         }
+        self.update_menu_targets();
         // Polled keys: zoom (the sensors camera's while the sensors manager is up).
         let min = self.zoom_min();
         // The smooth wheel zoom and the close-up focus ease towards their target (on the real
@@ -2262,6 +2398,12 @@ impl Game {
                 }
                 Cue::Speech { event, variable } => self.speak(event, variable, audio),
                 Cue::LocationCard { milliseconds, text } => {
+                    self.intel_trace.push(
+                        now,
+                        IntelTraceKind::LocationCard {
+                            seconds: milliseconds as f32 * 0.001,
+                        },
+                    );
                     if let Some(subs) = self.subtitles.as_mut() {
                         subs.location_card(milliseconds, &text::to_latin1(&text));
                     }
@@ -2306,10 +2448,8 @@ impl Game {
                 });
             }
         }
-        self.intel_trace.push(
-            now,
-            traced.unwrap_or(IntelTraceKind::Unsubtitled { event }),
-        );
+        self.intel_trace
+            .push(now, traced.unwrap_or(IntelTraceKind::Unsubtitled { event }));
     }
 
     // ---------------------------------------------------------------------------------------
@@ -2762,13 +2902,10 @@ impl Game {
             let r = &s.regions[subtitle::region::LETTERBOX];
             self.intel_trace
                 .region(now, r.cards.len(), r.aborted, r.continuous);
-            let on_screen = s.any_cards();
-            if let Some(run) = self.world.mission_run_mut() {
-                if report != 0 {
+            if report != 0 {
+                if let Some(run) = self.world.mission_run_mut() {
                     run.game.intel_ended = true;
                 }
-                // `subAnyCardsOnScreen` for the intel safety timeout.
-                run.game.subtitles_on_screen = on_screen;
             }
             // `moSetTop`: the HUD's top panels go below a portrait (next frame's overlay).
             self.ui.subtitle_top(s.hud_top());
@@ -2873,7 +3010,7 @@ impl Game {
         let band = self.left_down.is_some() && self.mode == Mode::Select;
         let action = match self.hover {
             Some(h)
-                if self.context_scheme()
+                if self.smart_right_click()
                     && !band
                     && !self.sensors.is_open()
                     && !matches!(h, Hover::Ship(id) if self.selection.contains(&id)) =>
@@ -2945,6 +3082,12 @@ impl Game {
         let now = self.world.universe().total_time_elapsed;
         if let Some(s) = self.subtitles.as_mut() {
             s.update(now);
+            // `subAnyCardsOnScreen` for the intel safety timeout: the cards this frame's draw
+            // keeps (also right when no frame is drawn, as in the headless tests).
+            let on_screen = s.any_cards_left(now);
+            if let Some(run) = self.world.mission_run_mut() {
+                run.game.subtitles_on_screen = on_screen;
+            }
         }
     }
 

@@ -16,6 +16,9 @@ const TITLE: Color = [0, 200, 0, 255];
 const GREYED: Color = [120, 120, 120, 255];
 const FILL: Color = [0, 0, 60, 150];
 const TARGET_OUTLINE: Color = [150, 180, 230, 255];
+/// The boxes around the highlighted item's targets: allies, enemies.
+const ALLY_TARGET: Color = [0, 150, 0, 255];
+const ENEMY_TARGET: Color = [150, 0, 0, 255];
 
 /// Which menu is open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +84,13 @@ pub struct State {
     /// Open submenu: (parent item, items).
     pub sub: Option<(usize, Vec<Item>)>,
     pub sub_highlight: Option<usize>,
+    /// The action of the item the menu last carried out, until the game takes it (it tells
+    /// a menu pick from the same order's key).
+    pub executed: Option<Action>,
+    /// The targets of the highlighted special action (the band-boxed ones, else its context
+    /// target), as the game placed them on screen: centre, radius, ally
+    /// (`pmDrawItemTargetHighlights`).
+    pub target_boxes: Vec<(i32, i32, i32, bool)>,
     /// Metrics of the last layout: space width, font height.
     metrics: (i32, i32),
 }
@@ -96,6 +106,7 @@ pub fn close(fe: &mut Fe) {
     p.sub = None;
     p.highlight = None;
     p.sub_highlight = None;
+    p.target_boxes.clear();
 }
 
 /// `pmOpenForTargets(0)` at the mouse (Open_Menu, right click on empty space).
@@ -590,6 +601,7 @@ pub fn execute_highlighted(fe: &mut Fe) {
     if !sensors_toggle {
         close(fe);
     }
+    fe.game.ig.popup.executed = Some(a);
     execute_action(fe, a, true);
     if a.has_up() {
         execute_action(fe, a, false);
@@ -649,6 +661,12 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
     if fe.game.ig.popup.highlight.is_some() {
         for &(_, x, y, r) in &fe.game.ig.view.ship_positions {
             canvas.outline_rect(Rect::new(x - r, y - r, x + r, y + r), TARGET_OUTLINE);
+        }
+    }
+    if fe.game.ig.popup.open == Some(MenuKind::Special) {
+        for &(x, y, r, ally) in &fe.game.ig.popup.target_boxes {
+            let c = if ally { ALLY_TARGET } else { ENEMY_TARGET };
+            canvas.outline_rect(Rect::new(x - r, y - r, x + r, y + r), c);
         }
     }
     let p = fe.game.ig.popup.clone();

@@ -17,9 +17,11 @@ pub enum IntelTraceKind {
         seconds: f32,
         fragments: usize,
     },
+    /// The mission's location card (`LocationCard`), shown for `seconds`.
+    LocationCard { seconds: f32 },
     /// A mission speech that gave no subtitle (no audio, a placeholder, too quiet).
     Unsubtitled { event: u32 },
-    /// The subtitle system reported the event over (`subMessageEnded`): the last letterbox
+    /// The subtitle system reported the event over (`subMessageEnded`): a region's last
     /// card expired, or the player skipped.
     SubtitlesEnded { skipped: bool },
     /// The mission's `IntelEventEnded` answered yes.

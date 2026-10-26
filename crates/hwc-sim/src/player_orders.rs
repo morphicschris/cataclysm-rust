@@ -463,37 +463,46 @@ pub enum TargetKind {
     Empable,
 }
 
+/// Whether `id` is an object of the kind for `player` (the test `mrFindNearestSpecialTarget`
+/// makes of each candidate, its distance aside).
+pub fn is_special_target(u: &Universe, player: usize, id: ShipId, kind: TargetKind) -> bool {
+    let Some(s) = u.ships.get(id) else { return false };
+    if s.flags & (sof::DEAD | sof::HIDE) != 0 {
+        return false;
+    }
+    let enemy = || !is_ally(u, id, player) && !crystal::is_crystal(u, id) && !untargetable_type(u, id);
+    match kind {
+        TargetKind::Salvageable => crate::salvage::can_salvage_target(u, player, id) && !fow_hidden(u, player, id),
+        TargetKind::Ally => is_ally(u, id, player),
+        TargetKind::Enemy => enemy() && !fow_hidden(u, player, id),
+        TargetKind::Empable => enemy() && acv::can_be_emped(u, id, None) && !fow_hidden(u, player, id),
+    }
+}
+
+/// `WorkerGetLowestModuleHealth` (0x5c45b0): the health fraction of the most damaged of the
+/// ship and its modules.
+fn lowest_module_health(u: &Universe, id: ShipId) -> f32 {
+    if u.ships.get(id).is_none() {
+        return 1.0;
+    }
+    let m = crate::ships::processor::most_damaged_module(u, id);
+    let s = u.ships.ship(m);
+    let max = u.statics.ship(s.ship_type).map_or(1.0, |st| st.health.max_health);
+    s.health / max
+}
+
 /// `mrFindNearestSpecialTarget` (0x55e7d0): the nearest object of the kind to `ship` that
-/// `player` can see (for allies, among those within 1000 m of the nearest, the most damaged).
+/// `player` can see (for allies, a farther one whose most damaged module is worse off than
+/// the nearest so far's wins when it is under 10^6 farther in squared distance).
 pub fn find_nearest_special_target(u: &Universe, player: usize, ship: ShipId, kind: TargetKind) -> Option<ShipId> {
     let me = u.ships.get(ship)?.posinfo.position;
     let mut best = 1e21f32;
     let mut found: Option<ShipId> = None;
-    let health = |id: ShipId| {
-        u.ships.get(id).map_or(1.0, |s| {
-            let max = u.statics.ship(s.ship_type).map_or(1.0, |st| st.health.max_health);
-            if max > 0.0 {
-                s.health / max
-            } else {
-                1.0
-            }
-        })
-    };
     for &id in &u.ship_list {
-        let Some(s) = u.ships.get(id) else { continue };
-        if id == ship || s.flags & (sof::DEAD | sof::HIDE) != 0 {
+        if id == ship || !is_special_target(u, player, id, kind) {
             continue;
         }
-        let enemy = |u: &Universe| !is_ally(u, id, player) && !crystal::is_crystal(u, id) && !untargetable_type(u, id);
-        let ok = match kind {
-            TargetKind::Salvageable => crate::salvage::can_salvage_target(u, player, id) && !fow_hidden(u, player, id),
-            TargetKind::Ally => is_ally(u, id, player),
-            TargetKind::Enemy => enemy(u) && !fow_hidden(u, player, id),
-            TargetKind::Empable => enemy(u) && acv::can_be_emped(u, id, None) && !fow_hidden(u, player, id),
-        };
-        if !ok {
-            continue;
-        }
+        let s = u.ships.ship(id);
         let p = s.posinfo.position;
         let (dx, dy, dz) = (p.x - me.x, p.y - me.y, p.z - me.z);
         let d = dx * dx + dy * dy + dz * dz;
@@ -502,7 +511,7 @@ pub fn find_nearest_special_target(u: &Universe, player: usize, ship: ShipId, ki
             found = Some(id);
         } else if kind == TargetKind::Ally {
             if let Some(f) = found {
-                if d - best < 1e6 && health(id) < health(f) {
+                if d - best < 1e6 && lowest_module_health(u, id) < lowest_module_health(u, f) {
                     best = d;
                     found = Some(id);
                 }
@@ -614,6 +623,33 @@ pub fn mr_hive_stop_launch(u: &mut Universe, selection: &[ShipId]) {
     }
 }
 
+impl SpecialItem {
+    /// What the item's context target is (`pmSetContextTarget`'s kinds); `None` for the
+    /// items without one.
+    pub fn target_kind(self) -> Option<TargetKind> {
+        Some(match self {
+            Self::Repair => TargetKind::Ally,
+            Self::Salvage => TargetKind::Salvageable,
+            Self::Leech | Self::Swarm | Self::Infect | Self::Ram | Self::Repulse | Self::FireMissiles => TargetKind::Enemy,
+            Self::Emp => TargetKind::Empable,
+            _ => return None,
+        })
+    }
+}
+
+/// `pmSetContextTarget` (0x4e5f00): the target a highlighted menu item acts on when no band
+/// box gave the menu targets, the nearest suitable object to the first selected ship.
+pub fn context_target(u: &Universe, player: usize, selection: &[ShipId], item: SpecialItem) -> Option<ShipId> {
+    let kind = item.target_kind()?;
+    find_nearest_special_target(u, player, *selection.first()?, kind)
+}
+
+/// `kbcbRepair` (0x549a40): the repair key, each repair-capable ship on the ally nearest it
+/// (`mrSpecialTargetRepair(NULL)`).
+pub fn repair_key(u: &mut Universe, player: usize, selection: &[ShipId]) {
+    special_target_order(u, player, selection, None, TargetOrder::Repair);
+}
+
 /// `pmExecuteSpecialItem` (0x4e8480) for the items the simulation carries out. `targets` are
 /// the band-boxed targets (or the menu's context target); returns false for items it does not
 /// handle (the submenus, the siege cannon's targeting, the Mimic and leech toggles, the force
@@ -624,7 +660,8 @@ pub fn execute_special(u: &mut Universe, player: usize, selection: &[ShipId], it
     match item {
         I::Harvest => crate::resource::cl_collect_resource(u, selection, None),
         I::Repair => {
-            // Only with a target (the context target of the menu).
+            // Only with a target: the band-boxed allies, else the menu's context target (with
+            // neither the item does nothing; the repair key is [`repair_key`]).
             let ally: Vec<ShipId> = targets.iter().copied().filter(|&x| is_ally(u, x, player)).collect();
             if !ally.is_empty() {
                 special_target_order(u, player, selection, Some(&ally), TargetOrder::Repair);
@@ -671,6 +708,29 @@ mod tests {
         assert_eq!(SpecialItem::Unlink.index(), 32);
         assert_eq!(SpecialItem::Emp.index(), 45);
         assert_eq!(SpecialItem::FireMissiles.index(), 48);
+    }
+
+    #[test]
+    fn context_target_kinds_follow_the_menu_items() {
+        use SpecialItem as I;
+        // `pmSetContextTarget`: item 0x1a repair (allies), 0x1b salvage, 0x2d EMP, the
+        // other targeted ones enemies.
+        let kinds: Vec<(usize, TargetKind)> = SpecialItem::ALL.into_iter().filter_map(|i| Some((i.index(), i.target_kind()?))).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (0x1a, TargetKind::Ally),
+                (0x1b, TargetKind::Salvageable),
+                (0x1d, TargetKind::Enemy),
+                (0x28, TargetKind::Enemy),
+                (0x2c, TargetKind::Enemy),
+                (0x2d, TargetKind::Empable),
+                (0x2e, TargetKind::Enemy),
+                (0x2f, TargetKind::Enemy),
+                (0x30, TargetKind::Enemy),
+            ]
+        );
+        assert_eq!(I::Repair.index(), 0x1a);
     }
 
     #[test]
