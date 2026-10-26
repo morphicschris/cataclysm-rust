@@ -199,10 +199,14 @@ impl Canvas {
     pub fn fill_rect(&mut self, r: Rect, c: Color) {
         let (x0, x1) = (r.x0.max(self.clip.x0), r.x1.min(self.clip.x1));
         let (y0, y1) = (r.y0.max(self.clip.y0), r.y1.min(self.clip.y1));
+        // A rectangle wholly outside the clip (e.g. off the right edge) draws nothing.
+        if x0 >= x1 {
+            return;
+        }
         let c = [c[0], c[1], c[2], 255];
         for y in y0..y1 {
             let row = (y * self.width) as usize;
-            self.pixels[row + x0 as usize..row + x1.max(x0) as usize].fill(c);
+            self.pixels[row + x0 as usize..row + x1 as usize].fill(c);
         }
     }
 
@@ -415,5 +419,17 @@ mod tests {
         assert_eq!(c.get(6, 4), WHITE);
         assert_eq!(c.get(4, 6), WHITE);
         assert_eq!(c.get(5, 5), BLACK);
+    }
+}
+
+#[cfg(test)]
+mod fill_rect_tests {
+    use super::*;
+
+    #[test]
+    fn fill_rect_off_the_right_edge_draws_nothing() {
+        let mut c = Canvas::new(8, 4);
+        c.fill_rect(Rect::new(20, 0, 30, 4), [255, 0, 0, 255]);
+        assert!(c.pixels.iter().all(|p| *p == BLACK));
     }
 }
