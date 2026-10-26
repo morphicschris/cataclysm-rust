@@ -122,6 +122,9 @@ pub struct State {
     pub modern_build: crate::ingame::modern_build::PanelState,
     pub modern_log: crate::ingame::modern_log::PanelState,
     pub modern_selected: crate::ingame::modern_selected::PanelState,
+    /// The modern research panel's state (its "COMPLETE" rows) and header as laid out.
+    pub modern_research: crate::ingame::modern_research::PanelState,
+    research_header: Option<Rect>,
     build_header: Option<Rect>,
     log_header: Option<Rect>,
     selected_header: Option<Rect>,
@@ -184,6 +187,11 @@ impl State {
             let step = (self.clock - self.top_stamp).round_ties_even() as i32;
             self.top = (self.top - step).max(0);
         }
+    }
+
+    /// Seconds of real time, as advanced by [`tick`].
+    pub(crate) fn clock(&self) -> f32 {
+        self.clock
     }
 
     pub fn set_mouse(&mut self, x: i32, y: i32) {
@@ -288,6 +296,8 @@ pub fn layout(fe: &mut Fe) {
     // The system log flashes its folded header on a new message.
     let clock = ig.overlay.clock;
     ig.overlay.modern_log.note(clock, &v.messages);
+    // The research panel keeps a topic just finished for a moment.
+    ig.overlay.modern_research.note(clock, v);
     // A fold chosen over a full-screen manager lasts until it closes.
     if !crate::ingame::full_screen_manager(ig.manager) {
         let o = &mut ig.overlay;
@@ -296,6 +306,7 @@ pub fn layout(fe: &mut Fe) {
         o.modern_build.over_manager = None;
         o.modern_log.over_manager = None;
         o.modern_selected.over_manager = None;
+        o.modern_research.over_manager = None;
     }
     let (w, h) = fe.screen_size();
     let view = &fe.game.ig.view;
@@ -376,6 +387,7 @@ pub fn layout(fe: &mut Fe) {
     o.objectives_header = objectives_header;
     o.resources_header = resources_header;
     o.build_header = arr.build.as_ref().map(|p| p.header);
+    o.research_header = arr.research.as_ref().map(|p| p.header);
     o.log_header = arr.log.as_ref().map(|p| p.header);
     o.selected_header = arr.selected.as_ref().map(|p| p.header);
     o.modern_panels = modern_panels;
@@ -547,8 +559,9 @@ pub fn modern_click(fe: &mut Fe, x: i32, y: i32) -> bool {
         return true;
     }
     type Toggle = (Option<Rect>, fn(&mut Fe));
-    let toggles: [Toggle; 3] = [
+    let toggles: [Toggle; 4] = [
         (o.build_header, crate::ingame::modern_build::toggle),
+        (o.research_header, crate::ingame::modern_research::toggle),
         (o.log_header, crate::ingame::modern_log::toggle),
         (o.selected_header, crate::ingame::modern_selected::toggle),
     ];
@@ -593,7 +606,7 @@ pub fn draw_modern_panels(fe: &mut Fe, canvas: &mut Canvas) {
     draw_modern_lists(fe, canvas, &arr, &view);
 }
 
-/// The modern build queue, system log and selected ships, as arranged.
+/// The modern build queue, research, system log and selected ships, as arranged.
 fn draw_modern_lists(
     fe: &Fe,
     canvas: &mut Canvas,
@@ -603,6 +616,9 @@ fn draw_modern_lists(
     let (clock, mouse) = (fe.game.ig.overlay.clock, fe.game.ig.overlay.mouse);
     if let Some(l) = &arr.build {
         crate::ingame::modern_build::draw(fe, canvas, l, view, mouse);
+    }
+    if let Some(l) = &arr.research {
+        crate::ingame::modern_research::draw(fe, canvas, l, &arr.research_entries, mouse);
     }
     if let Some(l) = &arr.log {
         crate::ingame::modern_log::draw(fe, canvas, l, view, clock);
@@ -685,7 +701,15 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
     let mut lines = Vec::new();
     if st.shown(&view, SELECTED) && !modern {
         let bd = st.backdrop(&view, SELECTED);
-        draw_ship_list(fe, canvas, &view.selection, false, bd, st.top + 10, &mut lines);
+        draw_ship_list(
+            fe,
+            canvas,
+            &view.selection,
+            false,
+            bd,
+            st.top + 10,
+            &mut lines,
+        );
     }
     let st = &fe.game.ig.overlay;
     if st.shown(&view, SELECTING) {
@@ -757,7 +781,10 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
     // The modern objectives panel takes the top-left corner: these columns go under it, the
     // player names under the build queue too.
     let names = st.shown(&view, PLAYERNAMES) && !view.player_names.is_empty();
-    let below_objectives = arr.objectives.as_ref().map_or(st.top, |p| p.below.max(st.top));
+    let below_objectives = arr
+        .objectives
+        .as_ref()
+        .map_or(st.top, |p| p.below.max(st.top));
     let left_top = arr.left_below().map_or(st.top, |y| y.max(st.top));
     let mut left_y = left_top + 20;
     if names {
@@ -777,7 +804,7 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
         draw_construction(fe, canvas, &view, left_y + 32, mid - 17, bd);
     }
     let st = &fe.game.ig.overlay;
-    if st.shown(&view, RESEARCH) {
+    if st.shown(&view, RESEARCH) && !modern {
         let bd = st.backdrop(&view, RESEARCH);
         // The research list keeps its place unless the build queue reaches it, and ends
         // above the system log.
@@ -1260,7 +1287,12 @@ fn draw_options_menu(fe: &Fe, canvas: &mut Canvas, view: &HostView) {
     let st = &fe.game.ig.overlay;
     let s = &fe.game.ig.strings;
     let top = st.top;
-    let r = Rect::new(180, top + 10, draw::width(&f, &"A".repeat(48)) + 220, top + 9 * h + 40);
+    let r = Rect::new(
+        180,
+        top + 10,
+        draw::width(&f, &"A".repeat(48)) + 220,
+        top + 9 * h + 40,
+    );
     canvas.fill_rect(r, BLACK);
     canvas.outline_rect(r, WHITE);
     canvas.outline_rect(Rect::new(r.x0 + 1, r.y0 + 1, r.x1 - 1, r.y1 - 1), WHITE);
@@ -1370,7 +1402,12 @@ pub fn status_rect(cx: i32, cy: i32, radius: f32) -> Rect {
 
 /// `selHotKeyNumberDraw`: the hot-key group number of a selected ship, at the right end of its
 /// status bars and a line of the font above them, in `selHotKeyNumberColor`.
-pub fn draw_hotkey_number(canvas: &mut Canvas, font: &hwc_formats::font::Font, bars: Rect, label: &str) {
+pub fn draw_hotkey_number(
+    canvas: &mut Canvas,
+    font: &hwc_formats::font::Font,
+    bars: Rect,
+    label: &str,
+) {
     let y = bars.y0 - crate::text::height(font);
     crate::text::print(
         canvas,
@@ -1450,7 +1487,10 @@ mod tests {
             st.settle_top();
             tops.push(st.top);
         }
-        assert_eq!(tops, [70, 70, 70, 70, 70, 69, 68, 67, 66, 65, 64, 63, 62, 61]);
+        assert_eq!(
+            tops,
+            [70, 70, 70, 70, 70, 69, 68, 67, 66, 65, 64, 63, 62, 61]
+        );
         while st.top > 0 {
             st.clock += 0.1;
             st.settle_top();

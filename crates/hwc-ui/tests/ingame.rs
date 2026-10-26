@@ -799,7 +799,12 @@ fn one_escape_closes_a_manager() {
         settle(&mut ui, &mut host);
         key(&mut ui, &mut host, 27);
         settle(&mut ui, &mut host);
-        assert_eq!(ui.manager(), None, "after one Escape: {:?}", ui.fe.stack_names());
+        assert_eq!(
+            ui.manager(),
+            None,
+            "after one Escape: {:?}",
+            ui.fe.stack_names()
+        );
         // The same Escape must not go on to open the escape menu.
         settle(&mut ui, &mut host);
         assert!(ui.fe.stack_names().is_empty(), "{:?}", ui.fe.stack_names());

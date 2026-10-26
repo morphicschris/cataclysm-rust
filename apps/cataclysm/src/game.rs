@@ -167,6 +167,8 @@ pub struct Game {
     /// The sensors manager's backdrop dimming and range discs drawn on the CPU canvas, and
     /// its meshes read back whole, as before (for comparing the two).
     pub sensors_cpu_layer: bool,
+    /// The modern build manager's ship view (only drawn while that preview is up).
+    ship_preview: crate::ship_preview::ShipPreview,
     /// The wheel eases the zoom (`hwcSmoothZoom`, `--zoom`): a user-requested change, on by
     /// default; off: the original's immediate step per notch.
     pub smooth_zoom: bool,
@@ -328,6 +330,7 @@ impl Game {
             layer_active: false,
             layer_cover: (0, false),
             sensors_cpu_layer: false,
+            ship_preview: Default::default(),
             smooth_zoom: options.get("hwcSmoothZoom") != 0,
             scene_at_window: options.get("hwcSceneAtWindow") != 0,
             big_font: res.font("Arial_13.hff"),
@@ -2359,6 +2362,7 @@ impl Game {
             self.draw_marks();
         }
         self.ui.letterboxed = self.letterbox.fully || self.nis.is_some();
+        self.update_ship_preview();
         let span = profile::span("hud");
         self.ui.draw(&mut self.canvas);
         drop(span);
@@ -2390,6 +2394,33 @@ impl Game {
         }
         self.draw_text();
         Ok(())
+    }
+
+    /// The modern build manager's ship view: the selected type turning in its box.
+    fn update_ship_preview(&mut self) {
+        let Some((r, t)) = self.ui.ship_view() else {
+            self.ship_preview.clear();
+            return;
+        };
+        if !hwc_ui::ingame::modern_build_manager::active(&self.ui.fe) {
+            return;
+        }
+        let team = self
+            .world
+            .team_schemes()
+            .first()
+            .copied()
+            .unwrap_or(([66, 108, 202], [255, 255, 255]));
+        let _p = profile::span("ship_preview");
+        if let Some(img) = self.ship_preview.update(
+            self.world.assets(),
+            team,
+            t,
+            (r.width(), r.height()),
+            self.real_time,
+        ) {
+            self.ui.set_ship_view_image(img);
+        }
     }
 
     pub fn canvas(&self) -> &Canvas {

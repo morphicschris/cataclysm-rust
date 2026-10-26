@@ -1,6 +1,8 @@
 //! Game-data screenshots of the modern RU / SU readout (`hwc_ui::ingame::modern_hud`) in
 //! mission 1: at 1920x1080 and at 1024x768 (each with the original box for comparison), and
-//! during the letterboxed fleet intel, where the overlay and so the readout are hidden.
+//! during the letterboxed fleet intel, where the overlay and so the readout are hidden; the
+//! research panel with research running (expanded, folded, a topic just finished) and the
+//! full HUD with every list panel up.
 //! Screenshots go to `screenshots/hud/`. Needs the game install (`HWC_GAME_DIR`) and a GPU
 //! adapter; skips otherwise. Slow in a debug build: run with `--release`.
 
@@ -299,13 +301,151 @@ fn modern_hud_hidden_in_the_intro_letterbox() {
     );
 }
 
+/// Starts research for the player in the first three labs that have a technology to
+/// research, some way along each; the topics' techs, in lab order.
+fn start_research(g: &mut Game) -> Vec<usize> {
+    use hwc_sim::base::{NUM_LABS, NUM_TECHS};
+    use hwc_sim::research;
+    let u = g.world.universe_mut();
+    u.base.players[0].can_do_research = true;
+    let mut started = Vec::new();
+    for lab in 0..NUM_LABS {
+        if started.len() == 3 {
+            break;
+        }
+        let p = &u.base.players[0];
+        let table = research::table_for(u, p.research_table);
+        let Some(t) = (0..NUM_TECHS).find(|&t| {
+            research::tech_lab(t) == lab as i32
+                && p.tech.has[t] != 1
+                && !p.topics.iter().any(|x| x.tech == t)
+                && table.tech_time.get(t).copied().unwrap_or(0) > 0
+        }) else {
+            continue;
+        };
+        research::assign_lab(u, 0, lab, t);
+        let done = [0.3, 0.65, 0.85][started.len()];
+        if let Some(x) = u.base.players[0].topics.iter_mut().find(|x| x.tech == t) {
+            x.time_left *= 1.0 - done;
+        }
+        started.push(t);
+    }
+    started
+}
+
+/// Queues acolytes and recons at the mothership (the build queue).
+fn queue_ships(g: &mut Game) {
+    use hwc_sim::statics::ShipType;
+    let ms = g.world.universe().base.players[0]
+        .mothership
+        .expect("the player's mothership");
+    let u = g.world.universe_mut();
+    u.base.players[0].resource_units = 50_000;
+    for (t, n) in [(ShipType::sAcolyte, 6), (ShipType::sRecon, 2)] {
+        if hwc_sim::construction::queue_build(u, ms, t, n) == 0 {
+            hwc_sim::construction::build_jobs_add(u, ms, t, n);
+        }
+    }
+}
+
+/// Mission 1 with research running in three labs and ships queued: the research panel
+/// directly under the build queue, expanded and folded, then a topic finishing (its
+/// "COMPLETE" row). Screenshots `m1_research_<size>.png`, `m1_research_collapsed_<size>.png`
+/// and `m1_research_complete_<size>.png`.
+fn research_panel(size: (i32, i32), tag: &str) {
+    use hwc_ui::ingame::{modern_panel, modern_research};
+    let Some(mut rig) = rig(size) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut game = rig.mission_one();
+    let g = &mut *game;
+    let mut frames = 0;
+    while !(g.world.run().game.ships_have_arrived
+        && g.world.run().game.sp_state == sp_state::NONE
+        && !boxed(g))
+    {
+        rig.frame(g);
+        frames += 1;
+        assert!(frames < 16 * 600, "mission 1 never left its intro");
+    }
+    queue_ships(g);
+    let techs = start_research(g);
+    assert!(techs.len() >= 2, "no research to start: {techs:?}");
+    for _ in 0..48 {
+        rig.frame(g);
+    }
+    let arrange = |g: &Game| {
+        let view = g.ui.state().view.clone();
+        modern_panel::arrange(&g.ui.fe, size.0, size.1, &view)
+    };
+    assert!(rig.shot(g, &format!("m1_research_{tag}")));
+    let a = arrange(g);
+    let r = a.research.clone().expect("no research panel");
+    assert!(r.expanded, "the research panel starts expanded at {tag}");
+    assert_eq!(r.rows.len() + r.hidden, techs.len());
+    if let Some(b) = &a.build {
+        assert_eq!(r.header.y0, b.below, "not under the build queue");
+    }
+    if let Some(l) = &a.log {
+        assert!(r.panel.y1 <= l.panel.y0, "into the system log");
+    }
+    g.ui.fe
+        .game
+        .options
+        .set_bool(modern_research::EXPANDED_KEY, false);
+    rig.frame(g);
+    assert!(rig.shot(g, &format!("m1_research_collapsed_{tag}")));
+    let f = arrange(g).research.expect("folded research panel");
+    assert!(!f.expanded && f.panel == f.header);
+    g.ui.fe
+        .game
+        .options
+        .set_bool(modern_research::EXPANDED_KEY, true);
+    // The nearest topic finishes within the next research update.
+    {
+        let u = g.world.universe_mut();
+        let p = &mut u.base.players[0];
+        let t = p
+            .topics
+            .iter_mut()
+            .find(|x| x.tech == techs[2.min(techs.len() - 1)]);
+        t.expect("topic").time_left = 0.5;
+    }
+    let complete = |g: &Game| {
+        arrange(g)
+            .research_entries
+            .iter()
+            .any(|e| e.complete.is_some())
+    };
+    let mut n = 0;
+    while !complete(g) && n < 16 * 4 {
+        rig.frame(g);
+        n += 1;
+    }
+    assert!(complete(g), "no COMPLETE row at {tag}");
+    assert!(rig.shot(g, &format!("m1_research_complete_{tag}")));
+}
+
+#[test]
+fn research_panel_in_mission_one_1080p() {
+    research_panel((1920, 1080), "1920x1080");
+}
+
+#[test]
+fn research_panel_in_mission_one_768() {
+    research_panel((1024, 768), "1024x768");
+}
+
 /// Mission 1 with every modern panel up: acolytes and recons queued at the Kuun-Lan (the
-/// build queue), the player's ships selected (the selected-ships panel), a ship built (the
-/// system log); then the three new panels folded from the options. Screenshots
+/// build queue), research running (the research panel), the player's ships selected (the
+/// selected-ships panel), a ship built (the system log); then the new panels folded from the
+/// options. Screenshots
 /// `m1_full_hud_<size>.png` and `m1_full_hud_collapsed_<size>.png`.
 fn full_hud(size: (i32, i32), tag: &str) {
-    use hwc_sim::statics::ShipType;
-    use hwc_ui::ingame::{modern_build, modern_log, modern_panel, modern_selected};
+    use hwc_ui::ingame::{
+        modern_build, modern_log, modern_panel, modern_research, modern_selected,
+    };
     let Some(mut rig) = rig(size) else {
         eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
         return;
@@ -324,15 +464,8 @@ fn full_hud(size: (i32, i32), tag: &str) {
     let ms = g.world.universe().base.players[0]
         .mothership
         .expect("the player's mothership");
-    {
-        let u = g.world.universe_mut();
-        u.base.players[0].resource_units = 50_000;
-        for (t, n) in [(ShipType::sAcolyte, 6), (ShipType::sRecon, 2)] {
-            if hwc_sim::construction::queue_build(u, ms, t, n) == 0 {
-                hwc_sim::construction::build_jobs_add(u, ms, t, n);
-            }
-        }
-    }
+    queue_ships(g);
+    start_research(g);
     // Until a ship is built (its message) with more still queued.
     let built = |g: &Game| {
         !g.ui.state().view.messages.is_empty() && !g.ui.state().view.jobs.is_empty()
@@ -357,6 +490,7 @@ fn full_hud(size: (i32, i32), tag: &str) {
     let view = g.ui.state().view.clone();
     let a = modern_panel::arrange(&g.ui.fe, size.0, size.1, &view);
     assert!(a.build.is_some(), "no build queue at {tag}");
+    assert!(a.research.is_some(), "no research panel at {tag}");
     assert!(a.log.is_some(), "no system log at {tag}");
     assert!(
         a.selected.is_some() || view.selection.is_empty(),
@@ -370,6 +504,7 @@ fn full_hud(size: (i32, i32), tag: &str) {
     }
     for k in [
         modern_build::EXPANDED_KEY,
+        modern_research::EXPANDED_KEY,
         modern_log::EXPANDED_KEY,
         modern_selected::EXPANDED_KEY,
     ] {
@@ -379,6 +514,7 @@ fn full_hud(size: (i32, i32), tag: &str) {
     assert!(rig.shot(g, &format!("m1_full_hud_collapsed_{tag}")));
     for k in [
         modern_build::EXPANDED_KEY,
+        modern_research::EXPANDED_KEY,
         modern_log::EXPANDED_KEY,
         modern_selected::EXPANDED_KEY,
     ] {

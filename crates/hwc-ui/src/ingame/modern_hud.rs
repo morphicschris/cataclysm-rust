@@ -217,6 +217,9 @@ pub fn manager_content(width: i32, height: i32) -> Rect {
 
 /// The manager area to keep clear this frame: Some while a full-screen manager is open.
 pub(crate) fn manager_area(fe: &Fe, width: i32, height: i32) -> Option<Rect> {
+    if let Some(r) = crate::ingame::modern_build_manager::area(fe, width, height) {
+        return Some(r);
+    }
     crate::ingame::full_screen_manager(fe.game.ig.manager).then(|| manager_content(width, height))
 }
 

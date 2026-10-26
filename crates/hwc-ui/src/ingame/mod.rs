@@ -18,10 +18,12 @@ pub mod keys;
 pub mod launchmgr;
 pub mod mock;
 pub mod modern_build;
+pub mod modern_build_manager;
 pub mod modern_hud;
 pub mod modern_log;
 pub mod modern_objectives;
 pub mod modern_panel;
+pub mod modern_research;
 pub mod modern_selected;
 pub mod overlay;
 pub mod popup;
@@ -93,6 +95,8 @@ pub struct IgState {
     pub binding: Option<Action>,
     pub manager: Option<Manager>,
     pub cm: consmgr::State,
+    /// The modern build manager's own state (preview, `--build-ui modern`).
+    pub mbm: modern_build_manager::State,
     pub lm: launchmgr::State,
     pub rm: research::State,
     pub tm: trader::State,
@@ -314,6 +318,9 @@ impl InGameUi {
         match ev {
             InputEvent::MouseMove { x, y } => {
                 self.fe.mouse_move(x, y);
+                if modern_build_manager::active(&self.fe) {
+                    modern_build_manager::mouse_move(&mut self.fe, x, y);
+                }
                 popup::mouse_move(&mut self.fe, x, y);
                 shipprint::mouse_move(&mut self.fe, x, y);
                 self.fe.game.ig.overlay.set_mouse(x, y);
@@ -322,6 +329,10 @@ impl InGameUi {
             InputEvent::MouseButton { left, down } => {
                 if self.fe.game.ig.manager.is_some() {
                     if self.panel_click(left, down) {
+                        return true;
+                    }
+                    if modern_build_manager::active(&self.fe) {
+                        modern_build_manager::mouse_button(&mut self.fe, left, down);
                         return true;
                     }
                     self.fe.mouse_button(left, down);
@@ -338,6 +349,10 @@ impl InGameUi {
                     || overlay::mouse_button(&mut self.fe, left, down, x, y)
             }
             InputEvent::Wheel { up } => {
+                if modern_build_manager::active(&self.fe) {
+                    modern_build_manager::wheel(&mut self.fe, up);
+                    return true;
+                }
                 if self.fe.game.ig.manager.is_some() {
                     self.fe.wheel(up);
                     return true;
@@ -433,7 +448,10 @@ impl InGameUi {
         }
         let actions = self.fe.game.ig.keys.actions_for(code, mods);
         if self.fleet_intel {
-            if actions.iter().any(|&a| a == keys::ESCAPE || a == keys::SKIP_SENSORS) {
+            if actions
+                .iter()
+                .any(|&a| a == keys::ESCAPE || a == keys::SKIP_SENSORS)
+            {
                 self.fe.game.ig.request(GameRequest::SkipFleetIntel);
             }
             return !actions.is_empty();
@@ -484,6 +502,7 @@ impl InGameUi {
             self.fe.process(dt);
             cataclysm::tick(&mut self.fe, dt);
             consmgr::tick(&mut self.fe, dt);
+            modern_build_manager::tick(&mut self.fe);
             launchmgr::tick(&mut self.fe);
             research::tick(&mut self.fe);
         } else {
@@ -530,7 +549,9 @@ impl InGameUi {
             shipprint::draw(&mut self.fe, canvas);
             popup::draw(&mut self.fe, canvas);
         }
-        if self.fe.game.ig.manager.is_some() {
+        if modern_build_manager::active(&self.fe) {
+            modern_build_manager::draw(&mut self.fe, canvas);
+        } else if self.fe.game.ig.manager.is_some() {
             self.fe.render_over(canvas);
         }
         if full_screen {
@@ -542,6 +563,9 @@ impl InGameUi {
     /// (`SV_ShipView`): the application renders it and hands it back with
     /// [`InGameUi::set_ship_view_image`].
     pub fn ship_view(&self) -> Option<(Rect, host::ShipType)> {
+        if modern_build_manager::active(&self.fe) {
+            return modern_build_manager::ship_view(&self.fe);
+        }
         consmgr::ship_view(&self.fe)
     }
 }
@@ -592,7 +616,10 @@ pub fn open_manager(fe: &mut Fe, m: Manager) {
     }
     fe.game.ig.manager = Some(m);
     match m {
-        Manager::Construction => consmgr::begin(fe),
+        Manager::Construction => {
+            consmgr::begin(fe);
+            modern_build_manager::reset(fe);
+        }
         Manager::Launch => launchmgr::begin(fe),
         Manager::Research => research::begin(fe),
         Manager::EscMenu => fe.game.ig.request(GameRequest::Sound(0x108)),

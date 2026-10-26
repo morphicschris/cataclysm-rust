@@ -285,6 +285,26 @@ fn scroll_by(fe: &mut Fe, delta: isize) {
     sync_scroll(fe, Some(top));
 }
 
+/// Scrolls the list so `top` is its first row, `page` rows on screen (the modern build
+/// manager shows a different number of rows than the original's 18).
+pub(crate) fn scroll_to(fe: &mut Fe, top: usize, page: usize) {
+    if let Some(r) = fe
+        .game
+        .ig
+        .cm
+        .scroll_list
+        .and_then(|id| fe.region_mut(id))
+    {
+        if let crate::controls::Control::List(l) = &mut r.control {
+            l.max_visible = page.max(1);
+        }
+    }
+    let total = rows(&fe.game.ig.view).len();
+    let top = top.min(total.saturating_sub(page.max(1)));
+    fe.game.ig.cm.top_row = top;
+    sync_scroll(fe, Some(top));
+}
+
 /// `cmClose`.
 pub fn close(fe: &mut Fe) {
     let slot = fe
@@ -302,7 +322,7 @@ pub fn close(fe: &mut Fe) {
 }
 
 /// Clicking a factory icon (`cmSelectMotherShip`, `cmSelectCarrier1/2`).
-fn select_factory(fe: &mut Fe, ev: u32, slot: usize) {
+pub(crate) fn select_factory(fe: &mut Fe, ev: u32, slot: usize) {
     if ev != RPE_PRESS_LEFT {
         return;
     }
@@ -392,17 +412,17 @@ fn ship_at(fe: &Fe, rect: Rect, y: i32) -> Option<BuildOption> {
         })
 }
 
-fn job(fe: &Fe, ship_type: ShipType) -> Option<&BuildJob> {
+pub(crate) fn job(fe: &Fe, ship_type: ShipType) -> Option<&BuildJob> {
     let f = fe.game.ig.cm.factory?;
     fe.game.ig.view.job(f, ship_type)
 }
 
-fn pending(fe: &Fe, ship_type: ShipType) -> i32 {
+pub(crate) fn pending(fe: &Fe, ship_type: ShipType) -> i32 {
     fe.game.ig.cm.pending.get(&ship_type).copied().unwrap_or(0)
 }
 
 /// Support units the manager's own counts need.
-fn gui_support_units(fe: &Fe) -> i32 {
+pub(crate) fn gui_support_units(fe: &Fe) -> i32 {
     rows(&fe.game.ig.view)
         .iter()
         .filter_map(|r| match r {
@@ -484,7 +504,7 @@ fn flush_live(fe: &mut Fe, ship_type: ShipType, live: i32) {
     }
 }
 
-fn ctrl(fe: &Fe) -> bool {
+pub(crate) fn ctrl(fe: &Fe) -> bool {
     fe.input.down.contains(&key::CONTROL)
 }
 
@@ -493,7 +513,7 @@ fn shift(fe: &Fe) -> bool {
 }
 
 /// Adds (`n` times, stopping at the first refusal); returns whether any was added.
-fn add(fe: &mut Fe, opt: &BuildOption, n: usize) -> bool {
+pub(crate) fn add(fe: &mut Fe, opt: &BuildOption, n: usize) -> bool {
     let mut live = 0;
     let mut any = false;
     for _ in 0..n {
@@ -506,7 +526,7 @@ fn add(fe: &mut Fe, opt: &BuildOption, n: usize) -> bool {
     any
 }
 
-fn remove(fe: &mut Fe, opt: &BuildOption, n: usize) {
+pub(crate) fn remove(fe: &mut Fe, opt: &BuildOption, n: usize) {
     let mut live = 0;
     for _ in 0..n {
         decrement(fe, opt, &mut live);
@@ -528,6 +548,13 @@ fn select_available(fe: &mut Fe, id: RegionId, ev: u32) {
     let Some(opt) = ship_at(fe, rect, my) else {
         return;
     };
+    list_event(fe, &opt, ev);
+}
+
+/// A click on a ship row of the list (`cmSelectAvailable` after finding the row): also what
+/// the modern build manager's rows do.
+pub(crate) fn list_event(fe: &mut Fe, opt: &BuildOption, ev: u32) {
+    let opt = opt.clone();
     let t = opt.ship_type;
     let n = if ctrl(fe) { 5 } else { 1 };
     match ev {

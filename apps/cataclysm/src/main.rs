@@ -9,6 +9,8 @@ mod bandbox;
 #[cfg(test)]
 mod build_shots;
 #[cfg(test)]
+mod buildui_shots;
+#[cfg(test)]
 mod campaign_shots;
 mod crash;
 mod data;
@@ -36,6 +38,7 @@ mod profile;
 #[cfg(test)]
 mod quality_shots;
 mod sensors;
+mod ship_preview;
 #[cfg(test)]
 mod smoke;
 #[cfg(test)]
@@ -120,6 +123,10 @@ options:
                         top-right corner, in the style of the later Homeworld games) or
                         original (the SU / RU / time box, bottom right); options file:
                         hwcModernHud = 1/0
+  --build-ui <mode>     original (default) or modern: a preview of the build manager
+                        restyled in the modern HUD's look (same controls, keys and
+                        actions); options file: hwcModernBuildManager = 0/1. The
+                        cataclysm-buildui build starts with modern.
   --letterbox <mode>    tall (default, a user-requested change: the cutscene and fleet-intel
                         bars are never thinner than on a 4:3 screen of the same height, 14%
                         of it each) or original (bars around a 1.85:1 picture: on a 16:9
@@ -205,6 +212,11 @@ pub struct Args {
 }
 
 fn parse_args() -> Result<Args, String> {
+    // The `buildui` build (cataclysm-buildui.exe) starts with the modern build manager;
+    // `--build-ui original` still turns it off.
+    if cfg!(feature = "buildui") {
+        hwc_ui::ingame::modern_build_manager::set_override(Some(true));
+    }
     let mut a = Args {
         data: None,
         scale: ScaleMode::Original,
@@ -321,6 +333,12 @@ fn parse_args() -> Result<Args, String> {
                     "original" => false,
                     v => return Err(format!("unknown --letterbox mode {v}")),
                 })
+            }
+            "--build-ui" => {
+                let v = value("--build-ui")?;
+                let modern = hwc_ui::ingame::modern_build_manager::parse_mode(&v)
+                    .ok_or_else(|| format!("unknown --build-ui mode {v}"))?;
+                hwc_ui::ingame::modern_build_manager::set_override(Some(modern));
             }
             "--profile" => crate::profile::enable(),
             "--hud" => {

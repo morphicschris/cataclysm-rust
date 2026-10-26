@@ -157,11 +157,16 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     ("hwcResourcesExpanded", 1),
     // The modern build queue (top left, under the objectives): 1 expanded, 0 collapsed.
     ("hwcBuildQueueExpanded", 1),
+    // The modern research panel (top left, under the build queue): 1 expanded, 0 collapsed.
+    ("hwcResearchExpanded", 1),
     // The modern system log (game messages, bottom left): 1 expanded, 0 collapsed.
     ("hwcSystemLogExpanded", 1),
     // The modern selected-ships panel (top right, under the resources): 1 expanded, 0
     // collapsed.
     ("hwcSelectedExpanded", 1),
+    // 1: the build manager in the modern HUD's style (a preview, `--build-ui modern`); 0:
+    // the original screen.
+    ("hwcModernBuildManager", 0),
     // Registry values.
     ("deviceIndex", -1),
     ("screenWidth", 640),
@@ -348,9 +353,11 @@ mod tests {
         let o = Options::default();
         assert!(o.get_bool("hwcFullDetailShips"));
         assert!(o.get_bool("hwcRightClickMove"));
-        let (back, errors) = Options::from_text("hwcFullDetailShips = 0
+        let (back, errors) = Options::from_text(
+            "hwcFullDetailShips = 0
 hwcRightClickMove = 0
-");
+",
+        );
         assert!(errors.is_empty());
         assert!(!back.get_bool("hwcFullDetailShips"));
         assert!(!back.get_bool("hwcRightClickMove"));
@@ -364,11 +371,13 @@ hwcRightClickMove = 0
         assert_eq!(o.get("hwcFxaa"), 0);
         assert!(o.get_bool("hwcSmoothZoom"));
         assert!(o.get_bool("hwcSceneAtWindow"));
-        let (back, errors) = Options::from_text("hwcRenderScale = 150
+        let (back, errors) = Options::from_text(
+            "hwcRenderScale = 150
 hwcMsaa = 4
 hwcFxaa = 1
 hwcSmoothZoom = 0
-");
+",
+        );
         assert!(errors.is_empty());
         assert_eq!(back.get("hwcRenderScale"), 150);
         assert_eq!(back.get("hwcMsaa"), 4);
@@ -382,7 +391,8 @@ hwcSmoothZoom = 0
         for k in ["hwcFocusZoom", "hwcZoomClear", "hwcRenderList"] {
             assert!(o.get_bool(k), "{k}");
         }
-        let (back, errors) = Options::from_text("hwcFocusZoom = 0\nhwcZoomClear = 0\nhwcRenderList = 0\n");
+        let (back, errors) =
+            Options::from_text("hwcFocusZoom = 0\nhwcZoomClear = 0\nhwcRenderList = 0\n");
         assert!(errors.is_empty());
         for k in ["hwcFocusZoom", "hwcZoomClear", "hwcRenderList"] {
             assert!(!back.get_bool(k), "{k}");

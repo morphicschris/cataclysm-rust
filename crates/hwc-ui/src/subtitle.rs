@@ -79,7 +79,12 @@ pub mod actor_flag {
 /// a non-zero one is used as is. For the per-mission voice flag the speaker depends on the
 /// mission: Bushan-Re (2), Kiith Nabaal (1), Kiith Manaan (16), Faal-Corum (11, 13, 14),
 /// otherwise the generic voice; outside single player always the generic voice.
-pub fn actor_for_speech(stream_actor: i32, event: u32, single_player: bool, mission: u32) -> Option<i32> {
+pub fn actor_for_speech(
+    stream_actor: i32,
+    event: u32,
+    single_player: bool,
+    mission: u32,
+) -> Option<i32> {
     use actor_flag::*;
     if stream_actor < 0 {
         return None;
@@ -283,7 +288,9 @@ impl Script {
                         s.regions[r].icon_offset = (x, y);
                     }
                 }
-                "scrollDwellStart" => s.scroll_dwell_start = real(0).unwrap_or(s.scroll_dwell_start),
+                "scrollDwellStart" => {
+                    s.scroll_dwell_start = real(0).unwrap_or(s.scroll_dwell_start)
+                }
                 "scrollDwellEnd" => s.scroll_dwell_end = real(0).unwrap_or(s.scroll_dwell_end),
                 "scrollShortest" => s.scroll_shortest = real(0).unwrap_or(s.scroll_shortest),
                 "subtitleShortest" => s.title_shortest = real(0).unwrap_or(s.title_shortest),
@@ -447,7 +454,12 @@ impl Subtitles {
     /// `subStartup` with the script text. Fonts and portraits come from `res` (portraits in
     /// `SpeechIcons\R1` or `R2` by the local player's race), coloured with the team colour
     /// scheme each theme names (`schemes[i]` = (base, stripe)).
-    pub fn new(script: Script, res: &Resources, race_one: bool, schemes: &[([u8; 3], [u8; 3])]) -> Subtitles {
+    pub fn new(
+        script: Script,
+        res: &Resources,
+        race_one: bool,
+        schemes: &[([u8; 3], [u8; 3])],
+    ) -> Subtitles {
         let fonts = script
             .themes
             .iter()
@@ -461,7 +473,10 @@ impl Subtitles {
                 let (name, scheme) = t.picture.as_ref()?;
                 let data = res.read(&format!("SpeechIcons\\{folder}\\{name}.lif"))?;
                 let lif = Lif::parse(&data).ok()?;
-                let (base, stripe) = schemes.get(*scheme).copied().unwrap_or(([255; 3], [255; 3]));
+                let (base, stripe) = schemes
+                    .get(*scheme)
+                    .copied()
+                    .unwrap_or(([255; 3], [255; 3]));
                 Some(Rc::new(Image::from_rgba(
                     lif.width as i32,
                     lif.height as i32,
@@ -496,7 +511,11 @@ impl Subtitles {
     }
 
     /// Loads `Subtitle.script` through `res`.
-    pub fn load(res: &Resources, race_one: bool, schemes: &[([u8; 3], [u8; 3])]) -> Option<Subtitles> {
+    pub fn load(
+        res: &Resources,
+        race_one: bool,
+        schemes: &[([u8; 3], [u8; 3])],
+    ) -> Option<Subtitles> {
         let data = res.read("Subtitle.script")?;
         let text: String = data.iter().map(|&b| b as char).collect();
         Some(Subtitles::new(Script::parse(&text), res, race_one, schemes))
@@ -534,7 +553,9 @@ impl Subtitles {
 
     /// Whether any region shows something (`subAnyCardsOnScreen`).
     pub fn any_cards(&self) -> bool {
-        self.regions.iter().any(|r| r.enabled && !r.cards.is_empty())
+        self.regions
+            .iter()
+            .any(|r| r.enabled && !r.cards.is_empty())
     }
 
     /// `subTitleAdd`: a fragment to show; joined with others of the same actor and event that
@@ -562,7 +583,8 @@ impl Subtitles {
 
     /// `kasfLocationCard`: centred in the location-card region.
     pub fn location_card(&mut self, milliseconds: i32, text: &[u8]) {
-        let mut s = format!("#r{:x}#t{:x}", region::LOCATION_CARD, THEME_LOCATION_CARD).into_bytes();
+        let mut s =
+            format!("#r{:x}#t{:x}", region::LOCATION_CARD, THEME_LOCATION_CARD).into_bytes();
         s.extend_from_slice(text);
         s.truncate(2039);
         let e = self.dummy_event;
@@ -632,8 +654,11 @@ impl Subtitles {
         while i < pending.len() {
             let first = &pending[i];
             let mut region = region::LETTERBOX;
-            let mut theme = usize::try_from(first.actor).ok().filter(|&t| t < NUMBER_THEMES);
-            let mut text = Self::controls(&first.text, &mut region, &mut theme, &mut continuous).to_vec();
+            let mut theme = usize::try_from(first.actor)
+                .ok()
+                .filter(|&t| t < NUMBER_THEMES);
+            let mut text =
+                Self::controls(&first.text, &mut region, &mut theme, &mut continuous).to_vec();
             let mut seconds = first.seconds;
             while let Some(next) = pending.get(i + 1) {
                 if next.actor != first.actor || next.event != first.event {
@@ -642,7 +667,12 @@ impl Subtitles {
                 i += 1;
                 text.push(b' ');
                 let mut ignore = false;
-                text.extend_from_slice(Self::controls(&next.text, &mut region, &mut theme, &mut ignore));
+                text.extend_from_slice(Self::controls(
+                    &next.text,
+                    &mut region,
+                    &mut theme,
+                    &mut ignore,
+                ));
                 seconds += next.seconds;
             }
             result = Some((region, theme, text, seconds));
@@ -667,7 +697,15 @@ impl Subtitles {
         self.regions[region].continuous = continuous;
     }
 
-    fn card(&self, theme: usize, x: i32, y: i32, created: f32, duration: f32, text: Vec<u8>) -> Card {
+    fn card(
+        &self,
+        theme: usize,
+        x: i32,
+        y: i32,
+        created: f32,
+        duration: f32,
+        text: Vec<u8>,
+    ) -> Card {
         let t = &self.script.themes[theme];
         Card {
             created,
@@ -697,7 +735,15 @@ impl Subtitles {
     }
 
     /// `subCreateNonScrollyLines`: pages of as many lines as fit, shown one after another.
-    fn paged(&mut self, region: usize, theme: usize, font: &Font, lines: Vec<Vec<u8>>, seconds: f32, now: f32) {
+    fn paged(
+        &mut self,
+        region: usize,
+        theme: usize,
+        font: &Font,
+        lines: Vec<Vec<u8>>,
+        seconds: f32,
+        now: f32,
+    ) {
         let seconds = seconds.max(self.script.title_shortest);
         let lh = text::height(font) + INTERLINE;
         let rect = self.regions[region].rect;
@@ -706,7 +752,11 @@ impl Subtitles {
         let per = seconds / pages as f32;
         let mut cards = Vec::with_capacity(lines.len());
         for (i, line) in lines.into_iter().enumerate() {
-            let delay = if i < per_page { 0.0 } else { (i / per_page) as f32 * per };
+            let delay = if i < per_page {
+                0.0
+            } else {
+                (i / per_page) as f32 * per
+            };
             let x = self.centre_x(region, theme, font, &line);
             let y = lh * (i % per_page) as i32;
             cards.push(self.card(theme, x, y, now + delay, per, line));
@@ -720,8 +770,17 @@ impl Subtitles {
     }
 
     /// `subCreateScrollyLines`: lines that scroll up through the region over the speech.
-    fn scrolly(&mut self, region: usize, theme: usize, font: &Font, lines: Vec<Vec<u8>>, seconds: f32, now: f32) {
-        let (dwell_start, dwell_end) = (self.script.scroll_dwell_start, self.script.scroll_dwell_end);
+    fn scrolly(
+        &mut self,
+        region: usize,
+        theme: usize,
+        font: &Font,
+        lines: Vec<Vec<u8>>,
+        seconds: f32,
+        now: f32,
+    ) {
+        let (dwell_start, dwell_end) =
+            (self.script.scroll_dwell_start, self.script.scroll_dwell_end);
         let lh = text::height(font) + INTERLINE;
         let rect = self.regions[region].rect;
         let n = lines.len() as i32;
@@ -737,7 +796,11 @@ impl Subtitles {
                 r.scroll_distance = 0.0;
             } else {
                 r.scroll_start = now + dwell_start;
-                let len = if scroll_time < 0.0 { self.script.scroll_shortest } else { scroll_time };
+                let len = if scroll_time < 0.0 {
+                    self.script.scroll_shortest
+                } else {
+                    scroll_time
+                };
                 r.scroll_end = r.scroll_start + len;
                 r.scroll_distance = -distance;
                 speed = distance / (r.scroll_end - r.scroll_start);
@@ -814,7 +877,11 @@ impl Subtitles {
             if !self.regions[i].enabled || self.regions[i].cards.is_empty() {
                 continue;
             }
-            let t = if i == region::NIS { nis_now.unwrap_or(now) } else { now };
+            let t = if i == region::NIS {
+                nis_now.unwrap_or(now)
+            } else {
+                now
+            };
             self.draw_region(canvas, i, t, state);
         }
     }
@@ -835,7 +902,11 @@ impl Subtitles {
     /// `subTitlesDraw`.
     fn draw_region(&mut self, canvas: &mut Canvas, index: usize, now: f32, state: DrawState) {
         self.hud_top.drawn = true;
-        if index == region::LETTERBOX && !state.movie && !state.letterbox_fading && !state.letterboxed {
+        if index == region::LETTERBOX
+            && !state.movie
+            && !state.letterbox_fading
+            && !state.letterboxed
+        {
             let band = self.band_rect(canvas.width);
             canvas.blend_rect(band, [BAND_LEVEL, BAND_LEVEL, BAND_LEVEL, BAND_LEVEL]);
         }
@@ -883,11 +954,23 @@ impl Subtitles {
                 }
             }
             let (x, y) = (card.x + x0, card.y + scroll);
-            let shadow = if card.drop_shadow { Shadow::SE } else { Shadow::None };
+            let shadow = if card.drop_shadow {
+                Shadow::SE
+            } else {
+                Shadow::None
+            };
             let theme = card.theme;
             let text = card.text.clone();
             if let Some(font) = self.font(theme).cloned() {
-                text::print(canvas, &font, x, y, [c[0], c[1], c[2], 255], &text, (shadow, [0, 0, 0, 255]));
+                text::print(
+                    canvas,
+                    &font,
+                    x,
+                    y,
+                    [c[0], c[1], c[2], 255],
+                    &text,
+                    (shadow, [0, 0, 0, 255]),
+                );
             }
             i += 1;
         }
@@ -924,8 +1007,14 @@ mod tests {
         assert_eq!(s.scroll_dwell_start, 2.7);
         // The mis-cased key is ignored like the engine's exact match.
         assert_eq!(s.title_shortest, 1.2);
-        assert_eq!(s.regions[1].rect_for(1280, 960), Rect::new(160, 20, 1240, 114));
-        assert_eq!(s.regions[2].rect_for(1280, 960), Rect::new(40, 600, 1240, 640));
+        assert_eq!(
+            s.regions[1].rect_for(1280, 960),
+            Rect::new(160, 20, 1240, 114)
+        );
+        assert_eq!(
+            s.regions[2].rect_for(1280, 960),
+            Rect::new(40, 600, 1240, 640)
+        );
     }
 
     #[test]
@@ -951,10 +1040,21 @@ mod tests {
         let lines = chop(b"aaa bbb ccc", 75, mono);
         assert_eq!(lines, vec![b"aaa bbb".to_vec(), b"ccc".to_vec()]);
         let lines = chop(b"one#n  two\\nthree\nfour", 1000, mono);
-        assert_eq!(lines, vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec(), b"four".to_vec()]);
+        assert_eq!(
+            lines,
+            vec![
+                b"one".to_vec(),
+                b"two".to_vec(),
+                b"three".to_vec(),
+                b"four".to_vec()
+            ]
+        );
         // No blank: cut mid-word before the character that reached the limit.
         let lines = chop(b"abcdefgh", 41, mono);
-        assert_eq!(lines, vec![b"abc".to_vec(), b"def".to_vec(), b"gh".to_vec()]);
+        assert_eq!(
+            lines,
+            vec![b"abc".to_vec(), b"def".to_vec(), b"gh".to_vec()]
+        );
         // Several blanks: the line ends at the first, the next starts after the last.
         let lines = chop(b"ab   cdef", 75, mono);
         assert_eq!(lines, vec![b"ab".to_vec(), b"cdef".to_vec()]);

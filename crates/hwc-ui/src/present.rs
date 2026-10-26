@@ -419,7 +419,11 @@ mod tests {
             &queue,
             &wgpu::TextureDescriptor {
                 label: None,
-                size: wgpu::Extent3d { width: 4, height: 2, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 4,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -432,7 +436,11 @@ mod tests {
         );
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
-            size: wgpu::Extent3d { width: 64, height: 4, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -464,13 +472,20 @@ mod tests {
                     rows_per_image: Some(4),
                 },
             },
-            wgpu::Extent3d { width: 64, height: 4, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: 64,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
         );
         queue.submit([encoder.finish()]);
         let slice = buffer.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         device
-            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
             .unwrap();
         let data = slice.get_mapped_range().unwrap();
         let px = |x: usize| &data[x * 4..x * 4 + 3];

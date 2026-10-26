@@ -6,6 +6,11 @@ license.workspace = true
 publish.workspace = true
 description = "Homeworld: Cataclysm recreation: the game executable"
 
+[features]
+# The build-manager preview build (cataclysm-buildui.exe): starts with the modern build
+# manager (`--build-ui modern`).
+buildui = []
+
 [dependencies]
 hwc-formats = { path = "../../crates/hwc-formats" }
 hwc-ui = { path = "../../crates/hwc-ui" }

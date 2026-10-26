@@ -5,11 +5,12 @@
 //! every modern panel for a frame so that they stack without overlapping:
 //!
 //! * top left: objectives, then the build queue directly under it (it moves up and down with
-//!   the objectives panel's height and fold);
+//!   the objectives panel's height and fold), then research under the build queue (under the
+//!   objectives while the queue is empty);
 //! * bottom left: the system log, its header on the bottom edge;
 //! * top right: resources, then the selected ships under it.
 //!
-//! The build queue and the selected ships drop the rows that do not fit above the next panel
+//! The build queue, research and the selected ships drop the rows that do not fit above the next panel
 //! (or the bottom of the screen) and say how many are left out; the log drops its oldest
 //! lines. A panel with no room for a single row shows its header only.
 
@@ -18,7 +19,7 @@ use crate::ingame::host::HostView;
 use crate::ingame::modern_hud::{self, Face, Pen};
 use crate::ingame::modern_objectives as obj;
 use crate::ingame::overlay;
-use crate::ingame::{modern_build, modern_log, modern_selected, Fe};
+use crate::ingame::{modern_build, modern_log, modern_research, modern_selected, Fe};
 
 /// Gap between panels stacked in one corner, at 1080 lines (the objectives' and resources'
 /// gap below them).
@@ -203,6 +204,9 @@ pub struct Arrangement {
     pub objectives: Option<obj::Panel>,
     pub resources: Option<modern_hud::Layout>,
     pub build: Option<modern_build::Layout>,
+    pub research: Option<modern_research::Layout>,
+    /// The research panel's rows (the topics, then the ones just finished).
+    pub research_entries: Vec<modern_research::Entry>,
     pub log: Option<modern_log::Layout>,
     pub selected: Option<modern_selected::Layout>,
 }
@@ -214,25 +218,27 @@ impl Arrangement {
         v.extend(self.objectives.as_ref().map(|p| p.panel));
         v.extend(self.resources.as_ref().map(|p| p.panel));
         v.extend(self.build.as_ref().map(|p| p.panel));
+        v.extend(self.research.as_ref().map(|p| p.panel));
         v.extend(self.log.as_ref().map(|p| p.panel));
         v.extend(self.selected.as_ref().map(|p| p.panel));
         v
     }
 
-    /// The first free line under the top-left panels (objectives and build queue), if any
-    /// is up.
+    /// The first free line under the top-left panels (objectives, build queue and research),
+    /// if any is up.
     pub fn left_below(&self) -> Option<i32> {
-        match (&self.build, &self.objectives) {
-            (Some(b), _) => Some(b.below),
-            (None, Some(o)) => Some(o.below),
-            _ => None,
-        }
+        self.research
+            .as_ref()
+            .map(|r| r.below)
+            .or(self.build.as_ref().map(|b| b.below))
+            .or(self.objectives.as_ref().map(|o| o.below))
     }
 }
 
 /// Places the modern panels for a `width` x `height` frame: none with `--hud original` or in
 /// a cutscene; each one only while its overlay panel is shown in the current view
-/// (`MainOverlay.script`: OBJECTIVES, PLAYERINFO, CONSTRUCTION, GAMEMESSAGE, SELECTED).
+/// (`MainOverlay.script`: OBJECTIVES, PLAYERINFO, CONSTRUCTION, RESEARCH, GAMEMESSAGE,
+/// SELECTED).
 pub fn arrange(fe: &Fe, width: i32, height: i32, view: &HostView) -> Arrangement {
     let st = &fe.game.ig.overlay;
     if !modern_hud::enabled(&fe.game.options) || st.cutscene {
@@ -258,21 +264,39 @@ pub fn arrange(fe: &Fe, width: i32, height: i32, view: &HostView) -> Arrangement
     } else {
         Vec::new()
     };
-    // The log first, keeping room above it for the build queue's header and one row.
+    let research = if st.shown(view, overlay::RESEARCH) {
+        modern_research::entries(view, &st.modern_research, st.clock())
+    } else {
+        Vec::new()
+    };
+    // Room kept under the build queue for the research panel's header.
+    let research_reserve = if research.is_empty() {
+        0
+    } else {
+        modern_research::header_height(s) + px(s, STACK_GAP)
+    };
+    // The log first, keeping room above it for the build queue's header and one row, and the
+    // research panel's header.
     if st.shown(view, overlay::GAMEMESSAGE) {
         let reserve = if entries.is_empty() {
             0
         } else {
             modern_build::min_height(s) + px(s, STACK_GAP)
-        };
+        } + research_reserve;
         a.log = modern_log::arrange(fe, width, height, view, left_top + reserve, manager, &m);
     }
+    let limit = a
+        .log
+        .as_ref()
+        .map_or(height - px(s, MARGIN), |l| l.panel.y0 - px(s, STACK_GAP));
     if !entries.is_empty() {
-        let limit = a
-            .log
-            .as_ref()
-            .map_or(height - px(s, MARGIN), |l| l.panel.y0 - px(s, STACK_GAP));
-        a.build = modern_build::arrange(fe, height, left_top, &entries, limit, manager, &m);
+        let build_limit = limit - research_reserve;
+        a.build = modern_build::arrange(fe, height, left_top, &entries, build_limit, manager, &m);
+    }
+    if !research.is_empty() {
+        let top = a.build.as_ref().map_or(left_top, |b| b.below);
+        a.research = modern_research::arrange(fe, height, top, research.len(), limit, manager, &m);
+        a.research_entries = research;
     }
     if st.shown(view, overlay::SELECTED) && !view.selection.is_empty() {
         let top = a

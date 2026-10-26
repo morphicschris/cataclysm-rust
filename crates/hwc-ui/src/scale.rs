@@ -92,7 +92,12 @@ mod tests {
 
     #[test]
     fn window_positions_round_trip() {
-        for mode in [ScaleMode::Original, ScaleMode::Fit, ScaleMode::Integer, ScaleMode::Stretch] {
+        for mode in [
+            ScaleMode::Original,
+            ScaleMode::Fit,
+            ScaleMode::Integer,
+            ScaleMode::Stretch,
+        ] {
             let p = Placement::new(mode, (1600, 1000));
             for (x, y) in [(0, 0), (17, 300), (p.canvas.0 - 1, p.canvas.1 - 1)] {
                 let (wx, wy) = p.to_window(x, y);
