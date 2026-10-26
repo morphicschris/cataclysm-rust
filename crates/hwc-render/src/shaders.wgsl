@@ -20,7 +20,7 @@ struct Object {
     clip_plane: vec4<f32>,
     // x: fade alpha, y: tint enabled, z: clip enabled, w: glow exponent
     params: vec4<f32>,
-    // x: glow darkening offset (-0.15 x glow), y: flash level
+    // x: glow darkening offset (-0.15 x glow), y: flash level, z: construction ghost
     tint: vec4<f32>,
     // Engine glow level per trail slot.
     engine_glow: vec4<f32>,
@@ -85,11 +85,13 @@ fn tint_offset(color: u32, flags: u32) -> vec3<f32> {
 }
 
 fn lit(n: vec3<f32>) -> vec3<f32> {
-    var c = material.ambient.rgb * frame.global_ambient.rgb;
+    // The unbuilt part of a hull under construction takes a blue ambient (tint.z set).
+    let ambient = select(material.ambient.rgb, vec3<f32>(0.0, 0.0, 0.75), object.tint.z > 0.5);
+    var c = ambient * frame.global_ambient.rgb;
     let count = i32(frame.params.x);
     for (var i = 0; i < count; i++) {
         let d = max(dot(n, frame.light_dir[i].xyz), 0.0);
-        c += material.ambient.rgb * frame.light_ambient[i].rgb
+        c += ambient * frame.light_ambient[i].rgb
             + material.diffuse.rgb * frame.light_diffuse[i].rgb * d;
     }
     return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));

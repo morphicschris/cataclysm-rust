@@ -142,6 +142,18 @@ pub struct InGameUi {
     /// A fleet intel event holds the keyboard (`smFleetIntel`): bound actions do nothing
     /// except Escape and Skip_Sensors, which skip the event.
     pub fleet_intel: bool,
+    /// A left / right press over the modern HUD's panels while a full-screen manager was
+    /// open: the manager saw neither it nor its release.
+    panel_press: [bool; 2],
+}
+
+/// The managers that cover the screen: the overlay is not drawn under them (the modern HUD's
+/// panels are drawn over them).
+pub fn full_screen_manager(m: Option<Manager>) -> bool {
+    matches!(
+        m,
+        Some(Manager::Construction | Manager::Launch | Manager::Research | Manager::Trader)
+    )
 }
 
 fn read_text(source: &dyn AssetSource, name: &str) -> Option<String> {
@@ -209,6 +221,7 @@ impl InGameUi {
             captured: false,
             letterboxed: false,
             fleet_intel: false,
+            panel_press: [false; 2],
         })
     }
 
@@ -304,6 +317,9 @@ impl InGameUi {
             }
             InputEvent::MouseButton { left, down } => {
                 if self.fe.game.ig.manager.is_some() {
+                    if self.panel_click(left, down) {
+                        return true;
+                    }
                     self.fe.mouse_button(left, down);
                     return true;
                 }
@@ -354,6 +370,30 @@ impl InGameUi {
                 false
             }
         }
+    }
+
+    /// A button over the modern HUD's panels while a full-screen manager is open: the panels
+    /// are drawn over the manager, so they take the click (a header folds its panel, an
+    /// objective line acts as usual) and the manager does not see it, nor the release of a
+    /// press they took. Whether it was used.
+    fn panel_click(&mut self, left: bool, down: bool) -> bool {
+        let slot = usize::from(!left);
+        if !down {
+            return std::mem::take(&mut self.panel_press[slot]);
+        }
+        if !full_screen_manager(self.fe.game.ig.manager) || self.fe.game.ig.overlay.cutscene {
+            return false;
+        }
+        let (x, y) = self.fe.mouse_pos();
+        overlay::layout(&mut self.fe);
+        if !overlay::over_modern_panel(&self.fe, x, y) {
+            return false;
+        }
+        self.panel_press[slot] = true;
+        if left {
+            overlay::modern_click(&mut self.fe, x, y);
+        }
+        true
     }
 
     /// Shift/Alt/Ctrl held now, as binding modifier flags.
@@ -426,6 +466,7 @@ impl InGameUi {
     /// One frame: refreshes the host copy, runs the screens, returns the requests.
     pub fn update(&mut self, host: &dyn GameUiHost, dt: f32) -> Vec<GameRequest> {
         self.refresh(host);
+        self.fe.game.ig.overlay.cutscene = self.letterboxed || self.fleet_intel;
         // Polled keys of the overlay.
         let held = self.action_held(keys::TOGGLE_OVERLAY_OPTIONS);
         self.fe.game.ig.overlay.options_held = held;
@@ -475,10 +516,9 @@ impl InGameUi {
     /// Draws the UI over the 3D view already in `canvas` (same size as the screen given to
     /// [`InGameUi::resize`]).
     pub fn draw(&mut self, canvas: &mut Canvas) {
-        let full_screen = matches!(
-            self.fe.game.ig.manager,
-            Some(Manager::Construction | Manager::Launch | Manager::Research | Manager::Trader)
-        );
+        // The modern HUD's panels hide in cutscenes: the letterbox, an NIS, fleet intel.
+        self.fe.game.ig.overlay.cutscene = self.letterboxed || self.fleet_intel;
+        let full_screen = full_screen_manager(self.fe.game.ig.manager);
         if !full_screen {
             if !self.letterboxed {
                 overlay::draw(&mut self.fe, canvas);
@@ -488,6 +528,9 @@ impl InGameUi {
         }
         if self.fe.game.ig.manager.is_some() {
             self.fe.render_over(canvas);
+        }
+        if full_screen {
+            overlay::draw_modern_panels(&mut self.fe, canvas);
         }
     }
 

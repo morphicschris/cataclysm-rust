@@ -10,7 +10,8 @@ use hwc_render::assets::{load_mad_clip, read_script};
 use hwc_render::effects::EffectBatch;
 use hwc_render::lod::{screen_radius, LodSelector};
 use hwc_render::render_state::{
-    cloak_wipe_plane, normalized_team_color, phase_blend_state, CollisionBox, PhaseState, ShipTint,
+    cloak_wipe_plane, normalized_team_color, phase_blend_state, CollisionBox, ConstructionState,
+    PhaseState, ShipTint,
 };
 use hwc_render::trails::{
     ShipTrailDef, ShipTrails, TeamTrailColors, TrailFrame, TrailGate, TrailTick, TrailTweaks,
@@ -532,6 +533,61 @@ fn special_render_states() {
     assert_ne!(tiles[0], tiles[3]);
     let (w, h, img) = montage(&tiles);
     save_png(&out_dir().join("render_states.png"), w, h, &img);
+}
+
+/// A destroyer under external construction at 0%, 30%, 70% and 100%: solid behind the cut,
+/// a quarter-opaque blue ghost ahead of it. Image: `screenshots/render2/construction.png`.
+#[test]
+fn construction_builds_in_behind_a_ghost() {
+    let Some(mut ctx) = setup() else { return };
+    let (_d, levels, destroyer) = ship(&ctx, "race_sect", "sdestroyer");
+    let (centre, radius) = levels[0].bounds();
+    let bx = CollisionBox {
+        corner: centre - Vec3::splat(radius * 0.7),
+        extent: Vec3::splat(radius * 1.4),
+    };
+    let cam = camera(
+        mesh_to_world().transform_point3(centre),
+        radius * 2.2,
+        50.0,
+        -25.0,
+    );
+    let team = normalized_team_color(ctx.colors.schemes[0].base);
+    let mut tiles = Vec::new();
+    for progress in [0.0, 0.3, 0.7, 1.0] {
+        let states = [ShipRenderState {
+            tint: ShipTint::default().params(team, [0.0; 4]),
+            construction: Some(ConstructionState {
+                progress,
+                collision_box: bx,
+            }),
+            ..Default::default()
+        }];
+        let instances = [ShipInstance {
+            ship: &destroyer,
+            transform: mesh_to_world(),
+            age: 1.0,
+        }];
+        let extras = SceneExtras {
+            ship_states: &states,
+            effects: None,
+        };
+        tiles.push(render(&mut ctx, &cam, &instances, &extras));
+    }
+    let bluish = |t: &[u8]| {
+        t.chunks(4)
+            .filter(|p| i32::from(p[2]) > i32::from(p[0]) + 12 && i32::from(p[2]) > i32::from(p[1]) + 6)
+            .count()
+    };
+    let lit: Vec<usize> = tiles.iter().map(|t| lit_pixels(t)).collect();
+    let blue: Vec<usize> = tiles.iter().map(|t| bluish(t)).collect();
+    eprintln!("construction lit {lit:?} bluish {blue:?}");
+    assert!(lit[0] > 1000, "the ghost is drawn at 0%");
+    assert!(blue[0] > blue[1] && blue[1] > blue[2] && blue[2] > blue[3], "{blue:?}");
+    // Brighter as it fills in: the ghost lets three quarters of the black through.
+    assert!(tiles[0].iter().map(|&c| u64::from(c)).sum::<u64>() < tiles[3].iter().map(|&c| u64::from(c)).sum::<u64>());
+    let (w, h, img) = montage(&tiles);
+    save_png(&out_dir().join("construction.png"), w, h, &img);
 }
 
 /// Frigates seen from the side with their engine trails, the nozzles placed without the mesh

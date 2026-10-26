@@ -1,14 +1,21 @@
 //! The "modern HUD" resource readout: a user-requested change, on by default, in the style of
-//! the later Homeworld games ("sleek glow"). Two rows in the top-right corner with no panel
-//! behind them: a small spaced-out caps label ("RESOURCES", "SUPPORT UNITS") with the value
-//! right-aligned on the same line, and under it a thin rounded bar with a gradient fill and a
-//! soft glow. The mission clock sits underneath. RU changes float up as "+150" / "−400";
-//! the SU bar pulses while support is at the cap. It replaces the original's SU / RU / time
-//! box (bottom right), which comes back with `--hud original` or `hwcModernHud = 0`.
+//! the later Homeworld games ("sleek glow"). A top-right panel styled like the objectives
+//! panel (translucent dark background, gold accent strip on its left edge) with a collapsible
+//! "RESOURCES" header. Expanded, it holds two rows: a small spaced-out caps label
+//! ("RESOURCE UNITS", "SUPPORT UNITS") with the value right-aligned on the same line, and
+//! under it a thin rounded bar with a gradient fill and a soft glow; the mission clock sits
+//! underneath. The SU bar pulses while support is at the cap. Collapsed, only the chevron,
+//! the label and the RUs held remain, over the 3D view with no background. Clicking the
+//! header folds it (remembered in the options file as `hwcResourcesExpanded`). It replaces
+//! the original's SU / RU / time box (bottom right), which comes back with `--hud original`
+//! or `hwcModernHud = 0`.
 //!
 //! It is drawn from the overlay at the point where the original box would be, under the same
-//! panel switch, so it shows and hides exactly when that box would (cutscenes, the letterbox,
-//! full-screen managers, the per-view overlay options).
+//! panel switch, so it hides in cutscenes, the letterbox and fleet intelligence like that box.
+//! Unlike the box it stays up over the full-screen managers (build, research, launch,
+//! trader): there it is drawn on top of the manager, and folds itself while expanded it would
+//! cover the manager's frame below the frame's empty top band (a click on the header unfolds
+//! it until the manager closes).
 //!
 //! Text is rendered at the canvas's own resolution from the system's Segoe UI (loaded at run
 //! time from the Windows font folder, never shipped) with `ab_glyph`; without it the game's
@@ -28,11 +35,14 @@ use ab_glyph::{Font as _, FontVec, PxScale, ScaleFont as _};
 use crate::canvas::{Canvas, Color, Rect, WHITE};
 use crate::ingame::draw;
 use crate::ingame::host::HostView;
+use crate::ingame::modern_objectives as obj;
 use crate::ingame::Fe;
 use crate::options::Options;
 
 /// The options-file key: 1 (default) the modern readout, 0 the original box.
 pub const OPTION_KEY: &str = "hwcModernHud";
+/// The options-file key: 1 (default) the resources panel expanded, 0 collapsed.
+pub const EXPANDED_KEY: &str = "hwcResourcesExpanded";
 
 /// The RU bar is full at this many RUs and dips below it (RUs have no cap of their own).
 pub const RU_BAR_MAX: i32 = 2000;
@@ -51,46 +61,55 @@ pub const VALUE_GLOW: Color = [255, 200, 0, 153];
 /// Value text (and its glow) while the support units are at (or over) the cap.
 pub const AT_CAP: Color = [0xFF, 0x4A, 0x1E, 0xFF];
 const AT_CAP_GLOW: Color = [0xFF, 0x4A, 0x1E, 140];
-/// Floating RU changes.
-pub const GAIN: Color = [0xC0, 0xFF, 0x48, 0xFF];
-pub const LOSS: Color = [0xFF, 0x5A, 0x2A, 0xFF];
 const CLOCK: Color = [255, 255, 255, 217];
 pub(crate) const SHADOW: Color = [0, 0, 0, 170];
 
 /// How fast a bar eases towards its value (per second; larger is quicker).
 pub const TWEEN_RATE: f32 = 10.0;
-/// How long an RU change floats, and the window in which further changes of the same sign
-/// add to it instead of starting another.
-pub const POPUP_SECONDS: f32 = 1.2;
-pub const POPUP_MERGE_SECONDS: f32 = 0.5;
-const POPUP_MAX: usize = 3;
 /// The SU bar's pulse at the cap, seconds per cycle.
 pub const PULSE_SECONDS: f32 = 1.6;
+
+/// Row labels and the header.
+pub const HEADER_TEXT: &str = "RESOURCES";
+pub const RU_LABEL: &str = "RESOURCE UNITS";
+pub const SU_LABEL: &str = "SUPPORT UNITS";
 
 /// Reference layout, in pixels at 1080 lines.
 const REF_HEIGHT: f32 = 1080.0;
 const MARGIN: f32 = 16.0;
-const BAR_W: f32 = 230.0;
+/// The panel's width; the rows sit `ROW_X` in from its left edge and `ROW_RIGHT` in from its
+/// right, which leaves bars 230 pixels long.
+const PANEL_W: f32 = 260.0;
+const ROW_X: f32 = 16.0;
+const ROW_RIGHT: f32 = 14.0;
+/// Header bottom to the first row's top.
+const ROWS_TOP: f32 = 2.0;
 const BAR_H: f32 = 4.0;
 /// Row top to the value's baseline, and to the bar's top.
 const BASELINE: f32 = 14.0;
 const BAR_TOP: f32 = 21.0;
 const ROW_GAP: f32 = 10.0;
-/// Bar bottom to the clock's baseline.
+/// Bar bottom to the clock's baseline, and the clock's baseline to the panel's bottom.
 const CLOCK_BASELINE: f32 = 16.0;
+const PAD_BOTTOM: f32 = 10.0;
+/// Room left under the panel for the selected-ship list.
+const BELOW_GAP: f32 = 8.0;
 const LABEL_PX: f32 = 11.0;
 const LABEL_SPACING: f32 = 2.0;
 const VALUE_PX: f32 = 16.0;
 const CLOCK_PX: f32 = 11.0;
 const CLOCK_SPACING: f32 = 1.0;
-const POPUP_PX: f32 = 13.0;
-const POPUP_GAP: f32 = 8.0;
-const POPUP_RISE: f32 = 12.0;
 /// CSS-style blur sizes (twice the Gaussian's sigma).
 const BAR_GLOW_BLUR: f32 = 8.0;
 const VALUE_GLOW_BLUR: f32 = 6.0;
 /// The bar glow's strength (the 1-D profiles of a 4-pixel bar peak well under 1).
 const BAR_GLOW_GAIN: f32 = 1.5;
+
+/// The full-screen managers' frame in the 640x480 layout: a few pixels wider than the layout
+/// on every side, with an empty top band before the title bar. The modern panels may cover
+/// the band, nothing under it.
+const MANAGER_FRAME_OUT: i32 = 8;
+const MANAGER_TOP_BAND: i32 = 56;
 
 /// `--hud`: 0 the options file decides, 1 modern, 2 original.
 static MODE_OVERRIDE: AtomicU8 = AtomicU8::new(0);
@@ -175,12 +194,44 @@ pub fn thousands(v: i32) -> String {
     out
 }
 
-/// A floating RU change's text: "+150", or "−400" with a real minus sign.
-pub fn delta_text(d: i32) -> String {
-    if d >= 0 {
-        format!("+{}", thousands(d))
-    } else {
-        format!("\u{2212}{}", thousands(-d))
+/// Whether two rectangles share any pixel.
+pub fn overlaps(a: Rect, b: Rect) -> bool {
+    a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
+}
+
+/// The part of a full-screen manager the modern panels must not cover on a `width` x
+/// `height` canvas: its frame (the 640x480 layout is centred, as the screens are placed)
+/// below the frame's empty top band.
+pub fn manager_content(width: i32, height: i32) -> Rect {
+    let (dx, dy) = (
+        (width - crate::fe::FE_WIDTH) / 2,
+        (height - crate::fe::FE_HEIGHT) / 2,
+    );
+    Rect::new(
+        dx - MANAGER_FRAME_OUT,
+        dy + MANAGER_TOP_BAND,
+        dx + crate::fe::FE_WIDTH + MANAGER_FRAME_OUT,
+        dy + crate::fe::FE_HEIGHT + MANAGER_FRAME_OUT,
+    )
+}
+
+/// The manager area to keep clear this frame: Some while a full-screen manager is open.
+pub(crate) fn manager_area(fe: &Fe, width: i32, height: i32) -> Option<Rect> {
+    crate::ingame::full_screen_manager(fe.game.ig.manager).then(|| manager_content(width, height))
+}
+
+/// Whether a panel is shown expanded: as the options file says, except over a full-screen
+/// manager (`manager`), where it folds by itself when expanded it would cover `expanded_rect`
+/// of the manager, unless its header was clicked while the manager is open (`over_manager`).
+pub fn fold(
+    saved: bool,
+    manager: Option<Rect>,
+    over_manager: Option<bool>,
+    expanded: Rect,
+) -> bool {
+    match manager {
+        None => saved,
+        Some(m) => over_manager.unwrap_or(saved && !overlaps(expanded, m)),
     }
 }
 
@@ -199,6 +250,17 @@ pub struct Row {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Layout {
     pub scale: f32,
+    pub expanded: bool,
+    /// The header (the fold toggle's click area): the panel's width expanded, just the
+    /// chevron, label and RU value collapsed (kept to the right edge).
+    pub header: Rect,
+    /// The background expanded; the header collapsed.
+    pub panel: Rect,
+    /// The header's chevron centre x, label pen x, value right edge and baseline.
+    pub chevron_x: i32,
+    pub label_x: i32,
+    pub header_right: i32,
+    pub header_baseline: i32,
     pub ru: Row,
     pub su: Row,
     /// The clock's right edge and baseline.
@@ -210,23 +272,45 @@ pub struct Layout {
     pub value_px: f32,
     pub clock_px: f32,
     pub clock_spacing: f32,
-    pub popup_px: f32,
-    pub popup_gap: i32,
-    pub popup_rise: f32,
     /// Gaussian sigmas of the bar and value glows.
     pub bar_sigma: f32,
     pub value_sigma: f32,
-    /// First free line under the readout (with a margin), for the panels below it.
+    /// First free line under the panel (with a margin), for the panels below it.
     pub bottom: i32,
 }
 
-/// Lays the readout out for a `width` x `height` canvas: sizes scale with the height, the
+/// The scale of a canvas `height` lines tall.
+pub(crate) fn scale_for(height: i32) -> f32 {
+    (height.max(1) as f32 / REF_HEIGHT).max(0.35)
+}
+
+/// The expanded panel for a `width` x `height` canvas: sizes scale with the height, the
 /// corner margin is 16 pixels at 1080 lines.
 pub fn layout(width: i32, height: i32) -> Layout {
-    let s = (height.max(1) as f32 / REF_HEIGHT).max(0.35);
+    layout_at(width, height, 0)
+}
+
+/// [`layout`] moved down by the overlay's top (`moSetTop`: below the speech portrait while
+/// one is up, sliding back up after), like the original's top-right panels.
+pub fn layout_at(width: i32, height: i32, top: i32) -> Layout {
+    panel_layout(width, height, top, true, 0)
+}
+
+/// The panel expanded or collapsed, `top` pixels down; `collapsed_w` is the collapsed
+/// header's width (see [`collapsed_width`]).
+pub fn panel_layout(width: i32, height: i32, top: i32, expanded: bool, collapsed_w: i32) -> Layout {
+    let s = scale_for(height);
     let px = |v: f32| (v * s).round() as i32;
-    let right = width - px(MARGIN);
-    let left = right - px(BAR_W);
+    let x1 = width - px(MARGIN);
+    let x0 = x1 - px(PANEL_W);
+    let y0 = top + px(MARGIN);
+    let full_header = Rect::new(x0, y0, x1, y0 + px(obj::HEADER_H));
+    let header = if expanded {
+        full_header
+    } else {
+        Rect::new((x1 - collapsed_w).max(x0), y0, x1, full_header.y1)
+    };
+    let (left, right) = (x0 + px(ROW_X), x1 - px(ROW_RIGHT));
     let bar_h = px(BAR_H).max(2);
     let row = |top: i32| {
         let bar_top = top + px(BAR_TOP);
@@ -237,11 +321,23 @@ pub fn layout(width: i32, height: i32) -> Layout {
             bar: Rect::new(left, bar_top, right, bar_top + bar_h),
         }
     };
-    let ru = row(px(MARGIN));
+    let ru = row(full_header.y1 + px(ROWS_TOP));
     let su = row(ru.bar.y1 + px(ROW_GAP));
     let clock_baseline = su.bar.y1 + px(CLOCK_BASELINE);
+    let panel = if expanded {
+        Rect::new(x0, y0, x1, clock_baseline + px(PAD_BOTTOM))
+    } else {
+        header
+    };
     Layout {
         scale: s,
+        expanded,
+        header,
+        panel,
+        chevron_x: header.x0 + px(obj::CHEVRON_X),
+        label_x: header.x0 + px(obj::LABEL_X),
+        header_right: header.x1 - px(obj::COUNT_RIGHT),
+        header_baseline: y0 + px(obj::HEADER_BASELINE),
         ru,
         su,
         clock_right: right,
@@ -251,28 +347,28 @@ pub fn layout(width: i32, height: i32) -> Layout {
         value_px: VALUE_PX * s,
         clock_px: CLOCK_PX * s,
         clock_spacing: CLOCK_SPACING * s,
-        popup_px: POPUP_PX * s,
-        popup_gap: px(POPUP_GAP),
-        popup_rise: POPUP_RISE * s,
         bar_sigma: BAR_GLOW_BLUR * s / 2.0,
         value_sigma: VALUE_GLOW_BLUR * s / 2.0,
-        bottom: clock_baseline + px(4.0) + px(MARGIN) / 2,
+        bottom: panel.y1 + px(BELOW_GAP),
     }
 }
 
-/// [`layout`] moved down by the overlay's top (`moSetTop`: below the speech portrait while
-/// one is up, sliding back up after), like the original's top-right panels.
-pub fn layout_at(width: i32, height: i32, top: i32) -> Layout {
-    let mut l = layout(width, height);
-    let shift = |r: &mut Row| {
-        r.baseline += top;
-        r.bar = r.bar.offset(0, top);
-    };
-    shift(&mut l.ru);
-    shift(&mut l.su);
-    l.clock_baseline += top;
-    l.bottom += top;
-    l
+/// The collapsed header's width at scale `s`: chevron and label, a gap, the RU value, the
+/// right padding.
+pub fn collapsed_width(pen: &Pen, s: f32, ru: i32) -> i32 {
+    let px = |v: f32| (v * s).round() as i32;
+    let label = pen.measure(
+        Face::Bold,
+        obj::HEADER_PX * s,
+        obj::HEADER_SPACING * s,
+        HEADER_TEXT,
+    );
+    let value = pen.measure(Face::Bold, obj::COUNT_PX * s, 0.0, &thousands(ru));
+    px(obj::LABEL_X)
+        + label.ceil() as i32
+        + px(obj::COLLAPSED_GAP)
+        + value.ceil() as i32
+        + px(obj::COUNT_RIGHT)
 }
 
 /// The filled part of a bar for a fraction.
@@ -287,22 +383,16 @@ pub fn clock_text(time: f32) -> String {
     format!("{:02}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)
 }
 
-/// A floating RU change.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Popup {
-    pub amount: i32,
-    pub start: f32,
-}
-
-/// The readout's animation state, kept in the overlay state: the eased bar fills and the
-/// floating RU changes.
+/// The readout's state, kept in the overlay state: the eased bar fills, and the fold chosen
+/// over the open full-screen manager.
 #[derive(Debug, Clone, Default)]
 pub struct Tween {
     ru: Option<f32>,
     su: Option<f32>,
     last_clock: f32,
-    last_ru: Option<i32>,
-    pub popups: Vec<Popup>,
+    /// Expanded (true) or collapsed by a header click while a full-screen manager is open;
+    /// None follows [`fold`]'s rule. Cleared when the manager closes.
+    pub over_manager: Option<bool>,
 }
 
 impl Tween {
@@ -331,59 +421,118 @@ impl Tween {
         };
         (ease(&mut self.ru, ru), ease(&mut self.su, su))
     }
+}
 
-    /// Notes the RUs held now: a change starts a floating "+n" / "−n", or adds to the newest
-    /// one when it has the same sign and is under [`POPUP_MERGE_SECONDS`] old. Old ones go.
-    pub fn note_ru(&mut self, clock: f32, ru: i32) {
-        if self.popups.iter().any(|p| p.start > clock) {
-            // The clock went back: a new mission.
-            self.popups.clear();
-            self.last_ru = None;
-        }
-        self.popups.retain(|p| clock - p.start < POPUP_SECONDS);
-        let Some(last) = self.last_ru.replace(ru) else {
-            return;
-        };
-        let d = ru - last;
-        if d == 0 {
-            return;
-        }
-        if let Some(p) = self.popups.last_mut() {
-            if clock - p.start < POPUP_MERGE_SECONDS && (p.amount > 0) == (d > 0) {
-                p.amount += d;
-                p.start = clock;
-                return;
-            }
-        }
-        self.popups.push(Popup {
-            amount: d,
-            start: clock,
-        });
-        if self.popups.len() > POPUP_MAX {
-            self.popups.remove(0);
-        }
+/// The panel for the current frame: expanded or collapsed (the options file, folded over a
+/// full-screen manager), below the speech band.
+pub fn panel(fe: &Fe, width: i32, height: i32, view: &HostView) -> Layout {
+    let top = fe.game.ig.overlay.top;
+    let full = layout_at(width, height, top);
+    let saved = fe.game.options.get_bool(EXPANDED_KEY);
+    let over = fe.game.ig.overlay.modern_hud.over_manager;
+    if fold(saved, manager_area(fe, width, height), over, full.panel) {
+        return full;
+    }
+    let s = scale_for(height);
+    let w = pen(fe).map_or(0, |p| collapsed_width(&p, s, view.player.resource_units));
+    panel_layout(width, height, top, false, w)
+}
+
+/// The header was clicked: collapse or expand. Over a full-screen manager the choice lasts
+/// until the manager closes; otherwise it is remembered in the options file.
+pub fn toggle(fe: &mut Fe) {
+    let (w, h) = fe.screen_size();
+    let shown = panel(fe, w, h, &fe.game.ig.view).expanded;
+    if manager_area(fe, w, h).is_some() {
+        fe.game.ig.overlay.modern_hud.over_manager = Some(!shown);
+    } else {
+        fe.game.set_option_now(EXPANDED_KEY, i32::from(!shown));
     }
 }
 
 /// How far down the top-right panels (the selected-ship list) start while the readout is
 /// up: 0 with the original box.
 pub fn top_reserve(fe: &Fe, width: i32, height: i32) -> i32 {
-    if enabled(&fe.game.options) {
-        layout_at(width, height, fe.game.ig.overlay.top).bottom
+    if enabled(&fe.game.options) && !fe.game.ig.overlay.cutscene {
+        panel(fe, width, height, &fe.game.ig.view).bottom
     } else {
         0
     }
 }
 
+// ---- text ----
+
+/// What the modern panels write with: Segoe UI, or the game's bitmap font without it.
+pub enum Pen {
+    Segoe(&'static Fonts),
+    Bitmap(Rc<hwc_formats::font::Font>),
+}
+
+/// Segoe UI when the system has it, else the overlay's text font.
+pub(crate) fn pen(fe: &Fe) -> Option<Pen> {
+    fonts().map(Pen::Segoe).or_else(|| {
+        fe.resources()
+            .font(crate::ingame::overlay::FONT_TEXT)
+            .map(Pen::Bitmap)
+    })
+}
+
+impl Pen {
+    /// Width of `s` in pixels (the bitmap font has one size and no spacing).
+    pub fn measure(&self, face: Face, px: f32, spacing: f32, s: &str) -> f32 {
+        match self {
+            Pen::Segoe(f) => text_width(f.face(face), px, spacing, s),
+            Pen::Bitmap(f) => draw::width(f, s) as f32,
+        }
+    }
+
+    /// Draws `s` with its pen at `x` and its baseline at `baseline`, with a drop shadow and
+    /// (Segoe only) a glow of `glow`'s colour and sigma; returns the advance.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn write(
+        &self,
+        canvas: &mut Canvas,
+        face: Face,
+        px: f32,
+        spacing: f32,
+        x: i32,
+        baseline: i32,
+        col: Color,
+        glow: Option<(Color, f32)>,
+        s: &str,
+    ) -> i32 {
+        match self {
+            Pen::Segoe(f) => {
+                let sigma = glow.map_or(0.0, |g| g.1);
+                let sp = sprite(f, face, px, spacing, s, sigma);
+                draw_sprite(canvas, &sp, x, baseline, col, glow.map(|g| g.0), 1.0);
+                sp.advance
+            }
+            Pen::Bitmap(f) => {
+                let h = crate::text::height(f);
+                draw::print_shadow(canvas, f, x, baseline - h + 2, col, SHADOW, s)
+            }
+        }
+    }
+
+    /// The width [`Pen::write`] advances by.
+    pub(crate) fn advance(&self, face: Face, px: f32, spacing: f32, s: &str) -> i32 {
+        match self {
+            Pen::Segoe(f) => sprite(f, face, px, spacing, s, 0.0).advance,
+            Pen::Bitmap(f) => draw::width(f, s),
+        }
+    }
+}
+
 // ---- fonts and cached text sprites ----
 
-pub(crate) struct Fonts {
+pub struct Fonts {
     pub(crate) bold: FontVec,
     pub(crate) semibold: FontVec,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Face {
+pub enum Face {
     Bold,
     Semibold,
 }
@@ -725,10 +874,15 @@ fn draw_bar(canvas: &mut Canvas, bar: Rect, fraction: f32, sigma: f32, glow: f32
     }
 }
 
-/// Draws the readout (the overlay calls this in place of the original box). `clock` is the
-/// overlay's real-time clock, for the easing, the floating changes and the pulse.
-pub fn draw(fe: &mut Fe, canvas: &mut Canvas, view: &HostView, clock: f32) {
+/// Draws the panel (the overlay calls this in place of the original box, and over the
+/// full-screen managers). `clock` is the overlay's real-time clock, for the easing and the
+/// pulse; `mouse` the pointer, for the header's hover colour.
+pub fn draw(fe: &mut Fe, canvas: &mut Canvas, view: &HostView, clock: f32, mouse: (i32, i32)) {
     DRAWN.with(|c| c.set(c.get() + 1));
+    let Some(pen) = pen(fe) else {
+        return;
+    };
+    let l = panel(fe, canvas.width, canvas.height, view);
     let p = &view.player;
     let r = Readout {
         ru: p.resource_units,
@@ -736,40 +890,15 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas, view: &HostView, clock: f32) {
         su_cap: p.support_capacity,
         time: view.time,
     };
-    let top = fe.game.ig.overlay.top;
-    if paint(canvas, &mut fe.game.ig.overlay.modern_hud, &r, clock, top) {
-        return;
-    }
-    // No Segoe UI: the game's own font, same places, without glows.
-    let Some(f) = fe.resources().font(crate::ingame::overlay::FONT_TEXT) else {
-        return;
-    };
-    let l = layout_at(canvas.width, canvas.height, top);
-    let h = crate::text::height(&f);
-    let su_col = if su_at_cap(r.su_used, r.su_cap) {
-        AT_CAP
-    } else {
-        WHITE
-    };
-    let rows = [
-        (l.ru, "RESOURCES", thousands(r.ru), WHITE),
-        (
-            l.su,
-            "SUPPORT UNITS",
-            format!("{} / {}", r.su_used, r.su_cap),
-            su_col,
-        ),
-    ];
-    for (row, label, value, col) in &rows {
-        let y = row.baseline - h + 2;
-        draw::print_shadow(canvas, &f, row.left, y, LABEL, SHADOW, label);
-        let w = draw::width(&f, value);
-        draw::print_shadow(canvas, &f, row.right - w, y, *col, SHADOW, value);
-    }
-    let clock_s = clock_text(r.time);
-    let cw = draw::width(&f, &clock_s);
-    let y = l.clock_baseline - h + 2;
-    draw::print_shadow(canvas, &f, l.clock_right - cw, y, WHITE, SHADOW, &clock_s);
+    paint(
+        canvas,
+        &mut fe.game.ig.overlay.modern_hud,
+        &r,
+        clock,
+        &l,
+        &pen,
+        mouse,
+    );
 }
 
 /// The numbers the readout shows.
@@ -782,14 +911,76 @@ pub struct Readout {
     pub time: f32,
 }
 
-/// Draws the bars and, with Segoe UI available, the text, `top` pixels down; false when the
-/// text still has to be drawn with the game's font.
-pub fn paint(canvas: &mut Canvas, hud: &mut Tween, r: &Readout, clock: f32, top: i32) -> bool {
-    let l = layout_at(canvas.width, canvas.height, top);
+/// Draws the panel laid out as `l`: background and accent (expanded), the header, and the
+/// rows and clock (expanded).
+pub fn paint(
+    canvas: &mut Canvas,
+    hud: &mut Tween,
+    r: &Readout,
+    clock: f32,
+    l: &Layout,
+    pen: &Pen,
+    mouse: (i32, i32),
+) {
+    let s = l.scale;
+    let px = |v: f32| (v * s).round() as i32;
     let at_cap = su_at_cap(r.su_used, r.su_cap);
+    // The fills keep easing while the panel is folded, so they do not jump on unfolding.
     let (ru_f, su_f) = hud.step(clock, ru_fill(r.ru), su_fill(r.su_used, r.su_cap));
-    hud.note_ru(clock, r.ru);
-    let popups = hud.popups.clone();
+    if l.expanded {
+        canvas.blend_rect(l.panel, obj::PANEL);
+        let accent = Rect::new(
+            l.panel.x0,
+            l.panel.y0,
+            l.panel.x0 + px(obj::ACCENT_W).max(1),
+            l.panel.y1,
+        );
+        canvas.fill_rect(accent, obj::ACCENT);
+    }
+    let head_col = if l.header.contains(mouse.0, mouse.1) {
+        WHITE
+    } else {
+        obj::GOLD
+    };
+    let baseline = l.header_baseline;
+    obj::chevron(
+        canvas,
+        l.chevron_x as f32,
+        baseline as f32 - 4.0 * s,
+        obj::CHEVRON_R * s,
+        l.expanded,
+        head_col,
+    );
+    let (hpx, hsp) = (obj::HEADER_PX * s, obj::HEADER_SPACING * s);
+    pen.write(
+        canvas,
+        Face::Bold,
+        hpx,
+        hsp,
+        l.label_x,
+        baseline,
+        head_col,
+        None,
+        HEADER_TEXT,
+    );
+    if !l.expanded {
+        // Collapsed: the RUs held on the header's right, like the objectives' count.
+        let value = thousands(r.ru);
+        let w = pen.advance(Face::Bold, obj::COUNT_PX * s, 0.0, &value);
+        let x = l.header_right - w;
+        pen.write(
+            canvas,
+            Face::Bold,
+            obj::COUNT_PX * s,
+            0.0,
+            x,
+            baseline,
+            head_col,
+            None,
+            &value,
+        );
+        return;
+    }
     let su_glow = if at_cap {
         0.45 + 0.75 * pulse(clock)
     } else {
@@ -797,66 +988,64 @@ pub fn paint(canvas: &mut Canvas, hud: &mut Tween, r: &Readout, clock: f32, top:
     };
     draw_bar(canvas, l.ru.bar, ru_f, l.bar_sigma, 1.0);
     draw_bar(canvas, l.su.bar, su_f, l.bar_sigma, su_glow);
-
-    let ru_value = thousands(r.ru);
-    let su_value = format!("{} / {}", r.su_used, r.su_cap);
     let (su_col, su_vglow) = if at_cap {
         (AT_CAP, AT_CAP_GLOW)
     } else {
         (WHITE, VALUE_GLOW)
     };
-    let clock_s = clock_text(r.time);
     let rows = [
-        (l.ru, "RESOURCES", ru_value, WHITE, VALUE_GLOW),
-        (l.su, "SUPPORT UNITS", su_value, su_col, su_vglow),
+        (l.ru, RU_LABEL, thousands(r.ru), WHITE, VALUE_GLOW),
+        (
+            l.su,
+            SU_LABEL,
+            format!("{} / {}", r.su_used, r.su_cap),
+            su_col,
+            su_vglow,
+        ),
     ];
-    if let Some(fonts) = fonts() {
-        let mut ru_value_left = l.ru.right;
-        for (i, (row, label, value, col, vglow)) in rows.iter().enumerate() {
-            let lab = sprite(fonts, Face::Bold, l.label_px, l.label_spacing, label, 0.0);
-            draw_sprite(canvas, &lab, row.left, row.baseline, LABEL, None, 1.0);
-            let v = sprite(fonts, Face::Bold, l.value_px, 0.0, value, l.value_sigma);
-            let vx = row.right - v.advance;
-            draw_sprite(canvas, &v, vx, row.baseline, *col, Some(*vglow), 1.0);
-            if i == 0 {
-                ru_value_left = vx;
-            }
-        }
-        for pop in &popups {
-            let t = ((clock - pop.start) / POPUP_SECONDS).clamp(0.0, 1.0);
-            let col = if pop.amount >= 0 { GAIN } else { LOSS };
-            let sp = sprite(
-                fonts,
-                Face::Bold,
-                l.popup_px,
-                0.0,
-                &delta_text(pop.amount),
-                0.0,
-            );
-            let x = ru_value_left - l.popup_gap - sp.advance;
-            let y = l.ru.baseline - (l.popup_rise * t).round() as i32;
-            draw_sprite(canvas, &sp, x, y, col, None, (1.0 - t) * (1.0 - t * 0.3));
-        }
-        let c = sprite(
-            fonts,
-            Face::Semibold,
-            l.clock_px,
-            l.clock_spacing,
-            &clock_s,
-            0.0,
-        );
-        draw_sprite(
+    for (row, label, value, col, vglow) in &rows {
+        let (lpx, lsp) = (l.label_px, l.label_spacing);
+        pen.write(
             canvas,
-            &c,
-            l.clock_right - c.advance,
-            l.clock_baseline,
-            CLOCK,
+            Face::Bold,
+            lpx,
+            lsp,
+            row.left,
+            row.baseline,
+            LABEL,
             None,
-            1.0,
+            label,
         );
-        return true;
+        let w = pen.advance(Face::Bold, l.value_px, 0.0, value);
+        let glow = Some((*vglow, l.value_sigma));
+        let x = row.right - w;
+        pen.write(
+            canvas,
+            Face::Bold,
+            l.value_px,
+            0.0,
+            x,
+            row.baseline,
+            *col,
+            glow,
+            value,
+        );
     }
-    false
+    let clock_s = clock_text(r.time);
+    let (cpx, csp) = (l.clock_px, l.clock_spacing);
+    let w = pen.advance(Face::Semibold, cpx, csp, &clock_s);
+    let x = l.clock_right - w;
+    pen.write(
+        canvas,
+        Face::Semibold,
+        cpx,
+        csp,
+        x,
+        l.clock_baseline,
+        CLOCK,
+        None,
+        &clock_s,
+    );
 }
 
 #[cfg(test)]
@@ -867,20 +1056,48 @@ mod tests {
     fn layout_at_1080p_keeps_16_px_margins() {
         let l = layout(1920, 1080);
         assert_eq!(l.scale, 1.0);
-        assert_eq!(l.ru.right, 1904);
-        assert_eq!(l.ru.left, 1904 - 230);
-        assert_eq!(l.ru.baseline, 30);
-        assert_eq!(l.ru.bar, Rect::new(1674, 37, 1904, 41));
-        assert_eq!(l.su.bar, Rect::new(1674, 72, 1904, 76));
+        assert!(l.expanded);
+        // The panel hugs the corner, 260 wide; its header is the objectives' height.
+        assert_eq!(l.panel.x1, 1904);
+        assert_eq!(l.panel.x0, 1904 - 260);
+        assert_eq!(l.header, Rect::new(1644, 16, 1904, 46));
+        assert_eq!(
+            (l.chevron_x, l.label_x, l.header_baseline),
+            (1659, 1672, 36)
+        );
+        // The rows inside it, bars 230 long.
+        assert_eq!(l.ru.left, 1660);
+        assert_eq!(l.ru.right, 1890);
+        assert_eq!(l.ru.baseline, 62);
+        assert_eq!(l.ru.bar, Rect::new(1660, 69, 1890, 73));
+        assert_eq!(l.su.bar, Rect::new(1660, 104, 1890, 108));
         assert_eq!(l.su.bar.y0 - l.ru.bar.y1, 31);
-        assert_eq!(l.clock_right, 1904);
-        assert_eq!(l.clock_baseline, 92);
+        assert_eq!(l.clock_right, 1890);
+        assert_eq!(l.clock_baseline, 124);
+        assert_eq!(l.panel.y1, 134);
+        assert_eq!(l.bottom, 142);
         assert_eq!((l.label_px, l.label_spacing, l.value_px), (11.0, 2.0, 16.0));
         assert_eq!((l.bar_sigma, l.value_sigma), (4.0, 3.0));
-        assert!(
-            l.bottom > l.clock_baseline && l.bottom < 120,
-            "{}",
-            l.bottom
+    }
+
+    #[test]
+    fn collapsed_keeps_to_the_right_edge() {
+        let l = panel_layout(1920, 1080, 0, false, 150);
+        assert!(!l.expanded);
+        assert_eq!(l.header, Rect::new(1904 - 150, 16, 1904, 46));
+        assert_eq!(l.panel, l.header, "no background under a folded panel");
+        assert_eq!(l.chevron_x, 1904 - 150 + 15);
+        assert_eq!(l.label_x, 1904 - 150 + 28);
+        assert_eq!(l.header_right, 1904 - 12);
+        assert_eq!(l.bottom, 46 + 8);
+        // Never wider than the expanded panel.
+        let w = panel_layout(1920, 1080, 0, false, 5000);
+        assert_eq!(w.header.x0, 1644);
+        // The header's place does not move when folding.
+        let e = layout(1920, 1080);
+        assert_eq!(
+            (l.header.y0, l.header.y1, l.header.x1),
+            (e.header.y0, e.header.y1, e.header.x1)
         );
     }
 
@@ -889,16 +1106,17 @@ mod tests {
         let l = layout(1024, 768);
         let s = 768.0 / 1080.0;
         assert!((l.scale - s).abs() < 1e-6);
-        assert_eq!(l.ru.right, 1024 - 11);
+        assert_eq!(l.panel.x1, 1024 - 11);
         assert_eq!(l.ru.bar.width(), 164);
         assert_eq!(l.ru.bar.height(), 3);
         assert!((l.value_px - 16.0 * s).abs() < 1e-4);
         // 4K doubles everything.
         let k = layout(3840, 2160);
-        assert_eq!(k.ru.bar, Rect::new(3840 - 32 - 460, 74, 3840 - 32, 82));
+        assert_eq!(k.panel, Rect::new(3840 - 32 - 520, 32, 3840 - 32, 268));
+        assert_eq!(k.ru.bar.width(), 460);
         // A tiny canvas still lays out inside itself, bars at least 2 pixels tall.
         let t = layout(320, 200);
-        assert!(t.ru.left > 0 && t.su.bar.y1 < 200 && t.ru.bar.height() >= 2);
+        assert!(t.panel.x0 > 0 && t.panel.y1 < 200 && t.ru.bar.height() >= 2);
     }
 
     #[test]
@@ -907,9 +1125,50 @@ mod tests {
         let b = layout_at(1920, 1080, 75);
         assert_eq!(b.ru.bar, a.ru.bar.offset(0, 75));
         assert_eq!(b.su.baseline, a.su.baseline + 75);
+        assert_eq!(b.header, a.header.offset(0, 75));
+        assert_eq!(b.panel, a.panel.offset(0, 75));
         assert_eq!(b.clock_baseline, a.clock_baseline + 75);
         assert_eq!(b.bottom, a.bottom + 75);
         assert_eq!(layout_at(1920, 1080, 0), a);
+        let c = panel_layout(1920, 1080, 75, false, 120);
+        assert_eq!(
+            c.header,
+            panel_layout(1920, 1080, 0, false, 120).header.offset(0, 75)
+        );
+    }
+
+    #[test]
+    fn manager_content_and_folding() {
+        // The 640x480 frame centred, below its empty top band.
+        assert_eq!(manager_content(1024, 768), Rect::new(184, 200, 840, 632));
+        assert_eq!(manager_content(640, 480), Rect::new(-8, 56, 648, 488));
+        assert_eq!(manager_content(1920, 1080), Rect::new(632, 356, 1288, 788));
+        // At 1080 lines both expanded panels stay clear of the frame.
+        let m = manager_content(1920, 1080);
+        assert!(!overlaps(layout(1920, 1080).panel, m));
+        // At 640x480 the expanded readout would reach into it: it folds.
+        let m4 = manager_content(640, 480);
+        let small = layout(640, 480);
+        assert!(overlaps(small.panel, m4));
+        assert!(!fold(true, Some(m4), None, small.panel));
+        assert!(
+            !overlaps(panel_layout(640, 480, 0, false, 80).panel, m4),
+            "the header fits"
+        );
+        // At 1024x768 it fits above the frame.
+        let m7 = manager_content(1024, 768);
+        assert!(fold(true, Some(m7), None, layout(1024, 768).panel));
+        // No manager: the options file; a click over the manager wins.
+        assert!(fold(true, None, Some(false), small.panel));
+        assert!(!fold(false, None, Some(true), small.panel));
+        assert!(fold(false, Some(m4), Some(true), small.panel));
+        assert!(!fold(true, Some(m7), Some(false), small.panel));
+        assert!(
+            !fold(false, Some(m7), None, small.panel),
+            "collapsed stays collapsed"
+        );
+        assert!(overlaps(Rect::new(0, 0, 10, 10), Rect::new(9, 9, 20, 20)));
+        assert!(!overlaps(Rect::new(0, 0, 10, 10), Rect::new(10, 0, 20, 10)));
     }
 
     #[test]
@@ -949,9 +1208,6 @@ mod tests {
         assert_eq!(thousands(1950), "1,950");
         assert_eq!(thousands(1234567), "1,234,567");
         assert_eq!(thousands(-2500), "-2,500");
-        assert_eq!(delta_text(150), "+150");
-        assert_eq!(delta_text(-400), "\u{2212}400");
-        assert_eq!(delta_text(-1500), "\u{2212}1,500");
     }
 
     #[test]
@@ -1000,44 +1256,6 @@ mod tests {
     }
 
     #[test]
-    fn ru_changes_float_and_merge() {
-        let mut t = Tween::default();
-        t.note_ru(1.0, 2000);
-        assert!(t.popups.is_empty(), "the first value is not a change");
-        t.note_ru(1.1, 1600);
-        assert_eq!(
-            t.popups,
-            vec![Popup {
-                amount: -400,
-                start: 1.1
-            }]
-        );
-        // Another loss soon after adds to it.
-        t.note_ru(1.3, 1500);
-        assert_eq!(
-            t.popups,
-            vec![Popup {
-                amount: -500,
-                start: 1.3
-            }]
-        );
-        // A gain starts its own.
-        t.note_ru(1.4, 1650);
-        assert_eq!(t.popups.len(), 2);
-        assert_eq!(t.popups[1].amount, 150);
-        // Gone after their time.
-        t.note_ru(1.4 + POPUP_SECONDS + 0.01, 1650);
-        assert!(t.popups.is_empty());
-        // Later gains do not merge with an expired one.
-        t.note_ru(5.0, 1700);
-        t.note_ru(5.0 + POPUP_MERGE_SECONDS + 0.1, 1800);
-        assert_eq!(t.popups.len(), 2);
-        // A new mission (the clock went back) forgets everything.
-        t.note_ru(0.5, 300);
-        assert!(t.popups.is_empty());
-    }
-
-    #[test]
     fn clock_and_mode_parsing() {
         assert_eq!(clock_text(71.9), "00:01:11");
         assert_eq!(clock_text(3725.0), "01:02:05");
@@ -1047,47 +1265,46 @@ mod tests {
     }
 
     #[test]
-    fn modern_hud_is_the_default_option() {
+    fn modern_hud_and_expanded_panels_are_the_default_options() {
         let o = Options::default();
         assert!(o.get_bool(OPTION_KEY));
-        let (back, errors) = Options::from_text("hwcModernHud = 0\n");
+        assert!(o.get_bool(EXPANDED_KEY));
+        let (back, errors) = Options::from_text("hwcModernHud = 0\nhwcResourcesExpanded = 0\n");
         assert!(errors.is_empty());
         assert!(!back.get_bool(OPTION_KEY));
+        assert!(!back.get_bool(EXPANDED_KEY));
     }
 
-    /// Paints the readout over a bright background: at the cap with a floating loss, and
-    /// with a gain; the pictures go to `screenshots/hud/sample_*.png`.
+    fn background(c: &mut Canvas) {
+        for y in 0..c.height {
+            for x in 0..c.width {
+                let t = x as f32 / c.width as f32;
+                let v = [(200.0 - 60.0 * t) as u8, (120.0 + 40.0 * t) as u8, 40, 255];
+                c.pixels[(y * c.width + x) as usize] = v;
+            }
+        }
+    }
+
+    /// Paints the panel over a bright background, expanded at the cap and collapsed; the
+    /// pictures go to `screenshots/hud/sample_*.png`.
     #[test]
     fn paint_samples() {
-        if fonts().is_none() {
-            return;
-        }
+        let Some(f) = fonts() else { return };
+        let pen = Pen::Segoe(f);
         let dir =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/hud");
-        let background = |c: &mut Canvas| {
-            for y in 0..c.height {
-                for x in 0..c.width {
-                    let t = x as f32 / c.width as f32;
-                    let v = [(200.0 - 60.0 * t) as u8, (120.0 + 40.0 * t) as u8, 40, 255];
-                    c.pixels[(y * c.width + x) as usize] = v;
-                }
-            }
-        };
         let mut c = Canvas::new(1920, 1080);
         background(&mut c);
         let mut t = Tween::default();
         let r = Readout {
-            ru: 2000,
+            ru: 1500,
             su_used: 20,
             su_cap: 20,
             time: 71.0,
         };
-        assert!(paint(&mut c, &mut t, &r, 1.0, 0));
-        let r = Readout { ru: 1600, ..r };
-        background(&mut c);
-        assert!(paint(&mut c, &mut t, &r, 1.3, 0));
-        assert_eq!(t.popups.len(), 1);
         let l = layout(1920, 1080);
+        let before = c.get(l.panel.x0 + 8, l.panel.y0 + 4);
+        paint(&mut c, &mut t, &r, 1.0, &l, &pen, (0, 0));
         // The fill is opaque gradient at the bar's left end.
         let p = c.get(l.ru.bar.x0 + 4, (l.ru.bar.y0 + l.ru.bar.y1) / 2);
         assert_eq!(p[0], 255);
@@ -1095,21 +1312,32 @@ mod tests {
         // The track is darker than the background.
         let q = c.get(l.ru.bar.x1 - 3, (l.ru.bar.y0 + l.ru.bar.y1) / 2);
         assert!(q[0] < 160, "{q:?}");
+        // The accent strip on the left edge, the darkened panel inside.
+        assert_eq!(c.get(l.panel.x0 + 1, l.panel.y0 + 40), obj::ACCENT);
+        let inside = c.get(l.panel.x0 + 8, l.panel.y0 + 4);
+        assert!(inside[0] < before[0] / 2, "{inside:?} over {before:?}");
         if std::fs::create_dir_all(&dir).is_ok() {
-            let _ = c.save_png(&dir.join("sample_cap_and_loss_1920x1080.png"));
-            let mut c = Canvas::new(1024, 768);
-            background(&mut c);
-            let mut t = Tween::default();
-            let r = Readout {
-                ru: 1800,
-                su_used: 8,
-                su_cap: 20,
-                time: 3725.0,
-            };
-            paint(&mut c, &mut t, &r, 1.0, 0);
-            background(&mut c);
-            paint(&mut c, &mut t, &Readout { ru: 1950, ..r }, 1.4, 0);
-            let _ = c.save_png(&dir.join("sample_gain_1024x768.png"));
+            let _ = c.save_png(&dir.join("sample_resources_expanded_1920x1080.png"));
+        }
+        // Collapsed: no background, no accent, the header text only.
+        let mut c = Canvas::new(1920, 1080);
+        background(&mut c);
+        let w = collapsed_width(&pen, 1.0, 1950);
+        let l = panel_layout(1920, 1080, 0, false, w);
+        let untouched = c.get(l.header.x0 + 1, l.header.y0 + 1);
+        paint(
+            &mut c,
+            &mut t,
+            &Readout { ru: 1950, ..r },
+            1.2,
+            &l,
+            &pen,
+            (0, 0),
+        );
+        assert_eq!(c.get(l.header.x0 + 1, l.header.y0 + 1), untouched);
+        assert!(w > 100 && w < 200, "{w}");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = c.save_png(&dir.join("sample_resources_collapsed_1920x1080.png"));
         }
     }
 

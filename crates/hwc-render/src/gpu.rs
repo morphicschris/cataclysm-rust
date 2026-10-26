@@ -560,6 +560,8 @@ struct InstanceParams {
     engine_glow: [f32; 4],
     team: [f32; 4],
     exponent: f32,
+    /// The still-to-be-built part of a hull under construction (blue ambient).
+    ghost: bool,
 }
 
 impl Default for InstanceParams {
@@ -572,6 +574,7 @@ impl Default for InstanceParams {
             engine_glow: [0.0; 4],
             team: [1.0; 4],
             exponent: 1.0,
+            ghost: false,
         }
     }
 }
@@ -588,7 +591,7 @@ fn object_uniform(model: Mat4, p: &InstanceParams) -> ObjectUniform {
             f32::from(u8::from(p.clip_plane.is_some())),
             p.exponent,
         ],
-        tint: p.tint,
+        tint: [p.tint[0], p.tint[1], f32::from(u8::from(p.ghost)), p.tint[3]],
         engine_glow: p.engine_glow,
         team: p.team,
     }
@@ -601,6 +604,8 @@ struct DrawItem<'s> {
     /// Uniform slot of the first object.
     first_slot: u32,
     transparent: bool,
+    /// Draws every batch without back-face culling (hulls under construction are open).
+    two_sided: bool,
     /// Squared distance from the eye, for sorting the transparent list.
     depth: f32,
 }
@@ -1268,6 +1273,7 @@ impl Renderer {
             objects: &[Mat4],
             params: InstanceParams,
             transparent: bool,
+            two_sided: bool,
         ) {
             let first_slot = uniforms.len() as u32;
             for m in objects {
@@ -1279,6 +1285,7 @@ impl Renderer {
                 level,
                 first_slot,
                 transparent,
+                two_sided,
                 depth: centre.distance_squared(eye),
             });
         }
@@ -1306,6 +1313,7 @@ impl Renderer {
                     1.0,
                 ],
                 exponent: 1.0,
+                ghost: false,
             };
             let transparent = state.is_transparent();
             let mut draw_main = true;
@@ -1330,6 +1338,7 @@ impl Renderer {
                     &objs,
                     p,
                     true,
+                    false,
                 );
             }
             if let Some(phase) = state.phase {
@@ -1360,6 +1369,7 @@ impl Renderer {
                                 &objs,
                                 p,
                                 true,
+                                false,
                             );
                         }
                         let p = InstanceParams {
@@ -1376,6 +1386,7 @@ impl Renderer {
                             &objects,
                             p,
                             true,
+                            false,
                         );
                         draw_main = false;
                         box_lines(1.0, 252.0 / 255.0, &mut internal);
@@ -1394,12 +1405,57 @@ impl Renderer {
                                 &objs,
                                 base,
                                 true,
+                                false,
                             );
                             draw_main = false;
                         }
                         box_lines(1.0 - phase.value * 0.25, 1.0 - phase.value, &mut internal);
                     }
                 }
+            }
+            // External construction: two passes cut by one plane across the heading axis. The
+            // built part draws solid, the rest as a quarter-opaque ghost with a blue ambient;
+            // both with back faces, since the cut leaves the hull open.
+            if let (true, Some(c)) = (draw_main, state.construction) {
+                let (built, ghost) =
+                    crate::render_state::construction_planes(&c.collision_box, c.progress);
+                let solid = InstanceParams {
+                    clip_plane: Some(plane_to_world(inst.transform, built)),
+                    ..base
+                };
+                push_item(
+                    &mut uniforms,
+                    &mut items,
+                    eye,
+                    ship,
+                    level,
+                    inst.transform,
+                    &objects,
+                    solid,
+                    state.transparent || base.fade < 1.0,
+                    true,
+                );
+                if c.progress < 1.0 {
+                    let rest = InstanceParams {
+                        clip_plane: Some(plane_to_world(inst.transform, ghost)),
+                        fade: base.fade * crate::render_state::CONSTRUCTION_GHOST_ALPHA,
+                        ghost: true,
+                        ..base
+                    };
+                    push_item(
+                        &mut uniforms,
+                        &mut items,
+                        eye,
+                        ship,
+                        level,
+                        inst.transform,
+                        &objects,
+                        rest,
+                        true,
+                        true,
+                    );
+                }
+                draw_main = false;
             }
             if draw_main {
                 push_item(
@@ -1412,6 +1468,7 @@ impl Renderer {
                     &objects,
                     base,
                     transparent,
+                    false,
                 );
             }
             if state.emp_lightning {
@@ -1578,8 +1635,9 @@ impl Renderer {
                 let blended = b.blended || force_blend;
                 let offset = ((item.first_slot as usize + b.object) as u64 * OBJECT_STRIDE) as u32;
                 pass.set_bind_group(2, &self.object_bind_group, &[offset]);
+                let two_sided = b.two_sided || item.two_sided;
                 pass.set_pipeline(
-                    &self.pipes.ship_pipelines[usize::from(b.two_sided) | usize::from(blended) << 1],
+                    &self.pipes.ship_pipelines[usize::from(two_sided) | usize::from(blended) << 1],
                 );
                 pass.set_bind_group(1, &level.materials[b.material], &[]);
                 pass.draw(b.first_vertex..b.first_vertex + b.vertex_count, 0..1);

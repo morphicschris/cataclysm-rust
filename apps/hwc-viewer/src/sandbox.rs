@@ -42,7 +42,7 @@ use hwc_math::timing::{TaskTicker, TIMER_RESOLUTION};
 use hwc_render::assets::{load_mad_clip, mothership_modules, read_script, AssetSource};
 use hwc_render::effects::{EffectBatch, Line as FxLine, Sprite, FULL_UV};
 use hwc_render::lod::{screen_radius, LodSelector, LodTable};
-use hwc_render::render_state::{normalized_team_color, ShipTint, TintParams};
+use hwc_render::render_state::{normalized_team_color, CollisionBox, ConstructionState, ShipTint, TintParams};
 use hwc_render::trails::{
     ShipTrailDef, ShipTrails, TeamTrailColors, TrailFrame, TrailGate, TrailTick, TrailTweaks,
 };
@@ -195,6 +195,8 @@ struct Item {
     clip: Option<Vec4>,
     tint: TintParams,
     time: f32,
+    /// Under external construction: build progress and mesh-space collision box.
+    construction: Option<ConstructionState>,
 }
 
 /// What the left mouse button does next.
@@ -1059,6 +1061,19 @@ impl Sandbox {
             let tint = fx
                 .tint
                 .params(team_color, fx.trails.engine_glow_levels(&self.trail_tweaks));
+            let construction = st
+                .filter(|_| s.special_flags2 & hwc_sim::base::special2::UNDER_CONSTRUCTION != 0)
+                .map(|st| {
+                    let c = &st.header.coll;
+                    let o = c.coll_rect_offset;
+                    ConstructionState {
+                        progress: s.base.build_progress,
+                        collision_box: CollisionBox {
+                            corner: Vec3::new(o.x, o.y, o.z),
+                            extent: Vec3::new(c.up_length, c.right_length, c.forward_length),
+                        },
+                    }
+                });
             frame.items.push(Item {
                 kind: ItemKind::Ship(t, s.color_scheme),
                 transform,
@@ -1067,6 +1082,7 @@ impl Sandbox {
                 clip,
                 tint,
                 time: now,
+                construction,
             });
             frame.poses.push(pose);
             // TODO(render states): cloak fade/wipe, phase blend, Beast infection and EMP
@@ -1090,6 +1106,7 @@ impl Sandbox {
                 clip: None,
                 tint: TintParams::default(),
                 time: now,
+                construction: None,
             });
             frame.poses.push(None);
         }
@@ -1202,6 +1219,7 @@ impl Sandbox {
                 clip_plane: item.clip,
                 tint: item.tint,
                 time: item.time,
+                construction: item.construction,
                 ..Default::default()
             });
         }

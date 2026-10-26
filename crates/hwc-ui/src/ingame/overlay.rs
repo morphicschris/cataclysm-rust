@@ -115,6 +115,12 @@ pub struct State {
     /// The modern objectives panel's flash, and its header (the collapse toggle) as laid out.
     pub modern_objectives: crate::ingame::modern_objectives::PanelState,
     objectives_header: Option<Rect>,
+    /// The modern resources panel's header (its collapse toggle) as laid out.
+    resources_header: Option<Rect>,
+    /// Where the modern panels are this frame (they take clicks on them).
+    modern_panels: Vec<Rect>,
+    /// A cutscene is up (the letterbox, an NIS, fleet intel): the modern panels hide.
+    pub cutscene: bool,
 }
 
 impl State {
@@ -260,6 +266,17 @@ fn bar_top(st: &State, view: &HostView, h: i32, th: i32, modern: bool) -> i32 {
 /// `moUpdateMouseOver`: where the clickable lines and buttons are this frame, from the
 /// state alone (clicks must not depend on a frame having been drawn).
 pub fn layout(fe: &mut Fe) {
+    let ig = &mut fe.game.ig;
+    // The objectives panel keeps the objectives the scripts destroy.
+    let v = &ig.view;
+    ig.overlay
+        .modern_objectives
+        .remember(v.player.mission, v.time, &v.objectives);
+    // A fold chosen over a full-screen manager lasts until it closes.
+    if !crate::ingame::full_screen_manager(ig.manager) {
+        ig.overlay.modern_objectives.over_manager = None;
+        ig.overlay.modern_hud.over_manager = None;
+    }
     let (w, h) = fe.screen_size();
     let view = &fe.game.ig.view;
     let st = &fe.game.ig.overlay;
@@ -281,10 +298,25 @@ pub fn layout(fe: &mut Fe) {
     }
     let mut objective_rects = Vec::new();
     let mut objectives_header = None;
+    let mut resources_header = None;
+    let mut modern_panels = Vec::new();
+    let show_modern = modern && !st.cutscene;
+    if show_modern && st.shown(view, PLAYERINFO) {
+        let l = crate::ingame::modern_hud::panel(fe, w, h, view);
+        resources_header = Some(l.header);
+        modern_panels.push(l.panel);
+    }
     if st.shown(view, OBJECTIVES) && modern {
-        if let Some(p) = crate::ingame::modern_objectives::panel(fe, w, h, view) {
+        let p = crate::ingame::modern_objectives::panel(fe, w, h, view);
+        if let Some(p) = p.filter(|_| show_modern) {
             objectives_header = Some(p.header);
-            objective_rects = p.items.iter().map(|i| (i.index, i.rect)).collect();
+            // Destroyed objectives are not the game's any more: no click.
+            objective_rects = p
+                .items
+                .iter()
+                .filter_map(|i| i.live.map(|l| (l, i.rect)))
+                .collect();
+            modern_panels.push(p.panel);
         }
     } else if st.shown(view, OBJECTIVES) && !view.objectives.is_empty() {
         let mut y = bar + th + 4;
@@ -316,6 +348,8 @@ pub fn layout(fe: &mut Fe) {
     o.lines = lines;
     o.objective_rects = objective_rects;
     o.objectives_header = objectives_header;
+    o.resources_header = resources_header;
+    o.modern_panels = modern_panels;
     o.message_rects = message_rects;
     o.view_buttons = view_buttons;
 }
@@ -375,13 +409,10 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool, x: i32, y: i32) -> bool
     if !down {
         return false;
     }
-    let o = &fe.game.ig.overlay;
-    // The modern objectives panel's header collapses or expands it.
-    if o.objectives_header.is_some_and(|r| r.contains(x, y)) {
-        crate::ingame::modern_objectives::toggle(fe);
-        layout(fe);
+    if modern_click(fe, x, y) {
         return true;
     }
+    let o = &fe.game.ig.overlay;
     if let Some(&(t, owner, _)) = o.lines.iter().find(|l| l.2.contains(x, y)) {
         let multi = fe.input.down.iter().any(|k| {
             fe.game
@@ -405,26 +436,7 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool, x: i32, y: i32) -> bool
         return true;
     }
     if let Some(&(i, _)) = o.objective_rects.iter().find(|l| l.1.contains(x, y)) {
-        // `moProcessClick` does nothing while the game is paused.
-        if fe.game.ig.view.player.paused {
-            return true;
-        }
-        fe.game
-            .ig
-            .request(GameRequest::Sound(SOUND_OBJECTIVE_CLICK));
-        let hyper = fe
-            .game
-            .ig
-            .view
-            .objectives
-            .get(i)
-            .is_some_and(|o| o.hyperspace);
-        if hyper {
-            crate::ingame::execute_action(fe, keys::HYPERSPACE, true);
-        } else {
-            fe.game.ig.esc.objective = Some(i);
-            open_manager(fe, Manager::Objectives);
-        }
+        click_objective(fe, i);
         return true;
     }
     if let Some(&(i, _)) = o.message_rects.iter().find(|l| l.1.contains(x, y)) {
@@ -439,6 +451,81 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool, x: i32, y: i32) -> bool
         return true;
     }
     false
+}
+
+/// `moProcessClick` on objective `i` of the game's list: the hyperspace entry jumps, the
+/// others open the objectives screen on it (nothing while the game is paused).
+fn click_objective(fe: &mut Fe, i: usize) {
+    if fe.game.ig.view.player.paused {
+        return;
+    }
+    fe.game
+        .ig
+        .request(GameRequest::Sound(SOUND_OBJECTIVE_CLICK));
+    let hyper = fe
+        .game
+        .ig
+        .view
+        .objectives
+        .get(i)
+        .is_some_and(|o| o.hyperspace);
+    if hyper {
+        crate::ingame::execute_action(fe, keys::HYPERSPACE, true);
+    } else {
+        fe.game.ig.esc.objective = Some(i);
+        open_manager(fe, Manager::Objectives);
+    }
+}
+
+/// Whether `(x, y)` is on one of the modern panels as laid out by [`layout`].
+pub fn over_modern_panel(fe: &Fe, x: i32, y: i32) -> bool {
+    fe.game
+        .ig
+        .overlay
+        .modern_panels
+        .iter()
+        .any(|r| r.contains(x, y))
+}
+
+/// A left press on the modern panels (from the overlay's clicks, or over a full-screen
+/// manager): a header folds its panel, an objective line acts as in the original, anywhere
+/// else on a panel the click is used up. Whether it was on a panel.
+pub fn modern_click(fe: &mut Fe, x: i32, y: i32) -> bool {
+    let o = &fe.game.ig.overlay;
+    if o.objectives_header.is_some_and(|r| r.contains(x, y)) {
+        crate::ingame::modern_objectives::toggle(fe);
+        layout(fe);
+        return true;
+    }
+    if o.resources_header.is_some_and(|r| r.contains(x, y)) {
+        crate::ingame::modern_hud::toggle(fe);
+        layout(fe);
+        return true;
+    }
+    if !over_modern_panel(fe, x, y) {
+        return false;
+    }
+    if let Some(&(i, _)) = o.objective_rects.iter().find(|l| l.1.contains(x, y)) {
+        click_objective(fe, i);
+    }
+    true
+}
+
+/// The modern panels over a full-screen manager (the overlay is not drawn under those).
+pub fn draw_modern_panels(fe: &mut Fe, canvas: &mut Canvas) {
+    if !crate::ingame::modern_hud::enabled(&fe.game.options) || fe.game.ig.overlay.cutscene {
+        return;
+    }
+    let view = fe.game.ig.view.clone();
+    let st = &fe.game.ig.overlay;
+    let (clock, mouse) = (st.clock, st.mouse);
+    let (objectives, info) = (st.shown(&view, OBJECTIVES), st.shown(&view, PLAYERINFO));
+    if objectives {
+        crate::ingame::modern_objectives::draw(fe, canvas, &view, clock, mouse);
+    }
+    if info {
+        crate::ingame::modern_hud::draw(fe, canvas, &view, clock, mouse);
+    }
 }
 
 /// An objective's line (`moDrawMissionInfo`): "COMPLETE - " or "INCOMPLETE - " before the
@@ -522,7 +609,9 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
     let mut objective_rects = Vec::new();
     if st.shown(&view, OBJECTIVES) && modern {
         let (clock, mouse) = (st.clock, st.mouse);
-        crate::ingame::modern_objectives::draw(fe, canvas, &view, clock, mouse);
+        if !st.cutscene {
+            crate::ingame::modern_objectives::draw(fe, canvas, &view, clock, mouse);
+        }
     } else if st.shown(&view, OBJECTIVES) && !view.objectives.is_empty() {
         let mut y = bar;
         let mut widest = 0;
@@ -567,8 +656,8 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
     }
     let st = &fe.game.ig.overlay;
     // The modern objectives panel takes the top-left corner: these columns go under it.
-    let left_top =
-        crate::ingame::modern_objectives::left_top(fe, w, h, &view, st.shown(&view, OBJECTIVES));
+    let objectives_up = st.shown(&view, OBJECTIVES) && !st.cutscene;
+    let left_top = crate::ingame::modern_objectives::left_top(fe, w, h, &view, objectives_up);
     let mut left_y = left_top + 20;
     if st.shown(&view, PLAYERNAMES) && !view.player_names.is_empty() {
         left_y = draw_player_names(fe, canvas, &view, left_top);
@@ -588,8 +677,10 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
     let st = &fe.game.ig.overlay;
     if st.shown(&view, PLAYERINFO) {
         if crate::ingame::modern_hud::enabled(&options) {
-            let clock = st.clock;
-            crate::ingame::modern_hud::draw(fe, canvas, &view, clock);
+            let (clock, mouse) = (st.clock, st.mouse);
+            if !st.cutscene {
+                crate::ingame::modern_hud::draw(fe, canvas, &view, clock, mouse);
+            }
         } else {
             let bd = !options.get_bool("ShowTaskbarBackdrop");
             draw_player_info(fe, canvas, &view, bar, bd);

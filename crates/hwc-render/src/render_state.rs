@@ -141,6 +141,32 @@ pub fn phase_sweep_plane(bx: &CollisionBox, value: f32) -> Vec4 {
     Vec4::new(-1.0, 0.0, 0.0, d)
 }
 
+/// Opacity of the part of an externally built hull that is still to be built (the engine's
+/// construction material sets this fade slot to a quarter).
+pub const CONSTRUCTION_GHOST_ALPHA: f32 = 0.25;
+
+/// Material ambient of the still-to-be-built part: the hull's own diffuse colour over a blue
+/// ambient, which gives the unfinished part its blue cast.
+pub const CONSTRUCTION_GHOST_AMBIENT: [f32; 3] = [0.0, 0.0, 0.75];
+
+/// A ship under external construction: how far it is built and its mesh-space collision box.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConstructionState {
+    /// Build progress, 0..1.
+    pub progress: f32,
+    pub collision_box: CollisionBox,
+}
+
+/// The two clip planes of a hull under construction. The hull is cut across its heading axis
+/// at `corner.z + extent.z × progress`: the built part (behind the cut) keeps the first plane
+/// and draws solid; the rest keeps the second and draws as a translucent blue ghost. The cut
+/// sweeps from the stern to the bow as the ship is built.
+pub fn construction_planes(bx: &CollisionBox, progress: f32) -> (Vec4, Vec4) {
+    let d = bx.extent.z * progress.clamp(0.0, 1.0) + bx.corner.z;
+    let built = Vec4::new(0.0, 0.0, -1.0, d);
+    (built, -built)
+}
+
 /// How cloaking shows: fading out, or a clip-plane wipe (the graphics option).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CloakStyle {
@@ -173,6 +199,8 @@ pub struct ShipRenderState<'a> {
     pub time: f32,
     /// Forces the sorted transparent pass.
     pub transparent: bool,
+    /// External construction: the built part solid, the rest a translucent ghost.
+    pub construction: Option<ConstructionState>,
 }
 
 #[derive(Clone, Copy)]
@@ -196,6 +224,7 @@ impl Default for ShipRenderState<'_> {
             emp_lightning: false,
             time: 0.0,
             transparent: false,
+            construction: None,
         }
     }
 }
@@ -203,7 +232,11 @@ impl Default for ShipRenderState<'_> {
 impl ShipRenderState<'_> {
     /// Whether the engine would defer this ship to the depth-sorted transparent list.
     pub fn is_transparent(&self) -> bool {
-        self.transparent || self.fade < 1.0 || self.infection.is_some() || self.phase.is_some()
+        self.transparent
+            || self.fade < 1.0
+            || self.infection.is_some()
+            || self.phase.is_some()
+            || self.construction.is_some()
     }
 }
 
@@ -264,5 +297,46 @@ mod tests {
         let world = plane_to_world(Mat4::from_translation(Vec3::new(0.0, 0.0, 100.0)), p);
         assert!(world.dot(Vec3::new(0.0, 0.0, 95.0).extend(1.0)) > 0.0);
         assert!((infection_progress(5.0, 10.0, 10.0) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn construction_cut_sweeps_from_stern_to_bow() {
+        let bx = CollisionBox {
+            corner: Vec3::new(-5.0, -5.0, -100.0),
+            extent: Vec3::new(10.0, 10.0, 200.0),
+        };
+        let at = |z: f32| Vec3::new(0.0, 0.0, z).extend(1.0);
+        let built_len = |progress: f32| {
+            let (built, ghost) = construction_planes(&bx, progress);
+            // Sample the hull's length: each point is on exactly one side of the cut.
+            let mut n = 0;
+            for i in 0..200 {
+                let p = at(-99.5 + i as f32);
+                let (b, g) = (built.dot(p), ghost.dot(p));
+                assert!((b + g).abs() < 1e-4, "the planes are opposite");
+                if b > 0.0 {
+                    n += 1;
+                }
+            }
+            n
+        };
+        // 0%: nothing solid; 30%: the stern 30%; 70%; 100%: all of it.
+        assert_eq!(built_len(0.0), 0);
+        assert_eq!(built_len(0.3), 60);
+        assert_eq!(built_len(0.7), 140);
+        assert_eq!(built_len(1.0), 200);
+        // The stern builds first; out-of-range progress clamps.
+        let (built, _) = construction_planes(&bx, 0.3);
+        assert!(built.dot(at(-90.0)) > 0.0 && built.dot(at(90.0)) < 0.0);
+        assert_eq!(construction_planes(&bx, 2.0), construction_planes(&bx, 1.0));
+        assert_eq!(construction_planes(&bx, -1.0), construction_planes(&bx, 0.0));
+        // The ghost is a quarter opaque with a blue ambient.
+        assert_eq!(CONSTRUCTION_GHOST_ALPHA, 0.25);
+        assert_eq!(CONSTRUCTION_GHOST_AMBIENT, [0.0, 0.0, 0.75]);
+        let s = ShipRenderState {
+            construction: Some(ConstructionState { progress: 0.5, collision_box: bx }),
+            ..Default::default()
+        };
+        assert!(s.is_transparent());
     }
 }

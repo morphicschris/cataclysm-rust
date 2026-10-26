@@ -1,9 +1,10 @@
 //! The modern HUD on the real game files with the mock host: the objectives panel's header
 //! toggles it (and the choice is kept in the options), its lines are hit-tested like the
 //! original's list (an objective opens fleet intelligence, the hyperspace entry jumps), it
-//! moves below a speech portrait, and the RU / SU readout is drawn. Screenshots go to
-//! `screenshots/hud/` when `HWC_SCREENSHOTS` is set. Needs `HWC_DATA_DIR` or `HWC_GAME_DIR`;
-//! skipped otherwise.
+//! moves below a speech portrait, completed and destroyed objectives stay listed greyed out;
+//! the resources panel folds from its header; both panels stay up over the build manager,
+//! clear of its frame, and take the clicks on them. Screenshots go to `screenshots/hud/`
+//! when `HWC_SCREENSHOTS` is set. Needs `HWC_DATA_DIR` or `HWC_GAME_DIR`; skipped otherwise.
 
 use std::rc::Rc;
 
@@ -11,6 +12,7 @@ use hwc_formats::GameData;
 use hwc_ui::canvas::Canvas;
 use hwc_ui::ingame::host::*;
 use hwc_ui::ingame::mock::MockHost;
+use hwc_ui::ingame::modern_hud;
 use hwc_ui::ingame::modern_objectives::{self, EXPANDED_KEY};
 use hwc_ui::ingame::{InGameUi, InputEvent, Manager, Setup};
 use hwc_ui::options::Options;
@@ -81,7 +83,7 @@ fn host() -> MockHost {
     host
 }
 
-fn shot(ui: &mut InGameUi, size: (i32, i32), name: &str) {
+fn shot(ui: &mut InGameUi, size: (i32, i32), name: &str) -> Canvas {
     let mut canvas = Canvas::new(size.0, size.1);
     // A bright nebula-like stand-in for the 3D view, to check readability.
     for y in 0..size.1 {
@@ -94,7 +96,7 @@ fn shot(ui: &mut InGameUi, size: (i32, i32), name: &str) {
     }
     ui.draw(&mut canvas);
     let Some(dir) = std::env::var_os("HWC_SCREENSHOTS") else {
-        return;
+        return canvas;
     };
     let dir = if std::path::Path::new(&dir).is_dir() {
         std::path::PathBuf::from(dir).join("hud")
@@ -103,6 +105,7 @@ fn shot(ui: &mut InGameUi, size: (i32, i32), name: &str) {
     };
     std::fs::create_dir_all(&dir).unwrap();
     canvas.save_png(&dir.join(format!("{name}.png"))).unwrap();
+    canvas
 }
 
 fn run(size: (i32, i32), tag: &str) {
@@ -177,6 +180,229 @@ fn run(size: (i32, i32), tag: &str) {
     });
     frame(&mut ui, &mut host);
     shot(&mut ui, size, &format!("objectives_new_{tag}"));
+    ui.subtitle_top(HudTop {
+        drawn: true,
+        portrait_bottom: None,
+    });
+    // The slide back up happens as the overlay draws.
+    let mut canvas = Canvas::new(size.0, size.1);
+    for _ in 0..400 {
+        if ui.state().overlay.top == 0 {
+            break;
+        }
+        frame(&mut ui, &mut host);
+        ui.draw(&mut canvas);
+    }
+    assert_eq!(ui.state().overlay.top, 0, "back up after the portrait");
+
+    // The script marks one objective complete and destroys another: both stay listed, greyed
+    // out, in the game's order; the destroyed one is no longer clickable, the hyperspace
+    // entry still is.
+    host.objectives[2].complete = true;
+    let destroyed = host.objectives.remove(0);
+    frame(&mut ui, &mut host);
+    let view = ui.state().view.clone();
+    let p = modern_objectives::panel(&ui.fe, size.0, size.1, &view).unwrap();
+    assert_eq!(p.items.len(), 5);
+    assert_eq!(p.items[0].lines[0].text, destroyed.text);
+    assert!(p.items[0].complete && p.items[0].live.is_none());
+    assert!(
+        p.items[1].complete,
+        "the mock's harvest objective is complete"
+    );
+    assert!(p.items[2].complete && p.items[2].live == Some(1));
+    assert!(!p.items[3].complete, "the hyperspace entry");
+    assert!(!p.items[4].complete);
+    let mouse = (size.0 / 2, size.1 / 2);
+    ui.handle_input(
+        &host,
+        InputEvent::MouseMove {
+            x: mouse.0,
+            y: mouse.1,
+        },
+    );
+    let c = shot(&mut ui, size, &format!("objectives_completed_{tag}"));
+    // The filled diamond of the destroyed one: grey, not gold.
+    let (mx, my) = p.items[0].marker;
+    let d = c.get(mx as i32, my as i32);
+    assert!(d[0].abs_diff(d[2]) < 40 && d[0] > 100, "{d:?}");
+    let r = p.items[0].rect;
+    click_at(&mut ui, &mut host, r.x0 + 40, (r.y0 + r.y1) / 2);
+    assert_eq!(
+        ui.manager(),
+        None,
+        "a destroyed objective opened the objectives screen"
+    );
+    let r = p.items[3].rect;
+    let out = click_at(&mut ui, &mut host, r.x0 + 40, (r.y0 + r.y1) / 2);
+    assert!(out.iter().any(|r| format!("{r:?}").contains("Hyperspace")));
+
+    // The resources panel folds from its header and remembers it.
+    let view = ui.state().view.clone();
+    let l = modern_hud::panel(&ui.fe, size.0, size.1, &view);
+    assert!(l.expanded, "the resources panel starts expanded");
+    let full = l.header;
+    click_at(
+        &mut ui,
+        &mut host,
+        full.x0 + full.height(),
+        (full.y0 + full.y1) / 2,
+    );
+    assert!(!ui.fe.game.options.get_bool(modern_hud::EXPANDED_KEY));
+    let view = ui.state().view.clone();
+    let f = modern_hud::panel(&ui.fe, size.0, size.1, &view);
+    assert!(!f.expanded && f.header.x1 == full.x1 && f.header.x0 > full.x0);
+    ui.handle_input(
+        &host,
+        InputEvent::MouseMove {
+            x: mouse.0,
+            y: mouse.1,
+        },
+    );
+    shot(&mut ui, size, &format!("resources_collapsed_{tag}"));
+    click_at(
+        &mut ui,
+        &mut host,
+        f.header.x0 + f.header.height(),
+        (f.header.y0 + f.header.y1) / 2,
+    );
+    assert!(ui.fe.game.options.get_bool(modern_hud::EXPANDED_KEY));
+    ui.handle_input(
+        &host,
+        InputEvent::MouseMove {
+            x: mouse.0,
+            y: mouse.1,
+        },
+    );
+    shot(&mut ui, size, &format!("resources_expanded_{tag}"));
+}
+
+/// Both panels stay up over the build manager, clear of its frame, drawn over it; a click on
+/// a header folds the panel for as long as the manager is open, and does not reach the
+/// manager.
+fn over_build_manager(size: (i32, i32), tag: &str) {
+    let Some(src) = source() else { return };
+    let mut ui = ui(src, size);
+    let mut host = host();
+    frame(&mut ui, &mut host);
+    ui.open(&host, Manager::Construction);
+    for _ in 0..10 {
+        frame(&mut ui, &mut host);
+    }
+    assert_eq!(ui.manager(), Some(Manager::Construction));
+    let view = ui.state().view.clone();
+    let content = modern_hud::manager_content(size.0, size.1);
+    let res = modern_hud::panel(&ui.fe, size.0, size.1, &view);
+    let objs = modern_objectives::panel(&ui.fe, size.0, size.1, &view).unwrap();
+    assert!(
+        !modern_hud::overlaps(res.panel, content),
+        "{:?} {content:?}",
+        res.panel
+    );
+    assert!(
+        !modern_hud::overlaps(objs.panel, content),
+        "{:?} {content:?}",
+        objs.panel
+    );
+    let before = modern_hud::drawn_count();
+    let c = shot(&mut ui, size, &format!("build_manager_{tag}"));
+    assert!(
+        modern_hud::drawn_count() > before,
+        "the readout is hidden by the manager"
+    );
+    if res.expanded {
+        let p = c.get(res.panel.x0 + 1, res.panel.y1 - 3);
+        assert_eq!(p, modern_objectives::ACCENT, "the accent strip is drawn");
+    }
+    let p = c.get(objs.header.x0 + 1, objs.header.y0 + 3);
+    assert_eq!(
+        p,
+        modern_objectives::ACCENT,
+        "the objectives panel is drawn"
+    );
+
+    // A header click folds the panel over the manager only; the manager stays open.
+    let h = res.header;
+    click_at(&mut ui, &mut host, h.x0 + h.height(), (h.y0 + h.y1) / 2);
+    assert_eq!(ui.manager(), Some(Manager::Construction));
+    assert!(
+        ui.fe.game.options.get_bool(modern_hud::EXPANDED_KEY),
+        "not saved"
+    );
+    let view = ui.state().view.clone();
+    let folded = modern_hud::panel(&ui.fe, size.0, size.1, &view);
+    assert_eq!(folded.expanded, !res.expanded);
+    let h = objs.header;
+    click_at(&mut ui, &mut host, h.x0 + 40, (h.y0 + h.y1) / 2);
+    assert_eq!(ui.manager(), Some(Manager::Construction));
+    assert!(ui.fe.game.options.get_bool(EXPANDED_KEY), "not saved");
+    let view = ui.state().view.clone();
+    let o = modern_objectives::panel(&ui.fe, size.0, size.1, &view).unwrap();
+    assert_eq!(o.expanded, !objs.expanded);
+    // The manager still takes clicks elsewhere: its keys close it, and the folds go back to
+    // the options file's.
+    ui.handle_input(&host, InputEvent::KeyDown(27));
+    frame(&mut ui, &mut host);
+    ui.handle_input(&host, InputEvent::KeyUp(27));
+    frame(&mut ui, &mut host);
+    assert_eq!(ui.manager(), None);
+    let view = ui.state().view.clone();
+    assert!(modern_hud::panel(&ui.fe, size.0, size.1, &view).expanded);
+    assert!(
+        modern_objectives::panel(&ui.fe, size.0, size.1, &view)
+            .unwrap()
+            .expanded
+    );
+
+    // In a cutscene (the letterbox, fleet intel) the panels hide over the manager too.
+    ui.open(&host, Manager::Construction);
+    frame(&mut ui, &mut host);
+    ui.letterboxed = true;
+    let before = modern_hud::drawn_count();
+    let mut canvas = Canvas::new(size.0, size.1);
+    ui.draw(&mut canvas);
+    assert_eq!(modern_hud::drawn_count(), before, "drawn in a cutscene");
+}
+
+#[test]
+fn panels_over_the_build_manager_1080p() {
+    over_build_manager((1920, 1080), "1920x1080");
+}
+
+#[test]
+fn panels_over_the_build_manager_768() {
+    over_build_manager((1024, 768), "1024x768");
+}
+
+/// At 640x480 the expanded panels would cover the manager's frame: they fold by themselves
+/// while it is open, and unfold from their headers.
+#[test]
+fn panels_fold_over_the_build_manager_640() {
+    let size = (640, 480);
+    let Some(src) = source() else { return };
+    let mut ui = ui(src, size);
+    let mut host = host();
+    frame(&mut ui, &mut host);
+    let view = ui.state().view.clone();
+    assert!(modern_hud::panel(&ui.fe, size.0, size.1, &view).expanded);
+    ui.open(&host, Manager::Construction);
+    frame(&mut ui, &mut host);
+    let view = ui.state().view.clone();
+    let res = modern_hud::panel(&ui.fe, size.0, size.1, &view);
+    let objs = modern_objectives::panel(&ui.fe, size.0, size.1, &view).unwrap();
+    assert!(!res.expanded && !objs.expanded, "folded over the manager");
+    let content = modern_hud::manager_content(size.0, size.1);
+    assert!(!modern_hud::overlaps(res.panel, content));
+    assert!(!modern_hud::overlaps(objs.panel, content));
+    shot(&mut ui, size, "build_manager_640x480");
+    let h = res.header;
+    click_at(&mut ui, &mut host, h.x0 + h.height(), (h.y0 + h.y1) / 2);
+    let view = ui.state().view.clone();
+    assert!(
+        modern_hud::panel(&ui.fe, size.0, size.1, &view).expanded,
+        "unfolded on demand"
+    );
+    assert_eq!(ui.manager(), Some(Manager::Construction));
 }
 
 #[test]

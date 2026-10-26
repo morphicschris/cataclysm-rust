@@ -43,6 +43,6 @@ pub use mesh::{mesh_to_world, Skeleton};
 pub use nebula::NebulaRenderer;
 pub use nis_sun::NisSunFlare;
 pub use quality::{RenderPlan, RenderQuality};
-pub use render_state::ShipRenderState;
+pub use render_state::{ConstructionState, ShipRenderState};
 
 pub use wgpu;

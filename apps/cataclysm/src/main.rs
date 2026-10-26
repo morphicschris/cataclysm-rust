@@ -7,6 +7,8 @@ mod app;
 mod audio;
 mod bandbox;
 #[cfg(test)]
+mod build_shots;
+#[cfg(test)]
 mod campaign_shots;
 mod crash;
 mod data;

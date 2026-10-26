@@ -150,6 +150,8 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     ("hwcModernHud", 1),
     // The modern objectives panel: 1 expanded, 0 collapsed (its header toggles it).
     ("hwcObjectivesExpanded", 1),
+    // The modern resources panel (RU / SU / time, top right): 1 expanded, 0 collapsed.
+    ("hwcResourcesExpanded", 1),
     // Registry values.
     ("deviceIndex", -1),
     ("screenWidth", 640),

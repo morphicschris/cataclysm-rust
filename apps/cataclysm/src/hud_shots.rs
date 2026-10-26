@@ -169,7 +169,7 @@ fn in_mission(size: (i32, i32), tag: &str) {
         ru_fill_on_canvas(g.canvas()),
         "the RU bar is not drawn at {tag}"
     );
-    // Spend 400 RUs: the bar dips and "−400" floats up.
+    // Spend 400 RUs: the bar eases down.
     g.world.universe_mut().base.players[0].resource_units -= 400;
     for _ in 0..5 {
         rig.frame(g);
@@ -217,7 +217,9 @@ fn in_mission(size: (i32, i32), tag: &str) {
         modern_objectives::panel(&g.ui.fe, size.0, size.1, &view).map(|p| (p.header, p.expanded))
     };
     let mut n = 0;
-    while (header(g).is_none() || boxed(g)) && n < 16 * 600 {
+    // The objective put in above stays listed (destroyed: greyed out); wait for the game's own.
+    let none_live = |g: &Game| g.ui.state().view.objectives.is_empty();
+    while (header(g).is_none() || none_live(g) || boxed(g)) && n < 16 * 600 {
         rig.frame(g);
         n += 1;
     }

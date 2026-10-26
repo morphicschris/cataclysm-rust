@@ -26,7 +26,7 @@ use hwc_math::timing::{TaskTicker, TIMER_RESOLUTION};
 use hwc_render::assets::{load_mad_clip, mothership_modules, read_script, AssetSource};
 use hwc_render::effects::{EffectBatch, Line as FxLine, Sprite, FULL_UV};
 use hwc_render::lod::{screen_radius, LodKind, LodSelector, LodTable};
-use hwc_render::render_state::{normalized_team_color, ShipTint, TintParams};
+use hwc_render::render_state::{normalized_team_color, CollisionBox, ConstructionState, ShipTint, TintParams};
 use hwc_render::trails::{
     ShipTrailDef, ShipTrails, TeamTrailColors, TrailFrame, TrailGate, TrailTick, TrailTweaks,
 };
@@ -171,6 +171,8 @@ struct Item {
     clip: Option<Vec4>,
     tint: TintParams,
     time: f32,
+    /// Under external construction: the build progress and the mesh-space collision box.
+    construction: Option<ConstructionState>,
 }
 
 /// The mission's universe and everything needed to draw it.
@@ -1235,6 +1237,7 @@ impl World {
             let tint = fx
                 .tint
                 .params(team_color, fx.trails.engine_glow_levels(&self.trail_tweaks));
+            let construction = st.and_then(|st| construction_state(s, &st.header.coll));
             frame.items.push(Item {
                 kind: ItemKind::Ship(t, s.color_scheme),
                 transform,
@@ -1243,6 +1246,7 @@ impl World {
                 clip,
                 tint,
                 time: now,
+                construction,
             });
             frame.poses.push(pose);
             let mesh = art
@@ -1277,6 +1281,7 @@ impl World {
                 clip: None,
                 tint: TintParams::default(),
                 time: now,
+                construction: None,
             });
             frame.poses.push(None);
             frame.ids.push((None, false));
@@ -1456,6 +1461,7 @@ impl World {
                 clip_plane: item.clip,
                 tint: item.tint,
                 time: item.time,
+                construction: item.construction,
                 ..Default::default()
             });
         }
@@ -1694,6 +1700,21 @@ fn clamp_host(level: &LevelState, s: &hwc_sim::Ship) -> Option<ShipId> {
             .iter()
             .find(|(m, _)| *m == s.id)
             .map(|(_, h)| *h)
+    })
+}
+
+/// The construction state of a ship flagged as under external construction
+/// (`rndSetupShipFadeState`): its build progress and its collision box in mesh space.
+fn construction_state(s: &hwc_sim::Ship, coll: &hwc_sim::statics::header::StaticCollInfo) -> Option<ConstructionState> {
+    if s.special_flags2 & hwc_sim::base::special2::UNDER_CONSTRUCTION == 0 {
+        return None;
+    }
+    Some(ConstructionState {
+        progress: s.base.build_progress,
+        collision_box: CollisionBox {
+            corner: v3(coll.coll_rect_offset),
+            extent: Vec3::new(coll.up_length, coll.right_length, coll.forward_length),
+        },
     })
 }
 
