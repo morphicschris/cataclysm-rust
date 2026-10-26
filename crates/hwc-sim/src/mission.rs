@@ -408,7 +408,7 @@ pub struct Game {
     /// ships in hyperspace); see [`crate::campaign`].
     pub hyper: crate::campaign::HyperState,
     /// Label names for the log (team labels from the level, names from the mission IR).
-    pub names: std::collections::HashMap<Hash, String>,
+    pub names: std::collections::BTreeMap<Hash, String>,
     pub log: Vec<LogEntry>,
     pub(crate) frame: u32,
     pub(crate) time: f32,
@@ -963,7 +963,7 @@ pub(crate) fn empty_game(config: MissionConfig) -> Game {
         ships_have_arrived: false,
         pending_nis: None,
         hyper: crate::campaign::HyperState::default(),
-        names: std::collections::HashMap::new(),
+        names: std::collections::BTreeMap::new(),
         log: Vec::new(),
         frame: 0,
         time: 0.0,

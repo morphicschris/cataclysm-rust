@@ -2,7 +2,7 @@
 //! extracted copy of it. Lookups follow the engine: ASCII case is ignored and `\` and `/` are
 //! interchangeable.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use hwc_formats::big::{normalize_name, BigArchive};
@@ -31,13 +31,13 @@ impl DataSource for BigArchive {
 #[derive(Debug, Clone)]
 pub struct DirSource {
     root: PathBuf,
-    files: HashMap<String, PathBuf>,
+    files: BTreeMap<String, PathBuf>,
 }
 
 impl DirSource {
     pub fn new(root: impl AsRef<Path>) -> std::io::Result<Self> {
         let root = root.as_ref().to_path_buf();
-        let mut files = HashMap::new();
+        let mut files = BTreeMap::new();
         let mut stack = vec![root.clone()];
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir)? {

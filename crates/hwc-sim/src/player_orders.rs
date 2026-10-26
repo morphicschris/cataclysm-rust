@@ -357,10 +357,10 @@ pub fn special_menu(u: &Universe, player: usize, selection: &[ShipId], targets: 
     let tg = command_availability(u, player, targets);
     let untargeted = targets.is_empty();
     let fits = |i: usize| untargeted || tg[i];
-    let mut on = std::collections::HashSet::new();
+    let mut on = Vec::new();
     let mut set = |c: bool, i: I| {
         if c {
-            on.insert(i);
+            on.push(i);
         }
     };
     set(a[HARVEST] && fits(RESOURCE), I::Harvest);

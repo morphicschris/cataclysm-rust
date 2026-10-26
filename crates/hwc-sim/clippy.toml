@@ -1,0 +1,7 @@
+# Hashed std collections iterate in a per-process order (RandomState); the simulation must
+# be deterministic, so it uses ordered collections (see tests/determinism.rs).
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is seeded per process; use BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order is seeded per process; use BTreeSet or Vec" },
+    { path = "std::collections::hash_map::RandomState", reason = "seeded per process" },
+]

@@ -19,21 +19,23 @@ struct Data {
     tweaks: SimTweaks,
 }
 
+/// Loads the static world and the tweaks afresh from the game data.
+fn load() -> Option<Data> {
+    let src: Box<dyn DataSource> = if let Ok(dir) = std::env::var("HWC_EXTRACTED_DIR") {
+        Box::new(DirSource::new(dir).ok()?)
+    } else if let Ok(dir) = std::env::var("HWC_GAME_DIR") {
+        Box::new(BigArchive::open(std::path::Path::new(&dir).join("cataclysm.big")).ok()?)
+    } else {
+        return None;
+    };
+    let statics = Arc::new(StaticWorld::load_from(src.as_ref(), LoadOptions::default()));
+    let tweaks = SimTweaks::load(src.as_ref());
+    Some(Data { statics, tweaks })
+}
+
 fn data() -> Option<&'static Data> {
     static DATA: OnceLock<Option<Data>> = OnceLock::new();
-    DATA.get_or_init(|| {
-        let src: Box<dyn DataSource> = if let Ok(dir) = std::env::var("HWC_EXTRACTED_DIR") {
-            Box::new(DirSource::new(dir).ok()?)
-        } else if let Ok(dir) = std::env::var("HWC_GAME_DIR") {
-            Box::new(BigArchive::open(std::path::Path::new(&dir).join("cataclysm.big")).ok()?)
-        } else {
-            return None;
-        };
-        let statics = Arc::new(StaticWorld::load_from(src.as_ref(), LoadOptions::default()));
-        let tweaks = SimTweaks::load(src.as_ref());
-        Some(Data { statics, tweaks })
-    })
-    .as_ref()
+    DATA.get_or_init(load).as_ref()
 }
 
 /// What one formation attack did, sampled every update once the formation reached its target.
@@ -55,6 +57,8 @@ struct Sampled {
     holding: usize,
     /// After the end: the slot error once the ships have settled.
     settled_error: Option<f32>,
+    /// The world hash after every update.
+    hashes: Vec<u64>,
 }
 
 impl Sampled {
@@ -68,7 +72,10 @@ impl Sampled {
 /// Six ships of `ship_type` in `formation_type` with `tac` tactics attack a target that cannot
 /// be killed until `kill_at` (then it dies), for `ticks` updates.
 fn attack(ship_type: ShipType, formation_type: u32, tac: usize, ticks: u32, kill_at: Option<u32>) -> Option<Sampled> {
-    let d = data()?;
+    attack_with(data()?, ship_type, formation_type, tac, ticks, kill_at)
+}
+
+fn attack_with(d: &Data, ship_type: ShipType, formation_type: u32, tac: usize, ticks: u32, kill_at: Option<u32>) -> Option<Sampled> {
     let n = 6;
     let mut spawns: Vec<Spawn> = (0..n).map(|i| Spawn { ship_type, player: 0, position: Vector::new(-12000.0, i as f32 * 250.0, 0.0) }).collect();
     spawns.push(Spawn { ship_type: ShipType::tResourceCollector, player: 1, position: Vector::new(8000.0, 0.0, 0.0) });
@@ -96,7 +103,7 @@ fn attack(ship_type: ShipType, formation_type: u32, tac: usize, ticks: u32, kill
             // Out of reach of the attack until it is meant to die.
             t.health = if kill_at.is_some_and(|k| tick >= k) { 0.5 } else { 1.0e9 };
         }
-        run.step();
+        s.hashes.push(run.step());
         if tick < 100 {
             continue;
         }
@@ -242,3 +249,37 @@ fn each_formation_type_attacks_in_formation() {
     }
 }
 
+
+/// The scripts the formation attack depends on were read: `holdFormationDuringBattle` is 0 for
+/// evasive and 1 for neutral and aggressive leaders. Every other test here fails in a
+/// confusing way (formations break up as if evasive) when it is not.
+#[test]
+fn tactics_script_holds_formations_for_neutral_and_aggressive() {
+    let Some(d) = data() else { return };
+    assert_eq!(d.tweaks.combat.hold_formation_during_battle, [0, 1, 1], "holdFormationDuringBattle[Evasive, Neutral, Aggressive] from Tactics.script");
+}
+
+/// Determinism: the same formation attack, run twice in one process from the same data and
+/// once more from data loaded afresh, gives the same world hash after every update (nothing
+/// in the load or the update depends on hashing, addresses, globals or earlier runs). With
+/// `HWC_PRINT` the final hash is printed so separate builds (`-p hwc-sim`, `--workspace`,
+/// `-p cataclysm -p hwc-sim`) can be compared.
+#[test]
+fn formation_attack_is_reproducible() {
+    let Some(d) = data() else { return };
+    let ticks = 16 * 70;
+    let a = attack_with(d, ShipType::sAcolyte, kind::DELTA, tactics::NEUTRAL, ticks, Some(16 * 40)).expect("run");
+    let b = attack_with(d, ShipType::sAcolyte, kind::DELTA, tactics::NEUTRAL, ticks, Some(16 * 40)).expect("run");
+    let fresh = load().expect("data");
+    let c = attack_with(&fresh, ShipType::sAcolyte, kind::DELTA, tactics::NEUTRAL, ticks, Some(16 * 40)).expect("run");
+    assert!(!a.hashes.is_empty());
+    for (other, what) in [(&b, "second run"), (&c, "run from freshly loaded data")] {
+        assert_eq!(a.hashes.len(), other.hashes.len(), "{what}: same number of updates");
+        if let Some(t) = a.hashes.iter().zip(&other.hashes).position(|(x, y)| x != y) {
+            panic!("{what}: world hash differs from update {t} ({:016x} vs {:016x})", a.hashes[t], other.hashes[t]);
+        }
+    }
+    if std::env::var("HWC_PRINT").is_ok() {
+        println!("formation attack world hash after {} updates: {:016x}", a.hashes.len(), a.hashes.last().unwrap());
+    }
+}

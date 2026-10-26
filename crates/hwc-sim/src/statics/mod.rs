@@ -22,7 +22,7 @@ pub mod source;
 pub mod teams;
 pub mod tweaks;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use hwc_formats::big::{normalize_name, BigArchive};
@@ -78,7 +78,7 @@ pub(crate) struct Loader<'a> {
     pub opts: LoadOptions,
     pub default_lod: Option<Arc<LodInfo>>,
     pub default_mex: Option<Arc<Mex>>,
-    mex_cache: HashMap<String, Arc<Mex>>,
+    mex_cache: BTreeMap<String, Arc<Mex>>,
     pub warnings: Vec<String>,
 }
 
@@ -90,7 +90,7 @@ impl<'a> Loader<'a> {
             opts,
             default_lod: None,
             default_mex: None,
-            mex_cache: HashMap::new(),
+            mex_cache: BTreeMap::new(),
             warnings: Vec::new(),
         };
         ld.default_lod = LodInfo::load(src, "DefaultShip\\", "DefaultShip.lod").map(Arc::new);
