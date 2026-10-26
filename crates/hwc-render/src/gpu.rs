@@ -247,6 +247,33 @@ pub struct Renderer {
     linear_sampler: wgpu::Sampler,
     nearest_sampler: wgpu::Sampler,
     white: wgpu::TextureView,
+    kit: PipelineKit,
+    pipes: Pipelines,
+    /// MSAA samples the pipelines are built for (1: none).
+    sample_count: u32,
+    /// Sample counts the adapter supports for the colour and depth formats.
+    msaa_support: Vec<u32>,
+    nav_buffer: DynamicBuffer,
+    effect_buffer: DynamicBuffer,
+    screen_buffer: DynamicBuffer,
+    line_buffer: DynamicBuffer,
+    effect_textures: Vec<wgpu::BindGroup>,
+    glow_meshes: Vec<Option<(wgpu::Buffer, u32)>>,
+}
+
+/// What the scene pipelines are built from, kept so they can be rebuilt for another sample
+/// count ([`Renderer::set_sample_count`]).
+struct PipelineKit {
+    shader: wgpu::ShaderModule,
+    ship_layout: wgpu::PipelineLayout,
+    glow_layout: wgpu::PipelineLayout,
+    sky_layout: wgpu::PipelineLayout,
+    sprite_pipeline_layout: wgpu::PipelineLayout,
+    color_format: wgpu::TextureFormat,
+}
+
+/// The scene pipelines for one sample count.
+struct Pipelines {
     /// Indexed by `two_sided as usize | (blended as usize) << 1`.
     ship_pipelines: Vec<wgpu::RenderPipeline>,
     sky_pipeline: wgpu::RenderPipeline,
@@ -257,12 +284,246 @@ pub struct Renderer {
     effect_pipelines: [wgpu::RenderPipeline; 2],
     screen_pipelines: [wgpu::RenderPipeline; 2],
     line_pipelines: [wgpu::RenderPipeline; 2],
-    nav_buffer: DynamicBuffer,
-    effect_buffer: DynamicBuffer,
-    screen_buffer: DynamicBuffer,
-    line_buffer: DynamicBuffer,
-    effect_textures: Vec<wgpu::BindGroup>,
-    glow_meshes: Vec<Option<(wgpu::Buffer, u32)>>,
+}
+
+impl PipelineKit {
+    fn build(&self, device: &wgpu::Device, samples: u32) -> Pipelines {
+        let shader = &self.shader;
+        let color_format = self.color_format;
+        let (ship_layout, glow_layout, sky_layout, sprite_pipeline_layout) = (
+            &self.ship_layout,
+            &self.glow_layout,
+            &self.sky_layout,
+            &self.sprite_pipeline_layout,
+        );
+        let multisample = wgpu::MultisampleState {
+            count: samples,
+            ..Default::default()
+        };
+        let ship_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<ShipVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+        };
+        let tint_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<TintVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![3 => Uint32x2],
+        };
+        let glow_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<GlowVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+        };
+        let sky_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<SkyVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+        };
+        let sprite_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<SpriteVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![
+                0 => Float32x3, 1 => Float32x2, 2 => Float32x2, 3 => Float32x4, 4 => Float32x2
+            ],
+        };
+        let effect_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<EffectGpuVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x2],
+        };
+        let line_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<LineGpuVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![
+                0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x3
+            ],
+        };
+
+        let alpha_blend = wgpu::BlendState::ALPHA_BLENDING;
+        let additive = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::SrcAlpha,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        };
+        let blends = [additive, alpha_blend];
+
+        struct Spec<'a> {
+            label: &'a str,
+            layout: &'a wgpu::PipelineLayout,
+            vs: &'a str,
+            fs: &'a str,
+            vertex: Vec<Option<wgpu::VertexBufferLayout<'a>>>,
+            cull: Option<wgpu::Face>,
+            blend: Option<wgpu::BlendState>,
+            depth_test: bool,
+            depth_write: bool,
+        }
+        let build = |s: Spec<'_>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(s.label),
+                layout: Some(s.layout),
+                vertex: wgpu::VertexState {
+                    module: shader,
+                    entry_point: Some(s.vs),
+                    compilation_options: Default::default(),
+                    buffers: &s.vertex,
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: s.cull,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(s.depth_write),
+                    depth_compare: Some(if s.depth_test {
+                        wgpu::CompareFunction::Less
+                    } else {
+                        wgpu::CompareFunction::Always
+                    }),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample,
+                fragment: Some(wgpu::FragmentState {
+                    module: shader,
+                    entry_point: Some(s.fs),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: color_format,
+                        blend: s.blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        let ship_pipelines = (0..4)
+            .map(|i| {
+                let two_sided = i & 1 != 0;
+                let blended = i & 2 != 0;
+                build(Spec {
+                    label: "ship",
+                    layout: ship_layout,
+                    vs: "vs_ship",
+                    fs: "fs_ship",
+                    vertex: vec![
+                        Some(ship_vertex_layout.clone()),
+                        Some(tint_vertex_layout.clone()),
+                    ],
+                    cull: (!two_sided).then_some(wgpu::Face::Back),
+                    blend: blended.then_some(alpha_blend),
+                    depth_test: true,
+                    depth_write: true,
+                })
+            })
+            .collect();
+        let sky_pipeline = build(Spec {
+            label: "sky",
+            layout: sky_layout,
+            vs: "vs_sky",
+            fs: "fs_sky",
+            vertex: vec![Some(sky_vertex_layout)],
+            cull: None,
+            blend: None,
+            depth_test: false,
+            depth_write: false,
+        });
+        let star_pipeline = build(Spec {
+            label: "stars",
+            layout: sprite_pipeline_layout,
+            vs: "vs_star",
+            fs: "fs_sprite",
+            vertex: vec![Some(sprite_vertex_layout.clone())],
+            cull: None,
+            blend: Some(additive),
+            depth_test: false,
+            depth_write: false,
+        });
+        let billboard_pipeline = build(Spec {
+            label: "billboards",
+            layout: sprite_pipeline_layout,
+            vs: "vs_billboard",
+            fs: "fs_sprite",
+            vertex: vec![Some(sprite_vertex_layout)],
+            cull: None,
+            blend: Some(additive),
+            depth_test: true,
+            depth_write: false,
+        });
+        let glow_pipeline = build(Spec {
+            label: "engine glow",
+            layout: glow_layout,
+            vs: "vs_glow",
+            fs: "fs_glow",
+            vertex: vec![Some(glow_vertex_layout)],
+            cull: Some(wgpu::Face::Back),
+            blend: Some(additive),
+            depth_test: true,
+            depth_write: false,
+        });
+        let effect_pipelines = blends.map(|blend| {
+            build(Spec {
+                label: "effects",
+                layout: sprite_pipeline_layout,
+                vs: "vs_effect",
+                fs: "fs_effect",
+                vertex: vec![Some(effect_vertex_layout.clone())],
+                cull: None,
+                blend: Some(blend),
+                depth_test: true,
+                depth_write: false,
+            })
+        });
+        let screen_pipelines = blends.map(|blend| {
+            build(Spec {
+                label: "screen effects",
+                layout: sprite_pipeline_layout,
+                vs: "vs_screen",
+                fs: "fs_effect",
+                vertex: vec![Some(effect_vertex_layout.clone())],
+                cull: None,
+                blend: Some(blend),
+                depth_test: false,
+                depth_write: false,
+            })
+        });
+        let line_pipelines = blends.map(|blend| {
+            build(Spec {
+                label: "lines",
+                layout: sprite_pipeline_layout,
+                vs: "vs_line",
+                fs: "fs_effect",
+                vertex: vec![Some(line_vertex_layout.clone())],
+                cull: None,
+                blend: Some(blend),
+                depth_test: true,
+                depth_write: false,
+            })
+        });
+
+        Pipelines {
+            ship_pipelines,
+            sky_pipeline,
+            star_pipeline,
+            billboard_pipeline,
+            glow_pipeline,
+            effect_pipelines,
+            screen_pipelines,
+            line_pipelines,
+        }
+    }
 }
 
 fn mat(m: Mat4) -> [[f32; 4]; 4] {
@@ -463,219 +724,15 @@ impl Renderer {
                 immediate_size: 0,
             });
 
-        let ship_vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<ShipVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+        let kit = PipelineKit {
+            shader,
+            ship_layout,
+            glow_layout,
+            sky_layout,
+            sprite_pipeline_layout,
+            color_format,
         };
-        let tint_vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<TintVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![3 => Uint32x2],
-        };
-        let glow_vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<GlowVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
-        };
-        let sky_vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<SkyVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
-        };
-        let sprite_vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<SpriteVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![
-                0 => Float32x3, 1 => Float32x2, 2 => Float32x2, 3 => Float32x4, 4 => Float32x2
-            ],
-        };
-        let effect_vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<EffectGpuVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x2],
-        };
-        let line_vertex_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<LineGpuVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![
-                0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32x3
-            ],
-        };
-
-        let alpha_blend = wgpu::BlendState::ALPHA_BLENDING;
-        let additive = wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::SrcAlpha,
-                dst_factor: wgpu::BlendFactor::One,
-                operation: wgpu::BlendOperation::Add,
-            },
-            alpha: wgpu::BlendComponent {
-                src_factor: wgpu::BlendFactor::Zero,
-                dst_factor: wgpu::BlendFactor::One,
-                operation: wgpu::BlendOperation::Add,
-            },
-        };
-        let blends = [additive, alpha_blend];
-
-        struct Spec<'a> {
-            label: &'a str,
-            layout: &'a wgpu::PipelineLayout,
-            vs: &'a str,
-            fs: &'a str,
-            vertex: Vec<Option<wgpu::VertexBufferLayout<'a>>>,
-            cull: Option<wgpu::Face>,
-            blend: Option<wgpu::BlendState>,
-            depth_test: bool,
-            depth_write: bool,
-        }
-        let build = |s: Spec<'_>| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(s.label),
-                layout: Some(s.layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some(s.vs),
-                    compilation_options: Default::default(),
-                    buffers: &s.vertex,
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: s.cull,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: Some(s.depth_write),
-                    depth_compare: Some(if s.depth_test {
-                        wgpu::CompareFunction::Less
-                    } else {
-                        wgpu::CompareFunction::Always
-                    }),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some(s.fs),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: color_format,
-                        blend: s.blend,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-
-        let ship_pipelines = (0..4)
-            .map(|i| {
-                let two_sided = i & 1 != 0;
-                let blended = i & 2 != 0;
-                build(Spec {
-                    label: "ship",
-                    layout: &ship_layout,
-                    vs: "vs_ship",
-                    fs: "fs_ship",
-                    vertex: vec![
-                        Some(ship_vertex_layout.clone()),
-                        Some(tint_vertex_layout.clone()),
-                    ],
-                    cull: (!two_sided).then_some(wgpu::Face::Back),
-                    blend: blended.then_some(alpha_blend),
-                    depth_test: true,
-                    depth_write: true,
-                })
-            })
-            .collect();
-        let sky_pipeline = build(Spec {
-            label: "sky",
-            layout: &sky_layout,
-            vs: "vs_sky",
-            fs: "fs_sky",
-            vertex: vec![Some(sky_vertex_layout)],
-            cull: None,
-            blend: None,
-            depth_test: false,
-            depth_write: false,
-        });
-        let star_pipeline = build(Spec {
-            label: "stars",
-            layout: &sprite_pipeline_layout,
-            vs: "vs_star",
-            fs: "fs_sprite",
-            vertex: vec![Some(sprite_vertex_layout.clone())],
-            cull: None,
-            blend: Some(additive),
-            depth_test: false,
-            depth_write: false,
-        });
-        let billboard_pipeline = build(Spec {
-            label: "billboards",
-            layout: &sprite_pipeline_layout,
-            vs: "vs_billboard",
-            fs: "fs_sprite",
-            vertex: vec![Some(sprite_vertex_layout)],
-            cull: None,
-            blend: Some(additive),
-            depth_test: true,
-            depth_write: false,
-        });
-        let glow_pipeline = build(Spec {
-            label: "engine glow",
-            layout: &glow_layout,
-            vs: "vs_glow",
-            fs: "fs_glow",
-            vertex: vec![Some(glow_vertex_layout)],
-            cull: Some(wgpu::Face::Back),
-            blend: Some(additive),
-            depth_test: true,
-            depth_write: false,
-        });
-        let effect_pipelines = blends.map(|blend| {
-            build(Spec {
-                label: "effects",
-                layout: &sprite_pipeline_layout,
-                vs: "vs_effect",
-                fs: "fs_effect",
-                vertex: vec![Some(effect_vertex_layout.clone())],
-                cull: None,
-                blend: Some(blend),
-                depth_test: true,
-                depth_write: false,
-            })
-        });
-        let screen_pipelines = blends.map(|blend| {
-            build(Spec {
-                label: "screen effects",
-                layout: &sprite_pipeline_layout,
-                vs: "vs_screen",
-                fs: "fs_effect",
-                vertex: vec![Some(effect_vertex_layout.clone())],
-                cull: None,
-                blend: Some(blend),
-                depth_test: false,
-                depth_write: false,
-            })
-        });
-        let line_pipelines = blends.map(|blend| {
-            build(Spec {
-                label: "lines",
-                layout: &sprite_pipeline_layout,
-                vs: "vs_line",
-                fs: "fs_effect",
-                vertex: vec![Some(line_vertex_layout.clone())],
-                cull: None,
-                blend: Some(blend),
-                depth_test: true,
-                depth_write: false,
-            })
-        });
-
+        let pipes = kit.build(device, 1);
         let mut renderer = Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -691,14 +748,10 @@ impl Renderer {
             linear_sampler,
             nearest_sampler,
             white,
-            ship_pipelines,
-            sky_pipeline,
-            star_pipeline,
-            billboard_pipeline,
-            glow_pipeline,
-            effect_pipelines,
-            screen_pipelines,
-            line_pipelines,
+            kit,
+            pipes,
+            sample_count: 1,
+            msaa_support: vec![1, 4],
             nav_buffer: DynamicBuffer::new("nav lights"),
             effect_buffer: DynamicBuffer::new("effects"),
             screen_buffer: DynamicBuffer::new("screen effects"),
@@ -721,6 +774,39 @@ impl Renderer {
 
     pub fn color_format(&self) -> wgpu::TextureFormat {
         self.color_format
+    }
+
+    /// MSAA samples per pixel the scene pipelines draw with (1: no multisampling). Targets
+    /// handed to [`render_ex`](Self::render_ex), [`crate::EffectRenderer::draw`] and
+    /// [`crate::NebulaRenderer::draw`] must have this sample count.
+    pub fn sample_count(&self) -> u32 {
+        self.sample_count
+    }
+
+    /// The sample counts the device can render the scene with (always contains 1). Without
+    /// [`set_msaa_support`](Self::set_msaa_support) this is WebGPU's guaranteed `[1, 4]`.
+    pub fn msaa_support(&self) -> &[u32] {
+        &self.msaa_support
+    }
+
+    /// Records the sample counts the adapter supports (see [`supported_sample_counts`]).
+    pub fn set_msaa_support(&mut self, counts: &[u32]) {
+        let mut v: Vec<u32> = counts.iter().copied().filter(|n| n.is_power_of_two()).collect();
+        v.push(1);
+        v.sort_unstable();
+        v.dedup();
+        self.msaa_support = v;
+    }
+
+    /// Rebuilds the scene pipelines for `samples` per pixel, the nearest supported count at
+    /// or below it; returns the count used.
+    pub fn set_sample_count(&mut self, samples: u32) -> u32 {
+        let n = crate::quality::pick_sample_count(samples, &self.msaa_support);
+        if n != self.sample_count {
+            self.pipes = self.kit.build(&self.device, n);
+            self.sample_count = n;
+        }
+        n
     }
 
     fn object_storage(
@@ -1095,8 +1181,13 @@ impl Renderer {
         }
     }
 
-    /// A depth buffer matching a colour target.
+    /// A depth buffer matching a single-sampled colour target.
     pub fn create_depth(&self, width: u32, height: u32) -> wgpu::TextureView {
+        self.create_depth_samples(width, height, 1)
+    }
+
+    /// A depth buffer with `samples` per pixel.
+    pub fn create_depth_samples(&self, width: u32, height: u32, samples: u32) -> wgpu::TextureView {
         self.device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("depth"),
@@ -1106,7 +1197,7 @@ impl Renderer {
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
-                sample_count: 1,
+                sample_count: samples,
                 dimension: wgpu::TextureDimension::D2,
                 format: DEPTH_FORMAT,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -1459,12 +1550,12 @@ impl Renderer {
 
         if let Some(bg) = scene.background {
             if let Some((buffer, count)) = &bg.sky {
-                pass.set_pipeline(&self.sky_pipeline);
+                pass.set_pipeline(&self.pipes.sky_pipeline);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..*count, 0..1);
             }
             if let Some(stars) = &bg.stars {
-                pass.set_pipeline(&self.star_pipeline);
+                pass.set_pipeline(&self.pipes.star_pipeline);
                 pass.set_vertex_buffer(0, stars.slice(..));
                 for b in &bg.star_batches {
                     pass.set_bind_group(3, &b.bind_group, &[]);
@@ -1488,7 +1579,7 @@ impl Renderer {
                 let offset = ((item.first_slot as usize + b.object) as u64 * OBJECT_STRIDE) as u32;
                 pass.set_bind_group(2, &self.object_bind_group, &[offset]);
                 pass.set_pipeline(
-                    &self.ship_pipelines[usize::from(b.two_sided) | usize::from(blended) << 1],
+                    &self.pipes.ship_pipelines[usize::from(b.two_sided) | usize::from(blended) << 1],
                 );
                 pass.set_bind_group(1, &level.materials[b.material], &[]);
                 pass.draw(b.first_vertex..b.first_vertex + b.vertex_count, 0..1);
@@ -1503,7 +1594,7 @@ impl Renderer {
         }
 
         if let (Some(buffer), false) = (self.nav_buffer.buffer(), nav_draws.is_empty()) {
-            pass.set_pipeline(&self.billboard_pipeline);
+            pass.set_pipeline(&self.pipes.billboard_pipeline);
             pass.set_vertex_buffer(0, buffer.slice(..));
             for (bind_group, first, count) in nav_draws {
                 pass.set_bind_group(3, bind_group, &[]);
@@ -1520,7 +1611,7 @@ impl Renderer {
 
         // Effects.
         if !glow_draws.is_empty() {
-            pass.set_pipeline(&self.glow_pipeline);
+            pass.set_pipeline(&self.pipes.glow_pipeline);
             for (buffer, count, slot) in &glow_draws {
                 pass.set_bind_group(
                     2,
@@ -1552,19 +1643,19 @@ impl Renderer {
         };
         runs(
             &mut pass,
-            &self.effect_pipelines,
+            &self.pipes.effect_pipelines,
             self.effect_buffer.buffer(),
             &tess.world_runs,
         );
         runs(
             &mut pass,
-            &self.line_pipelines,
+            &self.pipes.line_pipelines,
             self.line_buffer.buffer(),
             &tess.line_runs,
         );
         runs(
             &mut pass,
-            &self.screen_pipelines,
+            &self.pipes.screen_pipelines,
             self.screen_buffer.buffer(),
             &tess.screen_runs,
         );
@@ -1676,6 +1767,12 @@ fn push_quad(
 
 /// Creates a device without a window (for screenshots and tests).
 pub fn headless_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
+    headless_device_with_msaa().map(|(d, q, _)| (d, q))
+}
+
+/// [`headless_device`], also giving the MSAA sample counts it can render the scene with
+/// (for [`Renderer::set_msaa_support`]).
+pub fn headless_device_with_msaa() -> Result<(wgpu::Device, wgpu::Queue, Vec<u32>), String> {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -1683,45 +1780,198 @@ pub fn headless_device() -> Result<(wgpu::Device, wgpu::Queue), String> {
         ..Default::default()
     }))
     .map_err(|e| format!("no GPU adapter: {e}"))?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-        .map_err(|e| format!("no GPU device: {e}"))
+    let (device, queue) = request_device(&adapter)?;
+    let counts = crate::quality::supported_sample_counts(&adapter, device.features());
+    Ok((device, queue, counts))
+}
+
+/// Opens `adapter`'s device with the adapter-specific format features when it has them (so
+/// MSAA can use 2 and 8 samples as well as WebGPU's 4).
+pub fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue), String> {
+    let wanted = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+    let desc = wgpu::DeviceDescriptor {
+        required_features: adapter.features() & wanted,
+        ..Default::default()
+    };
+    pollster::block_on(adapter.request_device(&desc)).map_err(|e| format!("no GPU device: {e}"))
 }
 
 /// An offscreen colour + depth target that can be read back as RGBA8.
+///
+/// `width` × `height` is the logical size: the picture read back, the camera's aspect and the
+/// unit of pixel-sized primitives. With [`with_quality`](Self::with_quality) the scene may be
+/// drawn larger or smaller (render scale), with MSAA, filtered by FXAA, and also kept on the
+/// GPU at a larger display size ([`present_view`](Self::present_view)).
 pub struct OffscreenTarget {
     pub width: u32,
     pub height: u32,
-    color: wgpu::Texture,
+    /// The sizes and sample count this target was made for.
+    pub plan: crate::quality::RenderPlan,
+    /// The scene's colour attachment (multisampled with MSAA).
     pub color_view: wgpu::TextureView,
+    /// The scene's depth attachment (same samples as `color_view`).
     pub depth_view: wgpu::TextureView,
+    /// The single-sampled scene colour the MSAA attachment resolves into (MSAA only).
+    resolve_view: Option<wgpu::TextureView>,
+    /// Passes after the scene: resampling to the display size, FXAA, resampling to the logical
+    /// size.
+    post: Vec<crate::quality::PostStep>,
+    /// The finished picture at the display size.
+    present: (wgpu::Texture, wgpu::TextureView),
+    /// The finished picture at the logical size, copied to the CPU.
+    readback: wgpu::Texture,
 }
 
 /// Format used by [`OffscreenTarget`]; build the [`Renderer`] with it.
 pub const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 impl OffscreenTarget {
+    /// A target drawn at its own size with the renderer's sample count.
     pub fn new(renderer: &Renderer, width: u32, height: u32) -> Self {
-        let color = renderer.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("offscreen"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: OFFSCREEN_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let color_view = color.create_view(&Default::default());
+        Self::with_quality(
+            renderer,
+            (width, height),
+            (width, height),
+            crate::quality::RenderQuality::default(),
+        )
+    }
+
+    /// A target for a `logical`-sized picture shown at `present` pixels, drawn with `quality`'s
+    /// scale and FXAA and the renderer's MSAA samples (call [`Renderer::set_sample_count`]
+    /// first). The sizes are limited by [`crate::quality::plan`]; when the budget would need
+    /// fewer samples than the renderer draws, the scale is cut further instead.
+    pub fn with_quality(
+        renderer: &Renderer,
+        logical: (u32, u32),
+        present: (u32, u32),
+        quality: crate::quality::RenderQuality,
+    ) -> Self {
+        use crate::quality::{plan as make_plan, SAMPLE_BUDGET};
+        let device = &renderer.device;
+        let max_dim = device.limits().max_texture_dimension_2d;
+        let n = renderer.sample_count();
+        let mut plan = make_plan(logical, present, quality.scale, n, max_dim, SAMPLE_BUDGET);
+        if plan.samples != n {
+            plan = make_plan(logical, present, quality.scale, 1, max_dim, SAMPLE_BUDGET / u64::from(n));
+            plan.samples = n;
+            plan.limited = true;
+        }
+        let tex = |label: &str, size: (u32, u32), samples: u32, usage: wgpu::TextureUsages| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: samples,
+                dimension: wgpu::TextureDimension::D2,
+                format: OFFSCREEN_FORMAT,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let image = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC;
+        let (scene, resolve) = if plan.samples > 1 {
+            let ms = tex(
+                "offscreen msaa",
+                plan.render,
+                plan.samples,
+                wgpu::TextureUsages::RENDER_ATTACHMENT,
+            );
+            (ms, Some(tex("offscreen resolve", plan.render, 1, image)))
+        } else {
+            (tex("offscreen", plan.render, 1, image), None)
+        };
+        let color_view = scene.create_view(&Default::default());
+        let resolve_view = resolve.as_ref().map(|t| t.create_view(&Default::default()));
+        // The chain of single-sampled pictures after the scene.
+        let mut post = Vec::new();
+        let mut cur = resolve.unwrap_or(scene);
+        let mut cur_size = plan.render;
+        let needs_post = cur_size != plan.present || quality.fxaa || plan.present != plan.logical;
+        let pipes = needs_post.then(|| crate::quality::PostPipelines::new(device, OFFSCREEN_FORMAT));
+        let mut step = |cur: &mut wgpu::Texture, cur_size: &mut (u32, u32), size: (u32, u32), fxaa: bool| {
+            let Some(pipes) = &pipes else { return };
+            let next = tex(
+                if fxaa { "offscreen fxaa" } else { "offscreen resample" },
+                size,
+                1,
+                image,
+            );
+            let src = cur.create_view(&Default::default());
+            post.push(pipes.step(
+                device,
+                &src,
+                *cur_size,
+                next.create_view(&Default::default()),
+                size,
+                fxaa,
+            ));
+            *cur = next;
+            *cur_size = size;
+        };
+        if cur_size != plan.present {
+            step(&mut cur, &mut cur_size, plan.present, false);
+        }
+        if quality.fxaa {
+            step(&mut cur, &mut cur_size, plan.present, true);
+        }
+        let present_tex = cur.clone();
+        if cur_size != plan.logical {
+            step(&mut cur, &mut cur_size, plan.logical, false);
+        }
+        let present_view = present_tex.create_view(&Default::default());
         Self {
-            width,
-            height,
-            color,
+            width: plan.logical.0,
+            height: plan.logical.1,
+            plan,
             color_view,
-            depth_view: renderer.create_depth(width, height),
+            depth_view: renderer.create_depth_samples(plan.render.0, plan.render.1, plan.samples),
+            resolve_view,
+            post,
+            present: (present_tex, present_view),
+            readback: cur,
+        }
+    }
+
+    /// The finished picture at the display size (the plan's `present`), for drawing straight
+    /// to the screen; valid after a render.
+    pub fn present_view(&self) -> &wgpu::TextureView {
+        &self.present.1
+    }
+
+    /// The display-size texture behind [`present_view`](Self::present_view).
+    pub fn present_texture(&self) -> &wgpu::Texture {
+        &self.present.0
+    }
+
+    /// Records the MSAA resolve and the post passes into `encoder`.
+    fn finish(&self, encoder: &mut wgpu::CommandEncoder) {
+        if let Some(resolve) = &self.resolve_view {
+            // An empty pass that only resolves the samples.
+            let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("msaa resolve"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.color_view,
+                    depth_slice: None,
+                    resolve_target: Some(resolve),
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Discard,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        for s in &self.post {
+            s.record(encoder);
         }
     }
 
@@ -1742,7 +1992,7 @@ impl OffscreenTarget {
 
     /// [`render_ex`](Self::render_ex), then `after` records more passes into the same encoder
     /// over the scene's colour and depth (e.g. [`crate::EffectRenderer::draw`]) before the
-    /// image is read back.
+    /// image is resolved, filtered and read back.
     pub fn render_ex_with(
         &self,
         renderer: &mut Renderer,
@@ -1755,6 +2005,13 @@ impl OffscreenTarget {
             &wgpu::TextureView,
         ),
     ) -> Result<Vec<u8>, String> {
+        if renderer.sample_count() != self.plan.samples {
+            return Err(format!(
+                "offscreen target made for {} samples, the renderer draws {}",
+                self.plan.samples,
+                renderer.sample_count()
+            ));
+        }
         let device = renderer.device.clone();
         let mut encoder = device.create_command_encoder(&Default::default());
         renderer.render_ex(
@@ -1766,6 +2023,7 @@ impl OffscreenTarget {
             extras,
         );
         after(renderer, &mut encoder, &self.color_view, &self.depth_view);
+        self.finish(&mut encoder);
         let row = self.width * 4;
         let padded =
             row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -1776,7 +2034,7 @@ impl OffscreenTarget {
             mapped_at_creation: false,
         });
         encoder.copy_texture_to_buffer(
-            self.color.as_image_copy(),
+            self.readback.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {

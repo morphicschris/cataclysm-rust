@@ -22,6 +22,7 @@ pub mod lod;
 pub mod mesh;
 pub mod nebula;
 pub mod nis_sun;
+pub mod quality;
 pub mod render_state;
 pub mod tga;
 pub mod trails;
@@ -33,7 +34,7 @@ pub use camera::{CameraTweaks, OrbitCamera};
 pub use effects::{Blend, EffectBatch, EffectTexture};
 pub use fx::{EffectRenderer, FxOptions, FxView};
 pub use gpu::{
-    headless_device, EngineEffectAssets, GpuBackground, GpuShip, OffscreenTarget, Renderer, Scene,
+    headless_device, headless_device_with_msaa, request_device, EngineEffectAssets, GpuBackground, GpuShip, OffscreenTarget, Renderer, Scene,
     SceneExtras, ShipInstance, TeamPaint, DEPTH_FORMAT, OFFSCREEN_FORMAT,
 };
 pub use lighting::SceneLighting;
@@ -41,6 +42,7 @@ pub use lod::{LodSelector, LodTable};
 pub use mesh::{mesh_to_world, Skeleton};
 pub use nebula::NebulaRenderer;
 pub use nis_sun::NisSunFlare;
+pub use quality::{RenderPlan, RenderQuality};
 pub use render_state::ShipRenderState;
 
 pub use wgpu;

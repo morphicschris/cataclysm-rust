@@ -57,6 +57,7 @@ pub mod nis_level;
 pub mod nis_support;
 pub mod object;
 pub mod parade;
+pub mod player_orders;
 pub mod physics;
 pub mod present;
 pub mod research;

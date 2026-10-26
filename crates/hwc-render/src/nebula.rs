@@ -342,6 +342,11 @@ pub struct NebulaRenderer {
     vertex_buffer: Option<(wgpu::Buffer, u64)>,
     vertices: Vec<NebulaVertex>,
     view_proj: Mat4,
+    shader: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
+    color_format: wgpu::TextureFormat,
+    /// MSAA samples the pipeline was built for.
+    samples: u32,
 }
 
 impl NebulaRenderer {
@@ -368,15 +373,39 @@ impl NebulaRenderer {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("nebula"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
+        let samples = renderer.sample_count();
+        let color_format = renderer.color_format();
+        let pipeline = Self::build_pipeline(device, &shader, &pipeline_layout, color_format, samples);
+        NebulaRenderer {
+            pipeline,
+            uniform,
+            group,
+            vertex_buffer: None,
+            vertices: Vec::new(),
+            view_proj: Mat4::IDENTITY,
+            shader,
+            pipeline_layout,
+            color_format,
+            samples,
+        }
+    }
+
+    fn build_pipeline(
+        device: &wgpu::Device,
+        shader: &wgpu::ShaderModule,
+        pipeline_layout: &wgpu::PipelineLayout,
+        color_format: wgpu::TextureFormat,
+        samples: u32,
+    ) -> wgpu::RenderPipeline {
         let vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<NebulaVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4],
         };
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("nebula"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_nebula"), compilation_options: Default::default(), buffers: &[Some(vertex_layout)] },
+            layout: Some(pipeline_layout),
+            vertex: wgpu::VertexState { module: shader, entry_point: Some("vs_nebula"), compilation_options: Default::default(), buffers: &[Some(vertex_layout)] },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
@@ -390,17 +419,16 @@ impl NebulaRenderer {
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
-            multisample: Default::default(),
+            multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: shader,
                 entry_point: Some("fs_nebula"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format: renderer.color_format(), blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState { format: color_format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
             }),
             multiview_mask: None,
             cache: None,
-        });
-        NebulaRenderer { pipeline, uniform, group, vertex_buffer: None, vertices: Vec::new(), view_proj: Mat4::IDENTITY }
+        })
     }
 
     /// Builds this frame's geometry.
@@ -420,6 +448,10 @@ impl NebulaRenderer {
             return;
         }
         let device = renderer.device();
+        if self.samples != renderer.sample_count() {
+            self.samples = renderer.sample_count();
+            self.pipeline = Self::build_pipeline(device, &self.shader, &self.pipeline_layout, self.color_format, self.samples);
+        }
         renderer.queue().write_buffer(&self.uniform, 0, bytemuck::bytes_of(&NebulaUniform { view_proj: self.view_proj.to_cols_array_2d() }));
         let bytes: &[u8] = bytemuck::cast_slice(&self.vertices);
         let size = bytes.len() as u64;

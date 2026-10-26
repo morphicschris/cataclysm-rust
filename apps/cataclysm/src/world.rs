@@ -751,6 +751,7 @@ impl World {
                     .ship(s.ship_type)
                     .map_or(800.0, |st| st.header.coll.coll_sphere_size);
                 self.camera.distance = (r * 5.0).max(3000.0);
+                self.camera.zoom_target = None;
                 self.focus = vec![s.id];
                 self.camera_pending = false;
             }
@@ -879,10 +880,17 @@ impl World {
                 // the states that start them.
             }
             let (_, transform) = Self::transform_of(s);
-            let pose = fx_pose(art, fx, 0);
-            let objects = pose.as_ref().and_then(|p| {
-                let sk = art.any_gpu()?.skeleton(0);
-                Some((sk, sk.resolve(|j| p[j].unwrap_or(sk.objects[j].rest))))
+            // The nozzles go through the objects of the level drawn (`trailUpdate` reads the
+            // ship's current level), posed or at rest.
+            let objects = art.any_gpu().map(|gpu| {
+                let lod = drawn_lod(self.full_detail, fx.lod).min(gpu.level_count().saturating_sub(1));
+                let pose = fx_pose(art, fx, lod.min(art.bindings.len().saturating_sub(1)));
+                let sk = gpu.skeleton(lod);
+                let mats = match &pose {
+                    Some(p) => sk.resolve(|j| p.get(j).copied().flatten().unwrap_or(sk.objects[j].rest)),
+                    None => sk.rest_matrices(),
+                };
+                (sk, mats)
             });
             fx.trails.update(
                 &art.trail,
@@ -1033,10 +1041,15 @@ impl World {
             } else {
                 st.map_or(1.0, |st| st.header.max_velocity)
             };
-            let objects = pose.as_ref().map(|p| {
+            // The nozzles go through the drawn level's objects, posed or at rest
+            // (`trailGetNozzleWorldPosition`).
+            let objects = {
                 let sk = gpu.skeleton(lod);
-                sk.resolve(|j| p.get(j).copied().flatten().unwrap_or(sk.objects[j].rest))
-            });
+                Some(match &pose {
+                    Some(p) => sk.resolve(|j| p.get(j).copied().flatten().unwrap_or(sk.objects[j].rest)),
+                    None => sk.rest_matrices(),
+                })
+            };
             let gate = TrailGate {
                 moving: s.posinfo.is_moving != 0 || v3(s.posinfo.velocity).length_squared() > 1.0,
                 docked: s.base.dock_state == hwc_sim::dock::state::INSIDE,

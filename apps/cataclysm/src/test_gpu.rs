@@ -6,19 +6,24 @@
 
 use std::sync::OnceLock;
 
-static DEVICE: OnceLock<Option<(wgpu::Device, wgpu::Queue)>> = OnceLock::new();
+static DEVICE: OnceLock<Option<(wgpu::Device, wgpu::Queue, Vec<u32>)>> = OnceLock::new();
 
 /// The shared headless device, created by the first test that asks (`None` without an
 /// adapter).
 pub fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    device_with_msaa().map(|(d, q, _)| (d, q))
+}
+
+/// [`device`] with the MSAA sample counts it supports for the 3D view.
+pub fn device_with_msaa() -> Option<(wgpu::Device, wgpu::Queue, Vec<u32>)> {
     DEVICE
         .get_or_init(|| {
             let d = match std::env::var_os("HWC_TEST_LOW_POWER") {
                 // The integrated GPU, where a window on the desktop's display may land.
                 Some(_) => low_power(),
-                None => hwc_render::headless_device().ok(),
+                None => hwc_render::headless_device_with_msaa().ok(),
             };
-            if let Some((device, _)) = &d {
+            if let Some((device, ..)) = &d {
                 device.set_device_lost_callback(|reason, message| {
                     if reason != wgpu::DeviceLostReason::Destroyed {
                         eprintln!(
@@ -35,7 +40,7 @@ the last frames drawn:
         .clone()
 }
 
-fn low_power() -> Option<(wgpu::Device, wgpu::Queue)> {
+fn low_power() -> Option<(wgpu::Device, wgpu::Queue, Vec<u32>)> {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -44,7 +49,9 @@ fn low_power() -> Option<(wgpu::Device, wgpu::Queue)> {
     }))
     .ok()?;
     eprintln!("test GPU: {:?}", adapter.get_info());
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
+    let (device, queue) = hwc_render::request_device(&adapter).ok()?;
+    let counts = hwc_render::quality::supported_sample_counts(&adapter, device.features());
+    Some((device, queue, counts))
 }
 
 /// Lists the adapters (`--ignored --nocapture`).

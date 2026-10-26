@@ -122,7 +122,15 @@ pub struct OrbitCamera {
     /// (`nisCamPathUpdate` sets it from the camera path's orientation; the view is
     /// `gluLookAt(eye, lookat, upvector)`). `None` for the game camera, whose up is +z.
     pub up_vector: Option<Vec3>,
+    /// The distance the smooth wheel zoom is easing towards ([`wheel_smooth`](Self::wheel_smooth),
+    /// [`ease_zoom`](Self::ease_zoom)); `None` when the camera is not easing. A modern option:
+    /// the original's wheel steps the distance at once ([`wheel`](Self::wheel)).
+    pub zoom_target: Option<f32>,
 }
+
+/// Time constant of the smooth wheel zoom, in seconds: each notch's step is 95% done after
+/// three of them (0.24 s).
+pub const ZOOM_EASE_TIME: f32 = 0.08;
 
 impl OrbitCamera {
     /// A camera at `distance` looking at the origin with zero angle and declination.
@@ -138,6 +146,7 @@ impl OrbitCamera {
             ignore_zoom: false,
             mouse_sens: 1.0,
             up_vector: None,
+            zoom_target: None,
         }
     }
 
@@ -188,6 +197,7 @@ impl OrbitCamera {
         }
         self.declination = (-d.z / dist).clamp(-1.0, 1.0).asin();
         self.up_vector = up.filter(|v| v.is_finite() && v.length_squared() > 0.0);
+        self.zoom_target = None;
     }
 
     pub fn rotate_angle(&mut self, radians: f32) {
@@ -204,30 +214,78 @@ impl OrbitCamera {
     /// (normally [`closest_zoom`](Self::closest_zoom), or a focused ship's minimum zoom distance
     /// when that is larger) unless zoom limits are ignored.
     pub fn zoom_with_min(&mut self, factor: f32, min_zoom: f32) {
-        self.distance *= factor;
+        // Any other zoom takes over from an easing wheel zoom where it has got to.
+        self.zoom_target = None;
+        self.distance = self.limit_zoom(self.distance * factor, min_zoom);
+    }
+
+    /// `distance` within the zoom limits (`cameraZoom`'s clamps: the far limit, then
+    /// `min_zoom`), unless they are ignored.
+    fn limit_zoom(&self, mut distance: f32, min_zoom: f32) -> f32 {
         if !self.ignore_zoom {
-            if self.distance > self.farthest_zoom {
-                self.distance = self.farthest_zoom;
+            if distance > self.farthest_zoom {
+                distance = self.farthest_zoom;
             }
-            if self.distance < min_zoom {
-                self.distance = min_zoom;
+            if distance < min_zoom {
+                distance = min_zoom;
             }
         }
+        distance
     }
 
     pub fn zoom(&mut self, factor: f32) {
         self.zoom_with_min(factor, self.closest_zoom);
     }
 
-    /// One mouse-wheel notch towards (`toward = true`) or away from the look-at point.
-    pub fn wheel(&mut self, toward: bool, min_zoom: f32) {
+    /// The distance factor of one wheel notch.
+    fn wheel_factor(&self, toward: bool) -> f32 {
         let t = &self.tweaks;
-        let factor = if toward {
+        if toward {
             1.0 - (1.0 - t.wheel_zoom_in) * self.mouse_sens
         } else {
             (t.wheel_zoom_out - 1.0) * self.mouse_sens + 1.0
+        }
+    }
+
+    /// One mouse-wheel notch towards (`toward = true`) or away from the look-at point: the
+    /// original's immediate step (`cameraControl`).
+    pub fn wheel(&mut self, toward: bool, min_zoom: f32) {
+        self.zoom_with_min(self.wheel_factor(toward), min_zoom);
+    }
+
+    /// One wheel notch of the smooth zoom: the same step and limits as [`wheel`](Self::wheel),
+    /// applied to the target distance (notches add up), which [`ease_zoom`](Self::ease_zoom)
+    /// then moves the camera to.
+    pub fn wheel_smooth(&mut self, toward: bool, min_zoom: f32) {
+        let from = self.zoom_target.unwrap_or(self.distance);
+        let target = self.limit_zoom(from * self.wheel_factor(toward), min_zoom);
+        self.zoom_target = Some(target);
+    }
+
+    /// Moves the distance towards the smooth zoom's target: `dt` seconds of exponential easing
+    /// in log distance, the same at any frame rate (two frames of `dt / 2` end where one frame
+    /// of `dt` does). The target is kept within the limits (`min_zoom` may change, e.g. on
+    /// focusing a large ship) and dropped once reached.
+    pub fn ease_zoom(&mut self, dt: f32, min_zoom: f32) {
+        let Some(target) = self.zoom_target else {
+            return;
         };
-        self.zoom_with_min(factor, min_zoom);
+        let target = self.limit_zoom(target, min_zoom);
+        let sane = |d: f32| d.is_finite() && d > 0.0;
+        if !(sane(target) && sane(self.distance)) {
+            self.zoom_target = None;
+            return;
+        }
+        let k = 1.0 - (-dt.max(0.0) / ZOOM_EASE_TIME).exp();
+        let (from, to) = (self.distance.ln(), target.ln());
+        let d = from + (to - from) * k;
+        if (to - d).abs() < 1e-4 {
+            self.distance = target;
+            self.zoom_target = None;
+        } else {
+            self.distance = d.exp();
+            self.zoom_target = Some(target);
+        }
     }
 
     /// One frame of the zoom keys being held.
@@ -283,6 +341,66 @@ impl OrbitCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smooth_wheel_zoom_eases_frame_rate_independently() {
+        let mut a = OrbitCamera::new(CameraTweaks::default(), 1000.0);
+        a.wheel_smooth(true, a.closest_zoom);
+        // The target is the original's one-notch step; nothing moves before time passes.
+        assert_eq!(a.zoom_target, Some(700.0));
+        assert_eq!(a.distance, 1000.0);
+        let mut b = a;
+        // 0.1 s as one frame or as ten.
+        a.ease_zoom(0.1, a.closest_zoom);
+        for _ in 0..10 {
+            b.ease_zoom(0.01, b.closest_zoom);
+        }
+        assert!((a.distance - b.distance).abs() < 0.05, "{} vs {}", a.distance, b.distance);
+        assert!(a.distance < 1000.0 && a.distance > 700.0);
+        // Exponential in log distance: after one time constant, 1 - 1/e of the way.
+        let mut c = OrbitCamera::new(CameraTweaks::default(), 1000.0);
+        c.wheel_smooth(true, c.closest_zoom);
+        c.ease_zoom(ZOOM_EASE_TIME, c.closest_zoom);
+        let done = (1000f32.ln() - c.distance.ln()) / (1000f32.ln() - 700f32.ln());
+        assert!((done - (1.0 - (-1f32).exp())).abs() < 1e-3, "{done}");
+        // It arrives and stops easing.
+        for _ in 0..200 {
+            a.ease_zoom(1.0 / 60.0, a.closest_zoom);
+        }
+        assert_eq!(a.distance, 700.0);
+        assert_eq!(a.zoom_target, None);
+    }
+
+    #[test]
+    fn smooth_wheel_zoom_keeps_the_limits_and_adds_notches() {
+        let mut c = OrbitCamera::new(CameraTweaks::default(), 1000.0);
+        c.wheel_smooth(false, c.closest_zoom);
+        c.wheel_smooth(false, c.closest_zoom);
+        assert!((c.zoom_target.unwrap() - 1000.0 * 1.45 * 1.45).abs() < 0.01);
+        for _ in 0..40 {
+            c.wheel_smooth(false, c.closest_zoom);
+        }
+        assert_eq!(c.zoom_target, Some(c.farthest_zoom));
+        for _ in 0..80 {
+            c.wheel_smooth(true, 300.0);
+        }
+        assert_eq!(c.zoom_target, Some(300.0));
+        // Never past a limit on the way.
+        let mut d = OrbitCamera::new(CameraTweaks::default(), 14000.0);
+        d.wheel_smooth(false, d.closest_zoom);
+        for _ in 0..100 {
+            d.ease_zoom(0.05, d.closest_zoom);
+            assert!(d.distance <= d.farthest_zoom);
+        }
+        // A key zoom takes over where the easing has got to.
+        let mut e = OrbitCamera::new(CameraTweaks::default(), 1000.0);
+        e.wheel_smooth(true, e.closest_zoom);
+        e.ease_zoom(0.05, e.closest_zoom);
+        let at = e.distance;
+        e.key_zoom(true, e.closest_zoom);
+        assert_eq!(e.zoom_target, None);
+        assert!((e.distance - at * 0.94).abs() < 0.01);
+    }
 
     #[test]
     fn negative_declination_lifts_the_eye() {

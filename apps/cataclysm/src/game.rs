@@ -117,6 +117,9 @@ pub struct Game {
     cues: CueReader,
     pub selection: Vec<ShipId>,
     pub(crate) selecting: Vec<ShipId>,
+    /// The targets the special-action menu was opened for by a `Ship_Special` band box
+    /// (`pmOpenForTargets`); empty for the plain menu.
+    pub(crate) special_targets: Vec<ShipId>,
     /// The hot-key groups (`selHotKeyGroup`).
     pub hotkeys: HotKeyGroups,
     /// Groups coming from the mission before, held until the mission's own level loads (an NIS
@@ -143,6 +146,26 @@ pub struct Game {
     formation_index: usize,
     canvas: Canvas,
     target: Option<OffscreenTarget>,
+    /// The 3D view's image-quality options (render scale, MSAA, FXAA); the original look by
+    /// default (`hwcRenderScale`, `hwcMsaa`, `hwcFxaa`, `--render-scale`, `--msaa`, `--fxaa`).
+    pub quality: hwc_render::RenderQuality,
+    /// The window pixels the frame is shown at, when larger than the canvas (a scaled front-end
+    /// mode): the 3D view is then drawn at those pixels and shown under the canvas
+    /// (`hwcSceneAtWindow`, `--scene-res`). None: drawn at the canvas size.
+    pub present: Option<(u32, u32)>,
+    /// The main view's 3D pixels as copied into the canvas this frame, when the scene is shown
+    /// at window resolution: the canvas pixels that still equal them let it through.
+    scene_copy: Vec<[u8; 4]>,
+    /// The quality the target was made with.
+    target_quality: hwc_render::RenderQuality,
+    /// The scene layer is shown this frame.
+    layer_active: bool,
+    /// The wheel eases the zoom (`hwcSmoothZoom`, `--zoom`): a user-requested change, on by
+    /// default; off: the original's immediate step per notch.
+    pub smooth_zoom: bool,
+    /// In a scaled front-end mode the 3D view is drawn at the window's pixels
+    /// (`hwcSceneAtWindow`, `--scene-res`); the application sets [`present`](Self::present).
+    pub scene_at_window: bool,
     big_font: Option<Rc<hwc_formats::font::Font>>,
     real_time: f32,
     /// The sensors manager.
@@ -264,6 +287,7 @@ impl Game {
             cues: CueReader::default(),
             selection: Vec::new(),
             selecting: Vec::new(),
+            special_targets: Vec::new(),
             hotkeys: HotKeyGroups::new(),
             carried_groups: None,
             group_fonts,
@@ -282,6 +306,17 @@ impl Game {
             formation_index: 0,
             canvas: Canvas::new(640, 480),
             target: None,
+            quality: hwc_render::RenderQuality::from_options(
+                options.get("hwcRenderScale"),
+                options.get("hwcMsaa"),
+                options.get("hwcFxaa"),
+            ),
+            present: None,
+            scene_copy: Vec::new(),
+            target_quality: hwc_render::RenderQuality::default(),
+            layer_active: false,
+            smooth_zoom: options.get("hwcSmoothZoom") != 0,
+            scene_at_window: options.get("hwcSceneAtWindow") != 0,
             big_font: res.font("Arial_13.hff"),
             hotkey_font: res.font("default.hff"),
             real_time: 0.0,
@@ -349,6 +384,7 @@ impl Game {
             strings: &self.strings,
             selection: &self.selection,
             selecting: &self.selecting,
+            special_targets: &self.special_targets,
             messages: &self.messages,
             paused: self.paused,
             // Escape first cancels the move plate, the sensors manager or the selection
@@ -452,7 +488,11 @@ impl Game {
             }
             InputEvent::Wheel { up } => {
                 let min = self.world.camera.closest_zoom;
-                self.world.camera.wheel(up, min);
+                if self.smooth_zoom {
+                    self.world.camera.wheel_smooth(up, min);
+                } else {
+                    self.world.camera.wheel(up, min);
+                }
             }
             _ => {}
         }
@@ -841,6 +881,7 @@ impl Game {
             ships: &self.selection,
             attack_capable: !bandbox::attack_capable(u, &self.selection).is_empty(),
             hold_capable: !bandbox::hold_capable(u, &self.selection).is_empty(),
+            special: bandbox::special_gather(u, &self.selection),
         };
         bandbox::selecting(mode, &inside, &sel)
     }
@@ -895,8 +936,24 @@ impl Game {
                     }
                 }
             }
-            // The special band box's target menu is not recreated: it selects like a plain box.
-            Mode::Select | Mode::Special => self.selection = selecting,
+            // `Ship_Special`: the selection keeps the ships with a special-target routine, and
+            // the special-action menu opens for the boxed ships that are not selected
+            // (`pmOpenForTargets(1, targets)`).
+            Mode::Special => {
+                let mut sel = std::mem::take(&mut self.selection);
+                hwc_sim::player_orders::special_target_capable(self.world.universe(), &mut sel);
+                self.selection = sel;
+                if self.selection.is_empty() {
+                    return;
+                }
+                let targets: Vec<ShipId> =
+                    selecting.into_iter().filter(|id| !self.selection.contains(id)).collect();
+                if !targets.is_empty() {
+                    self.special_targets = targets;
+                    self.with_host(|ui, host| ui.open_popup(host, true));
+                }
+            }
+            Mode::Select => self.selection = selecting,
         }
     }
 
@@ -1226,6 +1283,15 @@ impl Game {
                     command::cl_formation(u, &sel, t);
                 }
             }
+            Command::Upgrade => hwc_sim::player_orders::mr_upgrade_ships(u, &sel),
+            // The special-action menu's items (`pmExecuteSpecialItem`), on the band-boxed
+            // targets the menu was opened for, if any.
+            c if crate::host::special_item(c).is_some() => {
+                let item = crate::host::special_item(c).expect("special item");
+                let targets = &self.special_targets;
+                hwc_sim::player_orders::execute_special(u, PLAYER, &sel, item, targets);
+                self.special_targets.clear();
+            }
             other => self.post(&format!("{other:?}: not available yet")),
         }
     }
@@ -1405,8 +1471,14 @@ impl Game {
         for r in requests {
             self.apply(r, audio, &mut out);
         }
+        // The band-boxed special targets last as long as their menu.
+        if self.ui.fe.game.ig.popup.open.is_none() {
+            self.special_targets.clear();
+        }
         // Polled keys: zoom (the sensors camera's while the sensors manager is up).
         let min = self.world.camera.closest_zoom;
+        // The smooth wheel zoom eases towards its target (on the real frame time).
+        self.world.camera.ease_zoom(dt, min);
         if !self.sensors.zooming() {
             if self.ui.action_held(keys::ZOOM_IN) {
                 self.world.camera.key_zoom(true, min);
@@ -2166,13 +2238,26 @@ impl Game {
             self.ui.resize(size.0, size.1);
         }
         let px = (size.0.max(1) as u32, size.1.max(1) as u32);
-        if self
-            .target
-            .as_ref()
-            .is_none_or(|t| (t.width, t.height) != px)
-        {
-            self.target = Some(OffscreenTarget::new(renderer, px.0, px.1));
+        let samples = renderer.set_sample_count(self.quality.msaa);
+        let present = self.present.filter(|p| p.0 > px.0 || p.1 > px.1).unwrap_or(px);
+        let quality = self.quality;
+        if self.target.as_ref().is_none_or(|t| {
+            t.plan.logical != px
+                || t.plan.samples != samples
+                || t.plan.present != present
+                || self.target_quality != quality
+        }) {
+            let t = OffscreenTarget::with_quality(renderer, px, present, quality);
+            if t.plan.limited {
+                eprintln!(
+                    "cataclysm: render scale {:.2} with {}x MSAA cut to {:.2} ({}x{}) to stay within the GPU budget",
+                    quality.scale, samples, t.plan.scale, t.plan.render.0, t.plan.render.1
+                );
+            }
+            self.target = Some(t);
+            self.target_quality = quality;
         }
+        self.layer_active = false;
         self.world.prepare(renderer);
         let game_camera = self.nis.as_ref().map(|_| self.world.camera);
         if let Some(n) = &self.nis {
@@ -2193,6 +2278,10 @@ impl Game {
                 *dst = [src[0], src[1], src[2], 255];
             }
             self.world.camera.tweaks = saved;
+            if target.plan.present != px {
+                self.scene_copy.clone_from(&self.canvas.pixels);
+                self.layer_active = true;
+            }
         }
         if let Some(c) = game_camera {
             self.world.camera = c;
@@ -2233,6 +2322,28 @@ impl Game {
 
     pub fn canvas(&self) -> &Canvas {
         &self.canvas
+    }
+
+    /// The sizes the 3D view was last drawn with.
+    #[cfg(test)]
+    pub fn render_plan(&self) -> Option<hwc_render::RenderPlan> {
+        self.target.as_ref().map(|t| t.plan)
+    }
+
+    /// When the 3D view was drawn at window resolution this frame: the canvas as RGBA with
+    /// the pixels nothing was drawn over made transparent, and the full-resolution scene to
+    /// show under it. Call after the last drawing into the canvas (the pointer).
+    pub fn scene_layer(&self) -> Option<(Vec<u8>, &hwc_render::wgpu::TextureView)> {
+        if !self.layer_active || self.scene_copy.len() != self.canvas.pixels.len() {
+            return None;
+        }
+        let target = self.target.as_ref()?;
+        let mut rgba = Vec::with_capacity(self.canvas.pixels.len() * 4);
+        for (p, s) in self.canvas.pixels.iter().zip(&self.scene_copy) {
+            let a = if p[..3] == s[..3] { 0 } else { 255 };
+            rgba.extend_from_slice(&[p[0], p[1], p[2], a]);
+        }
+        Some((rgba, target.present_view()))
     }
 
     /// What is under the pointer and which pointer shows (`mouseSetCursorSetting`).

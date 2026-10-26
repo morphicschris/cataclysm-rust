@@ -63,6 +63,8 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     window: Arc<Window>,
+    /// MSAA sample counts the adapter supports for the 3D view.
+    msaa_counts: Vec<u32>,
 }
 
 struct App {
@@ -111,6 +113,49 @@ struct App {
     /// `--lod` and `--right-click` (None: the options file decides).
     full_detail: Option<bool>,
     right_click_move: Option<bool>,
+    /// `--render-scale`, `--msaa`, `--fxaa`, `--scene-res`, `--zoom` (None: the options file).
+    render_scale: Option<f32>,
+    msaa: Option<u32>,
+    fxaa: Option<bool>,
+    scene_at_window: Option<bool>,
+    smooth_zoom: Option<bool>,
+    /// `--no-vsync`.
+    no_vsync: bool,
+    /// `--frame-times`: the 3D frame's draw times, printed every few seconds.
+    frame_times: Option<FrameTimes>,
+}
+
+/// Draw times of the mission's frames (`--frame-times`): the time `Game::render` takes, which
+/// waits for the GPU to finish the 3D view (it is read back), and the time between frames.
+#[derive(Default)]
+struct FrameTimes {
+    render: Vec<f64>,
+    interval: Vec<f64>,
+}
+
+impl FrameTimes {
+    const EVERY: usize = 240;
+
+    fn add(&mut self, render_ms: f64, interval_ms: f64) {
+        self.render.push(render_ms);
+        self.interval.push(interval_ms);
+        if self.render.len() >= Self::EVERY {
+            let stats = |v: &mut Vec<f64>| {
+                v.sort_by(f64::total_cmp);
+                let mean = v.iter().sum::<f64>() / v.len() as f64;
+                let p95 = v[(v.len() * 95 / 100).min(v.len() - 1)];
+                let max = v[v.len() - 1];
+                v.clear();
+                (mean, p95, max)
+            };
+            let r = stats(&mut self.render);
+            let i = stats(&mut self.interval);
+            eprintln!(
+                "cataclysm: frame times over {} frames: render mean {:.1} ms, p95 {:.1}, max {:.1}; frame interval mean {:.1} ms, p95 {:.1}, max {:.1}",
+                Self::EVERY, r.0, r.1, r.2, i.0, i.1, i.2
+            );
+        }
+    }
 }
 
 pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), String> {
@@ -175,6 +220,13 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         autoplay: args.autoplay,
         full_detail: args.full_detail,
         right_click_move: args.right_click_move,
+        render_scale: args.render_scale,
+        msaa: args.msaa,
+        fxaa: args.fxaa,
+        scene_at_window: args.scene_at_window,
+        smooth_zoom: args.smooth_zoom,
+        no_vsync: args.no_vsync,
+        frame_times: args.frame_times.then(FrameTimes::default),
     };
     if app.intro.is_none() {
         app.front_end_start();
@@ -184,7 +236,7 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
 }
 
 impl Gpu {
-    fn new(window: Arc<Window>, linear: bool) -> Result<Self, String> {
+    fn new(window: Arc<Window>, linear: bool, no_vsync: bool) -> Result<Self, String> {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance
@@ -199,9 +251,10 @@ impl Gpu {
             ..Default::default()
         }))
         .map_err(|e| format!("no GPU adapter: {e}"))?;
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-                .map_err(|e| format!("no GPU device: {e}"))?;
+        // With the adapter's own format features MSAA may use 2 and 8 samples as well as 4.
+        let (device, queue) = hwc_render::request_device(&adapter)?;
+        let msaa_counts =
+            hwc_render::quality::supported_sample_counts(&adapter, device.features());
         let info = adapter.get_info();
         eprintln!(
             "cataclysm: GPU {} ({:?}, driver {} {})",
@@ -233,7 +286,11 @@ the last frames drawn:
         if let Some(f) = caps.formats.iter().find(|f| !f.is_srgb()) {
             config.format = *f;
         }
-        config.present_mode = wgpu::PresentMode::AutoVsync;
+        config.present_mode = if no_vsync {
+            wgpu::PresentMode::AutoNoVsync
+        } else {
+            wgpu::PresentMode::AutoVsync
+        };
         surface.configure(&device, &config);
         let filter = if linear {
             Filter::Linear
@@ -248,6 +305,7 @@ the last frames drawn:
             device,
             queue,
             window,
+            msaa_counts,
         })
     }
 
@@ -262,6 +320,23 @@ the last frames drawn:
 
     fn present(&mut self, canvas: &Canvas, viewport: (f32, f32, f32, f32)) {
         self.presenter.upload(&self.device, &self.queue, canvas);
+        self.present_uploaded(viewport, None);
+    }
+
+    /// The 3D view at window resolution under the canvas (`rgba`, its pixels nothing was drawn
+    /// over transparent).
+    fn present_layered(
+        &mut self,
+        rgba: &[u8],
+        size: (u32, u32),
+        viewport: (f32, f32, f32, f32),
+        scene: &wgpu::TextureView,
+    ) {
+        self.presenter.upload_rgba(&self.device, &self.queue, size, rgba);
+        self.present_uploaded(viewport, Some(scene));
+    }
+
+    fn present_uploaded(&mut self, viewport: (f32, f32, f32, f32), scene: Option<&wgpu::TextureView>) {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -273,7 +348,12 @@ the last frames drawn:
         };
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        self.presenter.draw(&mut encoder, &view, viewport);
+        match scene {
+            Some(s) => self
+                .presenter
+                .draw_layered(&self.device, &mut encoder, &view, viewport, s),
+            None => self.presenter.draw(&mut encoder, &view, viewport),
+        }
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         self.queue.present(frame);
@@ -542,11 +622,13 @@ impl App {
             if let Some(gpu) = self.gpu.as_mut() {
                 gpu.present(l.render(size), viewport);
                 if self.renderer.is_none() {
-                    self.renderer = Some(hwc_render::Renderer::new(
+                    let mut r = hwc_render::Renderer::new(
                         &gpu.device,
                         &gpu.queue,
                         hwc_render::OFFSCREEN_FORMAT,
-                    ));
+                    );
+                    r.set_msaa_support(&gpu.msaa_counts);
+                    self.renderer = Some(r);
                 }
             }
             match l.advance(&self.session, self.renderer.as_mut(), dt) {
@@ -563,6 +645,39 @@ impl App {
                     }
                     if let Some(v) = self.right_click_move {
                         game.right_click_move = v;
+                    }
+                    if let Some(s) = self.render_scale {
+                        game.quality.scale = hwc_render::quality::clamp_scale(s);
+                    }
+                    if let Some(n) = self.msaa {
+                        game.quality.msaa = n;
+                    }
+                    if let Some(v) = self.fxaa {
+                        game.quality.fxaa = v;
+                    }
+                    if let Some(v) = self.scene_at_window {
+                        game.scene_at_window = v;
+                    }
+                    if let Some(v) = self.smooth_zoom {
+                        game.smooth_zoom = v;
+                    }
+                    if let Some(r) = &self.renderer {
+                        let q = game.quality;
+                        let n = hwc_render::quality::pick_sample_count(q.msaa, r.msaa_support());
+                        if n != q.msaa {
+                            eprintln!(
+                                "cataclysm: {}x MSAA is not supported here (supported: {:?}); using {n}x",
+                                q.msaa,
+                                r.msaa_support()
+                            );
+                        }
+                        if !q.is_original() {
+                            eprintln!(
+                                "cataclysm: 3D view: render scale {:.2}, {n}x MSAA, FXAA {}",
+                                q.scale,
+                                if q.fxaa { "on" } else { "off" }
+                            );
+                        }
                     }
                     if let Some(a) = &mut self.audio {
                         a.stop_music(0.0);
@@ -634,7 +749,15 @@ impl App {
         let (Some(gpu), Some(r)) = (self.gpu.as_mut(), self.renderer.as_mut()) else {
             return Ok(true);
         };
+        // In a scaled front-end mode the 3D view can be drawn at the window's pixels.
+        let viewport = self.session.placement.viewport;
+        g.present = (g.scene_at_window && self.session.scale != ScaleMode::Original)
+            .then(|| (viewport.2.round().max(1.0) as u32, viewport.3.round().max(1.0) as u32));
+        let started = Instant::now();
         g.render(r, size)?;
+        if let Some(t) = &mut self.frame_times {
+            t.add(started.elapsed().as_secs_f64() * 1e3, f64::from(dt) * 1e3);
+        }
         // The move plate put the pointer somewhere (`mousePositionSet`): the system pointer
         // follows, so the next movement starts from there.
         if let Some((x, y)) = g.take_pointer_warp() {
@@ -647,7 +770,14 @@ impl App {
         if self.session.cursor_visible {
             g.draw_cursor();
         }
-        gpu.present(g.canvas(), self.session.placement.viewport);
+        match g.scene_layer() {
+            Some((rgba, scene)) => {
+                let c = g.canvas();
+                let size = (c.width.max(1) as u32, c.height.max(1) as u32);
+                gpu.present_layered(&rgba, size, viewport, scene);
+            }
+            None => gpu.present(g.canvas(), viewport),
+        }
         Ok(true)
     }
 
@@ -900,7 +1030,7 @@ impl ApplicationHandler for App {
         let result = event_loop
             .create_window(attrs)
             .map_err(|e| e.to_string())
-            .and_then(|w| Gpu::new(Arc::new(w), self.linear));
+            .and_then(|w| Gpu::new(Arc::new(w), self.linear, self.no_vsync));
         match result {
             Ok(gpu) => {
                 // The engine draws its own pointer.

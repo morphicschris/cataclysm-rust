@@ -3,6 +3,8 @@
 //! ship takes them over when it is created and, for most types, when it docks
 //! (`suShipApplyUpgrades`).
 
+use hwc_math::fpu::{ld, st};
+
 use crate::base::{BaseState, Techs, NUM_SHIP_TYPES};
 use crate::object::{Ship, ShipId};
 use crate::statics::{ShipRace, ShipStaticInfo, ShipType, WeaponType};
@@ -117,6 +119,112 @@ pub fn apply_upgrades(u: &mut Universe, id: ShipId) {
 /// `suShipHasUpgrade`.
 pub fn has_upgrade(s: &Ship, bit: u32) -> bool {
     s.upgrade_flags & bit != 0
+}
+
+/// 0x7211d0: upgrade time for a tech level, by the player's level.
+const TECH_LEVEL_UPGRADE_TIME: [f32; 3] = [10.0, 20.0, 30.0];
+/// 0x7211dc: upgrade time of each gun upgrade (only the energy upgrade is ever pending).
+const GUN_UPGRADE_TIME: [f32; 9] = [10.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+
+/// `suShipPendingUpgrades` (0x50f480): the upgrade bits the player has researched for the
+/// ship's type that the ship does not have yet.
+pub fn pending_upgrades(u: &Universe, id: ShipId) -> u32 {
+    let Some(s) = u.ships.get(id) else { return 0 };
+    let Some(p) = u.base.players.get(s.player) else { return 0 };
+    let bits = type_mask(s.ship_type) & p.upgrade_bits;
+    if bits == s.upgrade_flags {
+        0
+    } else {
+        !s.upgrade_flags & bits
+    }
+}
+
+/// `suShipPendingGunUpgrades` (0x50f4b0): which gun upgrades the ship is waiting for (a
+/// projectile gun that can take energy shots, once the player has them).
+pub fn pending_gun_upgrades(u: &Universe, id: ShipId) -> [bool; 9] {
+    let mut out = [false; 9];
+    let Some(s) = u.ships.get(id) else { return out };
+    let Some(p) = u.base.players.get(s.player) else { return out };
+    let Some(statics) = u.statics.ship(s.ship_type).and_then(|st| st.guns.as_ref()) else { return out };
+    for (g, gs) in s.guns.iter().zip(statics) {
+        if g.level == 0 && gs.end_upgrade_level == WeaponType::Energy && p.gun_types[1] != 0 {
+            out[0] = true;
+        }
+    }
+    out
+}
+
+/// `suShipCanRaiseTechLevel`: the ship is below both its type's and the player's tech level.
+fn can_raise_tech_level(u: &Universe, id: ShipId) -> bool {
+    let Some(s) = u.ships.get(id) else { return false };
+    let Some(p) = u.base.players.get(s.player) else { return false };
+    let level = s.armour_level as i32;
+    level < max_tech_level(s.ship_type) && level < p.max_tech_level
+}
+
+/// `suShipCanUpgrade` (0x50f590): not upgrading already, and a tech level, upgrade bits or a
+/// gun upgrade to take.
+pub fn can_upgrade(u: &Universe, id: ShipId) -> bool {
+    let Some(s) = u.ships.get(id) else { return false };
+    !s.base.upgrading && (can_raise_tech_level(u, id) || pending_upgrades(u, id) != 0 || pending_gun_upgrades(u, id).iter().any(|&g| g))
+}
+
+/// `suUpgradeBitsPercent` (0x50f110): 10 per pending bit of 0x1..0x4000000 (20 for 0x10000;
+/// 0x1000000 counts nothing).
+fn upgrade_bits_time(bits: u32) -> f64 {
+    let mut t = 0.0;
+    for b in 0..27 {
+        let bit = 1u32 << b;
+        if bits & bit != 0 && bit != 0x0100_0000 {
+            t += if bit == 0x1_0000 { 20.0 } else { 10.0 };
+        }
+    }
+    t
+}
+
+/// `suGetShipUpgradeCost` (0x50f710): how long the ship's pending upgrades take, in seconds.
+pub fn upgrade_cost(u: &Universe, id: ShipId) -> f64 {
+    let Some(s) = u.ships.get(id) else { return 0.0 };
+    let mut t = 0.0f32;
+    if can_raise_tech_level(u, id) {
+        let level = u.base.players[s.player].max_tech_level.clamp(0, 2) as usize;
+        t = TECH_LEVEL_UPGRADE_TIME[level];
+    }
+    for (i, &g) in pending_gun_upgrades(u, id).iter().enumerate() {
+        if g {
+            t = st(ld(t) + ld(GUN_UPGRADE_TIME[i]));
+        }
+    }
+    let modifier = u.statics.ship(s.ship_type).map_or(1.0, |st| st.upgrade_time_modifier);
+    (upgrade_bits_time(pending_upgrades(u, id)) + ld(t)) * ld(modifier)
+}
+
+/// The field upgrade (0x449920): the ships halt and are disabled while they upgrade; the
+/// upgrades are applied when the time is up (`univShipThink`), at once when there is no time
+/// to wait.
+pub fn cl_upgrade(u: &mut Universe, ships: &[ShipId]) {
+    crate::command::cl_halt(u, ships);
+    let now = u.total_time_elapsed;
+    for &id in ships {
+        if u.ships.get(id).is_none() {
+            continue;
+        }
+        let cost = upgrade_cost(u, id);
+        let pending = pending_upgrades(u, id);
+        let s = u.ships.ship_mut(id);
+        s.base.upgrading = true;
+        s.base.upgrade_end = st(cost + ld(now));
+        crate::base::set_disable_reason(s, true, 0);
+        if pending & 0x400 != 0 {
+            crate::ships::dreadnought::create_cannon(u, id);
+        }
+        let s = u.ships.ship_mut(id);
+        if !(now < s.base.upgrade_end) {
+            s.base.upgrading = false;
+            crate::base::set_disable_reason(s, false, 0);
+            apply_upgrades(u, id);
+        }
+    }
 }
 
 /// `suPlayerUpdateFromResearch` (0x50f310): tech level, gun types and upgrade bits from the

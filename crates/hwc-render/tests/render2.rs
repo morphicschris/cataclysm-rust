@@ -533,3 +533,107 @@ fn special_render_states() {
     let (w, h, img) = montage(&tiles);
     save_png(&out_dir().join("render_states.png"), w, h, &img);
 }
+
+/// Frigates seen from the side with their engine trails, the nozzles placed without the mesh
+/// objects' matrices (`before`: how they were drawn when no animation played) and through them
+/// (`after`, as `trailGetNozzleWorldPosition` does). The ramming frigate's first object sits
+/// 162 units behind the mesh origin, so its trails started inside the hull. Images go to
+/// `screenshots/aa/frigate-trails-{before,after}.png`.
+#[test]
+fn frigate_trails_follow_their_engines() {
+    let Some(mut ctx) = setup() else { return };
+    let assets = ctx.renderer.load_engine_effects(ctx.src.as_ref());
+    let tweaks = read_script(ctx.src.as_ref(), "trail.script")
+        .map(|s| TrailTweaks::from_script(&s))
+        .unwrap_or_default();
+    let team_trails = read_script(ctx.src.as_ref(), "teamcolors.script")
+        .map(|s| TeamTrailColors::from_script(&s))
+        .unwrap_or_default();
+    let team_color = normalized_team_color(ctx.colors.schemes[0].base);
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/aa");
+    std::fs::create_dir_all(&dir).unwrap();
+    let ships = [
+        ("race_sect", "srammingfrigate"),
+        ("race_sect", "smultibeamfrigate"),
+        ("race_sect", "shivefrigate"),
+    ];
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    for (race, name) in ships {
+        let (def, _levels, gpu) = ship(&ctx, race, name);
+        let mut tdef = ShipTrailDef::load(ctx.src.as_ref(), &def);
+        if let Some(r) = &mut tdef.ramp {
+            r.recolorize_all(&team_trails);
+        }
+        assert!(tdef.trail_count() > 0, "{name} has engines");
+        let sk = gpu.skeleton(0);
+        let rest = sk.rest_matrices();
+        let speed = def.stats.maxvelocity.unwrap_or(300.0);
+        let (_, radius) = gpu.bounds();
+        for (objects, out) in [(None, &mut before), (Some((sk, rest.as_slice())), &mut after)] {
+            let mut trails = ShipTrails::new(&tdef, 99);
+            let ticks = 48;
+            let (transform, velocity) = flight(ticks as f32 * TICK, speed, 0.0);
+            let pos = transform.w_axis.truncate();
+            // From the side (the flight runs along world -X), level, a little behind the ship.
+            let cam = camera(pos + Vec3::new(radius * 0.3, 0.0, 0.0), radius * 1.7, 90.0, -6.0);
+            let eye_space_z = cam.view().transform_point3(pos).z;
+            let mut effects = EffectBatch::default();
+            for k in 0..=ticks {
+                let (transform, velocity) = flight(k as f32 * TICK, speed, 0.0);
+                trails.update(&tdef, &tweaks, &TrailTick { transform, objects });
+                let frame = TrailFrame {
+                    transform,
+                    objects,
+                    velocity,
+                    max_velocity: speed,
+                    gate: TrailGate {
+                        moving: true,
+                        ..Default::default()
+                    },
+                    lod: 0,
+                    team: 0,
+                    team_color,
+                    eye: cam.eye(),
+                    eye_space_z,
+                    scale: 1.0,
+                    fade: 1.0,
+                    glow_texture: assets.glow_texture,
+                };
+                effects.clear();
+                trails.draw(&tdef, &tweaks, &frame, &mut effects);
+            }
+            let _ = velocity;
+            let states = [ShipRenderState {
+                tint: ShipTint::default().params(team_color, trails.engine_glow_levels(&tweaks)),
+                ..Default::default()
+            }];
+            let instances = [ShipInstance {
+                ship: &gpu,
+                transform,
+                age: 1.0,
+            }];
+            let extras = SceneExtras {
+                ship_states: &states,
+                effects: Some(&effects),
+            };
+            out.push(render(&mut ctx, &cam, &instances, &extras));
+        }
+    }
+    // The ramming frigate's picture changes; the others' first objects sit at the origin.
+    let changed = |i: usize| {
+        before[i]
+            .chunks(4)
+            .zip(after[i].chunks(4))
+            .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 12))
+            .count()
+    };
+    assert!(changed(0) > 50, "ramming frigate trails did not move ({})", changed(0));
+    for (i, (_, name)) in ships.iter().enumerate().skip(1) {
+        assert!(changed(i) < 20, "{name}: trails moved ({})", changed(i));
+    }
+    for (tiles, file) in [(&before, "frigate-trails-before.png"), (&after, "frigate-trails-after.png")] {
+        let (w, h, img) = montage(tiles);
+        save_png(&dir.join(file), w, h, &img);
+    }
+}

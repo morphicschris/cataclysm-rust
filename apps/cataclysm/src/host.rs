@@ -36,6 +36,8 @@ pub struct SimHost<'a> {
     pub strings: &'a Strings,
     pub selection: &'a [ShipId],
     pub selecting: &'a [ShipId],
+    /// The band-boxed targets the special-action menu is open for.
+    pub special_targets: &'a [ShipId],
     pub messages: &'a [GameMessage],
     pub paused: bool,
     pub escape_pending: bool,
@@ -587,11 +589,17 @@ impl GameUiHost for SimHost<'_> {
             c.push(Command::Dock);
             c.push(Command::Retire);
         }
-        if ships
-            .iter()
-            .any(|s| hwc_sim::resource::is_worker(s.ship_type))
-        {
-            c.push(Command::Harvest);
+        // `pmEnableMenuItems`: "Upgrade" while some ship has upgrades waiting.
+        if hwc_sim::player_orders::any_can_upgrade(u, PLAYER, self.selection) {
+            c.push(Command::Upgrade);
+        }
+        // `pmBuildMenuItems`: the special-action menu's items.
+        let items =
+            hwc_sim::player_orders::special_menu(u, PLAYER, self.selection, self.special_targets);
+        for cmd in items.into_iter().filter_map(special_command) {
+            if !c.contains(&cmd) {
+                c.push(cmd);
+            }
         }
         if ships.len() > 1 {
             for f in [
@@ -673,6 +681,36 @@ impl GameUiHost for SimHost<'_> {
     fn ship_screen_pos(&self, ship: u32) -> Option<(i32, i32, i32)> {
         (self.screen_pos)(sim_id(ship))
     }
+}
+
+/// The menu command of a special-action item the game carries out (`None` for the items the
+/// menu has no command for yet: the Mimic, force-field and siege-cannon items and the
+/// cancel items).
+pub fn special_command(item: hwc_sim::player_orders::SpecialItem) -> Option<Command> {
+    use hwc_sim::player_orders::SpecialItem as I;
+    Some(match item {
+        I::Harvest => Command::Harvest,
+        I::Repair => Command::Repair,
+        I::Salvage => Command::Salvage,
+        I::Leech => Command::Leech,
+        I::Link => Command::Link,
+        I::Unlink => Command::Unlink,
+        I::Cloak => Command::Cloak,
+        I::Swarm => Command::Swarmers,
+        I::Infect => Command::BeastAttack,
+        I::Emp => Command::Emp,
+        I::Ram => Command::Ram,
+        I::Repulse => Command::Repulse,
+        I::FireMissiles => Command::FireMissiles,
+        _ => return None,
+    })
+}
+
+/// The special-action item a menu command runs (the reverse of [`special_command`]).
+pub fn special_item(c: Command) -> Option<hwc_sim::player_orders::SpecialItem> {
+    hwc_sim::player_orders::SpecialItem::ALL
+        .into_iter()
+        .find(|&i| special_command(i) == Some(c))
 }
 
 /// Whether the local player may select this ship.

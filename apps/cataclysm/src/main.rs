@@ -26,9 +26,13 @@ mod pings;
 mod plate;
 mod play;
 mod preview;
+#[cfg(test)]
+mod quality_shots;
 mod sensors;
 #[cfg(test)]
 mod smoke;
+#[cfg(test)]
+mod special_actions;
 #[cfg(test)]
 mod speech;
 #[cfg(test)]
@@ -87,6 +91,36 @@ options:
                         right click on empty space opens the move plate, Shift+right click
                         the menu) or original (the menu, or the context-sensitive action);
                         options file: hwcRightClickMove = 1/0
+  --zoom <mode>         smooth (default, a user-requested change: each mouse-wheel notch
+                        eases the camera to its distance) or original (the original's
+                        immediate step); options file: hwcSmoothZoom = 1/0
+
+3D view quality (modern options, all off by default: the original look; see
+docs/render-quality.md for the measured costs):
+  --render-scale <s>    internal render scale 0.5..2.0 (default 1). Above 1 the 3D view is
+                        supersampled (drawn larger, filtered down); below 1 it is cheaper and
+                        softer. The interface and text stay at native resolution. Cost grows
+                        with the square: 1.5 = 2.25x the pixels, 2.0 = 4x. Options file:
+                        hwcRenderScale = 50..200 (percent)
+  --msaa <n>            multisample anti-aliasing: 1 (off), 2, 4 or 8, limited to what the
+                        GPU supports; covers ships, effects, trails, lines and nebulae.
+                        Options file: hwcMsaa = n
+  --fxaa <on|off>       FXAA post filter over the 3D view (cheap; softens edges and fine
+                        detail a little). Options file: hwcFxaa = 1/0
+  --scene-res <mode>    window (default) or layout: with --scale fit/integer/stretch the 3D
+                        view is drawn at the window's pixels under the scaled 640x480
+                        interface (window), or at the layout's 640x480 pixels and scaled up
+                        with it (layout). Options file: hwcSceneAtWindow = 1/0
+  A frame never draws more than 16.6 M samples (3840x2160 at 2x MSAA): over that the
+  render scale, then the MSAA samples, are cut (a note is printed), which keeps a frame on an
+  integrated GPU well clear of a driver reset; the scale is also kept within the GPU's
+  texture size limit.
+  Measured on an Intel UHD 750, Mission 1 combat at 1600x900 (mean frame; off: 13-14 ms):
+  FXAA 16-18 ms, MSAA 2 15-18, MSAA 4 16-20, MSAA 8 18-22, scale 1.5 18-20, scale 2 19-22,
+  scale 2 + MSAA 4 22-26 (cut to scale 1.70)
+  --no-vsync            present without waiting for the display (for measuring)
+  --frame-times         print the 3D frames' draw times every 240 frames
+
   -h, --help            this text
 
 The original's switches /window, /fullscreen and /disableAVI are accepted too.
@@ -117,6 +151,15 @@ pub struct Args {
     /// `--right-click`: Some(true) modern, Some(false) original, None the options file's
     /// `hwcRightClickMove`.
     pub right_click_move: Option<bool>,
+    /// `--zoom`: Some(true) smooth, Some(false) the original's step, None the options file.
+    pub smooth_zoom: Option<bool>,
+    /// `--render-scale`, `--msaa`, `--fxaa`, `--scene-res` (None: the options file).
+    pub render_scale: Option<f32>,
+    pub msaa: Option<u32>,
+    pub fxaa: Option<bool>,
+    pub scene_at_window: Option<bool>,
+    pub no_vsync: bool,
+    pub frame_times: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -139,6 +182,13 @@ fn parse_args() -> Result<Args, String> {
         autoplay: false,
         full_detail: None,
         right_click_move: None,
+        smooth_zoom: None,
+        render_scale: None,
+        msaa: None,
+        fxaa: None,
+        scene_at_window: None,
+        no_vsync: false,
+        frame_times: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -191,6 +241,49 @@ fn parse_args() -> Result<Args, String> {
                     v => return Err(format!("unknown --right-click mode {v}")),
                 })
             }
+            "--zoom" => {
+                a.smooth_zoom = Some(match value("--zoom")?.to_ascii_lowercase().as_str() {
+                    "smooth" => true,
+                    "original" => false,
+                    v => return Err(format!("unknown --zoom mode {v}")),
+                })
+            }
+            "--render-scale" => {
+                let v: f32 = value("--render-scale")?
+                    .parse()
+                    .map_err(|_| "bad --render-scale")?;
+                if !(hwc_render::quality::SCALE_MIN..=hwc_render::quality::SCALE_MAX).contains(&v) {
+                    return Err(format!(
+                        "--render-scale must be {}..{}",
+                        hwc_render::quality::SCALE_MIN,
+                        hwc_render::quality::SCALE_MAX
+                    ));
+                }
+                a.render_scale = Some(v);
+            }
+            "--msaa" => {
+                let n: u32 = value("--msaa")?.parse().map_err(|_| "bad --msaa")?;
+                if ![1, 2, 4, 8].contains(&n) {
+                    return Err("--msaa must be 1, 2, 4 or 8".into());
+                }
+                a.msaa = Some(n);
+            }
+            "--fxaa" => {
+                a.fxaa = Some(match value("--fxaa")?.to_ascii_lowercase().as_str() {
+                    "on" | "1" => true,
+                    "off" | "0" => false,
+                    v => return Err(format!("unknown --fxaa value {v}")),
+                })
+            }
+            "--scene-res" => {
+                a.scene_at_window = Some(match value("--scene-res")?.to_ascii_lowercase().as_str() {
+                    "window" => true,
+                    "layout" => false,
+                    v => return Err(format!("unknown --scene-res mode {v}")),
+                })
+            }
+            "--no-vsync" => a.no_vsync = true,
+            "--frame-times" => a.frame_times = true,
             "--filter" => a.linear = value("--filter")?.eq_ignore_ascii_case("linear"),
             "--size" => {
                 let v = value("--size")?;

@@ -1193,6 +1193,8 @@ pub struct EffectRenderer {
     texture_layout: wgpu::BindGroupLayout,
     color_format: wgpu::TextureFormat,
     pipelines: HashMap<FxState, wgpu::RenderPipeline>,
+    /// MSAA samples the cached pipelines were built for.
+    samples: u32,
     uniform: wgpu::Buffer,
     frame_group: wgpu::BindGroup,
     sampler: wgpu::Sampler,
@@ -1283,6 +1285,7 @@ impl EffectRenderer {
             texture_layout,
             color_format: renderer.color_format(),
             pipelines: HashMap::new(),
+            samples: renderer.sample_count(),
             uniform,
             frame_group,
             sampler,
@@ -1570,7 +1573,10 @@ impl EffectRenderer {
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
-            multisample: Default::default(),
+            multisample: wgpu::MultisampleState {
+                count: self.samples,
+                ..Default::default()
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &self.shader,
                 entry_point: Some("fs_fx"),
@@ -1601,6 +1607,11 @@ impl EffectRenderer {
             return;
         }
         let device = renderer.device().clone();
+        // The scene's MSAA setting changed: the pipelines are rebuilt for it.
+        if self.samples != renderer.sample_count() {
+            self.samples = renderer.sample_count();
+            self.pipelines.clear();
+        }
         let states: Vec<FxState> = self.frame.draws.iter().map(|d| d.state).collect();
         for s in states {
             self.pipeline(&device, s);

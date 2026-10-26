@@ -29,6 +29,12 @@ fn vs(@builtin(vertex_index) i: u32) -> Out {
 fn fs(i: Out) -> @location(0) vec4<f32> {
     return vec4(textureSample(tex, samp, i.uv).rgb, 1.0);
 }
+
+// A frame with transparent pixels, blended over what is already drawn.
+@fragment
+fn fs_over(i: Out) -> @location(0) vec4<f32> {
+    return textureSample(tex, samp, i.uv);
+}
 "#;
 
 /// Texture filtering when the frame is scaled.
@@ -41,6 +47,8 @@ pub enum Filter {
 
 pub struct Presenter {
     pipeline: wgpu::RenderPipeline,
+    /// The frame blended over a scene layer ([`draw_layered`](Self::draw_layered)).
+    over_pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     texture: Option<(wgpu::Texture, wgpu::BindGroup, u32, u32)>,
@@ -78,31 +86,35 @@ impl Presenter {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("hwc-ui present"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let make = |entry: &str, blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("hwc-ui present"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline = make("fs", None);
+        let over_pipeline = make("fs_over", Some(wgpu::BlendState::ALPHA_BLENDING));
         let f = match filter {
             Filter::Nearest => wgpu::FilterMode::Nearest,
             Filter::Linear => wgpu::FilterMode::Linear,
@@ -115,6 +127,7 @@ impl Presenter {
         });
         Self {
             pipeline,
+            over_pipeline,
             layout,
             sampler,
             texture: None,
@@ -124,6 +137,17 @@ impl Presenter {
     /// Uploads the frame (the texture is recreated when the canvas size changes).
     pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, canvas: &Canvas) {
         let (w, h) = (canvas.width.max(1) as u32, canvas.height.max(1) as u32);
+        self.upload_rgba(device, queue, (w, h), &canvas.to_rgba8());
+    }
+
+    /// Uploads a `size` frame of RGBA8 rows (alpha used by [`draw_layered`](Self::draw_layered)).
+    pub fn upload_rgba(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        (w, h): (u32, u32),
+        rgba: &[u8],
+    ) {
         if !matches!(&self.texture, Some((_, _, tw, th)) if (*tw, *th) == (w, h)) {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("hwc-ui frame"),
@@ -166,7 +190,7 @@ impl Presenter {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &canvas.to_rgba8(),
+            rgba,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * w),
@@ -214,6 +238,62 @@ impl Presenter {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind, &[]);
         pass.draw(0..6, 0..1);
+    }
+
+    /// Clears the target, draws `scene` (a full-resolution picture of the viewport, e.g. the 3D
+    /// view at window pixels) into `viewport`, then the uploaded frame over it, blended by its
+    /// alpha: the frame's transparent pixels let the scene through.
+    pub fn draw_layered(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        viewport: (f32, f32, f32, f32),
+        scene: &wgpu::TextureView,
+    ) {
+        let scene_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hwc-ui scene layer"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(scene),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("hwc-ui present layered"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        let (x, y, w, h) = viewport;
+        if w < 1.0 || h < 1.0 {
+            return;
+        }
+        pass.set_viewport(x, y, w, h, 0.0, 1.0);
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &scene_bind, &[]);
+        pass.draw(0..6, 0..1);
+        if let Some((_, bind, ..)) = &self.texture {
+            pass.set_pipeline(&self.over_pipeline);
+            pass.set_bind_group(0, bind, &[]);
+            pass.draw(0..6, 0..1);
+        }
     }
 }
 
@@ -307,4 +387,94 @@ pub fn render_offscreen(
     drop(data);
     buffer.unmap();
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wgpu::util::DeviceExt;
+
+    /// The scene layer shows through the frame's transparent pixels only.
+    #[test]
+    fn layered_frame_lets_the_scene_through_transparent_pixels() {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let Ok((device, queue)) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+        else {
+            return;
+        };
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let mut p = Presenter::new(&device, format, Filter::Nearest);
+        // A 2x1 frame: left pixel opaque blue, right pixel transparent.
+        p.upload_rgba(&device, &queue, (2, 1), &[0, 0, 255, 255, 9, 9, 9, 0]);
+        // The scene, at twice the frame's resolution: solid red.
+        let scene = device.create_texture_with_data(
+            &queue,
+            &wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d { width: 4, height: 2, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &[255, 0, 0, 255].repeat(8),
+        );
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: 64, height: 4, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        p.draw_layered(
+            &device,
+            &mut encoder,
+            &target.create_view(&Default::default()),
+            (0.0, 0.0, 64.0, 4.0),
+            &scene.create_view(&Default::default()),
+        );
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                },
+            },
+            wgpu::Extent3d { width: 64, height: 4, depth_or_array_layers: 1 },
+        );
+        queue.submit([encoder.finish()]);
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .unwrap();
+        let data = slice.get_mapped_range().unwrap();
+        let px = |x: usize| &data[x * 4..x * 4 + 3];
+        assert_eq!(px(4), [0, 0, 255], "the frame's opaque pixel");
+        assert_eq!(px(60), [255, 0, 0], "the scene under the transparent pixel");
+    }
 }

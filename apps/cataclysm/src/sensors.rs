@@ -415,6 +415,7 @@ pub fn place(c: &mut OrbitCamera, eye: Vec3, look: Vec3) {
     let v = eye - look;
     let d = v.length();
     c.look_at = look;
+    c.zoom_target = None;
     if d > 1e-3 {
         c.distance = d;
         let mut a = v.y.atan2(v.x);

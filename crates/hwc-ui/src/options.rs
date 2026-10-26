@@ -121,6 +121,20 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // 1: with ships selected, a right click on empty space opens the move plate and
     // Shift+right click the menu; 0: the original's right click (`--right-click`).
     ("hwcRightClickMove", 1),
+    // 1: the mouse wheel eases the zoom to each notch's distance; 0: the original's
+    // immediate step per notch (`--zoom`).
+    ("hwcSmoothZoom", 1),
+    // The 3D view's internal render scale in percent, 50..200 (100: the original, drawn at
+    // the screen's pixels; above 100 supersampled; `--render-scale`).
+    ("hwcRenderScale", 100),
+    // MSAA samples for the 3D view: 1 (off, the original), 2, 4 or 8 (`--msaa`).
+    ("hwcMsaa", 1),
+    // 1: FXAA over the 3D view (`--fxaa`).
+    ("hwcFxaa", 0),
+    // 1: in a scaled front-end mode (`--scale fit/integer/stretch`) the 3D view is drawn at
+    // the window's pixels under the scaled interface; 0: at the 640x480 layout's pixels
+    // (`--scene-res`).
+    ("hwcSceneAtWindow", 1),
     // Registry values.
     ("deviceIndex", -1),
     ("screenWidth", 640),
@@ -313,6 +327,26 @@ hwcRightClickMove = 0
         assert!(errors.is_empty());
         assert!(!back.get_bool("hwcFullDetailShips"));
         assert!(!back.get_bool("hwcRightClickMove"));
+    }
+
+    #[test]
+    fn image_quality_options_default_to_the_original() {
+        let o = Options::default();
+        assert_eq!(o.get("hwcRenderScale"), 100);
+        assert_eq!(o.get("hwcMsaa"), 1);
+        assert_eq!(o.get("hwcFxaa"), 0);
+        assert!(o.get_bool("hwcSmoothZoom"));
+        assert!(o.get_bool("hwcSceneAtWindow"));
+        let (back, errors) = Options::from_text("hwcRenderScale = 150
+hwcMsaa = 4
+hwcFxaa = 1
+hwcSmoothZoom = 0
+");
+        assert!(errors.is_empty());
+        assert_eq!(back.get("hwcRenderScale"), 150);
+        assert_eq!(back.get("hwcMsaa"), 4);
+        assert!(back.get_bool("hwcFxaa"));
+        assert!(!back.get_bool("hwcSmoothZoom"));
     }
 
     #[test]

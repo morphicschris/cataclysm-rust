@@ -731,8 +731,11 @@ impl TrailGate {
 pub struct TrailTick<'a> {
     /// Mesh-to-world matrix (rotation and position).
     pub transform: Mat4,
-    /// Ship-space matrix of each mesh object, for nozzles attached to objects (from
-    /// [`crate::mesh::Skeleton::resolve`]); `None` keeps nozzles at their file positions.
+    /// Ship-space matrix of each mesh object of the level of detail drawn (from
+    /// [`crate::mesh::Skeleton::resolve`], or [`crate::mesh::Skeleton::rest_matrices`] when not
+    /// animated): every nozzle goes through its object's matrix, or the first object's when it
+    /// names none (`trailGetNozzleWorldPosition`). `None` keeps nozzles at their file
+    /// positions (only right for a ship whose first object sits at the origin).
     pub objects: Option<(&'a crate::mesh::Skeleton, &'a [Mat4])>,
 }
 
@@ -800,11 +803,14 @@ fn nozzle_offset(
     let Some(n) = def.nozzles.iter().find(|n| n.index == slot) else {
         return Vec3::ZERO;
     };
-    let m = n
-        .attached_to
-        .as_deref()
-        .zip(objects)
-        .and_then(|(name, (sk, mats))| sk.find(name).and_then(|i| mats.get(i)).copied())
+    // The nozzle's object in this level of detail (`mexSetEngineNozzle` looks the name up in
+    // every level); a nozzle naming no object, or one the level lacks, takes the first
+    // object's matrix (`univShipGetBindEntry` maps "none" to object 0).
+    let m = objects
+        .and_then(|(sk, mats)| {
+            let i = n.attached_to.as_deref().and_then(|name| sk.find(name)).unwrap_or(0);
+            mats.get(i).or(mats.first()).copied()
+        })
         .unwrap_or(Mat4::IDENTITY);
     m.transform_point3(n.position)
 }
@@ -1436,6 +1442,48 @@ mod tests {
             10.0,
             0,
         )
+    }
+
+    #[test]
+    fn nozzles_go_through_their_object_or_the_first_one() {
+        use crate::mesh::{Skeleton, SkeletonObject};
+        // A root object off the origin (the ramming frigate's sits at z = -162) and a child.
+        let sk = Skeleton {
+            objects: vec![
+                SkeletonObject {
+                    name: "Hull".into(),
+                    parent: None,
+                    rest: Mat4::from_translation(Vec3::new(0.0, 0.0, -162.0)),
+                },
+                SkeletonObject {
+                    name: "Nose".into(),
+                    parent: Some(0),
+                    rest: Mat4::from_translation(Vec3::new(0.0, 0.0, -12.0)),
+                },
+            ],
+        };
+        let mats = sk.rest_matrices();
+        let mut d = def();
+        let nozzle = |index, z, attached: Option<&str>| EngineNozzle {
+            index,
+            position: Vec3::new(1.0, 0.0, z),
+            normal: -Vec3::Z,
+            attached_to: attached.map(str::to_string),
+        };
+        d.nozzles = vec![
+            nozzle(0, -68.5, Some("hull")),
+            nozzle(1, 236.0, Some("Nose")),
+            nozzle(2, 10.0, None),
+            nozzle(3, 20.0, Some("NotInThisLevel")),
+        ];
+        let objects = Some((&sk, mats.as_slice()));
+        assert_eq!(nozzle_offset(&d, 0, objects), Vec3::new(1.0, 0.0, -230.5));
+        assert_eq!(nozzle_offset(&d, 1, objects), Vec3::new(1.0, 0.0, 62.0));
+        // No object named, or one this level lacks: the first object's matrix.
+        assert_eq!(nozzle_offset(&d, 2, objects), Vec3::new(1.0, 0.0, -152.0));
+        assert_eq!(nozzle_offset(&d, 3, objects), Vec3::new(1.0, 0.0, -142.0));
+        // Without the objects, the file position.
+        assert_eq!(nozzle_offset(&d, 0, None), Vec3::new(1.0, 0.0, -68.5));
     }
 
     #[test]

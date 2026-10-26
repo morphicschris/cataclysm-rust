@@ -200,6 +200,67 @@ pub struct Selected<'a> {
     pub attack_capable: bool,
     /// `makeShipsHoldCapable` found some.
     pub hold_capable: bool,
+    /// What a `Ship_Special` box gathers for these ships ([`special_gather`]).
+    pub special: Option<SpecialGather>,
+}
+
+/// What a `Ship_Special` band box gathers (`mrSelectHold`), from the selected ships with a
+/// special-target routine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpecialGather {
+    pub gather: Gather,
+    /// Some ship may target friendlies (`canSpecialBandBoxFriendlies`): the player's and
+    /// allied ships stay in the box.
+    pub friendlies: bool,
+    /// A salvager is selected: derelicts stay in the box.
+    pub salvager: bool,
+}
+
+/// `mrSelectHold`'s `Ship_Special` gathering: `None` when no selected ship has a special
+/// target routine.
+pub fn special_gather(u: &Universe, ships: &[ShipId]) -> Option<SpecialGather> {
+    let (mut friendlies, mut plain, mut anything) = (false, false, false);
+    for &id in ships {
+        let Some(s) = u.ship(id) else { continue };
+        let Some(st) = u.statics.ship(s.ship_type) else { continue };
+        if !hwc_sim::ships::has_special_target(s.ship_type) {
+            continue;
+        }
+        if !st.can_special_band_box_friendlies {
+            plain = true;
+        } else {
+            friendlies = true;
+            if st.unknown_flag_212 {
+                plain = true;
+            }
+        }
+        if st.unknown_flag_213 {
+            anything = true;
+        }
+    }
+    let gather = if anything {
+        Gather { own_only: false, anything: true, attack: false }
+    } else if plain {
+        Gather { own_only: false, anything: false, attack: false }
+    } else if friendlies {
+        Gather { own_only: true, anything: false, attack: false }
+    } else {
+        return None;
+    };
+    let salvager = ships.iter().any(|&id| u.ship(id).is_some_and(|s| hwc_sim::salvage::is_salvager(s.ship_type)));
+    Some(SpecialGather { gather, friendlies, salvager })
+}
+
+/// `mrRemoveDerelictsAndAllPlayerShipsFromSelecting`: without friendly targets, the
+/// player's and allied ships (and derelicts, unless a salvager is selected) leave the box.
+fn special_keeps(f: &Facts, g: &SpecialGather) -> bool {
+    if g.friendlies {
+        return true;
+    }
+    if f.derelict {
+        return g.salvager;
+    }
+    !(f.own || f.ally || f.permanently_disabled)
 }
 
 /// The "selecting" list while the box is dragged (`mrSelectHold`): the gathered ships the
@@ -213,13 +274,21 @@ pub fn selecting(mode: Mode, inside: &[(ShipId, Facts)], sel: &Selected) -> Vec<
         }
         _ => {}
     }
-    let g = mode.gather();
+    let special = match (mode, sel.special) {
+        (Mode::Special, None) => return Vec::new(),
+        (_, s) => s,
+    };
+    let g = match (mode, special) {
+        (Mode::Special, Some(s)) => s.gather,
+        _ => mode.gather(),
+    };
     inside
         .iter()
         .filter(|(_, f)| gathered(f, g))
         .filter(|(id, f)| match mode {
             Mode::Attack => plain_attack_target(f),
             Mode::Guard => f.ally && !sel.ships.contains(id),
+            Mode::Special => special.is_some_and(|s| special_keeps(f, &s)),
             _ => true,
         })
         .map(|&(id, _)| id)
@@ -325,11 +394,11 @@ mod tests {
         .map(|(i, f)| (ShipId(i as u16 + 10), f))
         .collect();
         let mine = [ShipId(10)];
-        let sel = Selected { ships: &mine, attack_capable: true, hold_capable: true };
+        let sel = Selected { ships: &mine, attack_capable: true, hold_capable: true, special: None };
         // Ctrl: the enemy and the foreign derelict.
         assert_eq!(selecting(Mode::Attack, &inside, &sel), vec![ShipId(11), ShipId(14)]);
         // Nobody able to attack: nothing lights up.
-        let none = Selected { ships: &mine, attack_capable: false, hold_capable: true };
+        let none = Selected { ships: &mine, attack_capable: false, hold_capable: true, special: None };
         assert!(selecting(Mode::Attack, &inside, &none).is_empty());
         // Ctrl+Shift: anything targetable, own ships included (not the cloaked or untargetable).
         assert_eq!(
@@ -349,5 +418,26 @@ mod tests {
         assert_eq!(selecting(Mode::Guard, &inside, &sel), vec![ShipId(12), ShipId(15)]);
         // No modifier: own ships only.
         assert_eq!(selecting(Mode::Select, &inside, &sel), vec![ShipId(10), ShipId(15)]);
+    }
+
+    #[test]
+    fn special_band_box_gathers_for_the_selected_specials() {
+        let mut derelict = ship(false);
+        derelict.derelict = true;
+        let inside: Vec<(ShipId, Facts)> =
+            [ship(true), ship(false), derelict].into_iter().enumerate().map(|(i, f)| (ShipId(i as u16 + 10), f)).collect();
+        let mine = [ShipId(10)];
+        let plain = Gather { own_only: false, anything: false, attack: false };
+        let with = |special| Selected { ships: &mine, attack_capable: true, hold_capable: true, special };
+        // No ship with a special-target routine: nothing is gathered.
+        assert!(selecting(Mode::Special, &inside, &with(None)).is_empty());
+        // Enemy targets only: own ships and (without a salvager) derelicts leave.
+        let enemies = SpecialGather { gather: plain, friendlies: false, salvager: false };
+        assert_eq!(selecting(Mode::Special, &inside, &with(Some(enemies))), vec![ShipId(11)]);
+        let salvage = SpecialGather { salvager: true, ..enemies };
+        assert_eq!(selecting(Mode::Special, &inside, &with(Some(salvage))), vec![ShipId(11), ShipId(12)]);
+        // Friendly targets: everything stays.
+        let friends = SpecialGather { friendlies: true, ..enemies };
+        assert_eq!(selecting(Mode::Special, &inside, &with(Some(friends))).len(), 3);
     }
 }

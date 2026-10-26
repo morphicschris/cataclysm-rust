@@ -61,6 +61,154 @@ pub fn cl_link(u: &mut Universe, a: ShipId, b: ShipId) -> bool {
     true
 }
 
+/// Upgrade bit of the ships that link (Acolytes, Mimics: `TECH_LINK`).
+pub const UPGRADE_LINK: u32 = 0x8;
+/// Upgrade bit of the linked ships that split again (ACVs, MCVs: `TECH_LINK`).
+pub const UPGRADE_UNLINK: u32 = 0x10;
+/// Static capability bit of the linked types (ACV, MCV, Beast ACV).
+const CAP_LINKED: u32 = 0x40;
+
+/// `dockLinkShipsBegin` (0x463080): `a` becomes the initiator (it flies under `b`), `b` the
+/// passive partner. A Mimic pair drops its disguises.
+pub fn dock_link_ships_begin(u: &mut Universe, a: ShipId, b: ShipId) {
+    u.ships.ship_mut(a).base.link = base::LinkSpec { partner: Some(b), state: state::APPROACH, timer: 0.0 };
+    u.ships.ship_mut(b).base.link = base::LinkSpec { partner: Some(a), state: state::PARTNER, timer: 0.0 };
+    if u.ships.ship(a).ship_type == ShipType::sMimic {
+        crate::ships::mimic::end_disguise(u, a, true);
+        crate::ships::mimic::end_disguise(u, b, true);
+    }
+}
+
+/// The per-ship reset before a link order (0x43fb30): a linkable ship lets go of any partner.
+fn release_partner(u: &mut Universe, id: ShipId) {
+    let t = u.ships.ship(id).ship_type;
+    if !matches!(t, ShipType::sAcolyte | ShipType::sACV | ShipType::sMimic | ShipType::sMCV | ShipType::bAcolyte | ShipType::bACV) {
+        return;
+    }
+    if let Some(p) = u.ships.ship(id).base.link.partner {
+        if let Some(ps) = u.ships.get_mut(p) {
+            ps.special_flags2 &= !base::special2::DOCKING;
+            ps.base.link.partner = None;
+            base::set_disable_reason(ps, false, 3);
+        }
+        let s = u.ships.ship_mut(id);
+        s.special_flags2 &= !base::special2::DOCKING;
+        s.base.link.partner = None;
+    }
+    base::set_disable_reason(u.ships.ship_mut(id), false, 3);
+}
+
+/// The link partner search of `clLink` (0x448d80): the nearest ship of `ship`'s type in
+/// `sel` that has the link upgrade and no partner yet (universe ship-list order on ties).
+fn nearest_link_partner(u: &Universe, sel: &[ShipId], ship: ShipId) -> Option<ShipId> {
+    let me = u.ships.ship(ship);
+    let mut best = 1e20f32;
+    let mut found = None;
+    for &id in &u.ship_list {
+        let Some(s) = u.ships.get(id) else { continue };
+        if !crate::upgrade::has_upgrade(s, UPGRADE_LINK) || !sel.contains(&id) || s.ship_type != me.ship_type || id == ship || s.base.link.partner.is_some() {
+            continue;
+        }
+        let (p, q) = (s.posinfo.position, me.posinfo.position);
+        let (dx, dy, dz) = (ld(p.x) - ld(q.x), ld(p.y) - ld(q.y), ld(p.z) - ld(q.z));
+        let d = (dz * dz + dy * dy + dx * dx).sqrt();
+        if d < f64::from(best) {
+            best = d as f32;
+            found = Some(id);
+        }
+    }
+    found
+}
+
+/// A ship dropped from a link or unlink order before it starts.
+fn drop_from_order(u: &mut Universe, id: ShipId) {
+    let s = u.ships.ship_mut(id);
+    s.command = None;
+    if s.base.disable_reasons[5] {
+        base::set_disable_reason(s, false, 5);
+    }
+}
+
+/// `clLink` (0x448e50): the ships pair up, each with the nearest unpaired ship of its type in
+/// the selection; of each pair the lower one (smaller z) flies under the other. One link
+/// order holds the initiators; the partners and the ships left without a partner leave the
+/// order. Returns the order, if any ship got one.
+pub fn cl_link_ships(u: &mut Universe, selection: &[ShipId]) -> Option<CommandId> {
+    let mut list: Vec<ShipId> = selection.iter().copied().filter(|&s| u.ships.get(s).is_some()).collect();
+    if list.is_empty() {
+        return None;
+    }
+    command::remove_ships_from_doing_stuff(u, &list);
+    for &s in &list {
+        release_partner(u, s);
+    }
+    let mut i = 0;
+    while i < list.len() {
+        let ship = list[i];
+        if u.ships.ship(ship).base.link.partner.is_some() {
+            list.swap_remove(i);
+            drop_from_order(u, ship);
+            continue;
+        }
+        let Some(p) = nearest_link_partner(u, &list, ship) else {
+            list.swap_remove(i);
+            drop_from_order(u, ship);
+            continue;
+        };
+        let (a, b) = if u.ships.ship(p).posinfo.position.z < u.ships.ship(ship).posinfo.position.z {
+            let j = list.iter().position(|&x| x == p).expect("partner in the selection");
+            list.swap(i, j);
+            (p, ship)
+        } else {
+            (ship, p)
+        };
+        dock_link_ships_begin(u, a, b);
+        i += 1;
+    }
+    if list.is_empty() {
+        return None;
+    }
+    let mut c = command::new_command_pub(list.clone());
+    c.order = order::LINK;
+    let cid = u.commands.add_pub(c);
+    command::prepare_ships_pub(u, cid);
+    command::init_ships_for_ai(u, &list);
+    Some(cid)
+}
+
+/// `dockUnlinkShipBegin` (0x463b00): the linked ship's split starts (an MCV drops its
+/// disguise).
+fn dock_unlink_ship_begin(u: &mut Universe, id: ShipId) {
+    let s = u.ships.ship_mut(id);
+    s.base.link = base::LinkSpec { partner: Some(id), state: state::NONE, timer: 0.0 };
+    if s.ship_type == ShipType::sMCV {
+        crate::ships::mimic::mcv_end_disguise(u, id, true);
+    }
+}
+
+/// `clUnlink` (0x449240): every linked ship of the selection (static capability 0x40) gets
+/// one unlink order.
+pub fn cl_unlink_ships(u: &mut Universe, selection: &[ShipId]) -> Option<CommandId> {
+    let list: Vec<ShipId> = selection
+        .iter()
+        .copied()
+        .filter(|&s| u.ships.get(s).is_some_and(|x| u.statics.ship(x.ship_type).is_some_and(|st| st.capability_flags & CAP_LINKED != 0)))
+        .collect();
+    if list.is_empty() {
+        return None;
+    }
+    command::remove_ships_from_doing_stuff(u, &list);
+    let mut c = command::new_command_pub(list.clone());
+    c.order = order::UNLINK;
+    let cid = u.commands.add_pub(c);
+    for &s in &list {
+        dock_unlink_ship_begin(u, s);
+    }
+    command::prepare_ships_pub(u, cid);
+    command::init_ships_for_ai(u, &list);
+    Some(cid)
+}
+
 fn neg(v: Vector) -> Vector {
     Vector::new(-v.x, -v.y, -v.z)
 }
