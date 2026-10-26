@@ -321,8 +321,12 @@ fn mission_one_plays_through_the_game_path() {
     rig.click(g, ex, ey, false);
     assert!(matches!(g.mode, Mode::Move { .. }), "right click opens the plate");
     assert!(!menu_open(g));
+    rig.click(g, ex, ey, true);
+    assert_eq!(g.mode, Mode::Select, "a left click cancels a right-click plate");
     rig.click(g, ex, ey, false);
-    assert_eq!(g.mode, Mode::Select, "a second right click cancels it");
+    assert!(matches!(g.mode, Mode::Move { .. }));
+    rig.click(g, ex, ey, false);
+    assert_eq!(g.mode, Mode::Select, "a second right click confirms it");
     rig.input(g, InputEvent::KeyDown(0x10));
     rig.click(g, ex, ey, false);
     rig.input(g, InputEvent::KeyUp(0x10));

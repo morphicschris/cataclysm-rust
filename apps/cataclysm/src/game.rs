@@ -198,6 +198,8 @@ pub struct Game {
     /// the menu; a right click on a ship or a resource does what it always did. Off: the
     /// original's right click (the menu, or the context-sensitive action).
     pub right_click_move: bool,
+    /// The open move plate came from that right click: right confirms it, left cancels it.
+    plate_from_right: bool,
 }
 
 /// A factory job with ships still to build: (factory, job, ship type).
@@ -297,6 +299,7 @@ impl Game {
             plate_font: res.font(&plate::readout_font_name(tweak.as_ref())),
             pointer_warp: None,
             right_click_move: options.get("hwcRightClickMove") != 0,
+            plate_from_right: false,
             nis_notes: Vec::new(),
             queued_nis: None,
             debug_keys: std::env::var_os("HWC_DEBUG_KEYS").is_some(),
@@ -458,24 +461,14 @@ impl Game {
     fn left_release(&mut self, start: Option<(i32, i32)>, audio: &mut Option<Audio>) {
         let size = self.size();
         let p = [self.mouse.0 as f32, self.mouse.1 as f32];
-        if let Mode::Move(plate) = self.mode {
-            // `piePointSpecExecute` -> `mrMoveShipsExecute`.
-            let dest = plate.destination();
-            let sel = self.mobile_selection();
-            if !sel.is_empty() && dest.is_finite() {
-                let c = plate.centre;
-                let from = hwc_math::Vector::new(c.x, c.y, c.z);
-                let d = hwc_math::Vector::new(dest.x, dest.y, dest.z);
-                command::cl_move(
-                    self.world.universe_mut(),
-                    &sel,
-                    command::waypoint_mode::ONCE,
-                    from,
-                    &[d],
-                );
+        if let Mode::Move(_) = self.mode {
+            // A plate opened by right click is confirmed with right click; left cancels it.
+            if self.plate_from_right {
+                self.mode = Mode::Select;
+                sound(audio, MOVEMENT_GUI_OFF);
+            } else {
+                self.execute_plate(audio);
             }
-            sound(audio, MOVEMENT_GUI_OFF);
-            self.mode = Mode::Select;
             return;
         }
         let Some(start) = start else { return };
@@ -495,6 +488,29 @@ impl Game {
                     self.selection.clear();
                 }
             }
+        }
+    }
+
+    /// Orders the move the plate points at and closes it.
+    fn execute_plate(&mut self, audio: &mut Option<Audio>) {
+        if let Mode::Move(plate) = self.mode {
+            // `piePointSpecExecute` -> `mrMoveShipsExecute`.
+            let dest = plate.destination();
+            let sel = self.mobile_selection();
+            if !sel.is_empty() && dest.is_finite() {
+                let c = plate.centre;
+                let from = hwc_math::Vector::new(c.x, c.y, c.z);
+                let d = hwc_math::Vector::new(dest.x, dest.y, dest.z);
+                command::cl_move(
+                    self.world.universe_mut(),
+                    &sel,
+                    command::waypoint_mode::ONCE,
+                    from,
+                    &[d],
+                );
+            }
+            sound(audio, MOVEMENT_GUI_OFF);
+            self.mode = Mode::Select;
         }
     }
 
@@ -544,8 +560,12 @@ impl Game {
     /// Right click without moving the camera: the menu (`mrRightClickMenu`).
     fn right_click(&mut self, audio: &mut Option<Audio>) {
         if let Mode::Move { .. } = self.mode {
-            self.mode = Mode::Select;
-            sound(audio, MOVEMENT_GUI_OFF);
+            if self.plate_from_right {
+                self.execute_plate(audio);
+            } else {
+                self.mode = Mode::Select;
+                sound(audio, MOVEMENT_GUI_OFF);
+            }
             return;
         }
         if self.selection.is_empty() {
@@ -554,6 +574,7 @@ impl Game {
         // The user-requested right click: on empty space the move plate, Shift for the menu.
         if self.right_click_opens_plate() {
             self.start_move(audio);
+            self.plate_from_right = matches!(self.mode, Mode::Move(_));
             return;
         }
         // `mrRightClickSmartOrder`: with a context-sensitive scheme the action under the
@@ -1259,6 +1280,7 @@ impl Game {
                 return;
             };
             self.mode = Mode::Move(Plate::new(c, size));
+            self.plate_from_right = false;
             sound(audio, MOVEMENT_GUI_ON);
         } else {
             self.mode = Mode::Select;
