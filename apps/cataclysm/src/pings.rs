@@ -160,7 +160,11 @@ pub enum Owner {
 pub enum Eval {
     /// `pingAnomalyPingTimeout`: KAS and objective pings. A ping on ships follows their centre
     /// and goes when the last of them dies; an object ping stays where its object died.
-    Anomaly { name: String, ships: Vec<ShipId>, object: Option<Owner> },
+    Anomaly {
+        name: String,
+        ships: Vec<ShipId>,
+        object: Option<Owner>,
+    },
     /// `FUN_005b9ef0`: while the sensor has found something.
     Proximity(ShipId),
     /// New ships: expires at its first evaluation.
@@ -291,7 +295,11 @@ impl Pings {
     /// `pingAnomalySelectionPingAdd`: a ping on the centre of some ships.
     pub fn anomaly_ships(&mut self, u: &Universe, name: &str, ships: &[ShipId], now: f32) {
         let centre = selection_centre(u, ships).unwrap_or(Vector::ZERO);
-        let eval = Eval::Anomaly { name: name.to_string(), ships: ships.to_vec(), object: None };
+        let eval = Eval::Anomaly {
+            name: name.to_string(),
+            ships: ships.to_vec(),
+            object: None,
+        };
         let mut p = Ping::new(centre, None, eval, now);
         p.apply(&self.tweaks.anomaly, mask::ANOMALY);
         self.list.push(p);
@@ -299,7 +307,11 @@ impl Pings {
 
     /// `pingAnomalyObjectPingAdd`: a ping on one object.
     pub fn anomaly_object(&mut self, name: &str, owner: Owner, at: Vector, now: f32) {
-        let eval = Eval::Anomaly { name: name.to_string(), ships: Vec::new(), object: Some(owner) };
+        let eval = Eval::Anomaly {
+            name: name.to_string(),
+            ships: Vec::new(),
+            object: Some(owner),
+        };
         let mut p = Ping::new(at, Some(owner), eval, now);
         p.apply(&self.tweaks.anomaly, mask::ANOMALY);
         self.list.push(p);
@@ -307,7 +319,11 @@ impl Pings {
 
     /// `pingAnomalyPositionPingAdd`: a ping on a point.
     pub fn anomaly_point(&mut self, name: &str, at: Vector, now: f32) {
-        let eval = Eval::Anomaly { name: name.to_string(), ships: Vec::new(), object: None };
+        let eval = Eval::Anomaly {
+            name: name.to_string(),
+            ships: Vec::new(),
+            object: None,
+        };
         let mut p = Ping::new(at, None, eval, now);
         p.apply(&self.tweaks.anomaly, mask::ANOMALY);
         self.list.push(p);
@@ -346,7 +362,11 @@ impl Pings {
     /// `pingBattlePingsCreate` on a battle-ping frame: the simulation's battle sub-blobs
     /// become pings, unless a battle ping is still in the list (then none are made).
     pub fn battles(&mut self, battles: Vec<hwc_sim::battle_ping::BattlePing>, now: f32) {
-        if self.list.iter().any(|p| matches!(p.eval, Eval::Battle { .. })) {
+        if self
+            .list
+            .iter()
+            .any(|p| matches!(p.eval, Eval::Battle { .. }))
+        {
             return;
         }
         for b in battles {
@@ -362,7 +382,9 @@ impl Pings {
             match o {
                 PingOrder::Ship { label, ship } => {
                     // `pingAnomalyObjectPingAdd` on the ship, wherever it is now.
-                    let Some(at) = u.ship(ship).map(|s| s.posinfo.position) else { continue };
+                    let Some(at) = u.ship(ship).map(|s| s.posinfo.position) else {
+                        continue;
+                    };
                     self.anomaly_object(&label, Owner::Ship(ship), at, now);
                 }
                 PingOrder::Ships { label, ships } => self.anomaly_ships(u, &label, &ships, now),
@@ -375,7 +397,15 @@ impl Pings {
     }
 
     /// `ProximitySensorHouseKeep`: the local player's sensor found something.
-    pub fn proximity(&mut self, sensor: ShipId, at: Vector, radius: f32, blink_rate: f32, color: Rgb, now: f32) {
+    pub fn proximity(
+        &mut self,
+        sensor: ShipId,
+        at: Vector,
+        radius: f32,
+        blink_rate: f32,
+        color: Rgb,
+        now: f32,
+    ) {
         let mut p = Ping::new(at, Some(Owner::Ship(sensor)), Eval::Proximity(sensor), now);
         p.color = color;
         p.size = radius;
@@ -473,13 +503,16 @@ impl Pings {
             p.camera_dist_sq = d.x * d.x + d.y * d.y + d.z * d.z;
             masks |= p.mask;
         }
-        self.list.sort_by(|a, b| b.camera_dist_sq.total_cmp(&a.camera_dist_sq));
+        self.list
+            .sort_by(|a, b| b.camera_dist_sq.total_cmp(&a.camera_dist_sq));
         let mut out = Vec::new();
         let mut played = None;
         for p in &self.list {
             let Some(size) = p.pulse(now) else { continue };
             let full = p.size.max(p.min_size);
-            let Some((x, y, r)) = project(p.centre, full) else { continue };
+            let Some((x, y, r)) = project(p.centre, full) else {
+                continue;
+            };
             if r <= 0.0 || (p.mask != mask::ANOMALY && hidden(p.centre)) {
                 continue;
             }
@@ -495,7 +528,15 @@ impl Pings {
                 if let Some(k) = kind_index(p.mask) {
                     if size <= self.last_sound_size[k] {
                         self.last_sound_size[k] = size;
-                        played = Some([sound::PROXIMITY, sound::NEW_SHIPS, sound::ANOMALY, sound::BATTLE, sound::HYPERSPACE][k]);
+                        played = Some(
+                            [
+                                sound::PROXIMITY,
+                                sound::NEW_SHIPS,
+                                sound::ANOMALY,
+                                sound::BATTLE,
+                                sound::HYPERSPACE,
+                            ][k],
+                        );
                     }
                 }
             }
@@ -527,8 +568,19 @@ impl Pings {
 
 /// `pieCircleSegmentsCompute` with the pie plate's levels (radius in pixels).
 pub fn circle_segments(r: f32) -> i32 {
-    const LEVELS: [(f32, i32); 7] = [(200.0, 32), (80.0, 20), (32.0, 16), (10.0, 12), (4.0, 8), (2.0, 6), (0.0, 4)];
-    LEVELS.iter().find(|&&(min, _)| r > min).map_or(32, |&(_, n)| n)
+    const LEVELS: [(f32, i32); 7] = [
+        (200.0, 32),
+        (80.0, 20),
+        (32.0, 16),
+        (10.0, 12),
+        (4.0, 8),
+        (2.0, 6),
+        (0.0, 4),
+    ];
+    LEVELS
+        .iter()
+        .find(|&&(min, _)| r > min)
+        .map_or(32, |&(_, n)| n)
 }
 
 /// `selCentrePointComputeGeneral`: the middle of the ships' bounding box.
@@ -545,7 +597,13 @@ pub fn selection_centre(u: &Universe, ships: &[ShipId]) -> Option<Vector> {
         }
         any = true;
     }
-    any.then(|| Vector::new((lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5))
+    any.then(|| {
+        Vector::new(
+            (lo[0] + hi[0]) * 0.5,
+            (lo[1] + hi[1]) * 0.5,
+            (lo[2] + hi[2]) * 0.5,
+        )
+    })
 }
 
 /// `primOvalArcOutline2` over a whole turn: a polygon whose first vertex is straight above
@@ -555,7 +613,10 @@ pub fn draw_circle(canvas: &mut hwc_ui::canvas::Canvas, c: &Circle) {
     let r = c.r as f32;
     let pt = |k: i32| {
         let a = std::f32::consts::TAU * k as f32 / n as f32;
-        ((c.x as f32 + a.sin() * r).round() as i32, (c.y as f32 - a.cos() * r).round() as i32)
+        (
+            (c.x as f32 + a.sin() * r).round() as i32,
+            (c.y as f32 - a.cos() * r).round() as i32,
+        )
     };
     let mut last = pt(0);
     for k in 1..=n {
@@ -618,7 +679,14 @@ mod tests {
         assert_eq!(p.list[0].owner, None);
         assert_eq!(p.list[0].centre, Vector::new(5.0, 0.0, 0.0));
         let project = |_: Vector, r: f32| Some((100.0, 100.0, r / 100.0));
-        let (c, s, m) = p.frame(0.0, Vector::new(0.0, 0.0, 1000.0), |_| None, project, |_| true, false);
+        let (c, s, m) = p.frame(
+            0.0,
+            Vector::new(0.0, 0.0, 1000.0),
+            |_| None,
+            project,
+            |_| true,
+            false,
+        );
         // Anomaly pings show in the fog; 500 m of 3000 m is a sixth of the full 30 px.
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].r, 5);
@@ -657,11 +725,17 @@ mod tests {
                 false
             }
         }
-        let statics = hwc_sim::statics::StaticWorld::load_from(&NoData, hwc_sim::statics::LoadOptions::default());
+        let statics = hwc_sim::statics::StaticWorld::load_from(
+            &NoData,
+            hwc_sim::statics::LoadOptions::default(),
+        );
         Universe::new(
             std::sync::Arc::new(statics),
             hwc_sim::SimTweaks::default(),
-            &[hwc_sim::statics::ShipRace::Somtaaw, hwc_sim::statics::ShipRace::Taiidan],
+            &[
+                hwc_sim::statics::ShipRace::Somtaaw,
+                hwc_sim::statics::ShipRace::Taiidan,
+            ],
         )
     }
 
@@ -674,11 +748,22 @@ mod tests {
         p.kas_orders(
             &u,
             vec![
-                PingOrder::Point { label: "FleetIntel1".into(), at },
-                PingOrder::Point { label: "FleetIntel2".into(), at },
+                PingOrder::Point {
+                    label: "FleetIntel1".into(),
+                    at,
+                },
+                PingOrder::Point {
+                    label: "FleetIntel2".into(),
+                    at,
+                },
                 // A ship that is gone makes no ping.
-                PingOrder::Ship { label: "Gone".into(), ship: ShipId(77) },
-                PingOrder::Remove { label: "fleetintel2".into() },
+                PingOrder::Ship {
+                    label: "Gone".into(),
+                    ship: ShipId(77),
+                },
+                PingOrder::Remove {
+                    label: "fleetintel2".into(),
+                },
             ],
             5.0,
         );
@@ -699,10 +784,23 @@ mod tests {
         use hwc_sim::battle_ping::BattlePing;
         let u = empty_universe();
         let mut p = pings();
-        let battle = |x: f32, ships: Vec<ShipId>| BattlePing { centre: Vector::new(x, 0.0, 0.0), radius: 4000.0, ships };
-        p.battles(vec![battle(0.0, vec![ShipId(1), ShipId(2)]), battle(9000.0, vec![ShipId(3)])], 0.0);
+        let battle = |x: f32, ships: Vec<ShipId>| BattlePing {
+            centre: Vector::new(x, 0.0, 0.0),
+            radius: 4000.0,
+            ships,
+        };
+        p.battles(
+            vec![
+                battle(0.0, vec![ShipId(1), ShipId(2)]),
+                battle(9000.0, vec![ShipId(3)]),
+            ],
+            0.0,
+        );
         assert_eq!(p.list.len(), 2);
-        assert!(p.list.iter().all(|q| q.mask == mask::BATTLE && q.size == 4000.0));
+        assert!(p
+            .list
+            .iter()
+            .all(|q| q.mask == mask::BATTLE && q.size == 4000.0));
         // While a battle ping is up no new ones are made.
         p.battles(vec![battle(500.0, vec![ShipId(4)])], 0.1);
         assert_eq!(p.list.len(), 2);

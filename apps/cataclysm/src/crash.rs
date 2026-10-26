@@ -67,9 +67,10 @@ fn report(info: &PanicHookInfo<'_>) -> String {
         .map(|s| s.to_string())
         .or_else(|| info.payload().downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "(no message)".into());
-    let location = info
-        .location()
-        .map_or_else(|| "unknown place".into(), |l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
+    let location = info.location().map_or_else(
+        || "unknown place".into(),
+        |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+    );
     let thread = std::thread::current();
     let name = thread.name().unwrap_or("unnamed");
     let since = std::time::SystemTime::now()
@@ -104,7 +105,10 @@ pub fn log(what: &str) {
 fn write_log(report: &str) -> Option<PathBuf> {
     for dir in log_dirs() {
         let path = dir.join(LOG_NAME);
-        let file = std::fs::OpenOptions::new().create(true).append(true).open(&path);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path);
         if let Ok(mut f) = file {
             if f.write_all(report.as_bytes()).is_ok() {
                 return Some(path);
@@ -126,7 +130,10 @@ pub fn write_file(name: &str, text: &str) {
 /// Next to the executable, then the user's config directory, then the working directory.
 fn log_dirs() -> Vec<PathBuf> {
     let mut v = Vec::new();
-    if let Some(d) = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)) {
+    if let Some(d) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(PathBuf::from))
+    {
         v.push(d);
     }
     if let Some(a) = std::env::var_os("APPDATA").or_else(|| std::env::var_os("XDG_CONFIG_HOME")) {
@@ -241,7 +248,8 @@ mod native {
         // reference count; `module` is written only on success.
         let found = unsafe {
             GetModuleHandleExW(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                    | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                 address,
                 &mut module,
             )
@@ -251,8 +259,12 @@ mod native {
         }
         let mut name = [0u16; 512];
         // SAFETY: `name` has room for the length passed.
-        let n = unsafe { GetModuleFileNameW(module, name.as_mut_ptr(), name.len() as u32) } as usize;
-        format!("{} (base {module:p})", String::from_utf16_lossy(&name[..n.min(name.len())]))
+        let n =
+            unsafe { GetModuleFileNameW(module, name.as_mut_ptr(), name.len() as u32) } as usize;
+        format!(
+            "{} (base {module:p})",
+            String::from_utf16_lossy(&name[..n.min(name.len())])
+        )
     }
 
     /// An exception no handler took: logged, then left to the system (which ends the process).
@@ -260,7 +272,11 @@ mod native {
         // SAFETY: the system passes valid exception pointers to the filter.
         let (code, address, params) = unsafe {
             match info.as_ref().and_then(|i| i.record.as_ref()) {
-                Some(r) => (r.code, r.address, r.information[..(r.parameter_count as usize).min(15)].to_vec()),
+                Some(r) => (
+                    r.code,
+                    r.address,
+                    r.information[..(r.parameter_count as usize).min(15)].to_vec(),
+                ),
                 None => (0, std::ptr::null(), Vec::new()),
             }
         };

@@ -24,7 +24,9 @@ const DT: f32 = 1.0 / 16.0;
 fn save(g: &Game, name: &str) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/nis");
     std::fs::create_dir_all(&dir).expect("screenshot dir");
-    g.canvas().save_png(&dir.join(format!("{name}.png"))).expect("png");
+    g.canvas()
+        .save_png(&dir.join(format!("{name}.png")))
+        .expect("png");
 }
 
 struct Rig {
@@ -103,7 +105,14 @@ fn nis_time(g: &Game) -> f32 {
 }
 
 /// Updates until the NIS time reaches `t` (or the NIS ends), then draws and saves.
-fn shot_at(g: &mut Game, r: &mut Renderer, audio: &mut Option<crate::audio::Audio>, want: Kind, t: f32, name: &str) -> bool {
+fn shot_at(
+    g: &mut Game,
+    r: &mut Renderer,
+    audio: &mut Option<crate::audio::Audio>,
+    want: Kind,
+    t: f32,
+    name: &str,
+) -> bool {
     let mut guard = 0;
     while kind(g) == Some(want) && nis_time(g) < t {
         g.update(DT, audio);
@@ -142,13 +151,20 @@ fn opening_nis_then_nislet_then_mission() {
     };
     let g = &mut *game;
     g.update(DT, &mut audio);
-    assert_eq!(kind(g), Some(Kind::Opening), "the opening NIS did not start");
+    assert_eq!(
+        kind(g),
+        Some(Kind::Opening),
+        "the opening NIS did not start"
+    );
     {
         let n = g.nis.as_ref().unwrap();
         assert_eq!(n.player.data.objects.len(), 46);
         assert!((n.player.length() - 110.633).abs() < 0.01);
         // It plays in its own level; the mission is not loaded yet.
-        assert_eq!(g.world.nis_level().map(|l| (l.mission, l.nis)), Some((1, 1)));
+        assert_eq!(
+            g.world.nis_level().map(|l| (l.mission, l.nis)),
+            Some((1, 1))
+        );
         assert!(g.world.mission_run().is_none());
     }
     // Faded from black at the start (fadeSet 100%, fadeTo 0% over 60 frames).
@@ -169,9 +185,15 @@ fn opening_nis_then_nislet_then_mission() {
     ];
     let mut bright = 0.0f32;
     for (t, name) in times {
-        assert!(shot_at(g, &mut r, &mut audio, Kind::Opening, t, name), "opening ended before {t}s");
+        assert!(
+            shot_at(g, &mut r, &mut audio, Kind::Opening, t, name),
+            "opening ended before {t}s"
+        );
         let b = brightness(g);
-        eprintln!("{name}: brightness {b:.1}, camera {:?}", g.nis.as_ref().map(|n| n.player.camera.eye));
+        eprintln!(
+            "{name}: brightness {b:.1}, camera {:?}",
+            g.nis.as_ref().map(|n| n.player.camera.eye)
+        );
         if t == 2.5 {
             bright = b;
         }
@@ -185,7 +207,10 @@ fn opening_nis_then_nislet_then_mission() {
     // The NIS ends; the mission loads behind its own loading screen, starts and asks for
     // NISlet 1.
     let mut guard = 0;
-    while !g.update(DT, &mut audio).contains(&crate::game::Outcome::NisLevelDone) {
+    while !g
+        .update(DT, &mut audio)
+        .contains(&crate::game::Outcome::NisLevelDone)
+    {
         guard += 1;
         assert!(guard < 16 * 10, "the opening did not end");
     }
@@ -200,7 +225,10 @@ fn opening_nis_then_nislet_then_mission() {
         guard += 1;
         assert!(guard < 16 * 20, "NISlet 1 did not start");
     }
-    eprintln!("NISlet 1 starts at game time {}", g.world.universe().total_time_elapsed);
+    eprintln!(
+        "NISlet 1 starts at game time {}",
+        g.world.universe().total_time_elapsed
+    );
     for (t, name) in [
         (2.0, "nislet1_01"),
         (24.5, "nislet1_02_location_card"),
@@ -245,9 +273,12 @@ fn escape_skips_the_opening() {
     for _ in 0..4 {
         g.update(DT, &mut audio);
     }
-    assert_ne!(kind(g), Some(Kind::Opening), "Escape did not end the opening");
+    assert_ne!(
+        kind(g),
+        Some(Kind::Opening),
+        "Escape did not end the opening"
+    );
 }
-
 
 /// Escape pressed again and again from the first frame: the opening ends, the mission loads
 /// behind its own loading screen, NISlet 1 is skipped the same way and the mission goes on.
@@ -281,7 +312,10 @@ fn rapid_escape_through_the_opening_and_nislet() {
         }
         let out = g.update(DT, &mut audio);
         assert!(
-            out.iter().all(|o| matches!(o, crate::game::Outcome::ApplyOptions | crate::game::Outcome::Animatic(_))),
+            out.iter().all(|o| matches!(
+                o,
+                crate::game::Outcome::ApplyOptions | crate::game::Outcome::Animatic(_)
+            )),
             "unexpected {out:?}"
         );
         g.render(&mut r, SIZE).expect("render");

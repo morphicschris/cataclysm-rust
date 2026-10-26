@@ -20,10 +20,14 @@ pub mod mock;
 pub mod modern_build;
 pub mod modern_build_manager;
 pub mod modern_hud;
+pub mod modern_launch_manager;
 pub mod modern_log;
 pub mod modern_manager;
+pub mod modern_menu;
 pub mod modern_objectives;
+pub mod modern_options;
 pub mod modern_panel;
+pub mod modern_proxy;
 pub mod modern_research;
 pub mod modern_research_manager;
 pub mod modern_selected;
@@ -102,6 +106,13 @@ pub struct IgState {
     /// The modern research manager's own state (`--research-ui`).
     pub mrm: modern_research_manager::State,
     pub lm: launchmgr::State,
+    /// The modern menus' own state (`--menus`).
+    pub mmenu: modern_menu::State,
+    /// The modern systems manager's own state (`--menus`).
+    pub mlm: modern_launch_manager::State,
+    /// Modern options the command line set for this run: (options key, value). The modern
+    /// options screen shows them and does not change them.
+    pub locked_options: Vec<(String, i32)>,
     pub rm: research::State,
     pub tm: trader::State,
     pub esc: escmenu::State,
@@ -157,6 +168,9 @@ pub struct InGameUi {
     /// A left / right press over the modern HUD's panels while a full-screen manager was
     /// open: the manager saw neither it nor its release.
     panel_press: [bool; 2],
+    /// The pointer as the application gave it (a modern screen may have put the screens'
+    /// own pointer elsewhere, on the original screen underneath).
+    mouse: (i32, i32),
 }
 
 /// The managers that cover the screen: the overlay is not drawn under them (the modern HUD's
@@ -234,6 +248,7 @@ impl InGameUi {
             letterboxed: false,
             fleet_intel: false,
             panel_press: [false; 2],
+            mouse: (0, 0),
         })
     }
 
@@ -259,6 +274,14 @@ impl InGameUi {
     /// Opt-in layout change: the roll call (which the original keeps at its 640x480 position in
     /// the top-left corner at every resolution, under the speech band and portrait) moves
     /// down by `dy` pixels. Takes effect the next time the screen opens.
+    /// A modern option the command line set for this run: the modern options screen shows
+    /// `value` and does not change it.
+    pub fn lock_option(&mut self, key: &str, value: i32) {
+        let locked = &mut self.fe.game.ig.locked_options;
+        locked.retain(|(k, _)| k != key);
+        locked.push((key.to_string(), value));
+    }
+
     pub fn set_rollcall_offset(&mut self, dy: i32) {
         self.fe.set_screen_offset(rollcall::SCREEN, 0, dy);
     }
@@ -321,7 +344,14 @@ impl InGameUi {
         }
         match ev {
             InputEvent::MouseMove { x, y } => {
+                self.mouse = (x, y);
                 self.fe.mouse_move(x, y);
+                if modern_menu::active(&self.fe) {
+                    modern_menu::mouse_move(&mut self.fe, x, y);
+                }
+                if modern_launch_manager::active(&self.fe) {
+                    modern_launch_manager::mouse_move(&mut self.fe, x, y);
+                }
                 if modern_build_manager::active(&self.fe) {
                     modern_build_manager::mouse_move(&mut self.fe, x, y);
                 }
@@ -346,6 +376,14 @@ impl InGameUi {
                         modern_research_manager::mouse_button(&mut self.fe, left, down);
                         return true;
                     }
+                    if modern_menu::active(&self.fe) {
+                        modern_menu::mouse_button(&mut self.fe, left, down);
+                        return true;
+                    }
+                    if modern_launch_manager::active(&self.fe) {
+                        modern_launch_manager::mouse_button(&mut self.fe, left, down);
+                        return true;
+                    }
                     self.fe.mouse_button(left, down);
                     return true;
                 }
@@ -368,6 +406,14 @@ impl InGameUi {
                     modern_research_manager::wheel(&mut self.fe, up);
                     return true;
                 }
+                if modern_menu::active(&self.fe) {
+                    modern_menu::wheel(&mut self.fe, up);
+                    return true;
+                }
+                if modern_launch_manager::active(&self.fe) {
+                    modern_launch_manager::wheel(&mut self.fe, up);
+                    return true;
+                }
                 if self.fe.game.ig.manager.is_some() {
                     self.fe.wheel(up);
                     return true;
@@ -377,6 +423,9 @@ impl InGameUi {
             InputEvent::KeyDown(code) => {
                 let repeat = !self.held.insert(code);
                 if self.fe.game.ig.manager.is_some() {
+                    if modern_menu::active(&self.fe) && modern_menu::key_down(&mut self.fe, code) {
+                        return true;
+                    }
                     self.fe.key_down(code);
                     return true;
                 }
@@ -398,6 +447,9 @@ impl InGameUi {
             }
             InputEvent::Char(c) => {
                 if self.fe.game.ig.manager.is_some() {
+                    if self.fe.game.ig.mmenu.page.is_some() && modern_menu::active(&self.fe) {
+                        return true;
+                    }
                     self.fe.char_typed(c);
                     return true;
                 }
@@ -418,7 +470,7 @@ impl InGameUi {
         if !full_screen_manager(self.fe.game.ig.manager) || self.fe.game.ig.overlay.cutscene {
             return false;
         }
-        let (x, y) = self.fe.mouse_pos();
+        let (x, y) = self.mouse;
         overlay::layout(&mut self.fe);
         if !overlay::over_modern_panel(&self.fe, x, y) {
             return false;
@@ -521,6 +573,7 @@ impl InGameUi {
             launchmgr::tick(&mut self.fe);
             research::tick(&mut self.fe);
             modern_research_manager::tick(&mut self.fe);
+            modern_menu::tick(&mut self.fe);
         } else {
             self.fe.time += f64::from(dt);
         }
@@ -529,7 +582,17 @@ impl InGameUi {
         if self.fe.game.ig.manager.is_some() && self.fe.stack.len() <= 1 {
             close_manager(&mut self.fe);
         }
+        // No modern screen hands the pointer on any more: the screens' pointer is the
+        // application's again.
+        if !self.proxied() && self.fe.mouse_pos() != self.mouse {
+            self.fe.mouse_move(self.mouse.0, self.mouse.1);
+        }
         self.take_requests()
+    }
+
+    /// A modern screen hands the pointer on to the original screen underneath.
+    fn proxied(&self) -> bool {
+        modern_menu::active(&self.fe) || modern_launch_manager::active(&self.fe)
     }
 
     /// Requests queued so far (also returned by [`InGameUi::update`]).
@@ -569,6 +632,10 @@ impl InGameUi {
             modern_build_manager::draw(&mut self.fe, canvas);
         } else if modern_research_manager::active(&self.fe) {
             modern_research_manager::draw(&mut self.fe, canvas);
+        } else if modern_menu::active(&self.fe) {
+            modern_menu::draw(&mut self.fe, canvas);
+        } else if modern_launch_manager::active(&self.fe) {
+            modern_launch_manager::draw(&mut self.fe, canvas);
         } else if self.fe.game.ig.manager.is_some() {
             self.fe.render_over(canvas);
         }
@@ -638,12 +705,19 @@ pub fn open_manager(fe: &mut Fe, m: Manager) {
             consmgr::begin(fe);
             modern_build_manager::reset(fe);
         }
-        Manager::Launch => launchmgr::begin(fe),
+        Manager::Launch => {
+            launchmgr::begin(fe);
+            modern_launch_manager::reset(fe);
+        }
         Manager::Research => {
             research::begin(fe);
             modern_research_manager::reset(fe);
         }
-        Manager::EscMenu => fe.game.ig.request(GameRequest::Sound(0x108)),
+        Manager::EscMenu => {
+            fe.game.ig.request(GameRequest::Sound(0x108));
+            modern_menu::reset(fe);
+        }
+        Manager::Objectives => modern_menu::reset(fe),
         _ => {}
     }
     let name = screen_name(fe, m);

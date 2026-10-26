@@ -209,9 +209,11 @@ user-requested change; the original screens stay open underneath for their keys,
 rules, and the new panels act through the same functions as the original's regions). The
 switches are `--build-ui original|modern` and `--research-ui original|modern`, options-file
 keys `hwcModernBuildManager` and `hwcModernResearchManager` (default 1); the original HUD
-(`--hud original`, `hwcModernHud = 0`) brings back both original screens too. See
-[modern-managers.md](modern-managers.md) for the layout, what each control calls and what is
-not 1:1.
+(`--hud original`, `hwcModernHud = 0`) brings back both original screens too. The escape
+menu with all its screens (options, key bindings, save / load, confirmations), the objectives
+screen and the systems (launch) manager are restyled the same way (`--menus original|modern`,
+`hwcModernMenus`, default 1), with a modern options screen (ENHANCEMENTS) in the options. See
+[modern-ui.md](modern-ui.md) for the layout, what each control calls and what is not 1:1.
 
 Drawn directly over the 3D view:
 

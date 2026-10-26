@@ -467,9 +467,8 @@ fn full_hud(size: (i32, i32), tag: &str) {
     queue_ships(g);
     start_research(g);
     // Until a ship is built (its message) with more still queued.
-    let built = |g: &Game| {
-        !g.ui.state().view.messages.is_empty() && !g.ui.state().view.jobs.is_empty()
-    };
+    let built =
+        |g: &Game| !g.ui.state().view.messages.is_empty() && !g.ui.state().view.jobs.is_empty();
     let mut n = 0;
     while !built(g) && n < 16 * 300 {
         rig.frame(g);
@@ -481,7 +480,10 @@ fn full_hud(size: (i32, i32), tag: &str) {
         .iter()
         .copied()
         .filter(|&id| crate::host::selectable(u, id))
-        .filter(|&id| u.ship(id).is_some_and(|s| s.player == 0 && Some(id) != Some(ms)))
+        .filter(|&id| {
+            u.ship(id)
+                .is_some_and(|s| s.player == 0 && Some(id) != Some(ms))
+        })
         .collect();
     for _ in 0..8 {
         rig.frame(g);
@@ -499,7 +501,12 @@ fn full_hud(size: (i32, i32), tag: &str) {
     let r = a.rects();
     for i in 0..r.len() {
         for j in i + 1..r.len() {
-            assert!(!modern_hud::overlaps(r[i], r[j]), "{:?} / {:?} at {tag}", r[i], r[j]);
+            assert!(
+                !modern_hud::overlaps(r[i], r[j]),
+                "{:?} / {:?} at {tag}",
+                r[i],
+                r[j]
+            );
         }
     }
     for k in [

@@ -16,13 +16,13 @@ use hwc_sim::harness::group_centre;
 use hwc_sim::statics::{ShipType, Technology};
 use hwc_sim::{command, dock, formation, ShipId};
 use hwc_ui::canvas::{Canvas, Color, Rect};
-use hwc_ui::letterbox::Letterbox;
-use hwc_ui::subtitle::{self, Subtitles};
 use hwc_ui::ingame::host::{Command, Formation, GameMessage, GameRequest, Owner};
 use hwc_ui::ingame::keys::{self, Action};
 use hwc_ui::ingame::strings::Strings;
 use hwc_ui::ingame::{InGameUi, InputEvent, Setup};
+use hwc_ui::letterbox::Letterbox;
 use hwc_ui::session::Session;
+use hwc_ui::subtitle::{self, Subtitles};
 use hwc_ui::text::{self, Shadow};
 use hwc_ui::AssetSource;
 
@@ -30,16 +30,16 @@ use hwc_ui::ingame::cursor::{self, avail, Availability, Pointer, PointerAction};
 
 use crate::audio::Audio;
 use crate::bandbox;
-use crate::pings::{self, Owner as PingOwner, Pings, Tweaks as PingTweaks};
 use crate::host::{selectable, sim_id, SimHost, PLAYER};
 use crate::hotkeys::{CarriedGroups, HotKeyGroups};
 use crate::mission::{Cue, CueReader};
 use crate::nis::{self, Kind as NisKind, NisRun};
-use hwc_nis::{Action as NisAction, Fired};
-use crate::sensors::{self, Phase, Sensors};
+use crate::pings::{self, Owner as PingOwner, Pings, Tweaks as PingTweaks};
 use crate::plate::{self, Plate};
 use crate::profile;
+use crate::sensors::{self, Phase, Sensors};
 use crate::world::World;
+use hwc_nis::{Action as NisAction, Fired};
 
 /// Pixels the pointer may move between press and release and still count as a click
 /// (`selClickBoxWidth/Height`: a band box needs `|dx| + 1 > 5`).
@@ -372,7 +372,10 @@ impl Game {
             autoplay: None,
         };
         // Mission 1's start sets the flag that keeps the letterbox of its first NIS.
-        g.keep_letterbox_after_nis = g.world.mission_run().is_some_and(|r| r.game.config.mission == 1);
+        g.keep_letterbox_after_nis = g
+            .world
+            .mission_run()
+            .is_some_and(|r| r.game.config.mission == 1);
         // `hwcOriginalLetterbox` 1: the original's 1.85:1 bars at any screen shape.
         g.letterbox.tall = options.get("hwcOriginalLetterbox") == 0;
         g.world.lens_flares = options.get("enableLensFlare") != 0;
@@ -386,6 +389,27 @@ impl Game {
         }
         g.subtitles = subs;
         Ok(g)
+    }
+
+    /// The recreation's own options from the options store, applied at once (the modern
+    /// options screen's ACCEPT): the 3D view's quality, the camera and controls, the
+    /// letterbox. The interface switches (HUD, managers, menus) are read from the store as
+    /// they are drawn.
+    pub fn apply_modern_options(&mut self, options: &hwc_ui::options::Options) {
+        self.quality = hwc_render::RenderQuality::from_options(
+            options.get("hwcRenderScale"),
+            options.get("hwcMsaa"),
+            options.get("hwcFxaa"),
+        );
+        self.smooth_zoom = options.get("hwcSmoothZoom") != 0;
+        self.scene_at_window = options.get("hwcSceneAtWindow") != 0;
+        self.right_click_move = options.get("hwcRightClickMove") != 0;
+        self.double_click_type = options.get("hwcDoubleClickSelectType") != 0;
+        self.letterbox.tall = options.get("hwcOriginalLetterbox") == 0;
+        self.world.full_detail = options.get("hwcFullDetailShips") != 0;
+        self.world.focus_zoom = options.get("hwcFocusZoom") != 0;
+        self.world.zoom_clear = options.get("hwcZoomClear") != 0;
+        self.world.render_list = options.get("hwcRenderList") != 0;
     }
 
     fn screen_pos(world: &World, size: (u32, u32), id: ShipId) -> Option<(i32, i32, i32)> {
@@ -595,7 +619,9 @@ impl Game {
     pub(crate) fn same_type_on_screen(&self, id: ShipId) -> Vec<ShipId> {
         let size = self.size();
         let u = self.world.universe();
-        let Some(kind) = u.ship(id).map(|s| s.ship_type) else { return vec![id] };
+        let Some(kind) = u.ship(id).map(|s| s.ship_type) else {
+            return vec![id];
+        };
         let mut sel = vec![id];
         for &other in &u.ship_list {
             if other == id || !selectable(u, other) {
@@ -993,7 +1019,8 @@ impl Game {
                         .filter_map(|&id| Some((id, bandbox::Facts::of(u, id, PLAYER)?)))
                         .collect()
                 };
-                let targets = bandbox::attack_targets(&facts, &attackers, mode == Mode::ForceAttack);
+                let targets =
+                    bandbox::attack_targets(&facts, &attackers, mode == Mode::ForceAttack);
                 if !targets.is_empty() {
                     command::cl_attack(self.world.universe_mut(), &attackers, &targets);
                 }
@@ -1030,8 +1057,10 @@ impl Game {
                 if self.selection.is_empty() {
                     return;
                 }
-                let targets: Vec<ShipId> =
-                    selecting.into_iter().filter(|id| !self.selection.contains(id)).collect();
+                let targets: Vec<ShipId> = selecting
+                    .into_iter()
+                    .filter(|id| !self.selection.contains(id))
+                    .collect();
                 if !targets.is_empty() {
                     self.special_targets = targets;
                     self.with_host(|ui, host| ui.open_popup(host, true));
@@ -1576,7 +1605,10 @@ impl Game {
             }
         }
         // The sensors manager: a mission opening or closing it, the zoom, panning.
-        let kas_open = self.world.mission_run().is_some_and(|r| r.game.sensors_open);
+        let kas_open = self
+            .world
+            .mission_run()
+            .is_some_and(|r| r.game.sensors_open);
         if kas_open != self.sensors.is_open() && !self.sensors.zooming() {
             if kas_open {
                 self.toggle_sensors(audio);
@@ -1600,8 +1632,11 @@ impl Game {
             let b = self.mouse;
             if (a.0 - b.0).abs() >= CLICK_SLOP || (a.1 - b.1).abs() >= CLICK_SLOP {
                 let mode = self.band_box_mode();
-                self.selecting =
-                    self.band_box_selecting(mode, [a.0 as f32, a.1 as f32], [b.0 as f32, b.1 as f32]);
+                self.selecting = self.band_box_selecting(
+                    mode,
+                    [a.0 as f32, a.1 as f32],
+                    [b.0 as f32, b.1 as f32],
+                );
             } else {
                 self.selecting.clear();
             }
@@ -1725,7 +1760,10 @@ impl Game {
         let u = self.world.universe();
         let mut out = Vec::new();
         for f in &u.base.factories {
-            let Some(fs) = f.ship.filter(|&id| u.ship(id).is_some_and(|s| s.player == PLAYER)) else {
+            let Some(fs) = f
+                .ship
+                .filter(|&id| u.ship(id).is_some_and(|s| s.player == PLAYER))
+            else {
                 continue;
             };
             for (i, j) in f.jobs.iter().enumerate() {
@@ -1781,7 +1819,12 @@ impl Game {
                         .get(bullet)
                         .filter(|b| b.bullet_type == pings::BIG_GUN_BULLET)
                     {
-                        p.anomaly_object(pings::BIG_GUN_PING, PingOwner::Bullet(bullet), b.posinfo.position, now);
+                        p.anomaly_object(
+                            pings::BIG_GUN_PING,
+                            PingOwner::Bullet(bullet),
+                            b.posinfo.position,
+                            now,
+                        );
                     }
                 }
                 _ => {}
@@ -1792,7 +1835,9 @@ impl Game {
             .list
             .iter()
             .filter_map(|q| match q.owner {
-                Some(PingOwner::Bullet(b)) if u.bullets.get(b).is_none() => Some(PingOwner::Bullet(b)),
+                Some(PingOwner::Bullet(b)) if u.bullets.get(b).is_none() => {
+                    Some(PingOwner::Bullet(b))
+                }
                 _ => None,
             })
             .collect();
@@ -1803,15 +1848,21 @@ impl Game {
         let found = |st: i32| st == proximity::state::FOUND || st == proximity::state::TRACKING;
         let mut states = Vec::new();
         for &id in &u.ship_list {
-            let Some(s) = u.ship(id).filter(|s| s.player == PLAYER) else { continue };
-            let ShipSpec::ProximitySensor(spec) = &s.spec else { continue };
+            let Some(s) = u.ship(id).filter(|s| s.player == PLAYER) else {
+                continue;
+            };
+            let ShipSpec::ProximitySensor(spec) = &s.spec else {
+                continue;
+            };
             let was = self
                 .ping_sensor_states
                 .iter()
                 .find(|(x, _)| *x == id)
                 .map(|&(_, st)| st);
             if was == Some(proximity::state::SEARCHING) && found(spec.state) {
-                if let TypeStatics::ProximitySensor(st) = hwc_sim::ships::type_statics(u, s.ship_type) {
+                if let TypeStatics::ProximitySensor(st) =
+                    hwc_sim::ships::type_statics(u, s.ship_type)
+                {
                     p.proximity(
                         id,
                         s.posinfo.position,
@@ -1828,7 +1879,12 @@ impl Game {
         // The last ship of a job: a ping at its factory.
         let mut pending: Vec<PendingJob> = jobs_before.to_vec();
         for e in &u.base.events {
-            let BaseEvent::ShipBuilt { ship_type, player, .. } = *e else { continue };
+            let BaseEvent::ShipBuilt {
+                ship_type, player, ..
+            } = *e
+            else {
+                continue;
+            };
             if player != PLAYER {
                 continue;
             }
@@ -1846,9 +1902,8 @@ impl Game {
             }
         }
         p.update(u, now, |id| {
-            u.ship(id).is_some_and(
-                |s| matches!(&s.spec, ShipSpec::ProximitySensor(x) if found(x.state)),
-            )
+            u.ship(id)
+                .is_some_and(|s| matches!(&s.spec, ShipSpec::ProximitySensor(x) if found(x.state)))
         });
     }
 
@@ -1883,7 +1938,9 @@ impl Game {
             return;
         }
         let legend = self.pings.legend(now, masks);
-        let Some(font) = self.group_fonts[2].clone() else { return };
+        let Some(font) = self.group_fonts[2].clone() else {
+            return;
+        };
         let rh = text::height(&font);
         let mut y = rh;
         for (name, colour) in legend {
@@ -1908,7 +1965,6 @@ impl Game {
             y += rh + 1;
         }
     }
-
 
     fn after_step(&mut self, audio: &mut Option<Audio>) {
         let u = &self.world.run().universe;
@@ -2343,7 +2399,10 @@ impl Game {
         }
         let px = (size.0.max(1) as u32, size.1.max(1) as u32);
         let samples = renderer.set_sample_count(self.quality.msaa);
-        let present = self.present.filter(|p| p.0 > px.0 || p.1 > px.1).unwrap_or(px);
+        let present = self
+            .present
+            .filter(|p| p.0 > px.0 || p.1 > px.1)
+            .unwrap_or(px);
         let quality = self.quality;
         if self.target.as_ref().is_none_or(|t| {
             t.plan.logical != px
@@ -2362,7 +2421,10 @@ impl Game {
             self.target_quality = quality;
         }
         self.layer_active = false;
-        profile::count("canvas_px", (self.canvas.width.max(0) * self.canvas.height.max(0)) as u64);
+        profile::count(
+            "canvas_px",
+            (self.canvas.width.max(0) * self.canvas.height.max(0)) as u64,
+        );
         let span = profile::span("prepare");
         self.world.prepare(renderer);
         drop(span);
@@ -2417,7 +2479,11 @@ impl Game {
         self.draw_hyperspace_fades();
         // Over everything: the letterbox bars, then the subtitles (`rndRenderTask`).
         self.letterbox.draw(&mut self.canvas);
-        self.layer_cover = (self.letterbox.drawn_height(self.canvas.width, self.canvas.height), self.full_screen_cover());
+        self.layer_cover = (
+            self.letterbox
+                .drawn_height(self.canvas.width, self.canvas.height),
+            self.full_screen_cover(),
+        );
         if let Some(s) = self.subtitles.as_mut() {
             let now = self.world.universe().total_time_elapsed;
             let state = subtitle::DrawState {
@@ -2484,7 +2550,10 @@ impl Game {
     /// the pixels nothing was drawn over made transparent, and the full-resolution scene to
     /// show under it. Call after the last drawing into the canvas (the pointer).
     pub fn scene_layer(&self) -> Option<(Vec<u8>, &hwc_render::wgpu::TextureView)> {
-        if !self.layer_active || self.scene_copy.len() != self.canvas.pixels.len() || self.layer_cover.1 {
+        if !self.layer_active
+            || self.scene_copy.len() != self.canvas.pixels.len()
+            || self.layer_cover.1
+        {
             return None;
         }
         let target = self.target.as_ref()?;
@@ -2504,7 +2573,10 @@ impl Game {
     /// Whether a fade or flash was drawn over the whole picture this frame (the NIS fade,
     /// the single-player fade to black, the arrival flash, the hyperspace whiteout).
     fn full_screen_cover(&self) -> bool {
-        let nis = self.nis.as_ref().is_some_and(|n| n.player.fade.level != 0.0);
+        let nis = self
+            .nis
+            .as_ref()
+            .is_some_and(|n| n.player.fade.level != 0.0);
         let hyper = self.world.mission_run().is_some_and(|r| {
             let h = &r.game.hyper;
             (h.fade > 0.0 && self.nis.is_none()) || h.arrival_flash > 0.0 || h.whiteout
@@ -2650,7 +2722,8 @@ impl Game {
             )?;
         } else {
             let mut rgba = vec![0u8; whole * 4];
-            self.world.render_background(renderer, target, show_bg, &layer, &mut rgba)?;
+            self.world
+                .render_background(renderer, target, show_bg, &layer, &mut rgba)?;
             for (dst, src) in self.canvas.pixels.iter_mut().zip(rgba.as_chunks::<4>().0) {
                 *dst = *src;
             }
@@ -2685,13 +2758,11 @@ impl Game {
             let region = (!self.sensors_cpu_layer)
                 .then(|| mesh_region(&self.world, px, &meshes))
                 .flatten();
-            let rendered = self.world.render_ships_only(
-                renderer,
-                target,
-                &frame,
-                region,
-                |id, _| meshes.contains(&id),
-            )?;
+            let rendered =
+                self.world
+                    .render_ships_only(renderer, target, &frame, region, |id, _| {
+                        meshes.contains(&id)
+                    })?;
             drop(span);
             gpu_profile(renderer, "sm.meshes");
             if let Some((rgba, [rx, ry, rw, rh])) = rendered {
@@ -2745,7 +2816,12 @@ impl Game {
                 continue;
             }
             if let Some((lo, hi)) = self.world.screen_box(size, s) {
-                outlines.push(Rect::new(lo[0] as i32, lo[1] as i32, hi[0] as i32, hi[1] as i32));
+                outlines.push(Rect::new(
+                    lo[0] as i32,
+                    lo[1] as i32,
+                    hi[0] as i32,
+                    hi[1] as i32,
+                ));
             }
         }
         for (i, &id) in marked.iter().enumerate() {
@@ -2966,7 +3042,11 @@ fn mesh_region(world: &World, size: (u32, u32), ships: &[ShipId]) -> Option<[u32
             .ship(s.ship_type)
             .map_or(50.0, |st| st.header.coll.coll_sphere_size)
             .max(20.0);
-        let p = glam::Vec3::new(s.coll.coll_position.x, s.coll.coll_position.y, s.coll.coll_position.z);
+        let p = glam::Vec3::new(
+            s.coll.coll_position.x,
+            s.coll.coll_position.y,
+            s.coll.coll_position.z,
+        );
         let c = sensors::project_sphere(world, size, p, r * 2.0)?;
         let r = c.r + 4.0;
         lo = [lo[0].min(c.x - r), lo[1].min(c.y - r)];
@@ -3003,7 +3083,10 @@ mod tests {
     #[test]
     fn whiteout_follows_mr_region_draw() {
         assert_eq!(whiteout_colour(0.0), Whiteout::Additive([70, 70, 255, 0]));
-        assert_eq!(whiteout_colour(0.25), Whiteout::Additive([70, 70, 255, 127]));
+        assert_eq!(
+            whiteout_colour(0.25),
+            Whiteout::Additive([70, 70, 255, 127])
+        );
         // At 1/2 the full blue, at 1 black.
         assert_eq!(whiteout_colour(0.5), Whiteout::Opaque([69, 69, 254, 255]));
         assert_eq!(whiteout_colour(1.0), Whiteout::Opaque([0, 0, 0, 255]));

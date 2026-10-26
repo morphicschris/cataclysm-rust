@@ -24,7 +24,9 @@ const DT: f32 = 1.0 / 16.0;
 fn save(canvas: &Canvas, name: &str) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/speech");
     std::fs::create_dir_all(&dir).expect("screenshot dir");
-    canvas.save_png(&dir.join(format!("{name}.png"))).expect("png");
+    canvas
+        .save_png(&dir.join(format!("{name}.png")))
+        .expect("png");
 }
 
 fn start() -> Option<(Box<Game>, Renderer, Option<crate::audio::Audio>)> {
@@ -155,7 +157,11 @@ fn mission_one_speech_and_letterbox() {
     // Skipping: a simulated subtitle while the fleet intel lockout holds the keys.
     let now = g.world.universe().total_time_elapsed;
     if let Some(s) = g.subtitles.as_mut() {
-        s.simulate(1, 6000, b"Tactical Officer: skipping this event fades the text out.");
+        s.simulate(
+            1,
+            6000,
+            b"Tactical Officer: skipping this event fades the text out.",
+        );
         s.update(now);
     }
     g.ui.fleet_intel = true;
@@ -185,7 +191,9 @@ fn mission_one_effects() {
     std::fs::create_dir_all(&dir).expect("screenshot dir");
     let snap = |g: &mut Game, r: &mut Renderer, name: &str| {
         g.render(r, SIZE).expect("render");
-        g.canvas().save_png(&dir.join(format!("{name}.png"))).expect("png");
+        g.canvas()
+            .save_png(&dir.join(format!("{name}.png")))
+            .expect("png");
     };
     let mut hyper = false;
     let mut shots = 0;
@@ -213,7 +221,10 @@ fn mission_one_effects() {
             snap(g, &mut r, "01_hyperspace_arrival");
         }
         let u = g.world.universe();
-        let fight = u.bullet_list.first().map(|&b| u.bullets.bullet(b).posinfo.position);
+        let fight = u
+            .bullet_list
+            .first()
+            .map(|&b| u.bullets.bullet(b).posinfo.position);
         if let Some(p) = fight {
             if frames % 32 == 0 && live > 0 {
                 g.world.follow_focus = false;
@@ -228,7 +239,9 @@ fn mission_one_effects() {
             }
         }
     }
-    eprintln!("frames {frames}: hyperspace shot {hyper}, combat shots {shots}, most live effects {most}");
+    eprintln!(
+        "frames {frames}: hyperspace shot {hyper}, combat shots {shots}, most live effects {most}"
+    );
     assert!(most > 0, "no effects ever ran");
 }
 
@@ -267,7 +280,10 @@ fn mission_one_intro_hands_over_control() {
             run.game.sp_state,
         );
         if state != last {
-            eprintln!("intro {frame:5} ({:6.1}s): {state}", run.universe.total_time_elapsed);
+            eprintln!(
+                "intro {frame:5} ({:6.1}s): {state}",
+                run.universe.total_time_elapsed
+            );
             last = state;
         }
         sensors_seen |= run.game.sensors_open;
@@ -312,7 +328,10 @@ fn kuun_lan_arrival_window() {
             .into_iter()
             .find(|&(id, state, clipt)| {
                 use hwc_render::effects::hs_state::{SLICING_INTO, SLICING_OUTOF};
-                Some(id) == ms && matches!(state, SLICING_INTO | SLICING_OUTOF) && clipt > 0.4 && clipt < 0.6
+                Some(id) == ms
+                    && matches!(state, SLICING_INTO | SLICING_OUTOF)
+                    && clipt > 0.4
+                    && clipt < 0.6
             });
         if let (Some((id, _, _)), Some(_)) = (window, ms) {
             let s = g.world.universe().ship(id).unwrap();
@@ -322,18 +341,27 @@ fn kuun_lan_arrival_window() {
             g.world.camera.look_at = glam::Vec3::new(p.x, p.y, p.z);
             g.world.camera.distance = 5000.0;
             // From the side, a little ahead.
-            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/game-effects");
+            let dir =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/game-effects");
             std::fs::create_dir_all(&dir).expect("screenshot dir");
             for k in 0..4 {
-                g.world.camera.angle = heading.y.atan2(heading.x) + 0.6 + k as f32 * std::f32::consts::FRAC_PI_2;
+                g.world.camera.angle =
+                    heading.y.atan2(heading.x) + 0.6 + k as f32 * std::f32::consts::FRAC_PI_2;
                 g.world.camera.declination = -0.3;
                 g.render(&mut r, SIZE).expect("render");
-                let name = if k == 0 { "05_kuun_lan_arrival.png".to_string() } else { format!("05_kuun_lan_arrival_{k}.png") };
+                let name = if k == 0 {
+                    "05_kuun_lan_arrival.png".to_string()
+                } else {
+                    format!("05_kuun_lan_arrival_{k}.png")
+                };
                 g.canvas().save_png(&dir.join(name)).expect("png");
             }
             seen = true;
             break;
         }
     }
-    assert!(seen, "the Kuun-Lan never came half out of its hyperspace window");
+    assert!(
+        seen,
+        "the Kuun-Lan never came half out of its hyperspace window"
+    );
 }

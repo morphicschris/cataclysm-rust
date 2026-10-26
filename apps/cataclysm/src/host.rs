@@ -652,8 +652,7 @@ impl GameUiHost for SimHost<'_> {
     fn roll_call(&self) -> Option<hwc_ui::ingame::host::RollCall> {
         let game = self.game()?;
         let h = &game.hyper;
-        let up = h.rollcall_screen
-            && game.sp_state == hwc_sim::mission::sp_state::WAITING_ROLLCALL;
+        let up = h.rollcall_screen && game.sp_state == hwc_sim::mission::sp_state::WAITING_ROLLCALL;
         up.then(|| hwc_ui::ingame::host::RollCall {
             docked: h.rollcall_docked,
             remaining: h.rollcall_remaining,
@@ -716,9 +715,7 @@ pub fn special_item(c: Command) -> Option<hwc_sim::player_orders::SpecialItem> {
 /// Whether the local player may select this ship.
 pub fn selectable(u: &Universe, id: ShipId) -> bool {
     u.ship(id).is_some_and(|s| {
-        s.player == PLAYER
-            && s.flags & (sof::HIDE | sof::DEAD) == 0
-            && s.flags & SOF_MODULE == 0
+        s.player == PLAYER && s.flags & (sof::HIDE | sof::DEAD) == 0 && s.flags & SOF_MODULE == 0
     })
 }
 
@@ -729,7 +726,15 @@ pub fn mission_end_label(strings: &Strings, mission: u32) -> String {
     } else {
         "strSinglePlayerHyperspace"
     };
-    strings.get(key).unwrap_or(if hwc_sim::campaign::skips_roll_call(mission) { "End Mission" } else { "Hyperspace" }).trim().to_string()
+    strings
+        .get(key)
+        .unwrap_or(if hwc_sim::campaign::skips_roll_call(mission) {
+            "End Mission"
+        } else {
+            "Hyperspace"
+        })
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -746,4 +751,3 @@ mod tests {
         assert_eq!(sim_id(ui_id(ShipId(42))), ShipId(42));
     }
 }
-

@@ -180,7 +180,10 @@ fn letterbox_slides_in_for_fleet_intel_over_the_sensors() {
                     assert!(y > 2, "{y}");
                     // Grey under black of alpha `fade` while moving.
                     let p = c.get(c.width - 10, 2);
-                    assert!(p[0] > 30 && p[0] < 80 && p[0] == p[1] && p[1] == p[2], "{p:?}");
+                    assert!(
+                        p[0] > 30 && p[0] < 80 && p[0] == p[1] && p[1] == p[2],
+                        "{p:?}"
+                    );
                     save(c, "m1_intel_letterbox_sliding");
                     sliding_shot = true;
                 }
@@ -218,11 +221,20 @@ fn letterbox_slides_in_for_fleet_intel_over_the_sensors() {
             break;
         }
     }
-    assert!(nislet_bars_gone, "no wideScreenOut ever took the NISlet's bars away");
+    assert!(
+        nislet_bars_gone,
+        "no wideScreenOut ever took the NISlet's bars away"
+    );
     // The first scene keeps the NISlet's bars; the incoming fighters (356 s in) bring them in.
-    assert!(slides >= 1, "the bars never slid in for a fleet-intel scene");
+    assert!(
+        slides >= 1,
+        "the bars never slid in for a fleet-intel scene"
+    );
     assert!(!g.letterbox.active(), "the bars stayed after the scene");
-    assert!(slid_over_sensors, "the bars were never up over the sensors view");
+    assert!(
+        slid_over_sensors,
+        "the bars were never up over the sensors view"
+    );
     assert!(sliding_shot && sensors_shot);
 }
 
@@ -293,7 +305,12 @@ fn sensors_manager_profile() {
             return;
         };
         let timed = rig.renderer.set_gpu_timing(true);
-        eprintln!("{}x{}: GPU timestamp queries {}", size.0, size.1, if timed { "on" } else { "not supported" });
+        eprintln!(
+            "{}x{}: GPU timestamp queries {}",
+            size.0,
+            size.1,
+            if timed { "on" } else { "not supported" }
+        );
         let device = rig.renderer.device().clone();
         let mut presenter = hwc_ui::present::Presenter::new(
             &device,
@@ -329,19 +346,36 @@ fn sensors_manager_profile() {
             rig.frame(g);
             rig.render(g);
         }
-        assert_eq!(g.sensors.phase(), Phase::Sensors, "the sensors manager did not open");
+        assert_eq!(
+            g.sensors.phase(),
+            Phase::Sensors,
+            "the sensors manager did not open"
+        );
         // The old way first: discs and dimming on the CPU, meshes read back whole.
         g.sensors_cpu_layer = true;
         let cpu = profiled_frames(g, &mut rig, &mut presenter, 64, true);
         g.sensors_cpu_layer = false;
         let sensors = profiled_frames(g, &mut rig, &mut presenter, 64, true);
         save(g.canvas(), &format!("m1_sensors_{}x{}", size.0, size.1));
-        eprintln!("== {}x{} sensors manager, CPU discs (before)
-{}", size.0, size.1, cpu.text());
+        eprintln!(
+            "== {}x{} sensors manager, CPU discs (before)
+{}",
+            size.0,
+            size.1,
+            cpu.text()
+        );
         eprintln!("== {}x{} main view\n{}", size.0, size.1, main.text());
-        eprintln!("== {}x{} sensors manager\n{}", size.0, size.1, sensors.text());
+        eprintln!(
+            "== {}x{} sensors manager\n{}",
+            size.0,
+            size.1,
+            sensors.text()
+        );
         let frame = sensors.cpu_ms("frame").unwrap_or(f64::MAX);
-        assert!(frame < 16.0, "the sensors frame takes {frame:.1} ms at {size:?}");
+        assert!(
+            frame < 16.0,
+            "the sensors frame takes {frame:.1} ms at {size:?}"
+        );
     }
 }
 
@@ -365,7 +399,11 @@ fn sensors_gpu_layer_matches_the_cpu_canvas() {
     for _ in 0..40 {
         rig.frame(g);
     }
-    assert_eq!(g.sensors.phase(), Phase::Sensors, "the sensors manager did not open");
+    assert_eq!(
+        g.sensors.phase(),
+        Phase::Sensors,
+        "the sensors manager did not open"
+    );
     // A frame first: a speech card expiring would change the second picture.
     rig.render(g);
     rig.render(g);
@@ -380,7 +418,10 @@ fn sensors_gpu_layer_matches_the_cpu_canvas() {
     g.sensors.toggles.background = true;
     save(&pictures[0], "m1_sensors_gpu_layer");
     save(&pictures[1], "m1_sensors_cpu_layer");
-    for (gpu, cpu, what) in [(&pictures[0], &pictures[1], "backdrop"), (&pictures[2], &pictures[3], "clear colour")] {
+    for (gpu, cpu, what) in [
+        (&pictures[0], &pictures[1], "backdrop"),
+        (&pictures[2], &pictures[3], "clear colour"),
+    ] {
         let mut differ = 0;
         let mut worst = 0;
         let mut blue = 0;
@@ -390,9 +431,15 @@ fn sensors_gpu_layer_matches_the_cpu_canvas() {
             worst = worst.max(d);
             blue += usize::from(b[2] > b[0] + 40);
         }
-        eprintln!("{what}: {differ} of {} pixels differ, by at most {worst}; {blue} disc pixels", cpu.pixels.len());
+        eprintln!(
+            "{what}: {differ} of {} pixels differ, by at most {worst}; {blue} disc pixels",
+            cpu.pixels.len()
+        );
         assert!(blue > 10_000, "no range discs in the picture");
-        assert!(worst <= 1, "the GPU layer is {worst} steps off the CPU canvas ({what})");
+        assert!(
+            worst <= 1,
+            "the GPU layer is {worst} steps off the CPU canvas ({what})"
+        );
     }
 }
 
@@ -417,7 +464,9 @@ fn kuun_lan_arrival_nav_lights() {
             .run()
             .hyperspace_windows()
             .into_iter()
-            .find(|&(id, state, clipt)| Some(id) == ms && state == SLICING_OUTOF && clipt > 0.45 && clipt < 0.6);
+            .find(|&(id, state, clipt)| {
+                Some(id) == ms && state == SLICING_OUTOF && clipt > 0.45 && clipt < 0.6
+            });
         let Some((id, _, _)) = window else { continue };
         let s = g.world.universe().ship(id).expect("mothership");
         let p = s.posinfo.position;
@@ -426,7 +475,8 @@ fn kuun_lan_arrival_nav_lights() {
         g.world.camera.look_at = glam::Vec3::new(p.x, p.y, p.z);
         g.world.camera.distance = 4500.0;
         for k in 0..4 {
-            g.world.camera.angle = heading.y.atan2(heading.x) + 0.6 + k as f32 * std::f32::consts::FRAC_PI_2;
+            g.world.camera.angle =
+                heading.y.atan2(heading.x) + 0.6 + k as f32 * std::f32::consts::FRAC_PI_2;
             g.world.camera.declination = -0.3;
             rig.render(g);
             save(g.canvas(), &format!("m1_arrival_nav_lights_{k}"));

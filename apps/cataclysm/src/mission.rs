@@ -176,16 +176,25 @@ impl Loader {
         centre: Option<(i32, Option<i32>)>,
     ) -> Result<NisLevelRun, String> {
         if !supported(self.mission) {
-            return Err(format!("mission {} is not part of the campaign", self.mission));
+            return Err(format!(
+                "mission {} is not part of the campaign",
+                self.mission
+            ));
         }
         self.load_statics(assets);
         let statics = self.statics.clone().expect("statics");
         let tweaks = self.tweaks.clone().expect("tweaks");
         let carry = self.take_carry(assets)?;
-        let mut run =
-            NisLevelRun::start(statics, tweaks, assets, self.mission, carry.as_ref(), centre)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("mission {} has no NIS level", self.mission))?;
+        let mut run = NisLevelRun::start(
+            statics,
+            tweaks,
+            assets,
+            self.mission,
+            carry.as_ref(),
+            centre,
+        )
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("mission {} has no NIS level", self.mission))?;
         run.universe.sp_difficulty = self.skill.max(0) as u32;
         Ok(run)
     }
@@ -204,7 +213,10 @@ impl Loader {
     /// The level and the KAS script (`singlePlayerLoadNewLevel`).
     pub fn start(&mut self, assets: &Assets) -> Result<MissionRun, String> {
         if !supported(self.mission) {
-            return Err(format!("mission {} is not part of the campaign", self.mission));
+            return Err(format!(
+                "mission {} is not part of the campaign",
+                self.mission
+            ));
         }
         self.load_statics(assets);
         let statics = self.statics.clone().expect("statics");

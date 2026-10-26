@@ -221,7 +221,11 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         rollcall_below_band: args.rollcall_below_band,
         // User request: movies stretch to the window unless `--scale` says otherwise (the
         // original draws them unscaled).
-        movie_scale: if args.scale_given { args.scale } else { ScaleMode::Stretch },
+        movie_scale: if args.scale_given {
+            args.scale
+        } else {
+            ScaleMode::Stretch
+        },
         debug_keys: args.debug_keys,
         autoplay: args.autoplay,
         full_detail: args.full_detail,
@@ -252,19 +256,21 @@ impl Gpu {
         let surface = instance
             .create_surface(window.clone())
             .map_err(|e| format!("surface: {e}"))?;
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            // The game's 3D view wants the faster GPU when there are two (`WGPU_POWER_PREF`
-            // = low or high chooses); the integrated one also shares memory with the desktop.
-            power_preference: wgpu::PowerPreference::from_env()
-                .unwrap_or(wgpu::PowerPreference::HighPerformance),
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }))
-        .map_err(|e| format!("no GPU adapter: {e}"))?;
+        let adapter =
+            pollster::block_on(
+                instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    // The game's 3D view wants the faster GPU when there are two (`WGPU_POWER_PREF`
+                    // = low or high chooses); the integrated one also shares memory with the desktop.
+                    power_preference: wgpu::PowerPreference::from_env()
+                        .unwrap_or(wgpu::PowerPreference::HighPerformance),
+                    compatible_surface: Some(&surface),
+                    ..Default::default()
+                }),
+            )
+            .map_err(|e| format!("no GPU adapter: {e}"))?;
         // With the adapter's own format features MSAA may use 2 and 8 samples as well as 4.
         let (device, queue) = hwc_render::request_device(&adapter)?;
-        let msaa_counts =
-            hwc_render::quality::supported_sample_counts(&adapter, device.features());
+        let msaa_counts = hwc_render::quality::supported_sample_counts(&adapter, device.features());
         let info = adapter.get_info();
         eprintln!(
             "cataclysm: GPU {} ({:?}, driver {} {})",
@@ -335,7 +341,8 @@ the last frames drawn:
         let rgba = canvas.pixels.as_flattened();
         crate::profile::count("upload_bytes", rgba.len() as u64);
         if rgba.len() == (size.0 * size.1 * 4) as usize {
-            self.presenter.upload_rgba(&self.device, &self.queue, size, rgba);
+            self.presenter
+                .upload_rgba(&self.device, &self.queue, size, rgba);
         } else {
             self.presenter.upload(&self.device, &self.queue, canvas);
         }
@@ -354,12 +361,17 @@ the last frames drawn:
     ) {
         let span = crate::profile::span("upload");
         crate::profile::count("upload_bytes", rgba.len() as u64);
-        self.presenter.upload_rgba(&self.device, &self.queue, size, rgba);
+        self.presenter
+            .upload_rgba(&self.device, &self.queue, size, rgba);
         drop(span);
         self.present_uploaded(viewport, Some(scene));
     }
 
-    fn present_uploaded(&mut self, viewport: (f32, f32, f32, f32), scene: Option<&wgpu::TextureView>) {
+    fn present_uploaded(
+        &mut self,
+        viewport: (f32, f32, f32, f32),
+        scene: Option<&wgpu::TextureView>,
+    ) {
         // Includes the wait for a swap-chain image (vsync).
         let _p = crate::profile::span("present");
         let frame = match self.surface.get_current_texture() {
@@ -496,7 +508,107 @@ fn key_code(k: &Key) -> Option<u16> {
     })
 }
 
+/// The command line's modern options (`--lod`, `--msaa`, `--zoom`...): over the options
+/// file's for this run.
+#[derive(Debug, Clone, Copy)]
+struct Overrides {
+    full_detail: Option<bool>,
+    right_click_move: Option<bool>,
+    render_scale: Option<f32>,
+    msaa: Option<u32>,
+    fxaa: Option<bool>,
+    scene_at_window: Option<bool>,
+    smooth_zoom: Option<bool>,
+    focus_zoom: Option<bool>,
+    zoom_clear: Option<bool>,
+    render_list: Option<bool>,
+    tall_letterbox: Option<bool>,
+}
+
+impl Overrides {
+    /// Sets them on the game (at its start, and after the options are applied).
+    fn apply(&self, game: &mut Game) {
+        if let Some(v) = self.full_detail {
+            game.world.full_detail = v;
+        }
+        if let Some(v) = self.right_click_move {
+            game.right_click_move = v;
+        }
+        if let Some(s) = self.render_scale {
+            game.quality.scale = hwc_render::quality::clamp_scale(s);
+        }
+        if let Some(n) = self.msaa {
+            game.quality.msaa = n;
+        }
+        if let Some(v) = self.fxaa {
+            game.quality.fxaa = v;
+        }
+        if let Some(v) = self.scene_at_window {
+            game.scene_at_window = v;
+        }
+        if let Some(v) = self.smooth_zoom {
+            game.smooth_zoom = v;
+        }
+        if let Some(v) = self.focus_zoom {
+            game.world.focus_zoom = v;
+        }
+        if let Some(v) = self.zoom_clear {
+            game.world.zoom_clear = v;
+        }
+        if let Some(v) = self.render_list {
+            game.world.render_list = v;
+        }
+        if let Some(v) = self.tall_letterbox {
+            game.letterbox.tall = v;
+        }
+    }
+
+    /// Tells the modern options screen which of its options the command line set (shown,
+    /// not changed there).
+    fn lock(&self, game: &mut Game) {
+        let ui = &mut game.ui;
+        let b = |v: bool| i32::from(v);
+        let locks = [
+            ("hwcFullDetailShips", self.full_detail.map(b)),
+            ("hwcRightClickMove", self.right_click_move.map(b)),
+            (
+                "hwcRenderScale",
+                self.render_scale.map(|s| (s * 100.0).round() as i32),
+            ),
+            ("hwcMsaa", self.msaa.map(|n| n as i32)),
+            ("hwcFxaa", self.fxaa.map(b)),
+            ("hwcSceneAtWindow", self.scene_at_window.map(b)),
+            ("hwcSmoothZoom", self.smooth_zoom.map(b)),
+            ("hwcFocusZoom", self.focus_zoom.map(b)),
+            ("hwcZoomClear", self.zoom_clear.map(b)),
+            ("hwcRenderList", self.render_list.map(b)),
+            ("hwcOriginalLetterbox", self.tall_letterbox.map(|t| b(!t))),
+        ];
+        for (key, v) in locks {
+            if let Some(v) = v {
+                ui.lock_option(key, v);
+            }
+        }
+    }
+}
+
 impl App {
+    fn overrides(&self) -> Overrides {
+        Overrides {
+            full_detail: self.full_detail,
+            right_click_move: self.right_click_move,
+            render_scale: self.render_scale,
+            msaa: self.msaa,
+            fxaa: self.fxaa,
+            scene_at_window: self.scene_at_window,
+            smooth_zoom: self.smooth_zoom,
+            focus_zoom: self.focus_zoom,
+            zoom_clear: self.zoom_clear,
+            render_list: self.render_list,
+            tall_letterbox: self.tall_letterbox,
+        }
+    }
+
     /// After the movies (`mainCleanupAfterVideo`): back to the configured display mode, then
     /// the front end and its music.
     fn front_end_start(&mut self) {
@@ -533,8 +645,13 @@ impl App {
         let carry = run.carry();
         // The hot-key groups go with the ships that jumped.
         let groups = carry.as_ref().map(|c| {
-            g.hotkeys
-                .carry_out(&run.universe, &run.game.hyper.in_hyperspace, crate::host::PLAYER, c, mission + 1)
+            g.hotkeys.carry_out(
+                &run.universe,
+                &run.game.hyper.in_hyperspace,
+                crate::host::PLAYER,
+                c,
+                mission + 1,
+            )
         });
         // `singlePlayerStartNis` reads these from the mission that has just ended.
         let centre = run
@@ -554,9 +671,7 @@ impl App {
         }
         let size = self.session.placement.canvas;
         match Loading::new(self.data.clone(), &self.session, next, skill, size) {
-            Ok(l) => {
-                self.loading = Some(Box::new(l.with_carry(carry, centre).with_groups(groups)))
-            }
+            Ok(l) => self.loading = Some(Box::new(l.with_carry(carry, centre).with_groups(groups))),
             Err(e) => {
                 eprintln!("cataclysm: cannot start mission {next}: {e}");
                 self.back_to_menu();
@@ -567,7 +682,9 @@ impl App {
     /// The NIS level's NIS has stopped: the mission loads from it behind a loading screen
     /// of its own (`singlePlayerNisStoppedCB` -> `singlePlayerLoadNewLevel(0, 0)`).
     fn after_nis_level(&mut self) {
-        let Some(mut g) = self.game.take() else { return };
+        let Some(mut g) = self.game.take() else {
+            return;
+        };
         let skill = g.world.skill();
         let groups = g.carried_groups.take();
         let crate::world::Sim::NisLevel(nis) = g.world.into_sim() else {
@@ -654,7 +771,9 @@ impl App {
                     );
                     r.set_msaa_support(&gpu.msaa_counts);
                     if crate::profile::enabled() && !r.set_gpu_timing(true) {
-                        eprintln!("cataclysm: --profile: no GPU timestamp queries here, CPU times only");
+                        eprintln!(
+                            "cataclysm: --profile: no GPU timestamp queries here, CPU times only"
+                        );
                     }
                     self.renderer = Some(r);
                 }
@@ -668,39 +787,9 @@ impl App {
                         game.autoplay = Some(hwc_sim::autoplay::Autoplay::new(16 * 60 * 30));
                     }
                     game.rollcall_below_band = self.rollcall_below_band;
-                    if let Some(v) = self.full_detail {
-                        game.world.full_detail = v;
-                    }
-                    if let Some(v) = self.right_click_move {
-                        game.right_click_move = v;
-                    }
-                    if let Some(s) = self.render_scale {
-                        game.quality.scale = hwc_render::quality::clamp_scale(s);
-                    }
-                    if let Some(n) = self.msaa {
-                        game.quality.msaa = n;
-                    }
-                    if let Some(v) = self.fxaa {
-                        game.quality.fxaa = v;
-                    }
-                    if let Some(v) = self.scene_at_window {
-                        game.scene_at_window = v;
-                    }
-                    if let Some(v) = self.smooth_zoom {
-                        game.smooth_zoom = v;
-                    }
-                    if let Some(v) = self.focus_zoom {
-                        game.world.focus_zoom = v;
-                    }
-                    if let Some(v) = self.zoom_clear {
-                        game.world.zoom_clear = v;
-                    }
-                    if let Some(v) = self.render_list {
-                        game.world.render_list = v;
-                    }
-                    if let Some(v) = self.tall_letterbox {
-                        game.letterbox.tall = v;
-                    }
+                    let ov = self.overrides();
+                    ov.apply(&mut game);
+                    ov.lock(&mut game);
                     if let Some(r) = &self.renderer {
                         let q = game.quality;
                         let n = hwc_render::quality::pick_sample_count(q.msaa, r.msaa_support());
@@ -737,6 +826,7 @@ impl App {
             }
             return Ok(true);
         }
+        let ov = self.overrides();
         let Some(g) = self.game.as_mut() else {
             return Ok(false);
         };
@@ -757,6 +847,10 @@ impl App {
                     if let Some(a) = &mut self.audio {
                         a.apply_options(&g.ui.fe.game.options);
                     }
+                    // The modern options apply at once (the command line's still win).
+                    let options = g.ui.fe.game.options.clone();
+                    g.apply_modern_options(&options);
+                    ov.apply(g);
                 }
                 game::Outcome::Animatic(n) => animatic = Some(n),
                 game::Outcome::NextMission => next = true,
@@ -795,8 +889,12 @@ impl App {
         };
         // In a scaled front-end mode the 3D view can be drawn at the window's pixels.
         let viewport = self.session.placement.viewport;
-        g.present = (g.scene_at_window && self.session.scale != ScaleMode::Original)
-            .then(|| (viewport.2.round().max(1.0) as u32, viewport.3.round().max(1.0) as u32));
+        g.present = (g.scene_at_window && self.session.scale != ScaleMode::Original).then(|| {
+            (
+                viewport.2.round().max(1.0) as u32,
+                viewport.3.round().max(1.0) as u32,
+            )
+        });
         let started = Instant::now();
         let span = crate::profile::span("render");
         g.render(r, size)?;
@@ -1303,7 +1401,11 @@ pub fn script_name(movie: &str) -> String {
 
 /// `animBinkDisplay`'s subtitle pass over the movie frame, on the movie clock: every region with
 /// text, without the band (rendering is off while `binkPlay` runs).
-pub fn draw_movie_subtitles(subs: &mut hwc_ui::subtitle::Subtitles, canvas: &mut Canvas, clock: f32) {
+pub fn draw_movie_subtitles(
+    subs: &mut hwc_ui::subtitle::Subtitles,
+    canvas: &mut Canvas,
+    clock: f32,
+) {
     let state = hwc_ui::subtitle::DrawState {
         movie: true,
         ..Default::default()

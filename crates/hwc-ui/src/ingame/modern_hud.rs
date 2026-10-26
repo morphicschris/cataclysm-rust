@@ -131,6 +131,15 @@ pub fn set_override(modern: Option<bool>) {
     MODE_OVERRIDE.store(v, Ordering::Relaxed);
 }
 
+/// The command line's choice (`--hud`), if it made one.
+pub fn overridden() -> Option<bool> {
+    match MODE_OVERRIDE.load(Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
 /// Whether the modern readout replaces the original box.
 pub fn enabled(options: &Options) -> bool {
     match MODE_OVERRIDE.load(Ordering::Relaxed) {
@@ -221,6 +230,9 @@ pub(crate) fn manager_area(fe: &Fe, width: i32, height: i32) -> Option<Rect> {
         return Some(r);
     }
     if let Some(r) = crate::ingame::modern_research_manager::area(fe, width, height) {
+        return Some(r);
+    }
+    if let Some(r) = crate::ingame::modern_launch_manager::area(fe, width, height) {
         return Some(r);
     }
     crate::ingame::full_screen_manager(fe.game.ig.manager).then(|| manager_content(width, height))

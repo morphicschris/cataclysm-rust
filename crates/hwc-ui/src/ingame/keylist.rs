@@ -115,7 +115,7 @@ fn key_list(fe: &mut Fe, call: &Call) {
 }
 
 /// Group title of the first action of each group.
-fn group_title(a: Action) -> Option<&'static str> {
+pub(crate) fn group_title(a: Action) -> Option<&'static str> {
     KEY_GROUPS.iter().find(|g| g.0 == a.0).map(|g| g.1)
 }
 

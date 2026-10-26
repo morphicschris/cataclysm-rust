@@ -954,7 +954,7 @@ const fn sld(name: &'static str, key: &'static str, max: u32, map: SliderMap) ->
 /// Lowest effect history scalar (`etgHistoryScalarMin`).
 const HISTORY_MIN: i32 = 64;
 /// Hardware voices below the channel slider's range (`soundGetVoiceLimits`: 8..32).
-const VOICE_MIN: i32 = 8;
+pub(crate) const VOICE_MIN: i32 = 8;
 const VOICE_MAX: i32 = 32;
 
 const SLIDERS: &[SliderBinding] = &[

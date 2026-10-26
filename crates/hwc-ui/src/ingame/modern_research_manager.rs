@@ -43,6 +43,11 @@ pub fn set_override(modern: Option<bool>) {
     SWITCH.set_override(modern);
 }
 
+/// The command line's choice, if it made one.
+pub fn overridden() -> Option<bool> {
+    SWITCH.overridden()
+}
+
 /// Whether the modern research manager replaces the original's look.
 pub fn enabled(options: &Options) -> bool {
     SWITCH.enabled(options)

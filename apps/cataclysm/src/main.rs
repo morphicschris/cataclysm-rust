@@ -24,6 +24,8 @@ mod intro;
 mod loading;
 #[cfg(test)]
 mod m1_checks;
+#[cfg(test)]
+mod menus_shots;
 mod mission;
 mod movie_script;
 mod nebula_view;
@@ -128,14 +130,23 @@ options:
                         top-right corner, in the style of the later Homeworld games) or
                         original (the SU / RU / time box, bottom right); options file:
                         hwcModernHud = 1/0. The original HUD also brings back the
-                        original build and research managers (unless --build-ui or
-                        --research-ui says otherwise)
+                        original build and research managers and menus (unless
+                        --build-ui, --research-ui or --menus says otherwise)
   --build-ui <mode>     modern (default, a user-requested change: the build manager in the
                         modern HUD's look, same controls, keys and actions) or original
                         (the original screen); options file: hwcModernBuildManager = 1/0
   --research-ui <mode>  modern (default, a user-requested change: the research manager in
                         the modern HUD's look, same controls, keys and actions) or original
                         (the original screen); options file: hwcModernResearchManager = 1/0
+  --menus <mode>        modern (default, a user-requested change: the in-game escape
+                        menu, save / load, quit and the other confirmations, the options
+                        and all their screens (audio, speech, equalizer, video, effects,
+                        gameplay, key bindings), the objectives and the systems (launch)
+                        manager in the modern HUD's look, same controls, keys and actions,
+                        plus an ENHANCEMENTS screen in the options for the modern options
+                        below, applied at once) or original (the original screens); options
+                        file: hwcModernMenus = 1/0. The original HUD brings back the
+                        original screens too
   --letterbox <mode>    tall (default, a user-requested change: the cutscene and fleet-intel
                         bars are never thinner than on a 4:3 screen of the same height, 14%
                         of it each) or original (bars around a 1.85:1 picture: on a 16:9
@@ -297,11 +308,13 @@ fn parse_args() -> Result<Args, String> {
                 })
             }
             "--right-click" => {
-                a.right_click_move = Some(match value("--right-click")?.to_ascii_lowercase().as_str() {
-                    "modern" => true,
-                    "original" => false,
-                    v => return Err(format!("unknown --right-click mode {v}")),
-                })
+                a.right_click_move = Some(
+                    match value("--right-click")?.to_ascii_lowercase().as_str() {
+                        "modern" => true,
+                        "original" => false,
+                        v => return Err(format!("unknown --right-click mode {v}")),
+                    },
+                )
             }
             "--zoom" => {
                 a.smooth_zoom = Some(match value("--zoom")?.to_ascii_lowercase().as_str() {
@@ -325,11 +338,13 @@ fn parse_args() -> Result<Args, String> {
                 })
             }
             "--draw-distance" => {
-                a.render_list = Some(match value("--draw-distance")?.to_ascii_lowercase().as_str() {
-                    "original" => true,
-                    "far" => false,
-                    v => return Err(format!("unknown --draw-distance mode {v}")),
-                })
+                a.render_list = Some(
+                    match value("--draw-distance")?.to_ascii_lowercase().as_str() {
+                        "original" => true,
+                        "far" => false,
+                        v => return Err(format!("unknown --draw-distance mode {v}")),
+                    },
+                )
             }
             "--letterbox" => {
                 a.tall_letterbox = Some(match value("--letterbox")?.to_ascii_lowercase().as_str() {
@@ -343,6 +358,12 @@ fn parse_args() -> Result<Args, String> {
                 let modern = hwc_ui::ingame::modern_build_manager::parse_mode(&v)
                     .ok_or_else(|| format!("unknown --build-ui mode {v}"))?;
                 hwc_ui::ingame::modern_build_manager::set_override(Some(modern));
+            }
+            "--menus" => {
+                let v = value("--menus")?;
+                let modern = hwc_ui::ingame::modern_menu::parse_mode(&v)
+                    .ok_or_else(|| format!("unknown --menus mode {v}"))?;
+                hwc_ui::ingame::modern_menu::set_override(Some(modern));
             }
             "--research-ui" => {
                 let v = value("--research-ui")?;
@@ -385,11 +406,12 @@ fn parse_args() -> Result<Args, String> {
                 })
             }
             "--scene-res" => {
-                a.scene_at_window = Some(match value("--scene-res")?.to_ascii_lowercase().as_str() {
-                    "window" => true,
-                    "layout" => false,
-                    v => return Err(format!("unknown --scene-res mode {v}")),
-                })
+                a.scene_at_window =
+                    Some(match value("--scene-res")?.to_ascii_lowercase().as_str() {
+                        "window" => true,
+                        "layout" => false,
+                        v => return Err(format!("unknown --scene-res mode {v}")),
+                    })
             }
             "--no-vsync" => a.no_vsync = true,
             "--frame-times" => a.frame_times = true,

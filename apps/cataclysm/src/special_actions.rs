@@ -95,22 +95,44 @@ impl Rig {
         g.input(InputEvent::MouseMove { x, y }, &mut self.audio);
         self.frame(g);
         for down in [true, false] {
-            g.input(InputEvent::MouseButton { left: true, down }, &mut self.audio);
+            g.input(
+                InputEvent::MouseButton { left: true, down },
+                &mut self.audio,
+            );
             self.frame(g);
         }
     }
 }
 
 fn menu_labels(g: &Game) -> Vec<String> {
-    g.ui.fe.game.ig.popup.items.iter().map(|i| i.label.clone()).collect()
+    g.ui.fe
+        .game
+        .ig
+        .popup
+        .items
+        .iter()
+        .map(|i| i.label.clone())
+        .collect()
 }
 
 /// Opens the special-action menu with Z and clicks `label`.
 fn z_menu_pick(rig: &mut Rig, g: &mut Game, label: &str) {
     rig.key(g, KEY_Z);
-    assert_eq!(g.ui.fe.game.ig.popup.open, Some(MenuKind::Special), "Z opens the special-action menu");
+    assert_eq!(
+        g.ui.fe.game.ig.popup.open,
+        Some(MenuKind::Special),
+        "Z opens the special-action menu"
+    );
     let labels = menu_labels(g);
-    let item = g.ui.fe.game.ig.popup.items.iter().find(|i| i.label == label).unwrap_or_else(|| panic!("no {label} in {labels:?}"));
+    let item =
+        g.ui.fe
+            .game
+            .ig
+            .popup
+            .items
+            .iter()
+            .find(|i| i.label == label)
+            .unwrap_or_else(|| panic!("no {label} in {labels:?}"));
     let r = item.rect;
     rig.click(g, (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2);
     assert!(g.ui.fe.game.ig.popup.open.is_none(), "the menu closes");
@@ -121,16 +143,28 @@ fn acolytes(g: &mut Game) -> [ShipId; 2] {
     let ms = u.base.players[PLAYER].mothership.expect("mothership");
     let p = u.ship(ms).unwrap().posinfo.position;
     let mut make = |off: Vector| {
-        let id = hwc_sim::base::create_ship(u, ShipType::sAcolyte, PLAYER, p + off, Default::default()).expect("acolyte");
+        let id =
+            hwc_sim::base::create_ship(u, ShipType::sAcolyte, PLAYER, p + off, Default::default())
+                .expect("acolyte");
         hwc_sim::construction::unit_cap_create_ship(u, id);
         id
     };
-    [make(Vector::new(3000.0, 0.0, 0.0)), make(Vector::new(3400.0, 300.0, 200.0))]
+    [
+        make(Vector::new(3000.0, 0.0, 0.0)),
+        make(Vector::new(3400.0, 300.0, 200.0)),
+    ]
 }
 
 fn acvs(g: &Game) -> Vec<ShipId> {
     let u = g.world.universe();
-    u.ship_list.iter().copied().filter(|&id| u.ship(id).is_some_and(|s| s.ship_type == ShipType::sACV && s.player == PLAYER)).collect()
+    u.ship_list
+        .iter()
+        .copied()
+        .filter(|&id| {
+            u.ship(id)
+                .is_some_and(|s| s.ship_type == ShipType::sACV && s.player == PLAYER)
+        })
+        .collect()
 }
 
 #[test]
@@ -142,7 +176,9 @@ fn mission1_z_menu_links_acolytes_into_an_acv() {
     let mut game = rig.mission1();
     let g = &mut *game;
     let mut n = 0;
-    while !(g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == hwc_sim::mission::sp_state::NONE) {
+    while !(g.world.run().game.ships_have_arrived
+        && g.world.run().game.sp_state == hwc_sim::mission::sp_state::NONE)
+    {
         rig.frame(g);
         n += 1;
         assert!(n < 16 * 60, "the fleet never arrived");
@@ -169,5 +205,8 @@ fn mission1_z_menu_links_acolytes_into_an_acv() {
     rig.frame(g);
     rig.key(g, KEY_Z);
     let labels = menu_labels(g);
-    assert!(labels.iter().any(|l| l == "Unlink") && !labels.iter().any(|l| l == "Link"), "{labels:?}");
+    assert!(
+        labels.iter().any(|l| l == "Unlink") && !labels.iter().any(|l| l == "Link"),
+        "{labels:?}"
+    );
 }

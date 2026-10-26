@@ -12,7 +12,11 @@ fn vector(v: glam::Vec3) -> Vector {
 }
 
 fn camera_of(cam: &OrbitCamera) -> NebulaCamera {
-    NebulaCamera { eye: vector(cam.eye()), look_at: vector(cam.look_at), clip_far: cam.tweaks.clip_far }
+    NebulaCamera {
+        eye: vector(cam.eye()),
+        look_at: vector(cam.look_at),
+        clip_far: cam.tweaks.clip_far,
+    }
 }
 
 /// `mrCamera` for the next universe update.
@@ -28,14 +32,27 @@ pub fn inputs<'a>(u: &'a Universe, cam: &NebulaCamera) -> Vec<NebulaInput<'a>> {
         .map(|neb| {
             let drawn: Vec<usize> = nebula::drawn_tendrils(neb, cam).collect();
             NebulaInput {
-                chunks: neb.chunks.iter().map(|c| ChunkInput { position: c.position, d_pos: c.d_pos, tendrils: c.tendrils, in_render_list: nebula::in_render_list(&u.nebulae.tweaks, cam, c.position) }).collect(),
+                chunks: neb
+                    .chunks
+                    .iter()
+                    .map(|c| ChunkInput {
+                        position: c.position,
+                        d_pos: c.d_pos,
+                        tendrils: c.tendrils,
+                        in_render_list: nebula::in_render_list(&u.nebulae.tweaks, cam, c.position),
+                    })
+                    .collect(),
                 tendrils: neb
                     .tendrils
                     .iter()
                     .enumerate()
                     .map(|(i, t)| {
                         let (a, b) = t.ends().unwrap_or((usize::MAX, usize::MAX));
-                        let lod = |k: usize| CylinderInput { slices: t.lods[k].slices, stacks: t.lods[k].stacks, vertices: &t.lods[k].vertices };
+                        let lod = |k: usize| CylinderInput {
+                            slices: t.lods[k].slices,
+                            stacks: t.lods[k].stacks,
+                            vertices: &t.lods[k].vertices,
+                        };
                         TendrilInput {
                             a,
                             b,
@@ -56,13 +73,23 @@ pub fn inputs<'a>(u: &'a Universe, cam: &NebulaCamera) -> Vec<NebulaInput<'a>> {
 
 /// Prepares the nebula pass (creating the renderer on first use); false when there is
 /// nothing to draw.
-pub fn prepare(slot: &mut Option<NebulaRenderer>, renderer: &Renderer, u: &Universe, cam: &OrbitCamera, size: (u32, u32)) -> bool {
+pub fn prepare(
+    slot: &mut Option<NebulaRenderer>,
+    renderer: &Renderer,
+    u: &Universe,
+    cam: &OrbitCamera,
+    size: (u32, u32),
+) -> bool {
     if u.nebulae.list.is_empty() {
         return false;
     }
     let neb = slot.get_or_insert_with(|| NebulaRenderer::new(renderer));
     let ncam = camera_of(cam);
-    let params = NebulaParams { eye: ncam.eye, distance_desaturation: u.nebulae.tweaks.distance_desaturation, bright: true };
+    let params = NebulaParams {
+        eye: ncam.eye,
+        distance_desaturation: u.nebulae.tweaks.distance_desaturation,
+        bright: true,
+    };
     let view = FxView::from_orbit(cam, size.0, size.1);
     neb.prepare(&inputs(u, &ncam), &params, &view);
     neb.vertex_count() > 0

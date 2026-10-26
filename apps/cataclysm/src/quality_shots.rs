@@ -131,18 +131,25 @@ fn every_quality_mode_draws_mission_one() {
     assert!(base > 0, "nothing drawn");
     for (name, q) in modes(rig.renderer.msaa_support()) {
         g.quality = q;
-        g.render(&mut rig.renderer, size).unwrap_or_else(|e| panic!("{name}: {e}"));
+        g.render(&mut rig.renderer, size)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
         let (lit, total) = stats(g);
         assert_eq!(total, (size.0 * size.1) as usize);
         // The same view: about as much of the frame is drawn in every mode.
         let ratio = lit as f64 / base as f64;
-        assert!((0.8..1.25).contains(&ratio), "{name}: {lit} lit pixels vs {base}");
+        assert!(
+            (0.8..1.25).contains(&ratio),
+            "{name}: {lit} lit pixels vs {base}"
+        );
         assert_eq!(
             rig.renderer.sample_count(),
             hwc_render::quality::pick_sample_count(q.msaa, rig.renderer.msaa_support()),
             "{name}"
         );
-        assert!(g.scene_layer().is_none(), "{name}: no layer at the canvas size");
+        assert!(
+            g.scene_layer().is_none(),
+            "{name}: no layer at the canvas size"
+        );
     }
     // A scaled front end: the scene is drawn at the window's pixels and shown under the
     // canvas, whose untouched pixels are transparent.
@@ -152,7 +159,10 @@ fn every_quality_mode_draws_mission_one() {
     let (rgba, _) = g.scene_layer().expect("scene layer");
     let clear = rgba.chunks(4).filter(|p| p[3] == 0).count();
     let total = (size.0 * size.1) as usize;
-    assert!(clear > total / 3, "{clear} of {total} pixels show the scene");
+    assert!(
+        clear > total / 3,
+        "{clear} of {total} pixels show the scene"
+    );
     assert!(clear < total, "the interface is drawn over the scene");
     g.present = None;
     rig.renderer.set_sample_count(1);
@@ -212,7 +222,12 @@ fn combat_frame_times_and_shots() {
         panic!("no combat in Mission 1");
     };
     // A few frames on with the camera on the fight.
-    let p = g.world.universe().ship(id).map(|s| s.posinfo.position).unwrap();
+    let p = g
+        .world
+        .universe()
+        .ship(id)
+        .map(|s| s.posinfo.position)
+        .unwrap();
     g.world.follow_focus = false;
     g.world.camera.look_at = glam::Vec3::new(p.x, p.y, p.z);
     g.world.camera.distance = 2600.0;
@@ -221,7 +236,12 @@ fn combat_frame_times_and_shots() {
         play.tick(g.world.run_mut());
         g.update(DT, &mut rig.audio);
     }
-    let fx_now = g.world.universe().effects.as_ref().map_or(0, |e| e.world.effects.len());
+    let fx_now = g
+        .world
+        .universe()
+        .effects
+        .as_ref()
+        .map_or(0, |e| e.world.effects.len());
     eprintln!(
         "combat at update {frame}: {ships} ships under fire, {fx} effects ({fx_now} when drawn); GPU {:?}",
         rig.renderer.msaa_support()
@@ -245,7 +265,9 @@ fn combat_frame_times_and_shots() {
         let max = t[n - 1];
         let p = g.render_plan().expect("plan");
         let plan = format!("{}x{} {}x", p.render.0, p.render.1, p.samples);
-        rows.push(format!("{name:18} {plan:16} mean {mean:6.1} ms  p95 {p95:6.1}  max {max:6.1}"));
+        rows.push(format!(
+            "{name:18} {plan:16} mean {mean:6.1} ms  p95 {p95:6.1}  max {max:6.1}"
+        ));
         if ["off", "scale-2", "msaa-4", "fxaa", "scale-2-msaa-4"].contains(&name.as_str()) {
             g.canvas()
                 .save_png(&dir.join(format!("m01-combat-{name}.png")))

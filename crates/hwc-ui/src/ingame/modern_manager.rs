@@ -49,6 +49,15 @@ impl Switch {
         self.over.store(v, Ordering::Relaxed);
     }
 
+    /// The command line's choice, if it made one.
+    pub fn overridden(&self) -> Option<bool> {
+        match self.over.load(Ordering::Relaxed) {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        }
+    }
+
     pub fn enabled(&self, options: &Options) -> bool {
         match self.over.load(Ordering::Relaxed) {
             1 => true,
@@ -136,9 +145,14 @@ pub const MIN_TEXT: f32 = 8.5;
 /// The panel's scale for a `width` x `height` canvas: the height over 1080, at least
 /// [`MIN_SCALE`], and never larger than fits the window.
 pub fn scale_for(width: i32, height: i32) -> f32 {
+    scale_sized(width, height, REF_W, REF_H, top_band(height))
+}
+
+/// The scale of a `ref_w` x `ref_h` panel (at 1080 lines) on a `width` x `height` canvas
+/// with `band` pixels kept clear along the top: as [`scale_for`].
+pub fn scale_sized(width: i32, height: i32, ref_w: f32, ref_h: f32, band: i32) -> f32 {
     let (w, h) = (width.max(1) as f32, height.max(1) as f32);
-    let band = top_band(height) as f32;
-    let fit = ((h - band - FIT_MARGIN) / REF_H).min((w - 2.0 * FIT_MARGIN) / REF_W);
+    let fit = ((h - band as f32 - FIT_MARGIN) / ref_h).min((w - 2.0 * FIT_MARGIN) / ref_w);
     (h / REF_LINES).max(MIN_SCALE).min(fit).max(0.2)
 }
 
@@ -158,16 +172,35 @@ pub struct Frame {
     pub title_x: i32,
     pub title_baseline: i32,
     pub footer_line: i32,
+    /// The panel's size at 1080 lines ([`REF_W`] x [`REF_H`] for the managers).
+    pub ref_w: f32,
+    pub ref_h: f32,
+    /// It has a footer (its hairline and buttons along the bottom).
+    pub footer: bool,
 }
 
 impl Frame {
-    /// The panel on a `width` x `height` canvas: centred, below the HUD's header band.
+    /// The managers' panel on a `width` x `height` canvas: centred, below the HUD's header
+    /// band.
     pub fn new(width: i32, height: i32) -> Frame {
-        let s = scale_for(width, height);
+        Frame::sized(width, height, REF_W, REF_H, top_band(height), true)
+    }
+
+    /// A `ref_w` x `ref_h` panel (at 1080 lines), centred, below `band` pixels along the
+    /// top, with or without a footer.
+    pub fn sized(
+        width: i32,
+        height: i32,
+        ref_w: f32,
+        ref_h: f32,
+        band: i32,
+        footer: bool,
+    ) -> Frame {
+        let s = scale_sized(width, height, ref_w, ref_h, band);
         let px = |v: f32| (v * s).round() as i32;
-        let (pw, ph) = (px(REF_W), px(REF_H));
+        let (pw, ph) = (px(ref_w), px(ref_h));
         let x0 = (width - pw) / 2;
-        let y0 = ((height - ph) / 2).max(top_band(height));
+        let y0 = ((height - ph) / 2).max(band);
         let panel = Rect::new(x0, y0, x0 + pw, y0 + ph);
         Frame {
             scale: s,
@@ -175,7 +208,10 @@ impl Frame {
             header: Rect::new(panel.x0, panel.y0, panel.x1, y0 + px(HEADER_H)),
             title_x: x0 + px(PAD),
             title_baseline: y0 + px(TITLE_BASELINE),
-            footer_line: y0 + px(FOOTER_LINE),
+            footer_line: y0 + px(ref_h - (REF_H - FOOTER_LINE)),
+            ref_w,
+            ref_h,
+            footer,
         }
     }
 
@@ -202,19 +238,29 @@ impl Frame {
 
     /// The `i`-th header button from the right.
     pub fn top_button(&self, i: usize) -> Rect {
-        let x = REF_W - PAD - TOP_BUTTON_W - i as f32 * (TOP_BUTTON_W + TOP_BUTTON_GAP);
+        let x = self.ref_w - PAD - TOP_BUTTON_W - i as f32 * (TOP_BUTTON_W + TOP_BUTTON_GAP);
         self.at(x, TOP_BUTTON_Y, TOP_BUTTON_W, TOP_BUTTON_H)
+    }
+
+    /// The footer buttons' top, in reference pixels from the panel's top.
+    pub fn footer_y(&self) -> f32 {
+        self.ref_h - (REF_H - BUTTON_Y)
     }
 
     /// The `i`-th footer button from the left.
     pub fn footer_button(&self, i: usize) -> Rect {
         let x = PAD + i as f32 * (BUTTON_W + BUTTON_GAP);
-        self.at(x, BUTTON_Y, BUTTON_W, BUTTON_H)
+        self.at(x, self.footer_y(), BUTTON_W, BUTTON_H)
     }
 
     /// The footer button on the right (Close).
     pub fn footer_right(&self) -> Rect {
-        self.at(REF_W - PAD - BUTTON_W, BUTTON_Y, BUTTON_W, BUTTON_H)
+        self.at(
+            self.ref_w - PAD - BUTTON_W,
+            self.footer_y(),
+            BUTTON_W,
+            BUTTON_H,
+        )
     }
 
     /// The panel's inner right edge.
@@ -559,7 +605,9 @@ pub fn draw_frame(canvas: &mut Canvas, f: &Frame) {
         );
     }
     hline(canvas, f.title_x, f.inner_x1(), f.header.y1, LINE);
-    hline(canvas, f.title_x, f.inner_x1(), f.footer_line, LINE);
+    if f.footer {
+        hline(canvas, f.title_x, f.inner_x1(), f.footer_line, LINE);
+    }
 }
 
 /// The title in letter-spaced gold caps, and after a thin divider what it is showing
@@ -801,21 +849,31 @@ pub fn draw_button(canvas: &mut Canvas, pen: &Pen, f: &Frame, r: Rect, b: &Butto
     } else {
         lerp(TEXT, WHITE, hv / 0.6)
     };
-    // The hot key in a small cap on the right.
-    let kpx = f.text(SMALL_PX - 1.0);
-    let kw = pen.advance(Face::Bold, kpx, 0.0, b.key).max(f.px(7.0));
-    let cap_w = kw + f.px(10.0);
-    let cap_h = f.px(16.0).min(r.height() - 6);
-    let cap = Rect::new(
-        r.x1 - f.px(8.0) - cap_w,
-        (r.y0 + r.y1) / 2 - cap_h / 2,
-        r.x1 - f.px(8.0),
-        (r.y0 + r.y1) / 2 - cap_h / 2 + cap_h,
-    );
+    // The hot key in a small cap on the right (none without a key).
     let shift = i32::from(pressed);
+    let cap = if b.key.is_empty() {
+        Rect::new(r.x1, r.y0, r.x1, r.y1)
+    } else {
+        let cap = key_cap_rect(pen, f, r.x1 - f.px(8.0), (r.y0 + r.y1) / 2, b.key);
+        let cap = Rect::new(cap.x0, cap.y0.max(r.y0 + 3), cap.x1, cap.y1.min(r.y1 - 3));
+        draw_key_cap(canvas, pen, f, cap, b.key, col, shift);
+        cap
+    };
     let label_room = cap.x0 - r.x0;
-    let w = pen.advance(Face::Bold, px, sp, b.label);
-    let lx = r.x0 + (label_room - w) / 2 + f.px(4.0);
+    let avail = (label_room - f.px(12.0)) as f32;
+    // Tight (a small window): the letter spacing goes before the letters do.
+    let sp = if pen.measure(Face::Bold, px, sp, b.label) > avail {
+        0.0
+    } else {
+        sp
+    };
+    let label = fit(pen, Face::Bold, px, sp, b.label, avail);
+    let w = pen.advance(Face::Bold, px, sp, &label);
+    let lx = if b.key.is_empty() {
+        r.x0 + (r.width() - w) / 2
+    } else {
+        r.x0 + (label_room - w) / 2 + f.px(4.0)
+    };
     write(
         canvas,
         pen,
@@ -826,8 +884,31 @@ pub fn draw_button(canvas: &mut Canvas, pen: &Pen, f: &Frame, r: Rect, b: &Butto
         mid_baseline(r, px) + shift,
         col,
         None,
-        b.label,
+        &label,
     );
+}
+
+/// Where a key cap showing `key` goes: its right edge at `right`, centred on `cy`.
+pub fn key_cap_rect(pen: &Pen, f: &Frame, right: i32, cy: i32, key: &str) -> Rect {
+    let kpx = f.text(SMALL_PX - 1.0);
+    let kw = pen.advance(Face::Bold, kpx, 0.0, key).max(f.px(7.0));
+    let cap_w = kw + f.px(10.0);
+    let cap_h = f.px(16.0);
+    Rect::new(right - cap_w, cy - cap_h / 2, right, cy - cap_h / 2 + cap_h)
+}
+
+/// A key cap: a thin outline around the key's name, in `col` (`shift` pixels down while
+/// its button is held).
+pub fn draw_key_cap(
+    canvas: &mut Canvas,
+    pen: &Pen,
+    f: &Frame,
+    cap: Rect,
+    key: &str,
+    col: Color,
+    shift: i32,
+) {
+    let kpx = f.text(SMALL_PX - 1.0);
     rounded_outline(canvas, cap, 2.0 * f.scale, 1.0, alpha(col, 0.45));
     write_centred(
         canvas,
@@ -839,7 +920,7 @@ pub fn draw_button(canvas: &mut Canvas, pen: &Pen, f: &Frame, r: Rect, b: &Butto
         mid_baseline(cap, kpx) + shift,
         alpha(col, 0.8),
         None,
-        b.key,
+        key,
     );
 }
 
@@ -1268,8 +1349,542 @@ fn bilinear(img: &Image, x: f32, y: f32) -> [f32; 4] {
     out
 }
 
+// ---- form controls (the modern menus, options and systems manager) ----
+
+/// A filled circle, anti-aliased.
+pub fn circle(canvas: &mut Canvas, cx: f32, cy: f32, radius: f32, c: Color) {
+    if c[3] == 0 || radius <= 0.0 {
+        return;
+    }
+    let (x0, x1) = ((cx - radius - 1.0) as i32, (cx + radius + 1.0) as i32);
+    let (y0, y1) = ((cy - radius - 1.0) as i32, (cy + radius + 1.0) as i32);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+            let v = (radius + 0.5 - d).clamp(0.0, 1.0);
+            if v > 0.0 {
+                canvas.blend(x, y, alpha(c, v));
+            }
+        }
+    }
+}
+
+/// A soft halo around a point (a knob's glow), `strength` at the centre.
+pub fn halo(canvas: &mut Canvas, cx: f32, cy: f32, radius: f32, c: Color, strength: f32) {
+    if strength <= 0.0 {
+        return;
+    }
+    let r = radius.max(1.0);
+    for y in (cy - r) as i32..=(cy + r) as i32 {
+        for x in (cx - r) as i32..=(cx + r) as i32 {
+            let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt() / r;
+            if d < 1.0 {
+                canvas.blend(x, y, alpha(c, (1.0 - d).powi(2) * strength));
+            }
+        }
+    }
+}
+
+/// A small chevron pointing down (or up), centred on (`cx`, `cy`), `size` pixels wide.
+pub fn chevron(canvas: &mut Canvas, cx: i32, cy: i32, size: i32, up: bool, c: Color) {
+    let half = (size / 2).max(2);
+    for i in 0..=half {
+        // The tips at the ends, the point in the middle.
+        let dy = if up {
+            i / 2 - half / 2
+        } else {
+            half / 2 - i / 2
+        };
+        for t in 0..2 {
+            canvas.blend(cx - half + i, cy - dy + t, c);
+            if i < half {
+                canvas.blend(cx + half - i, cy - dy + t, c);
+            }
+        }
+    }
+}
+
+/// The gold ring of the keyboard focus around `r`.
+pub fn focus_ring(canvas: &mut Canvas, f: &Frame, r: Rect) {
+    let ring = Rect::new(r.x0 - 3, r.y0 - 3, r.x1 + 3, r.y1 + 3);
+    rounded_outline(canvas, ring, 3.0 * f.scale + 3.0, 1.0, alpha(GOLD, 0.7));
+}
+
+/// The keyboard focus on a row of settings: a faint gold wash and a gold mark on its left.
+pub fn focus_row(canvas: &mut Canvas, f: &Frame, row: Rect) {
+    let band = Rect::new(row.x0, row.y0 + 2, row.x1, row.y1 - 2);
+    rounded(canvas, band, 2.0 * f.scale, [255, 200, 0, 16]);
+    canvas.fill_rect(
+        Rect::new(
+            band.x0,
+            band.y0 + 3,
+            band.x0 + f.px(2.0).max(2),
+            band.y1 - 3,
+        ),
+        alpha(GOLD, 0.9),
+    );
+}
+
+/// An on / off switch in `r` (a pill): `on` eases the knob across (0 off, 1 on).
+pub fn draw_switch(canvas: &mut Canvas, f: &Frame, r: Rect, on: f32, hover: f32, disabled: bool) {
+    let on = on.clamp(0.0, 1.0);
+    let radius = r.height() as f32 / 2.0;
+    let track = if disabled {
+        [255, 255, 255, 14]
+    } else {
+        lerp(
+            lerp([255, 255, 255, 22], [255, 255, 255, 40], hover),
+            lerp([255, 200, 0, 120], [255, 200, 0, 170], hover),
+            on,
+        )
+    };
+    rounded(canvas, r, radius, track);
+    let border = if disabled {
+        [255, 255, 255, 30]
+    } else {
+        lerp(lerp([255, 255, 255, 70], alpha(GOLD, 0.8), hover), GOLD, on)
+    };
+    rounded_outline(canvas, r, radius, 1.0, border);
+    let kr = radius - (2.0 * f.scale).max(2.0);
+    let x0 = r.x0 as f32 + radius;
+    let x1 = r.x1 as f32 - radius;
+    let cx = x0 + (x1 - x0) * on;
+    let cy = (r.y0 + r.y1) as f32 / 2.0;
+    let knob = if disabled {
+        [160, 160, 160, 120]
+    } else {
+        lerp([200, 206, 214, 255], [255, 246, 220, 255], on)
+    };
+    if !disabled {
+        halo(canvas, cx, cy, kr * 2.2, GOLD, 0.25 * on + 0.15 * hover);
+    }
+    circle(canvas, cx, cy + 1.0, kr, [0, 0, 0, 90]);
+    circle(canvas, cx, cy, kr, knob);
+}
+
+/// A horizontal slider on `track` (its bar along the middle): the gradient fill to
+/// `fraction` and a round knob there, bigger and glowing under the pointer.
+pub fn draw_slider(
+    canvas: &mut Canvas,
+    f: &Frame,
+    track: Rect,
+    fraction: f32,
+    hover: f32,
+    disabled: bool,
+) {
+    let fr = fraction.clamp(0.0, 1.0);
+    let h = f.px(4.0).max(3);
+    let cy = (track.y0 + track.y1) / 2;
+    let bar_r = Rect::new(track.x0, cy - h / 2, track.x1, cy - h / 2 + h);
+    if disabled {
+        rounded(canvas, bar_r, h as f32 / 2.0, [255, 255, 255, 20]);
+    } else {
+        bar(canvas, f, bar_r, fr, 0.6 + 0.4 * hover);
+    }
+    let kx = track.x0 as f32 + track.width() as f32 * fr;
+    let kr = f.px(7.0).max(4) as f32 + 1.5 * hover * f.scale;
+    if !disabled {
+        halo(canvas, kx, cy as f32, kr * 2.4, GOLD, 0.2 + 0.25 * hover);
+    }
+    circle(canvas, kx, cy as f32 + 1.0, kr, [0, 0, 0, 110]);
+    let knob = if disabled {
+        [150, 150, 150, 160]
+    } else {
+        lerp([236, 239, 243, 255], [255, 246, 220, 255], hover)
+    };
+    circle(canvas, kx, cy as f32, kr, knob);
+    if !disabled {
+        circle(canvas, kx, cy as f32, kr * 0.45, alpha(GOLD, 0.85));
+    }
+}
+
+/// A vertical slider on `track` (the bar up its middle; `fraction` 0 at the top, as the
+/// original's vertical sliders count), filled from the knob down.
+pub fn draw_vslider(
+    canvas: &mut Canvas,
+    f: &Frame,
+    track: Rect,
+    fraction: f32,
+    hover: f32,
+    disabled: bool,
+) {
+    let fr = fraction.clamp(0.0, 1.0);
+    let w = f.px(4.0).max(3);
+    let cx = (track.x0 + track.x1) / 2;
+    let bar_r = Rect::new(cx - w / 2, track.y0, cx - w / 2 + w, track.y1);
+    rounded(canvas, bar_r, w as f32 / 2.0, modern_hud::TRACK);
+    let ky = track.y0 as f32 + track.height() as f32 * fr;
+    if !disabled {
+        for y in ky as i32..bar_r.y1 {
+            let t = 1.0 - (y - track.y0) as f32 / track.height().max(1) as f32;
+            hline(canvas, bar_r.x0, bar_r.x1, y, modern_hud::gradient(t));
+        }
+    }
+    let kr = f.px(7.0).max(4) as f32 + 1.5 * hover * f.scale;
+    let kx = cx as f32 + 0.5;
+    if !disabled {
+        halo(canvas, kx, ky, kr * 2.4, GOLD, 0.2 + 0.25 * hover);
+    }
+    circle(canvas, kx, ky + 1.0, kr, [0, 0, 0, 110]);
+    circle(canvas, kx, ky, kr, lerp(TEXT, [255, 246, 220, 255], hover));
+    circle(canvas, kx, ky, kr * 0.45, alpha(GOLD, 0.85));
+}
+
+/// `n` equal segments across `r` (a segmented control's parts).
+pub fn segment_rects(r: Rect, n: usize) -> Vec<Rect> {
+    let n = n.max(1) as i32;
+    (0..n)
+        .map(|i| {
+            Rect::new(
+                r.x0 + r.width() * i / n,
+                r.y0,
+                r.x0 + r.width() * (i + 1) / n,
+                r.y1,
+            )
+        })
+        .collect()
+}
+
+/// How a segmented control or a drop-down's list looks.
+#[derive(Debug, Clone, Default)]
+pub struct ChoiceLook<'a> {
+    pub labels: &'a [String],
+    pub current: Option<usize>,
+    /// Each choice's eased highlight.
+    pub hover: Vec<f32>,
+    pub pressed: Option<usize>,
+    pub disabled: bool,
+}
+
+/// A segmented control: one box split into its choices, the current one gold.
+pub fn draw_segments(canvas: &mut Canvas, pen: &Pen, f: &Frame, r: Rect, c: &ChoiceLook) {
+    let radius = 3.0 * f.scale;
+    rounded(canvas, r, radius, [255, 255, 255, 10]);
+    let parts = segment_rects(r, c.labels.len());
+    let px = f.text(BUTTON_PX - 1.0);
+    let sp = SMALL_SPACING * f.scale * 0.6;
+    for (i, (p, label)) in parts.iter().zip(c.labels).enumerate() {
+        let hv = if c.disabled {
+            0.0
+        } else {
+            c.hover.get(i).copied().unwrap_or(0.0)
+        };
+        let inner = Rect::new(p.x0 + 2, p.y0 + 2, p.x1 - 2, p.y1 - 2);
+        let cur = c.current == Some(i);
+        let pressed = c.pressed == Some(i) && !c.disabled;
+        if pressed {
+            rounded(canvas, inner, radius - 1.0, [255, 200, 0, 130]);
+        } else if cur {
+            let bg = if c.disabled {
+                [255, 255, 255, 24]
+            } else {
+                lerp([255, 200, 0, 60], [255, 200, 0, 90], hv)
+            };
+            rounded(canvas, inner, radius - 1.0, bg);
+            if !c.disabled {
+                rounded_outline(canvas, inner, radius - 1.0, 1.0, alpha(GOLD, 0.9));
+            }
+        } else if hv > 0.0 {
+            rounded(
+                canvas,
+                inner,
+                radius - 1.0,
+                alpha([255, 255, 255, 22], hv / 0.6),
+            );
+        }
+        if i > 0 && !cur && c.current != Some(i - 1) {
+            canvas.blend_rect(
+                Rect::new(p.x0, p.y0 + f.px(7.0), p.x0 + 1, p.y1 - f.px(7.0)),
+                LINE,
+            );
+        }
+        let col = if c.disabled {
+            if cur {
+                MUTED
+            } else {
+                GREYED
+            }
+        } else if pressed {
+            ON_GOLD
+        } else if cur {
+            lerp(LABEL, WHITE, hv)
+        } else {
+            lerp(MUTED, WHITE, hv / 0.6)
+        };
+        let t = fit(
+            pen,
+            Face::Bold,
+            px,
+            sp,
+            label,
+            (p.width() - f.px(8.0)) as f32,
+        );
+        write_centred(
+            canvas,
+            pen,
+            Face::Bold,
+            px,
+            sp,
+            (p.x0 + p.x1) / 2,
+            mid_baseline(*p, px),
+            col,
+            None,
+            &t,
+        );
+    }
+    let edge = if c.disabled {
+        [255, 255, 255, 25]
+    } else {
+        [255, 255, 255, 50]
+    };
+    rounded_outline(canvas, r, radius, 1.0, edge);
+}
+
+/// A drop-down's closed box: the current choice and a chevron (up while open).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_select(
+    canvas: &mut Canvas,
+    pen: &Pen,
+    f: &Frame,
+    r: Rect,
+    text: &str,
+    open: bool,
+    hover: f32,
+    disabled: bool,
+) {
+    let radius = 3.0 * f.scale;
+    let bg = if open {
+        [255, 200, 0, 40]
+    } else {
+        lerp([255, 255, 255, 12], [255, 200, 0, 36], hover / 0.6)
+    };
+    rounded(canvas, r, radius, bg);
+    let border = if disabled {
+        [255, 255, 255, 25]
+    } else if open {
+        GOLD
+    } else {
+        lerp([255, 255, 255, 60], GOLD, hover / 0.6)
+    };
+    rounded_outline(canvas, r, radius, 1.0, border);
+    let px = f.text(BODY_PX);
+    let col = if disabled {
+        GREYED
+    } else {
+        lerp(TEXT, WHITE, hover)
+    };
+    let chev = f.px(10.0).max(6);
+    let t = fit(
+        pen,
+        Face::Semibold,
+        px,
+        0.0,
+        text,
+        (r.width() - f.px(24.0) - chev) as f32,
+    );
+    write(
+        canvas,
+        pen,
+        Face::Semibold,
+        px,
+        0.0,
+        r.x0 + f.px(10.0),
+        mid_baseline(r, px),
+        col,
+        None,
+        &t,
+    );
+    let chev_col = alpha(if disabled { GREYED } else { GOLD }, 0.9);
+    chevron(
+        canvas,
+        r.x1 - f.px(12.0) - chev / 2,
+        (r.y0 + r.y1) / 2,
+        chev,
+        open,
+        chev_col,
+    );
+}
+
+/// The panel a drop-down's list sits on, around its `rows`.
+pub fn choices_panel(f: &Frame, rows: &[Rect]) -> Option<Rect> {
+    let (first, last) = (rows.first()?, rows.last()?);
+    let pad = f.px(4.0);
+    Some(Rect::new(
+        first.x0 - pad,
+        first.y0 - pad,
+        first.x1 + pad,
+        last.y1 + pad,
+    ))
+}
+
+/// A drop-down's open list: a solid panel with a row per choice, the current one marked,
+/// the one under the pointer warmed.
+pub fn draw_choices(canvas: &mut Canvas, pen: &Pen, f: &Frame, rows: &[Rect], c: &ChoiceLook) {
+    let Some(r) = choices_panel(f, rows) else {
+        return;
+    };
+    shadow(canvas, r, f.px(10.0).max(4));
+    rounded(canvas, r, 4.0 * f.scale, [14, 16, 22, 250]);
+    rounded_outline(canvas, r, 4.0 * f.scale, 1.0, alpha(GOLD, 0.6));
+    let px = f.text(BODY_PX);
+    for (i, (row, label)) in rows.iter().zip(c.labels).enumerate() {
+        let hv = c.hover.get(i).copied().unwrap_or(0.0);
+        let sel = c.current == Some(i);
+        row_band(canvas, f, *row, sel, hv, 0.0);
+        if c.pressed == Some(i) {
+            rounded(canvas, *row, 2.0 * f.scale, [255, 200, 0, 110]);
+        }
+        let col = if sel {
+            lerp(LABEL, WHITE, hv)
+        } else {
+            lerp(TEXT, WHITE, hv)
+        };
+        write(
+            canvas,
+            pen,
+            Face::Semibold,
+            px,
+            0.0,
+            row.x0 + f.px(14.0),
+            mid_baseline(*row, px),
+            col,
+            None,
+            label,
+        );
+    }
+}
+
+/// How a text field looks.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FieldLook<'a> {
+    pub text: &'a str,
+    /// Shown muted while the field is empty.
+    pub placeholder: &'a str,
+    /// It has the keyboard.
+    pub focused: bool,
+    /// The caret is shown (it blinks).
+    pub caret: bool,
+    pub hover: f32,
+}
+
+/// A text field: a dark box, the text, and a caret at its end while it has the keyboard.
+pub fn draw_field(canvas: &mut Canvas, pen: &Pen, f: &Frame, r: Rect, t: &FieldLook) {
+    let radius = 3.0 * f.scale;
+    rounded(canvas, r, radius, [0, 0, 0, 90]);
+    let border = if t.focused {
+        GOLD
+    } else {
+        lerp([255, 255, 255, 50], alpha(GOLD, 0.8), t.hover / 0.6)
+    };
+    rounded_outline(canvas, r, radius, 1.0, border);
+    let px = f.text(BODY_PX + 1.0);
+    let base = mid_baseline(r, px);
+    let x = r.x0 + f.px(12.0);
+    if t.text.is_empty() && !t.focused {
+        write(
+            canvas,
+            pen,
+            Face::Semibold,
+            px,
+            0.0,
+            x,
+            base,
+            DIM,
+            None,
+            t.placeholder,
+        );
+    }
+    let shown = fit(
+        pen,
+        Face::Semibold,
+        px,
+        0.0,
+        t.text,
+        (r.width() - f.px(28.0)) as f32,
+    );
+    let w = write(
+        canvas,
+        pen,
+        Face::Semibold,
+        px,
+        0.0,
+        x,
+        base,
+        WHITE,
+        None,
+        &shown,
+    );
+    if t.caret {
+        let cx = if t.text.is_empty() { x } else { x + w + 1 };
+        let h = (px * 1.05).round() as i32;
+        canvas.blend_rect(
+            Rect::new(
+                cx,
+                base - h + f.px(2.0),
+                cx + f.px(2.0).max(1),
+                base + f.px(3.0),
+            ),
+            GOLD,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn sized_frames_keep_the_footer_at_the_bottom() {
+        let f = Frame::sized(1920, 1080, 640.0, 420.0, 0, true);
+        assert_eq!(f.panel.width(), 640);
+        assert_eq!(f.panel.height(), 420);
+        assert_eq!(
+            f.footer_button(0).y1,
+            f.panel.y1 - (REF_H - BUTTON_Y - BUTTON_H) as i32
+        );
+        assert_eq!(f.footer_right().x1, f.inner_x1());
+        assert!(f.footer_line < f.footer_button(0).y0);
+        // A tall panel shrinks to fit a small window.
+        let s = Frame::sized(640, 480, 960.0, 900.0, 0, true);
+        assert!(s.panel.y0 >= 0 && s.panel.y1 <= 480, "{:?}", s.panel);
+        // The managers' frame is unchanged.
+        assert_eq!(Frame::new(1920, 1080).footer_line, 160 + 680);
+    }
+
+    #[test]
+    fn segments_split_evenly() {
+        let parts = segment_rects(Rect::new(10, 0, 110, 20), 3);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].x0, 10);
+        assert_eq!(parts[2].x1, 110);
+        assert!(parts.windows(2).all(|w| w[0].x1 == w[1].x0));
+    }
+
+    #[test]
+    fn form_controls_draw_inside_their_boxes() {
+        let f = Frame::new(1920, 1080);
+        let mut c = Canvas::new(200, 60);
+        draw_switch(&mut c, &f, Rect::new(10, 10, 54, 32), 1.0, 0.0, false);
+        // On: the track is gold, the knob sits on the right.
+        let track = c.get(20, 21);
+        assert!(track[0] > track[2], "{track:?}");
+        assert!(c.get(43, 21)[0] > 200);
+        assert_eq!(
+            c.get(100, 21),
+            Canvas::new(1, 1).get(0, 0),
+            "nothing outside"
+        );
+        let mut c = Canvas::new(200, 40);
+        draw_slider(&mut c, &f, Rect::new(20, 10, 180, 30), 0.5, 0.0, false);
+        assert!(c.get(100, 20)[0] > 200, "the knob at the middle");
+        assert!(c.get(40, 20)[3] > 0, "the filled part");
+        circle(&mut c, 10.0, 10.0, 3.0, [255, 0, 0, 255]);
+        assert_eq!(c.get(9, 9)[0], 255);
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
     use super::*;
 
     #[test]

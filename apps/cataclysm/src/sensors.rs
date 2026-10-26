@@ -898,7 +898,13 @@ fn ring_fade_under(
 /// segment's apothem (`(e1 - d) / (e1 - e0)` with `e = r * cos(half) / cos(local)`), which the
 /// trapezoid's interpolated alpha reproduces exactly; with the alpha cut to 8 bits as the
 /// canvas does, the picture is the same to within one step of rounding.
-pub fn ring_fade_triangles(c: &Circle, r1: f32, segments: i32, col: Color, out: &mut Vec<PixelTriangle>) {
+pub fn ring_fade_triangles(
+    c: &Circle,
+    r1: f32,
+    segments: i32,
+    col: Color,
+    out: &mut Vec<PixelTriangle>,
+) {
     let n = segments.max(3);
     let step = TAU / n as f32;
     let centre = Vec2::new(c.x, c.y);
@@ -930,7 +936,12 @@ pub fn ring_fade_triangles(c: &Circle, r1: f32, segments: i32, col: Color, out: 
 
 /// Two triangles covering a `w` x `h` screen in one colour.
 pub fn full_screen_triangles(w: f32, h: f32, color: [f32; 4], out: &mut Vec<PixelTriangle>) {
-    let [a, b, c, d] = [Vec2::ZERO, Vec2::new(w, 0.0), Vec2::new(w, h), Vec2::new(0.0, h)];
+    let [a, b, c, d] = [
+        Vec2::ZERO,
+        Vec2::new(w, 0.0),
+        Vec2::new(w, h),
+        Vec2::new(0.0, h),
+    ];
     out.push(PixelTriangle {
         points: [a, b, c],
         colors: [color; 3],
@@ -989,7 +1000,16 @@ fn draw_rings(canvas: &mut Canvas, rings: Vec<(Circle, f32, i32, Color)>) {
         }
     }
     for (i, (c, outer, segments, col)) in rings.into_iter().enumerate() {
-        ring_fade_under(canvas, c.x, c.y, c.r, outer, segments, col, Some((&cover, i as u16)));
+        ring_fade_under(
+            canvas,
+            c.x,
+            c.y,
+            c.r,
+            outer,
+            segments,
+            col,
+            Some((&cover, i as u16)),
+        );
     }
 }
 
@@ -1130,7 +1150,8 @@ impl Sensors {
                 }
                 match r.kind {
                     hwc_sim::resource::ResourceKind::Asteroid(_) => ASTEROID_COLOR,
-                    hwc_sim::resource::ResourceKind::DustCloud(_) | hwc_sim::resource::ResourceKind::Nebula(_) => DUST_COLOR,
+                    hwc_sim::resource::ResourceKind::DustCloud(_)
+                    | hwc_sim::resource::ResourceKind::Nebula(_) => DUST_COLOR,
                 }
             };
             if !fog.explored(r.position) {
@@ -1379,7 +1400,9 @@ impl Sensors {
         let cw = hwc_ui::text::width(font, b"0").max(1);
         let fh = hwc_ui::text::height(font);
         for (n, ships) in inp.groups {
-            let Some(label) = crate::hotkeys::LABELS.get(usize::from(*n)) else { continue };
+            let Some(label) = crate::hotkeys::LABELS.get(usize::from(*n)) else {
+                continue;
+            };
             let label = label.as_bytes();
             let mut placed: Vec<(i32, i32)> = Vec::new();
             for &id in ships {
@@ -1677,7 +1700,10 @@ mod tests {
         );
         // A viewer in cell (0, 0, 0) with range 0 sees the cells next to it.
         g.add_viewer_cells([0, 0, 0], 1);
-        let fog = Fog { grid: Some(&g), mode: FOG_MODE };
+        let fog = Fog {
+            grid: Some(&g),
+            mode: FOG_MODE,
+        };
         let p = |x: f32, y: f32, z: f32| hwc_math::Vector::new(x, y, z);
         assert!(fog.seen(p(5.0, 5.0, 5.0)));
         assert!(!fog.point_hidden(p(15.0, 15.0, 15.0)));
@@ -1686,13 +1712,22 @@ mod tests {
         assert!(!fog.explored(p(25.0, 5.0, 5.0)));
         assert!(fog.point_hidden(p(-5.0, 5.0, 5.0)), "outside the grid");
         assert!(!fog.explored(p(-5.0, 5.0, 5.0)));
-        let none = Fog { grid: None, mode: FOG_MODE };
+        let none = Fog {
+            grid: None,
+            mode: FOG_MODE,
+        };
         assert!(none.point_hidden(p(5.0, 5.0, 5.0)));
         // Mode 1 leaves the outside of the grid open; mode 0 is no fog at all.
-        let one = Fog { grid: Some(&g), mode: 1 };
+        let one = Fog {
+            grid: Some(&g),
+            mode: 1,
+        };
         assert!(!one.point_hidden(p(-5.0, 5.0, 5.0)));
         assert!(one.point_hidden(p(25.0, 25.0, 25.0)));
-        let off = Fog { grid: None, mode: 0 };
+        let off = Fog {
+            grid: None,
+            mode: 0,
+        };
         assert!(!off.point_hidden(p(25.0, 25.0, 25.0)) && off.explored(p(25.0, 25.0, 25.0)));
     }
 
@@ -1702,7 +1737,11 @@ mod tests {
             .map(|i| {
                 let f = i as f32;
                 (
-                    Circle { x: 30.0 + f * 7.3, y: 40.0 + (f * 1.7).sin() * 20.0, r: 10.0 + f * 2.1 },
+                    Circle {
+                        x: 30.0 + f * 7.3,
+                        y: 40.0 + (f * 1.7).sin() * 20.0,
+                        r: 10.0 + f * 2.1,
+                    },
                     (10.0 + f * 2.1) * RANGE_FADE,
                     8 + i * 2,
                     [(20 * i) as u8, 100, 200 - (10 * i) as u8, 255],
@@ -1716,7 +1755,10 @@ mod tests {
             ring_fade(&mut a, c.x, c.y, c.r, *outer, *seg, *col);
         }
         draw_rings(&mut b, rings);
-        assert!(a.pixels == b.pixels, "the covered rings changed the picture");
+        assert!(
+            a.pixels == b.pixels,
+            "the covered rings changed the picture"
+        );
     }
 
     #[test]

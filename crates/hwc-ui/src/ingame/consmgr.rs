@@ -288,13 +288,7 @@ fn scroll_by(fe: &mut Fe, delta: isize) {
 /// Scrolls the list so `top` is its first row, `page` rows on screen (the modern build
 /// manager shows a different number of rows than the original's 18).
 pub(crate) fn scroll_to(fe: &mut Fe, top: usize, page: usize) {
-    if let Some(r) = fe
-        .game
-        .ig
-        .cm
-        .scroll_list
-        .and_then(|id| fe.region_mut(id))
-    {
+    if let Some(r) = fe.game.ig.cm.scroll_list.and_then(|id| fe.region_mut(id)) {
         if let crate::controls::Control::List(l) = &mut r.control {
             l.max_visible = page.max(1);
         }

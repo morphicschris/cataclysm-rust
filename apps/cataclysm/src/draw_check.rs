@@ -68,7 +68,11 @@ fn clamp(x: &mut f32, max: f32, clamped: &mut usize) {
 /// Checks and counts an effect list (see the module notes).
 pub fn check_effects(list: &mut RenderList, stats: &mut Stats) {
     for s in &mut list.sprites {
-        if !finite(s.position) || !finite_all(&s.size) || !s.rotation.is_finite() || !finite_all(&s.color) {
+        if !finite(s.position)
+            || !finite_all(&s.size)
+            || !s.rotation.is_finite()
+            || !finite_all(&s.color)
+        {
             s.size = [0.0; 2];
             s.color = [0.0; 4];
             s.position = Vector::ZERO;
@@ -162,14 +166,33 @@ pub fn check_batch(b: &mut hwc_render::EffectBatch, stats: &mut Stats) {
     use glam::{Vec2, Vec3};
     let v3 = |v: Vec3| v.is_finite();
     let c4 = |c: &[f32; 4]| finite_all(c);
-    let n = b.sprites.len() + b.lines.len() + b.triangles.len() + b.strips.len() + b.glow_meshes.len() + b.flares.len();
-    b.sprites.retain(|s| v3(s.position) && s.half_size.is_finite() && s.rotation.is_finite() && c4(&s.color));
-    b.lines.retain(|l| v3(l.from) && v3(l.to) && l.width.is_finite() && c4(&l.from_color) && c4(&l.to_color));
-    b.triangles.retain(|t| t.vertices.iter().all(|v| v3(v.position) && c4(&v.color)));
-    b.strips.retain(|s| s.points.iter().all(|&p| v3(p)) && s.width.is_finite());
-    b.glow_meshes.retain(|g| g.transform.is_finite() && c4(&g.color));
-    b.flares.retain(|f| f.centre.is_finite() && f.half_size.is_finite() && c4(&f.color));
-    stats.not_finite += n - (b.sprites.len() + b.lines.len() + b.triangles.len() + b.strips.len() + b.glow_meshes.len() + b.flares.len());
+    let n = b.sprites.len()
+        + b.lines.len()
+        + b.triangles.len()
+        + b.strips.len()
+        + b.glow_meshes.len()
+        + b.flares.len();
+    b.sprites.retain(|s| {
+        v3(s.position) && s.half_size.is_finite() && s.rotation.is_finite() && c4(&s.color)
+    });
+    b.lines.retain(|l| {
+        v3(l.from) && v3(l.to) && l.width.is_finite() && c4(&l.from_color) && c4(&l.to_color)
+    });
+    b.triangles
+        .retain(|t| t.vertices.iter().all(|v| v3(v.position) && c4(&v.color)));
+    b.strips
+        .retain(|s| s.points.iter().all(|&p| v3(p)) && s.width.is_finite());
+    b.glow_meshes
+        .retain(|g| g.transform.is_finite() && c4(&g.color));
+    b.flares
+        .retain(|f| f.centre.is_finite() && f.half_size.is_finite() && c4(&f.color));
+    stats.not_finite += n
+        - (b.sprites.len()
+            + b.lines.len()
+            + b.triangles.len()
+            + b.strips.len()
+            + b.glow_meshes.len()
+            + b.flares.len());
     for s in &mut b.sprites {
         if s.half_size.max_element() > MAX_SIZE {
             s.half_size = s.half_size.min(Vec2::splat(MAX_SIZE));
@@ -185,7 +208,14 @@ pub fn check_batch(b: &mut hwc_render::EffectBatch, stats: &mut Stats) {
             stats.clamped += 1;
         }
     }
-    stats.batch = [b.sprites.len(), b.lines.len(), b.triangles.len(), b.strips.len(), b.glow_meshes.len(), b.flares.len()];
+    stats.batch = [
+        b.sprites.len(),
+        b.lines.len(),
+        b.triangles.len(),
+        b.strips.len(),
+        b.glow_meshes.len(),
+        b.flares.len(),
+    ];
 }
 
 /// Records a frame's counts.

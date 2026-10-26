@@ -99,6 +99,13 @@ impl FeAtom {
         self.flags & flag != 0
     }
 
+    /// The rectangle as loaded, on the 640x480 layout (before the screen was placed on a
+    /// screen of another size).
+    pub fn layout_rect(&self) -> Rect {
+        let (x, y, w, h) = self.loaded;
+        Rect::from_xywh(x, y, w, h)
+    }
+
     pub fn checked(&self) -> bool {
         self.status & FAS_CHECKED != 0
     }

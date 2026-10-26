@@ -14,7 +14,7 @@ pub struct RegionId {
 }
 
 /// Reference to an atom: screen index and atom index within it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AtomRef {
     pub screen: usize,
     pub atom: usize,

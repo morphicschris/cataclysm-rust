@@ -23,7 +23,9 @@ const DT: f32 = 1.0 / 16.0;
 fn shot_dir() -> PathBuf {
     let dir = std::env::var_os("HWC_BUILD_SHOTS")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/build"));
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/build")
+        });
     std::fs::create_dir_all(&dir).expect("screenshot directory");
     dir
 }
@@ -80,7 +82,9 @@ fn centre_difference(a: &[[u8; 4]], b: &[[u8; 4]], (w, h): (i32, i32), r: i32) -
     for y in (h / 2 - r).max(0)..(h / 2 + r).min(h) {
         for x in (w / 2 - r).max(0)..(w / 2 + r).min(w) {
             let i = (y * w + x) as usize;
-            d += (0..3).map(|c| u64::from(a[i][c].abs_diff(b[i][c]))).sum::<u64>();
+            d += (0..3)
+                .map(|c| u64::from(a[i][c].abs_diff(b[i][c])))
+                .sum::<u64>();
         }
     }
     d
@@ -119,7 +123,9 @@ fn mission_one_processor_builds_in_from_the_stern() {
     }
     let ms = {
         let u = g.world.universe();
-        u.base.players[0].mothership.expect("the player's mothership")
+        u.base.players[0]
+            .mothership
+            .expect("the player's mothership")
     };
     {
         let u = g.world.universe_mut();
@@ -188,7 +194,15 @@ fn mission_one_processor_builds_in_from_the_stern() {
         g.world.camera.angle = 60f32.to_radians();
         for (suffix, q, fd) in [
             ("", RenderQuality::default(), full_detail),
-            ("-msaa4-scale1.5-full", RenderQuality { scale: 1.5, msaa: 4, fxaa: false }, true),
+            (
+                "-msaa4-scale1.5-full",
+                RenderQuality {
+                    scale: 1.5,
+                    msaa: 4,
+                    fxaa: false,
+                },
+                true,
+            ),
         ] {
             g.quality = q;
             g.world.full_detail = fd;
@@ -212,15 +226,26 @@ fn mission_one_processor_builds_in_from_the_stern() {
         }
         step(g, &mut audio);
     }
-    assert!(hull(g, ShipType::sProcessor).is_none(), "the Processor completes");
+    assert!(
+        hull(g, ShipType::sProcessor).is_none(),
+        "the Processor completes"
+    );
     g.render(&mut renderer, size).expect("render");
-    g.canvas().save_png(&dir.join("m01-processor-done.png")).expect("png");
+    g.canvas()
+        .save_png(&dir.join("m01-processor-done.png"))
+        .expect("png");
     let done = g.canvas().pixels.clone();
-    let diff: Vec<u64> = frames_at.iter().map(|f| centre_difference(f, &done, size, 160)).collect();
+    let diff: Vec<u64> = frames_at
+        .iter()
+        .map(|f| centre_difference(f, &done, size, 160))
+        .collect();
     eprintln!("shots at progress {taken:?}; difference from the finished hull {diff:?}");
     assert!(taken[1].1 >= 0.3 && taken[1].1 < 0.4, "{taken:?}");
     assert!(taken[2].1 >= 0.7 && taken[2].1 < 0.8, "{taken:?}");
     // The hull fills in: each shot is closer to the finished ship than the one before.
-    assert!(diff[0] > diff[1] && diff[1] > diff[2] && diff[2] > diff[3], "{diff:?}");
+    assert!(
+        diff[0] > diff[1] && diff[1] > diff[2] && diff[2] > diff[3],
+        "{diff:?}"
+    );
     assert!(diff[0] > 4 * diff[3].max(1), "{diff:?}");
 }

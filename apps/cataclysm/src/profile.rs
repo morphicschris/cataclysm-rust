@@ -263,7 +263,10 @@ mod tests {
         assert_eq!(r.frames, 4);
         assert_eq!(r.cpu_ms("fog"), Some(2.0));
         assert_eq!(r.cpu_ms("discs"), Some(1.5));
-        assert_eq!(r.cpu.iter().find(|c| c.0 == "discs").map(|c| c.2), Some(3.0));
+        assert_eq!(
+            r.cpu.iter().find(|c| c.0 == "discs").map(|c| c.2),
+            Some(3.0)
+        );
         assert_eq!(r.gpu_ms("scene"), Some(1.5));
         assert_eq!(r.count("pixels"), Some(100.0));
         assert!(r.cpu_ms("frame").is_some());

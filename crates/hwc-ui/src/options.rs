@@ -173,6 +173,11 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // 1: the research manager in the modern HUD's style (`--research-ui`); 0: the original
     // screen. The original HUD brings back the original too.
     ("hwcModernResearchManager", 1),
+    // 1: the in-game escape menu, its options and confirmations, the objectives screen and
+    // the systems (launch) manager in the modern HUD's style, with the modern options
+    // screen (`--menus`); 0: the original screens. The original HUD brings back the
+    // original too.
+    ("hwcModernMenus", 1),
     // Registry values.
     ("deviceIndex", -1),
     ("screenWidth", 640),

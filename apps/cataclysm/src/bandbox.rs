@@ -59,9 +59,21 @@ impl Mode {
     /// The `selRectDragFunction` options the mode gathers with.
     pub fn gather(self) -> Gather {
         match self {
-            Mode::ForceAttack | Mode::Attack => Gather { own_only: false, anything: true, attack: true },
-            Mode::Guard | Mode::Focus => Gather { own_only: false, anything: false, attack: false },
-            Mode::MultipleSelect | Mode::Select | Mode::Special => Gather { own_only: true, anything: false, attack: false },
+            Mode::ForceAttack | Mode::Attack => Gather {
+                own_only: false,
+                anything: true,
+                attack: true,
+            },
+            Mode::Guard | Mode::Focus => Gather {
+                own_only: false,
+                anything: false,
+                attack: false,
+            },
+            Mode::MultipleSelect | Mode::Select | Mode::Special => Gather {
+                own_only: true,
+                anything: false,
+                attack: false,
+            },
         }
     }
 }
@@ -174,7 +186,11 @@ pub fn gathered(f: &Facts, g: Gather) -> bool {
     if f.mimic_as_object && !g.anything {
         return false;
     }
-    if g.attack && ((f.no_force_attack_if_own && f.own) || f.ship_type == BIG_GUN_UNIT || f.untargetable_type) {
+    if g.attack
+        && ((f.no_force_attack_if_own && f.own)
+            || f.ship_type == BIG_GUN_UNIT
+            || f.untargetable_type)
+    {
         return false;
     }
     true
@@ -222,7 +238,9 @@ pub fn special_gather(u: &Universe, ships: &[ShipId]) -> Option<SpecialGather> {
     let (mut friendlies, mut plain, mut anything) = (false, false, false);
     for &id in ships {
         let Some(s) = u.ship(id) else { continue };
-        let Some(st) = u.statics.ship(s.ship_type) else { continue };
+        let Some(st) = u.statics.ship(s.ship_type) else {
+            continue;
+        };
         if !hwc_sim::ships::has_special_target(s.ship_type) {
             continue;
         }
@@ -239,16 +257,35 @@ pub fn special_gather(u: &Universe, ships: &[ShipId]) -> Option<SpecialGather> {
         }
     }
     let gather = if anything {
-        Gather { own_only: false, anything: true, attack: false }
+        Gather {
+            own_only: false,
+            anything: true,
+            attack: false,
+        }
     } else if plain {
-        Gather { own_only: false, anything: false, attack: false }
+        Gather {
+            own_only: false,
+            anything: false,
+            attack: false,
+        }
     } else if friendlies {
-        Gather { own_only: true, anything: false, attack: false }
+        Gather {
+            own_only: true,
+            anything: false,
+            attack: false,
+        }
     } else {
         return None;
     };
-    let salvager = ships.iter().any(|&id| u.ship(id).is_some_and(|s| hwc_sim::salvage::is_salvager(s.ship_type)));
-    Some(SpecialGather { gather, friendlies, salvager })
+    let salvager = ships.iter().any(|&id| {
+        u.ship(id)
+            .is_some_and(|s| hwc_sim::salvage::is_salvager(s.ship_type))
+    });
+    Some(SpecialGather {
+        gather,
+        friendlies,
+        salvager,
+    })
 }
 
 /// `mrRemoveDerelictsAndAllPlayerShipsFromSelecting`: without friendly targets, the
@@ -268,7 +305,11 @@ fn special_keeps(f: &Facts, g: &SpecialGather) -> bool {
 pub fn selecting(mode: Mode, inside: &[(ShipId, Facts)], sel: &Selected) -> Vec<ShipId> {
     match mode {
         Mode::ForceAttack | Mode::Attack | Mode::Guard
-            if !(if mode == Mode::Guard { sel.hold_capable } else { sel.attack_capable }) =>
+            if !(if mode == Mode::Guard {
+                sel.hold_capable
+            } else {
+                sel.attack_capable
+            }) =>
         {
             return Vec::new();
         }
@@ -297,7 +338,11 @@ pub fn selecting(mode: Mode, inside: &[(ShipId, Facts)], sel: &Selected) -> Vec<
 
 /// The targets of an attack band box on release (`mrBandBoxRelease`): the selecting list less
 /// the untargetable and the attackers themselves (and, unforced, only plain targets).
-pub fn attack_targets(selecting: &[(ShipId, Facts)], attackers: &[ShipId], forced: bool) -> Vec<ShipId> {
+pub fn attack_targets(
+    selecting: &[(ShipId, Facts)],
+    attackers: &[ShipId],
+    forced: bool,
+) -> Vec<ShipId> {
     selecting
         .iter()
         .filter(|(id, f)| !f.untargetable && !attackers.contains(id))
@@ -355,7 +400,9 @@ mod tests {
         // Force attack wins over everything; guard over focus and attack.
         assert_eq!(Mode::from_held(|_| true), Mode::ForceAttack);
         assert_eq!(
-            Mode::from_held(|a| a == keys::BANDBOX_GUARD || a == keys::BANDBOX_ATTACK || a == keys::BANDBOX_FOCUS),
+            Mode::from_held(|a| a == keys::BANDBOX_GUARD
+                || a == keys::BANDBOX_ATTACK
+                || a == keys::BANDBOX_FOCUS),
             Mode::Guard
         );
     }
@@ -394,11 +441,24 @@ mod tests {
         .map(|(i, f)| (ShipId(i as u16 + 10), f))
         .collect();
         let mine = [ShipId(10)];
-        let sel = Selected { ships: &mine, attack_capable: true, hold_capable: true, special: None };
+        let sel = Selected {
+            ships: &mine,
+            attack_capable: true,
+            hold_capable: true,
+            special: None,
+        };
         // Ctrl: the enemy and the foreign derelict.
-        assert_eq!(selecting(Mode::Attack, &inside, &sel), vec![ShipId(11), ShipId(14)]);
+        assert_eq!(
+            selecting(Mode::Attack, &inside, &sel),
+            vec![ShipId(11), ShipId(14)]
+        );
         // Nobody able to attack: nothing lights up.
-        let none = Selected { ships: &mine, attack_capable: false, hold_capable: true, special: None };
+        let none = Selected {
+            ships: &mine,
+            attack_capable: false,
+            hold_capable: true,
+            special: None,
+        };
         assert!(selecting(Mode::Attack, &inside, &none).is_empty());
         // Ctrl+Shift: anything targetable, own ships included (not the cloaked or untargetable).
         assert_eq!(
@@ -411,33 +471,76 @@ mod tests {
             .copied()
             .filter(|(id, _)| selecting(Mode::ForceAttack, &inside, &sel).contains(id))
             .collect();
-        assert_eq!(attack_targets(&gathered, &mine, true), (11..=16).map(ShipId).collect::<Vec<_>>());
-        assert_eq!(attack_targets(&gathered, &mine, false), vec![ShipId(11), ShipId(14)]);
+        assert_eq!(
+            attack_targets(&gathered, &mine, true),
+            (11..=16).map(ShipId).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            attack_targets(&gathered, &mine, false),
+            vec![ShipId(11), ShipId(14)]
+        );
         // Alt: everything in the box; G: the friendly ships but the selection.
         assert_eq!(selecting(Mode::Focus, &inside, &sel).len(), 8);
-        assert_eq!(selecting(Mode::Guard, &inside, &sel), vec![ShipId(12), ShipId(15)]);
+        assert_eq!(
+            selecting(Mode::Guard, &inside, &sel),
+            vec![ShipId(12), ShipId(15)]
+        );
         // No modifier: own ships only.
-        assert_eq!(selecting(Mode::Select, &inside, &sel), vec![ShipId(10), ShipId(15)]);
+        assert_eq!(
+            selecting(Mode::Select, &inside, &sel),
+            vec![ShipId(10), ShipId(15)]
+        );
     }
 
     #[test]
     fn special_band_box_gathers_for_the_selected_specials() {
         let mut derelict = ship(false);
         derelict.derelict = true;
-        let inside: Vec<(ShipId, Facts)> =
-            [ship(true), ship(false), derelict].into_iter().enumerate().map(|(i, f)| (ShipId(i as u16 + 10), f)).collect();
+        let inside: Vec<(ShipId, Facts)> = [ship(true), ship(false), derelict]
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| (ShipId(i as u16 + 10), f))
+            .collect();
         let mine = [ShipId(10)];
-        let plain = Gather { own_only: false, anything: false, attack: false };
-        let with = |special| Selected { ships: &mine, attack_capable: true, hold_capable: true, special };
+        let plain = Gather {
+            own_only: false,
+            anything: false,
+            attack: false,
+        };
+        let with = |special| Selected {
+            ships: &mine,
+            attack_capable: true,
+            hold_capable: true,
+            special,
+        };
         // No ship with a special-target routine: nothing is gathered.
         assert!(selecting(Mode::Special, &inside, &with(None)).is_empty());
         // Enemy targets only: own ships and (without a salvager) derelicts leave.
-        let enemies = SpecialGather { gather: plain, friendlies: false, salvager: false };
-        assert_eq!(selecting(Mode::Special, &inside, &with(Some(enemies))), vec![ShipId(11)]);
-        let salvage = SpecialGather { salvager: true, ..enemies };
-        assert_eq!(selecting(Mode::Special, &inside, &with(Some(salvage))), vec![ShipId(11), ShipId(12)]);
+        let enemies = SpecialGather {
+            gather: plain,
+            friendlies: false,
+            salvager: false,
+        };
+        assert_eq!(
+            selecting(Mode::Special, &inside, &with(Some(enemies))),
+            vec![ShipId(11)]
+        );
+        let salvage = SpecialGather {
+            salvager: true,
+            ..enemies
+        };
+        assert_eq!(
+            selecting(Mode::Special, &inside, &with(Some(salvage))),
+            vec![ShipId(11), ShipId(12)]
+        );
         // Friendly targets: everything stays.
-        let friends = SpecialGather { friendlies: true, ..enemies };
-        assert_eq!(selecting(Mode::Special, &inside, &with(Some(friends))).len(), 3);
+        let friends = SpecialGather {
+            friendlies: true,
+            ..enemies
+        };
+        assert_eq!(
+            selecting(Mode::Special, &inside, &with(Some(friends))).len(),
+            3
+        );
     }
 }

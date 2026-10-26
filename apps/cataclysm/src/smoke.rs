@@ -323,10 +323,17 @@ fn mission_one_plays_through_the_game_path() {
         .expect("some empty space on screen");
     let (ex, ey) = empty;
     rig.click(g, ex, ey, false);
-    assert!(matches!(g.mode, Mode::Move { .. }), "right click opens the plate");
+    assert!(
+        matches!(g.mode, Mode::Move { .. }),
+        "right click opens the plate"
+    );
     assert!(!menu_open(g));
     rig.click(g, ex, ey, true);
-    assert_eq!(g.mode, Mode::Select, "a left click cancels a right-click plate");
+    assert_eq!(
+        g.mode,
+        Mode::Select,
+        "a left click cancels a right-click plate"
+    );
     rig.click(g, ex, ey, false);
     assert!(matches!(g.mode, Mode::Move { .. }));
     rig.click(g, ex, ey, false);
@@ -344,7 +351,11 @@ fn mission_one_plays_through_the_game_path() {
         rig.frame(g);
         if g.hover.is_some() {
             rig.click(g, p.0, p.1, false);
-            assert_eq!(g.mode, Mode::Select, "a right click on a ship opens no plate");
+            assert_eq!(
+                g.mode,
+                Mode::Select,
+                "a right click on a ship opens no plate"
+            );
             if menu_open(g) {
                 rig.key(g, 0x1b);
             }
@@ -588,7 +599,11 @@ fn sensors_manager_and_pointers() {
     rig.frame(g);
     rig.shot(g, "23c_sensors_plate_height");
     assert_eq!(g.plate().unwrap().spec, crate::plate::Spec::Height);
-    assert!(g.plate().unwrap().spec_z > 100.0, "height {}", g.plate().unwrap().spec_z);
+    assert!(
+        g.plate().unwrap().spec_z > 100.0,
+        "height {}",
+        g.plate().unwrap().spec_z
+    );
     rig.input(g, InputEvent::KeyUp(0x10));
     rig.frame(g);
     rig.shot(g, "23d_sensors_plate_released");
@@ -660,7 +675,10 @@ struct Lcg(u64);
 
 impl Lcg {
     fn next(&mut self) -> u32 {
-        self.0 = self.0.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         (self.0 >> 33) as u32
     }
 
@@ -711,21 +729,45 @@ fn mission_one_random_play() {
         let g = &mut *game;
         match rng.below(40) {
             0..=9 => {
-                let (x, y) = (rng.below(SIZE.0 as u32) as i32, rng.below(SIZE.1 as u32) as i32);
+                let (x, y) = (
+                    rng.below(SIZE.0 as u32) as i32,
+                    rng.below(SIZE.1 as u32) as i32,
+                );
                 g.input(InputEvent::MouseMove { x, y }, &mut rig.audio);
             }
             10..=12 => {
                 let left = rng.below(4) != 0;
                 g.input(InputEvent::MouseButton { left, down: true }, &mut rig.audio);
-                g.input(InputEvent::MouseButton { left, down: false }, &mut rig.audio);
+                g.input(
+                    InputEvent::MouseButton { left, down: false },
+                    &mut rig.audio,
+                );
             }
             13 => {
-                let a = (rng.below(SIZE.0 as u32) as i32, rng.below(SIZE.1 as u32) as i32);
-                let b = (rng.below(SIZE.0 as u32) as i32, rng.below(SIZE.1 as u32) as i32);
+                let a = (
+                    rng.below(SIZE.0 as u32) as i32,
+                    rng.below(SIZE.1 as u32) as i32,
+                );
+                let b = (
+                    rng.below(SIZE.0 as u32) as i32,
+                    rng.below(SIZE.1 as u32) as i32,
+                );
                 g.input(InputEvent::MouseMove { x: a.0, y: a.1 }, &mut rig.audio);
-                g.input(InputEvent::MouseButton { left: true, down: true }, &mut rig.audio);
+                g.input(
+                    InputEvent::MouseButton {
+                        left: true,
+                        down: true,
+                    },
+                    &mut rig.audio,
+                );
                 g.input(InputEvent::MouseMove { x: b.0, y: b.1 }, &mut rig.audio);
-                g.input(InputEvent::MouseButton { left: true, down: false }, &mut rig.audio);
+                g.input(
+                    InputEvent::MouseButton {
+                        left: true,
+                        down: false,
+                    },
+                    &mut rig.audio,
+                );
             }
             14 => {
                 let k = KEYS[rng.below(KEYS.len() as u32) as usize];
@@ -742,10 +784,25 @@ fn mission_one_random_play() {
             },
             16 => {
                 // Right-drag: camera rotation.
-                g.input(InputEvent::MouseButton { left: false, down: true }, &mut rig.audio);
-                let (x, y) = (rng.below(SIZE.0 as u32) as i32, rng.below(SIZE.1 as u32) as i32);
+                g.input(
+                    InputEvent::MouseButton {
+                        left: false,
+                        down: true,
+                    },
+                    &mut rig.audio,
+                );
+                let (x, y) = (
+                    rng.below(SIZE.0 as u32) as i32,
+                    rng.below(SIZE.1 as u32) as i32,
+                );
                 g.input(InputEvent::MouseMove { x, y }, &mut rig.audio);
-                g.input(InputEvent::MouseButton { left: false, down: false }, &mut rig.audio);
+                g.input(
+                    InputEvent::MouseButton {
+                        left: false,
+                        down: false,
+                    },
+                    &mut rig.audio,
+                );
             }
             _ => {}
         }
@@ -842,7 +899,10 @@ fn mission_one_autoplay_combat() {
                 g.world.camera.distance = 2000.0 + rng.below(6000) as f32;
             }
         }
-        let (x, y) = (rng.below(SIZE.0 as u32) as i32, rng.below(SIZE.1 as u32) as i32);
+        let (x, y) = (
+            rng.below(SIZE.0 as u32) as i32,
+            rng.below(SIZE.1 as u32) as i32,
+        );
         g.input(InputEvent::MouseMove { x, y }, &mut rig.audio);
         let out = g.update(DT, &mut rig.audio);
         for o in out {
@@ -864,7 +924,10 @@ fn mission_one_autoplay_combat() {
             slowest = slowest.max(ms);
             if ms > 120.0 {
                 let h = crate::draw_check::history();
-                eprintln!("slow frame {frame}: {ms:.0} ms; {}", h.lines().last().unwrap_or(""));
+                eprintln!(
+                    "slow frame {frame}: {ms:.0} ms; {}",
+                    h.lines().last().unwrap_or("")
+                );
             }
         }
         let u = g.world.universe();
@@ -881,14 +944,18 @@ fn mission_one_autoplay_combat() {
                 u.base.resources.list.len()
             );
         }
-        if g.world.mission_run().is_some_and(|r| r.mission_complete() || r.game.mission_failed) {
+        if g.world
+            .mission_run()
+            .is_some_and(|r| r.mission_complete() || r.game.mission_failed)
+        {
             eprintln!("combat: mission over at frame {frame}");
             break;
         }
     }
-    eprintln!("combat: at most {most_fx} effects and {most_ships} ships; slowest frame {slowest:.0} ms");
+    eprintln!(
+        "combat: at most {most_fx} effects and {most_ships} ships; slowest frame {slowest:.0} ms"
+    );
 }
-
 
 /// Hot-key groups: Ctrl+1 makes the selection group 1, 1 selects it again.
 #[test]
@@ -963,7 +1030,11 @@ fn hot_key_groups() {
     rig.input(g, InputEvent::KeyDown(0x11));
     rig.key(g, 0xc0);
     rig.input(g, InputEvent::KeyUp(0x11));
-    assert_eq!(g.hotkeys.group_of(fleet[0]), None, "Ctrl+` did not remove group 2");
+    assert_eq!(
+        g.hotkeys.group_of(fleet[0]),
+        None,
+        "Ctrl+` did not remove group 2"
+    );
 }
 
 /// Frame times of the sensors manager in Mission 1 (printed; `--ignored`).
@@ -1005,8 +1076,14 @@ fn sensors_frame_times() {
     rig.frames(g, 40);
     assert!(g.sensors.is_open(), "sensors did not open");
     let sensors = time(g, &mut rig, 64);
-    eprintln!("main view: update {:.1} ms, frame {:.1} ms (max {:.1})", main.0, main.1, main.2);
-    eprintln!("sensors:   update {:.1} ms, frame {:.1} ms (max {:.1})", sensors.0, sensors.1, sensors.2);
+    eprintln!(
+        "main view: update {:.1} ms, frame {:.1} ms (max {:.1})",
+        main.0, main.1, main.2
+    );
+    eprintln!(
+        "sensors:   update {:.1} ms, frame {:.1} ms (max {:.1})",
+        sensors.0, sensors.1, sensors.2
+    );
 }
 
 /// Full detail draws every ship at its top level while the original's level is still worked
@@ -1047,11 +1124,19 @@ fn full_detail_and_the_move_plate_height() {
         let _ = g.world.frame(px);
     }
     let original = g.world.frame(px).ship_levels();
-    assert!(original.iter().any(|&(_, l)| l > 0), "nothing dropped a level: {original:?}");
+    assert!(
+        original.iter().any(|&(_, l)| l > 0),
+        "nothing dropped a level: {original:?}"
+    );
     g.world.full_detail = true;
     let full = g.world.frame(px).ship_levels();
-    assert!(!full.is_empty() && full.iter().all(|&(_, l)| l == 0), "{full:?}");
-    assert!(full.iter().any(|&(id, _)| g.world.ship_lod(id).unwrap_or(0) > 0));
+    assert!(
+        !full.is_empty() && full.iter().all(|&(_, l)| l == 0),
+        "{full:?}"
+    );
+    assert!(full
+        .iter()
+        .any(|&(id, _)| g.world.ship_lod(id).unwrap_or(0) > 0));
     g.world.camera.distance = distance;
     g.world.camera.tweaks.clip_far = far;
     g.world.render_list = true;
@@ -1067,7 +1152,13 @@ fn full_detail_and_the_move_plate_height() {
     rig.key(g, 0x4d);
     assert!(g.plate().is_some(), "plate up");
     let start = (SIZE.0 / 2 + 120, SIZE.1 / 2 + 80);
-    rig.input(g, InputEvent::MouseMove { x: start.0, y: start.1 });
+    rig.input(
+        g,
+        InputEvent::MouseMove {
+            x: start.0,
+            y: start.1,
+        },
+    );
     rig.frame(g);
     rig.render(g, "30_plate_plane");
     let plate = *g.plate().unwrap();
@@ -1081,15 +1172,37 @@ fn full_detail_and_the_move_plate_height() {
     assert_eq!(g.plate().unwrap().spec, crate::plate::Spec::Height);
     let _ = g.take_pointer_warp();
     // Up the screen, a little to the side: the destination rises over the same foot.
-    rig.input(g, InputEvent::MouseMove { x: start.0 + 15, y: start.1 - 90 });
+    rig.input(
+        g,
+        InputEvent::MouseMove {
+            x: start.0 + 15,
+            y: start.1 - 90,
+        },
+    );
     rig.frame(g);
     rig.render(g, "32_plate_height");
     let plate = *g.plate().unwrap();
     assert!(plate.spec_z > 100.0, "height {}", plate.spec_z);
-    assert!(plate.height.truncate().distance(foot.truncate()) < 1.0, "{:?} {:?} cam {} {:?}", plate.height, foot, g.world.camera.distance, g.world.camera.zoom_target);
-    assert!(g.take_pointer_warp().is_some(), "the pointer is held on the vertical");
+    assert!(
+        plate.height.truncate().distance(foot.truncate()) < 1.0,
+        "{:?} {:?} cam {} {:?}",
+        plate.height,
+        foot,
+        g.world.camera.distance,
+        g.world.camera.zoom_target
+    );
+    assert!(
+        g.take_pointer_warp().is_some(),
+        "the pointer is held on the vertical"
+    );
     // Higher on the screen is higher in space.
-    rig.input(g, InputEvent::MouseMove { x: start.0, y: start.1 - 150 });
+    rig.input(
+        g,
+        InputEvent::MouseMove {
+            x: start.0,
+            y: start.1 - 150,
+        },
+    );
     rig.frame(g);
     rig.render(g, "33_plate_higher");
     let higher = g.plate().unwrap().spec_z;
@@ -1113,8 +1226,20 @@ fn full_detail_and_the_move_plate_height() {
     // Click: the ships go to the raised point.
     let dest = g.plate().unwrap().destination();
     assert!(dest.z - g.plate().unwrap().centre.z > 100.0);
-    rig.input(g, InputEvent::MouseButton { left: true, down: true });
-    rig.input(g, InputEvent::MouseButton { left: true, down: false });
+    rig.input(
+        g,
+        InputEvent::MouseButton {
+            left: true,
+            down: true,
+        },
+    );
+    rig.input(
+        g,
+        InputEvent::MouseButton {
+            left: true,
+            down: false,
+        },
+    );
     rig.frame(g);
     assert_eq!(g.mode, Mode::Select);
     let u = g.world.universe();
@@ -1155,7 +1280,11 @@ fn double_click_selects_the_type_on_screen() {
             }
         }
     }
-    let Some(group) = by_type.into_values().max_by_key(|v| v.len()).filter(|v| v.len() >= 2) else {
+    let Some(group) = by_type
+        .into_values()
+        .max_by_key(|v| v.len())
+        .filter(|v| v.len() >= 2)
+    else {
         eprintln!("skipped: no type with two ships");
         return;
     };
@@ -1199,7 +1328,10 @@ fn double_click_selects_the_type_on_screen() {
     let mut w = want.clone();
     got.sort();
     w.sort();
-    assert_eq!(got, w, "a double click selects every ship of the type on screen");
+    assert_eq!(
+        got, w,
+        "a double click selects every ship of the type on screen"
+    );
     // Off: the second click is a plain click again.
     g.double_click_type = false;
     rig.click(g, 3, SIZE.1 / 2, true);

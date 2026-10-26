@@ -26,14 +26,16 @@ use hwc_math::timing::{TaskTicker, TIMER_RESOLUTION};
 use hwc_render::assets::{load_mad_clip, mothership_modules, read_script, AssetSource};
 use hwc_render::effects::{EffectBatch, Line as FxLine, Sprite, FULL_UV};
 use hwc_render::lod::{screen_radius, LodKind, LodSelector, LodTable};
-use hwc_render::render_state::{normalized_team_color, CollisionBox, ConstructionState, ShipTint, TintParams};
+use hwc_render::render_state::{
+    normalized_team_color, CollisionBox, ConstructionState, ShipTint, TintParams,
+};
 use hwc_render::trails::{
     ShipTrailDef, ShipTrails, TeamTrailColors, TrailFrame, TrailGate, TrailTick, TrailTweaks,
 };
 use hwc_render::{
-    Background, Blend, CameraTweaks, EffectTexture, EngineEffectAssets, GpuBackground, GpuShip,
-    FocusShip, MadClip, OrbitCamera, Renderer, Scene, SceneExtras, SceneLighting, ShipAnimator, ShipDef,
-    ShipInstance, ShipModel, ShipRenderState, TeamColors, TeamPaint, ANIM_STOP_AT_END,
+    Background, Blend, CameraTweaks, EffectTexture, EngineEffectAssets, FocusShip, GpuBackground,
+    GpuShip, MadClip, OrbitCamera, Renderer, Scene, SceneExtras, SceneLighting, ShipAnimator,
+    ShipDef, ShipInstance, ShipModel, ShipRenderState, TeamColors, TeamPaint, ANIM_STOP_AT_END,
 };
 use hwc_sim::harness::group_centre;
 use hwc_sim::level::LevelState;
@@ -422,7 +424,11 @@ impl World {
 
     /// Team colour schemes (base, stripe); scheme 0 is the local player's.
     pub fn team_schemes(&self) -> Vec<([u8; 3], [u8; 3])> {
-        self.team_colors.schemes.iter().map(|s| (s.base, s.stripe)).collect()
+        self.team_colors
+            .schemes
+            .iter()
+            .map(|s| (s.base, s.stripe))
+            .collect()
     }
 
     /// The game files the world draws from.
@@ -475,12 +481,14 @@ impl World {
     /// The running mission. Only for the mission's own paths: panics while an NIS level
     /// plays (callers that can run then use [`World::mission_run`]).
     pub fn run(&self) -> &MissionRun {
-        self.mission_run().expect("the mission is not loaded while its NIS level plays")
+        self.mission_run()
+            .expect("the mission is not loaded while its NIS level plays")
     }
 
     /// [`World::run`], mutably.
     pub fn run_mut(&mut self) -> &mut MissionRun {
-        self.mission_run_mut().expect("the mission is not loaded while its NIS level plays")
+        self.mission_run_mut()
+            .expect("the mission is not loaded while its NIS level plays")
     }
 
     /// The NIS level playing in this world, if it is one.
@@ -785,7 +793,9 @@ impl World {
 
     /// Cuts the ship's engine trails (`trailZeroLength`, an NIS object that jumped).
     pub fn cut_trails(&mut self, id: ShipId) {
-        let Some(t) = self.universe().ship(id).map(|s| s.ship_type) else { return };
+        let Some(t) = self.universe().ship(id).map(|s| s.ship_type) else {
+            return;
+        };
         if let (Some(art), Some(fx)) = (self.art.get(&t), self.fx.get_mut(&id)) {
             fx.trails = ShipTrails::new(&art.trail, id.0 as u32 ^ 0x9e37_79b9);
         }
@@ -794,10 +804,18 @@ impl World {
     /// `madAnimationStart` by animation name (`meshAnimStart` in an NIS); false when the
     /// ship's `.mad` has no such animation.
     pub fn play_anim(&mut self, id: ShipId, name: &str) -> bool {
-        let Some(t) = self.universe().ship(id).map(|s| s.ship_type) else { return false };
-        let Some(art) = self.art.get(&t) else { return false };
-        let Some(clip) = art.clip.as_ref() else { return false };
-        let Some(index) = clip.find(name) else { return false };
+        let Some(t) = self.universe().ship(id).map(|s| s.ship_type) else {
+            return false;
+        };
+        let Some(art) = self.art.get(&t) else {
+            return false;
+        };
+        let Some(clip) = art.clip.as_ref() else {
+            return false;
+        };
+        let Some(index) = clip.find(name) else {
+            return false;
+        };
         if let Some(fx) = self.fx.get_mut(&id) {
             fx.anim.play(clip, index, 0);
             fx.last_mad = index as i32;
@@ -908,11 +926,14 @@ impl World {
             // The nozzles go through the objects of the level drawn (`trailUpdate` reads the
             // ship's current level), posed or at rest.
             let objects = art.any_gpu().map(|gpu| {
-                let lod = drawn_lod(self.full_detail, fx.lod).min(gpu.level_count().saturating_sub(1));
+                let lod =
+                    drawn_lod(self.full_detail, fx.lod).min(gpu.level_count().saturating_sub(1));
                 let pose = fx_pose(art, fx, lod.min(art.bindings.len().saturating_sub(1)));
                 let sk = gpu.skeleton(lod);
                 let mats = match &pose {
-                    Some(p) => sk.resolve(|j| p.get(j).copied().flatten().unwrap_or(sk.objects[j].rest)),
+                    Some(p) => {
+                        sk.resolve(|j| p.get(j).copied().flatten().unwrap_or(sk.objects[j].rest))
+                    }
                     None => sk.rest_matrices(),
                 };
                 (sk, mats)
@@ -942,15 +963,19 @@ impl World {
                 let c = &st.header.coll;
                 let minimum_zoom = hwc_sim::ships::mimic::apparent_sizes(u, id)
                     .map_or(st.minimum_zoom_distance, |a| a.2);
-                let offset = Vec3::new(c.coll_sphere_offset.x, c.coll_sphere_offset.y, c.coll_sphere_offset.z);
-                let drawn_radius = self
-                    .art
-                    .get(&s.ship_type)
-                    .and_then(|a| a.any_gpu())
-                    .map_or(0.0, |g| {
-                        let (centre, r) = g.bounds();
-                        (centre - offset).length() + r
-                    });
+                let offset = Vec3::new(
+                    c.coll_sphere_offset.x,
+                    c.coll_sphere_offset.y,
+                    c.coll_sphere_offset.z,
+                );
+                let drawn_radius =
+                    self.art
+                        .get(&s.ship_type)
+                        .and_then(|a| a.any_gpu())
+                        .map_or(0.0, |g| {
+                            let (centre, r) = g.bounds();
+                            (centre - offset).length() + r
+                        });
                 Some(FocusShip {
                     centre: v3(s.coll.coll_position),
                     radius: c.coll_sphere_size,
@@ -1202,7 +1227,9 @@ impl World {
             let objects = {
                 let sk = gpu.skeleton(lod);
                 Some(match &pose {
-                    Some(p) => sk.resolve(|j| p.get(j).copied().flatten().unwrap_or(sk.objects[j].rest)),
+                    Some(p) => {
+                        sk.resolve(|j| p.get(j).copied().flatten().unwrap_or(sk.objects[j].rest))
+                    }
                     None => sk.rest_matrices(),
                 })
             };
@@ -1263,7 +1290,9 @@ impl World {
             let ResourceKind::Asteroid(k) = r.kind else {
                 continue;
             };
-            if r.flags & hwc_sim::object::sof::HIDE != 0 || !self.object_in_view(v3(r.position), false) {
+            if r.flags & hwc_sim::object::sof::HIDE != 0
+                || !self.object_in_view(v3(r.position), false)
+            {
                 continue;
             }
             if !self
@@ -1310,7 +1339,11 @@ impl World {
         }
         // Nothing unbounded goes to the GPU; the counts go to the crash log's history.
         let mut stats = crate::draw_check::Stats::default();
-        let keep: Vec<bool> = frame.items.iter().map(|i| i.transform.is_finite()).collect();
+        let keep: Vec<bool> = frame
+            .items
+            .iter()
+            .map(|i| i.transform.is_finite())
+            .collect();
         if keep.iter().any(|k| !k) {
             stats.not_finite += keep.iter().filter(|k| !**k).count();
             let mut k = keep.iter();
@@ -1683,16 +1716,11 @@ impl World {
         keep: impl Fn(ShipId) -> bool,
     ) -> Option<ShipId> {
         let mut best: Option<(f32, ShipId)> = None;
-        for s in self
-            .universe()
-            .ships
-            .iter()
-            .filter(|s| {
-                s.flags & hwc_sim::object::sof::HIDE == 0
-                    && keep(s.id)
-                    && self.ship_in_view(s, v3(s.posinfo.position))
-            })
-        {
+        for s in self.universe().ships.iter().filter(|s| {
+            s.flags & hwc_sim::object::sof::HIDE == 0
+                && keep(s.id)
+                && self.ship_in_view(s, v3(s.posinfo.position))
+        }) {
             if let Some((lo, hi)) = self.screen_box(size, s) {
                 if px[0] >= lo[0] && px[0] <= hi[0] && px[1] >= lo[1] && px[1] <= hi[1] {
                     let d = (v3(s.posinfo.position) - self.camera.eye()).length();
@@ -1718,7 +1746,10 @@ fn clamp_host(level: &LevelState, s: &hwc_sim::Ship) -> Option<ShipId> {
 
 /// The construction state of a ship flagged as under external construction
 /// (`rndSetupShipFadeState`): its build progress and its collision box in mesh space.
-fn construction_state(s: &hwc_sim::Ship, coll: &hwc_sim::statics::header::StaticCollInfo) -> Option<ConstructionState> {
+fn construction_state(
+    s: &hwc_sim::Ship,
+    coll: &hwc_sim::statics::header::StaticCollInfo,
+) -> Option<ConstructionState> {
     if s.special_flags2 & hwc_sim::base::special2::UNDER_CONSTRUCTION == 0 {
         return None;
     }
@@ -1771,7 +1802,11 @@ fn hyperspace_window(
         forward_length: c.forward_length,
         up_length: c.up_length,
         right_length: c.right_length,
-        coll_sphere_offset: Vec3::new(c.coll_sphere_offset.x, c.coll_sphere_offset.y, c.coll_sphere_offset.z),
+        coll_sphere_offset: Vec3::new(
+            c.coll_sphere_offset.x,
+            c.coll_sphere_offset.y,
+            c.coll_sphere_offset.z,
+        ),
         box_scale: st.hyperspace_box_scale,
         color: [r, g, b],
     };
@@ -2026,13 +2061,18 @@ mod tests {
         let l = RenderLimits::default();
         let fighter = Some(ShipClass::Fighter);
         let t = ShipType::sMothership;
-        let drawn = |class, d_look: f32, d_near: f32| l.ship_drawn(class, t, 0.0, 0.0, d_look * d_look, d_near * d_near);
+        let drawn = |class, d_look: f32, d_near: f32| {
+            l.ship_drawn(class, t, 0.0, 0.0, d_look * d_look, d_near * d_near)
+        };
         // Listed within 16000 of the look-at point; faded out from the nearer point at
         // sqrt((1.3 * 16000 - 1.3 * 5000)^2 + (1.3 * 5000)^2) = 15708.
         assert!(drawn(fighter, 15000.0, 15000.0));
         assert!(drawn(fighter, 15700.0, 15700.0));
         assert!(!drawn(fighter, 15720.0, 15720.0));
-        assert!(drawn(fighter, 15900.0, 9000.0), "near the eye it is not faded");
+        assert!(
+            drawn(fighter, 15900.0, 9000.0),
+            "near the eye it is not faded"
+        );
         assert!(!drawn(fighter, 16000.0, 100.0), "not in the render list");
         // The mothership reaches 18000; micro ships go with the fighters, components with the
         // mothership.
@@ -2040,7 +2080,14 @@ mod tests {
         assert!(!drawn(Some(ShipClass::Micro), 16500.0, 9000.0));
         assert!(drawn(Some(ShipClass::Component), 17500.0, 9000.0));
         // A ship's own renderlistLimit / renderlistFade replace the class's.
-        let own = l.ship_drawn(fighter, t, 1000.0, 30000.0 * 30000.0, 25000.0f32.powi(2), 9000.0f32.powi(2));
+        let own = l.ship_drawn(
+            fighter,
+            t,
+            1000.0,
+            30000.0 * 30000.0,
+            25000.0f32.powi(2),
+            9000.0f32.powi(2),
+        );
         assert!(own);
         // The script's values are read.
         let s = hwc_formats::script::ScriptFile::parse("RENDER_LIMIT_FIGHTER 9000.0\nRENDER_FADE_FIGHTER 1000.0\nRENDER_VIEWABLE_DISTANCE_SQR 12000.0\n");
@@ -2057,13 +2104,36 @@ mod tests {
     #[test]
     fn effect_systems_are_kept_or_cut_whole() {
         use hwc_fx::render::{Point, PrimKind, Span};
-        let p = |x: f32| Point { position: hwc_math::Vector::new(x, 0.0, 0.0), size: 1.0, color: [1.0; 4], blend: hwc_fx::render::Blend::Alpha };
+        let p = |x: f32| Point {
+            position: hwc_math::Vector::new(x, 0.0, 0.0),
+            size: 1.0,
+            color: [1.0; 4],
+            blend: hwc_fx::render::Blend::Alpha,
+        };
         let mut list = hwc_fx::RenderList {
             points: vec![p(0.0), p(1.0), p(5000.0), p(5001.0), p(2.0)],
             spans: vec![
-                Span { kind: PrimKind::Points, start: 0, count: 2, lit: false, alpha: true },
-                Span { kind: PrimKind::Points, start: 2, count: 2, lit: false, alpha: false },
-                Span { kind: PrimKind::Points, start: 4, count: 1, lit: true, alpha: false },
+                Span {
+                    kind: PrimKind::Points,
+                    start: 0,
+                    count: 2,
+                    lit: false,
+                    alpha: true,
+                },
+                Span {
+                    kind: PrimKind::Points,
+                    start: 2,
+                    count: 2,
+                    lit: false,
+                    alpha: false,
+                },
+                Span {
+                    kind: PrimKind::Points,
+                    start: 4,
+                    count: 1,
+                    lit: true,
+                    alpha: false,
+                },
             ],
             ..Default::default()
         };
@@ -2071,7 +2141,10 @@ mod tests {
         let xs: Vec<f32> = list.points.iter().map(|q| q.position.x).collect();
         assert_eq!(xs, vec![0.0, 1.0, 2.0]);
         assert_eq!(list.spans.len(), 2);
-        assert_eq!((list.spans[1].start, list.spans[1].count, list.spans[1].lit), (2, 1, true));
+        assert_eq!(
+            (list.spans[1].start, list.spans[1].count, list.spans[1].lit),
+            (2, 1, true)
+        );
         assert_eq!(list.draw_order(), list.spans);
     }
 

@@ -291,11 +291,7 @@ fn roll_call_below_the_band() {
         rig.frame(g);
     }
     rig.shot(g, "07b_m3_roll_call_below_band");
-    let band = g
-        .subtitles
-        .as_ref()
-        .expect("subtitles")
-        .band_rect(SIZE.0);
+    let band = g.subtitles.as_ref().expect("subtitles").band_rect(SIZE.0);
     let fe = &g.ui.fe;
     let go = fe.find_atom("GoNowHyperspace").expect("GoNowHyperspace");
     // 175 on the 640x480 layout, moved down by the band's bottom.
@@ -530,23 +526,49 @@ fn band_boxes_and_sensors_pings() {
             g.input(InputEvent::KeyDown(k), &mut rig.audio);
         }
         g.input(InputEvent::MouseMove { x: 2, y: 2 }, &mut rig.audio);
-        g.input(InputEvent::MouseButton { left: true, down: true }, &mut rig.audio);
-        g.input(InputEvent::MouseMove { x: SIZE.0 - 3, y: SIZE.1 - 3 }, &mut rig.audio);
+        g.input(
+            InputEvent::MouseButton {
+                left: true,
+                down: true,
+            },
+            &mut rig.audio,
+        );
+        g.input(
+            InputEvent::MouseMove {
+                x: SIZE.0 - 3,
+                y: SIZE.1 - 3,
+            },
+            &mut rig.audio,
+        );
         rig.frame(g);
         let gathered = g.selecting.clone();
-        g.input(InputEvent::MouseButton { left: true, down: false }, &mut rig.audio);
+        g.input(
+            InputEvent::MouseButton {
+                left: true,
+                down: false,
+            },
+            &mut rig.audio,
+        );
         if let Some(k) = modifier {
             g.input(InputEvent::KeyUp(k), &mut rig.audio);
         }
         rig.frame(g);
         gathered
     };
-    let own = |g: &Game, id: hwc_sim::ShipId| g.world.universe().ship(id).is_some_and(|s| s.player == PLAYER);
+    let own = |g: &Game, id: hwc_sim::ShipId| {
+        g.world
+            .universe()
+            .ship(id)
+            .is_some_and(|s| s.player == PLAYER)
+    };
     let plain = drag(&mut rig, g, None);
     assert!(!plain.is_empty(), "nothing of the fleet in view");
     assert!(plain.iter().all(|&id| own(g, id)));
     let ctrl = drag(&mut rig, g, Some(0x11));
-    assert!(ctrl.iter().all(|&id| !own(g, id)), "a Ctrl band box lit up own ships: {ctrl:?}");
+    assert!(
+        ctrl.iter().all(|&id| !own(g, id)),
+        "a Ctrl band box lit up own ships: {ctrl:?}"
+    );
     let alt = drag(&mut rig, g, Some(0x12));
     assert!(plain.iter().all(|id| alt.contains(id)));
 
@@ -556,7 +578,8 @@ fn band_boxes_and_sensors_pings() {
     let at = u.ship(ms).expect("mothership").posinfo.position;
     let now = u.total_time_elapsed;
     g.pings.anomaly_point("TestObjective", at, now);
-    g.pings.new_ship(hwc_math::Vector::new(at.x + 3000.0, at.y, at.z), now);
+    g.pings
+        .new_ship(hwc_math::Vector::new(at.x + 3000.0, at.y, at.z), now);
     g.ui.fe.game.ig.overlay.tactical = true;
     g.toggle_sensors(&mut rig.audio);
     rig.frames_until(g, 16 * 10, "the sensors manager", |g| {
@@ -568,7 +591,11 @@ fn band_boxes_and_sensors_pings() {
     }
     rig.shot(g, "12_m1_sensors_pings");
     // The two test pings, beside whatever the mission and its battles have up.
-    assert!(g.pings.list.iter().any(|p| p.mask == crate::pings::mask::NEW_SHIPS));
+    assert!(g
+        .pings
+        .list
+        .iter()
+        .any(|p| p.mask == crate::pings::mask::NEW_SHIPS));
     assert_eq!(g.pings.anomaly_remove("testobj"), 1);
 }
 
@@ -610,8 +637,15 @@ fn intro_pings_show_in_the_fleet_intel_and_the_fog_hides_the_enemy() {
             break;
         }
     }
-    assert!(kas_pings > 0, "no anomaly pings from the mission script in {frames} frames");
-    assert_eq!(g.sensors.phase(), crate::sensors::Phase::Sensors, "the sensors manager is open");
+    assert!(
+        kas_pings > 0,
+        "no anomaly pings from the mission script in {frames} frames"
+    );
+    assert_eq!(
+        g.sensors.phase(),
+        crate::sensors::Phase::Sensors,
+        "the sensors manager is open"
+    );
     for _ in 0..16 {
         rig.frame(g);
     }
@@ -656,7 +690,10 @@ fn mission_one_arrival_from_the_opening() {
     l.loader.play_nislets = false;
     let mut game = rig.load(l);
     let g = &mut *game;
-    assert!(g.world.nis_level().is_some(), "mission 1 did not start with its NIS level");
+    assert!(
+        g.world.nis_level().is_some(),
+        "mission 1 did not start with its NIS level"
+    );
     rig.frame(g);
     let mut done = false;
     let mut frames = 0;
@@ -691,13 +728,26 @@ fn mission_one_arrival_from_the_opening() {
         }
         rig.frame(g);
         frames += 1;
-        assert!(frames < 16 * 400, "the fleet never arrived in mission 1:\n{}", log.join("\n"));
+        assert!(
+            frames < 16 * 400,
+            "the fleet never arrived in mission 1:\n{}",
+            log.join("\n")
+        );
         let u = g.world.universe();
-        let nis = g.nis.as_ref().map(|n| format!("{:?} {:.1}", n.kind, n.player.time));
-        let ms = u.ship_list.iter().copied().find(|&id| u.ship(id).is_some_and(|s| s.ship_type == ShipType::sMothership && s.player == 0));
+        let nis = g
+            .nis
+            .as_ref()
+            .map(|n| format!("{:?} {:.1}", n.kind, n.player.time));
+        let ms = u.ship_list.iter().copied().find(|&id| {
+            u.ship(id)
+                .is_some_and(|s| s.ship_type == ShipType::sMothership && s.player == 0)
+        });
         let Some(ms) = ms else {
             if frames.is_multiple_of(32) {
-                log.push(format!("{frames}: no mothership; nis {nis:?} sp {}", g.world.run().game.sp_state));
+                log.push(format!(
+                    "{frames}: no mothership; nis {nis:?} sp {}",
+                    g.world.run().game.sp_state
+                ));
             }
             continue;
         };
@@ -713,7 +763,13 @@ fn mission_one_arrival_from_the_opening() {
             // The view on the start point while the Kuun-Lan waits in hyperspace.
             before_shot = true;
             let u = g.world.universe();
-            let at = u.ship(ms).map_or([0.0; 3], |s| [s.posinfo.position.x, s.posinfo.position.y, s.posinfo.position.z]);
+            let at = u.ship(ms).map_or([0.0; 3], |s| {
+                [
+                    s.posinfo.position.x,
+                    s.posinfo.position.y,
+                    s.posinfo.position.z,
+                ]
+            });
             g.world.follow_focus = false;
             g.world.camera.look_at = glam::Vec3::from_array(at);
             g.world.camera.distance = 7000.0;
@@ -723,17 +779,41 @@ fn mission_one_arrival_from_the_opening() {
             g.world.follow_focus = true;
         }
         let u = g.world.universe();
-        docked = docked.max(u.ship(ms).and_then(|s| s.base.inside.as_ref()).map_or(0, |i| i.ships.len()));
+        docked = docked.max(
+            u.ship(ms)
+                .and_then(|s| s.base.inside.as_ref())
+                .map_or(0, |i| i.ships.len()),
+        );
         if !drawn {
-            let others: Vec<String> = u.ship_list.iter().filter_map(|&id| u.ship(id)).filter(|s| s.player == 0 && s.ship_type.to_string().starts_with('s') && hwc_sim::effects::ship_drawn(u, s.id)).map(|s| s.ship_type.to_string()).collect();
+            let others: Vec<String> = u
+                .ship_list
+                .iter()
+                .filter_map(|&id| u.ship(id))
+                .filter(|s| {
+                    s.player == 0
+                        && s.ship_type.to_string().starts_with('s')
+                        && hwc_sim::effects::ship_drawn(u, s.id)
+                })
+                .map(|s| s.ship_type.to_string())
+                .collect();
             if !others.is_empty() {
                 log.push(format!("{frames}: drawn before the Kuun-Lan: {others:?}"));
                 bad.push(frames);
             }
         }
-        let window = g.world.run().hyperspace_windows().iter().find(|w| w.0 == ms).map(|w| (w.1, w.2));
+        let window = g
+            .world
+            .run()
+            .hyperspace_windows()
+            .iter()
+            .find(|w| w.0 == ms)
+            .map(|w| (w.1, w.2));
         if drawn != was_drawn || frames.is_multiple_of(8) {
-            log.push(format!("{frames}: ms {} drawn {drawn} window {window:?} nis {nis:?} sp {}", ms.0, g.world.run().game.sp_state));
+            log.push(format!(
+                "{frames}: ms {} drawn {drawn} window {window:?} nis {nis:?} sp {}",
+                ms.0,
+                g.world.run().game.sp_state
+            ));
         }
         if drawn && !was_drawn {
             g.render(&mut rig.renderer, SIZE).expect("render");
@@ -750,15 +830,33 @@ fn mission_one_arrival_from_the_opening() {
         was_drawn = drawn;
     }
     eprintln!("{}", log.join("\n"));
-    assert!(bad.is_empty(), "the Kuun-Lan was drawn without its window at frames {bad:?}");
-    assert!(flash_max > 0.99 && flash_shot, "no white flash after the NISlet ({flash_max})");
-    assert!(g.world.run().game.hyper.arrival_flash <= 0.0, "the flash outlasted the arrival");
+    assert!(
+        bad.is_empty(),
+        "the Kuun-Lan was drawn without its window at frames {bad:?}"
+    );
+    assert!(
+        flash_max > 0.99 && flash_shot,
+        "no white flash after the NISlet ({flash_max})"
+    );
+    assert!(
+        g.world.run().game.hyper.arrival_flash <= 0.0,
+        "the flash outlasted the arrival"
+    );
     // The ships that travelled docked come out through the Kuun-Lan's launch points.
-    let ms = g.world.universe().base.players[0].mothership.expect("mothership");
+    let ms = g.world.universe().base.players[0]
+        .mothership
+        .expect("mothership");
     let inside = |g: &Game| {
-        g.world.universe().ship(ms).and_then(|s| s.base.inside.as_ref()).map_or(0, |i| i.ships.len())
+        g.world
+            .universe()
+            .ship(ms)
+            .and_then(|s| s.base.inside.as_ref())
+            .map_or(0, |i| i.ships.len())
     };
-    eprintln!("ships inside the Kuun-Lan on the way in: {docked}; at the end of the arrival: {}", inside(g));
+    eprintln!(
+        "ships inside the Kuun-Lan on the way in: {docked}; at the end of the arrival: {}",
+        inside(g)
+    );
     let mut launching_shot = false;
     g.world.focus = vec![ms];
     g.world.camera.distance = 5000.0;
@@ -766,7 +864,12 @@ fn mission_one_arrival_from_the_opening() {
         rig.frame(g);
         let u = g.world.universe();
         let launching = u.ship_list.iter().any(|&id| {
-            u.ship(id).is_some_and(|s| s.player == 0 && s.command.is_some_and(|c| u.commands.get(c).is_some_and(|c| c.launch_from == Some(ms))))
+            u.ship(id).is_some_and(|s| {
+                s.player == 0
+                    && s.command.is_some_and(|c| {
+                        u.commands.get(c).is_some_and(|c| c.launch_from == Some(ms))
+                    })
+            })
         });
         if launching && !launching_shot && f > 8 {
             g.render(&mut rig.renderer, SIZE).expect("render");
@@ -812,7 +915,10 @@ fn camera_focus_zoom_and_draw_distance() {
         .ship_list
         .iter()
         .copied()
-        .find(|&id| u.ship(id).is_some_and(|s| s.player == 0 && s.ship_type == ShipType::sWorker))
+        .find(|&id| {
+            u.ship(id)
+                .is_some_and(|s| s.player == 0 && s.ship_type == ShipType::sWorker)
+        })
         .expect("a worker");
     g.selection = vec![worker];
     rig.key(g, 0x46);
@@ -832,9 +938,15 @@ fn camera_focus_zoom_and_draw_distance() {
     let twice = g.world.camera.distance;
     eprintln!("F: {once:.0}; F again: {twice:.0}");
     let fit = g.world.focus_min_zoom(); // new
-    assert!(twice < once * 0.5, "the second F did not zoom in: {once} -> {twice}"); // new
-    assert!((twice - fit).abs() < fit * 0.02, "not at the framing distance {fit}: {twice}"); // new
-    // The wheel all the way in.
+    assert!(
+        twice < once * 0.5,
+        "the second F did not zoom in: {once} -> {twice}"
+    ); // new
+    assert!(
+        (twice - fit).abs() < fit * 0.02,
+        "not at the framing distance {fit}: {twice}"
+    ); // new
+       // The wheel all the way in.
     for _ in 0..30 {
         g.input(InputEvent::Wheel { up: true }, &mut rig.audio);
         rig.frame(g);
@@ -847,15 +959,22 @@ fn camera_focus_zoom_and_draw_distance() {
     let closest = g.world.camera.distance;
     eprintln!("closest zoom on a worker: {closest:.1}");
     let ships = g.world.focus_ships(); // new
-    assert!(closest >= g.world.camera.clear_distance(&ships) - 0.5, "the near plane cuts the hull at {closest}"); // new
+    assert!(
+        closest >= g.world.camera.clear_distance(&ships) - 0.5,
+        "the near plane cuts the hull at {closest}"
+    ); // new
     g.world.zoom_clear = false; // new
-    for _ in 0..30 { // new
+    for _ in 0..30 {
+        // new
         g.input(InputEvent::Wheel { up: true }, &mut rig.audio); // new
         rig.frame(g); // new
     } // new
     rig.shot(g, "x"); // new
     save_cam(g, "cam_zoom_closest_original_limit"); // new
-    eprintln!("closest with the original limit: {:.1}", g.world.camera.distance); // new
+    eprintln!(
+        "closest with the original limit: {:.1}",
+        g.world.camera.distance
+    ); // new
     g.world.zoom_clear = true; // new
 
     // Draw distance: the camera on the mothership at the farthest zoom, a Taiidan ship 21000
@@ -863,14 +982,28 @@ fn camera_focus_zoom_and_draw_distance() {
     // turned 40 degrees about the mothership, which puts it near the top right corner.
     let u = g.world.universe();
     let ms = u.base.players[0].mothership.expect("mothership");
-    let centre = glam::Vec3::from_array(u.ship(ms).map(|s| [s.posinfo.position.x, s.posinfo.position.y, s.posinfo.position.z]).unwrap());
+    let centre = glam::Vec3::from_array(
+        u.ship(ms)
+            .map(|s| {
+                [
+                    s.posinfo.position.x,
+                    s.posinfo.position.y,
+                    s.posinfo.position.z,
+                ]
+            })
+            .unwrap(),
+    );
     let far = u
         .ship_list
         .iter()
         .copied()
         .filter(|&id| u.ship(id).is_some_and(|s| s.player == 1))
         .max_by(|a, b| {
-            let r = |id: hwc_sim::ShipId| u.ship(id).and_then(|s| u.statics.ship(s.ship_type)).map_or(0.0, |st| st.header.coll.coll_sphere_size);
+            let r = |id: hwc_sim::ShipId| {
+                u.ship(id)
+                    .and_then(|s| u.statics.ship(s.ship_type))
+                    .map_or(0.0, |st| st.header.coll.coll_sphere_size)
+            };
             r(*a).total_cmp(&r(*b))
         })
         .expect("an enemy ship");
@@ -889,27 +1022,52 @@ fn camera_focus_zoom_and_draw_distance() {
     let mut seen = Vec::new();
     for (view, dir) in [
         ("head_on", along),
-        ("corner", along * turn.cos() + (-side - up).normalize() * turn.sin()),
+        (
+            "corner",
+            along * turn.cos() + (-side - up).normalize() * turn.sin(),
+        ),
     ] {
         let eye = centre - dir * 14500.0;
         g.world.camera.set_eye_look_up(eye, centre, None);
-        let drawn = g.world.frame((SIZE.0 as u32, SIZE.1 as u32)).ship_levels().iter().any(|&(id, _)| id == far);
+        let drawn = g
+            .world
+            .frame((SIZE.0 as u32, SIZE.1 as u32))
+            .ship_levels()
+            .iter()
+            .any(|&(id, _)| id == far);
         let in_front = (target - eye).dot(dir);
         rig.shot(g, "x");
         save_cam(g, &format!("cam_draw_{view}"));
-        eprintln!("{view}: depth {in_front:.0}, from the eye {:.0}: drawn {drawn}", (target - eye).length());
+        eprintln!(
+            "{view}: depth {in_front:.0}, from the eye {:.0}: drawn {drawn}",
+            (target - eye).length()
+        );
         seen.push(drawn);
     }
     assert_eq!(seen[0], seen[1], "drawn {seen:?} head-on / near the corner");
     // `--draw-distance far`: drawn within the far clip distance of the eye, by radial distance.
     g.world.render_list = false;
-    for dir in [along, along * turn.cos() + (-side - up).normalize() * turn.sin()] {
+    for dir in [
+        along,
+        along * turn.cos() + (-side - up).normalize() * turn.sin(),
+    ] {
         let eye = centre - dir * 14500.0;
         g.world.camera.set_eye_look_up(eye, centre, None);
-        let drawn = g.world.frame((SIZE.0 as u32, SIZE.1 as u32)).ship_levels().iter().any(|&(id, _)| id == far);
+        let drawn = g
+            .world
+            .frame((SIZE.0 as u32, SIZE.1 as u32))
+            .ship_levels()
+            .iter()
+            .any(|&(id, _)| id == far);
         let reach = (target - eye).length();
-        assert_eq!(drawn, reach < g.world.camera.tweaks.clip_far, "far mode at {reach}");
+        assert_eq!(
+            drawn,
+            reach < g.world.camera.tweaks.clip_far,
+            "far mode at {reach}"
+        );
     }
     g.world.render_list = true;
-    let _ = std::fs::remove_file(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/game-campaign/x.png"));
+    let _ = std::fs::remove_file(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/game-campaign/x.png"),
+    );
 }

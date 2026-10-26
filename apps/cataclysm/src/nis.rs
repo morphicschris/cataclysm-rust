@@ -80,13 +80,15 @@ pub fn files(kind: Kind, mission: u32) -> Option<(String, String)> {
 
 /// Reads and loads an NIS.
 pub fn load(assets: &Assets, kind: Kind, mission: u32) -> Result<NisData, String> {
-    let (nis, script) = files(kind, mission).ok_or_else(|| format!("no NIS for {kind:?} in mission {mission}"))?;
+    let (nis, script) =
+        files(kind, mission).ok_or_else(|| format!("no NIS for {kind:?} in mission {mission}"))?;
     load_files(assets, &nis, &script)
 }
 
 /// Reads and loads the NIS `nis` with its script `script`.
 pub fn load_files(assets: &Assets, nis: &str, script: &str) -> Result<NisData, String> {
-    let read = |p: &str| hwc_render::AssetSource::read(assets, p).ok_or_else(|| format!("{p} not found"));
+    let read =
+        |p: &str| hwc_render::AssetSource::read(assets, p).ok_or_else(|| format!("{p} not found"));
     let n = read(nis)?;
     let s = read(script)?;
     let d = NisData::load(&n, Some(&s)).map_err(|e| format!("{nis}: {e}"))?;
@@ -107,7 +109,10 @@ pub fn placement(point: [f32; 4]) -> (Vector, Matrix) {
 /// A position with the NIS turned about +z by `angle` radians.
 fn placement_radians(position: Vector, angle: f32) -> (Vector, Matrix) {
     use hwc_math::fpu::{ld, st};
-    let (s, c) = (hwc_math::trig::fsin(ld(angle)), hwc_math::trig::fcos(ld(angle)));
+    let (s, c) = (
+        hwc_math::trig::fsin(ld(angle)),
+        hwc_math::trig::fcos(ld(angle)),
+    );
     let rot = Matrix::rot_about_z(st(c), st(s));
     (position, Matrix::IDENTITY.mul_mat(&rot))
 }
@@ -148,7 +153,8 @@ impl NisRun {
     ) -> (NisRun, Vec<Fired>) {
         let (position, matrix) = at;
         let eye = world.camera.eye();
-        let (player, step) = NisPlayer::start(data, position, matrix, Vector::new(eye.x, eye.y, eye.z));
+        let (player, step) =
+            NisPlayer::start(data, position, matrix, Vector::new(eye.x, eye.y, eye.z));
         let stage = Stage::create(world.universe_mut(), &player, mission, modules);
         // `lensFlareNISSunAdd`.
         world.nis_sun.add();
@@ -170,7 +176,8 @@ impl NisRun {
     pub fn tick(&mut self, world: &mut World) -> (Vec<Fired>, bool) {
         self.stage.forget_dead(world.universe(), &mut self.player);
         let step = self.player.tick();
-        self.stage.write_poses(world.universe_mut(), &self.player, false);
+        self.stage
+            .write_poses(world.universe_mut(), &self.player, false);
         for id in self.stage.jumped(world.universe(), &self.player) {
             world.cut_trails(id);
         }
@@ -239,29 +246,55 @@ impl NisRun {
 /// else the first of the race, type and `G_NisCentreInstance` instance) the NIS is moved and
 /// turned so that object starts where the real one is; otherwise it is turned by the centre's
 /// heading on the xy plane.
-pub fn level_placement(data: &NisData, p: &NisPlacement, u: &Universe, level: &LevelState) -> (Vector, Matrix) {
+pub fn level_placement(
+    data: &NisData,
+    p: &NisPlacement,
+    u: &Universe,
+    level: &LevelState,
+) -> (Vector, Matrix) {
     let instance = p.centre_derelict.and_then(|(_, i, _)| i);
     // A derelict asked for but not in the level leaves no centre at all.
     let centre = match p.centre_derelict {
         Some((t, _, found)) => found.and_then(|i| level.derelicts.get(i)).map(|d| {
-            let name = usize::try_from(t).ok().and_then(DerelictType::from_index).map(DerelictType::name);
+            let name = usize::try_from(t)
+                .ok()
+                .and_then(DerelictType::from_index)
+                .map(DerelictType::name);
             (d.position, d.coordsys, Some(DERELICT_RACE), name)
         }),
-        None => p.centre_ship.and_then(|id| u.ship(id)).map(|s| (s.posinfo.position, s.rotinfo.coordsys, None, Some(s.ship_type.name()))),
+        None => p.centre_ship.and_then(|id| u.ship(id)).map(|s| {
+            (
+                s.posinfo.position,
+                s.rotinfo.coordsys,
+                None,
+                Some(s.ship_type.name()),
+            )
+        }),
     };
     let Some((position, coordsys, race, type_name)) = centre else {
         return placement_radians(p.position, p.angle);
     };
     let heading = Vector::new(coordsys.m[6], coordsys.m[7], 0.0).normalized();
     let turn = (heading.x as f64).acos() as f32;
-    let angle = if heading.y >= 0.0 { turn } else { std::f32::consts::TAU - turn };
+    let angle = if heading.y >= 0.0 {
+        turn
+    } else {
+        std::f32::consts::TAU - turn
+    };
     let Some(index) = data.centre_object(race, type_name, instance) else {
         return placement_radians(position, angle);
     };
     let (start, start_matrix) = data.start_position(index);
     let matrix = coordsys.mul_mat(&start_matrix.transpose());
     let offset = matrix.mul_vec(start);
-    (Vector::new(position.x - offset.x, position.y - offset.y, position.z - offset.z), matrix)
+    (
+        Vector::new(
+            position.x - offset.x,
+            position.y - offset.y,
+            position.z - offset.z,
+        ),
+        matrix,
+    )
 }
 
 /// `NSR_Derelict`: the race of the derelict paths.
@@ -285,7 +318,11 @@ pub fn level_modules(run: &NisLevelRun) -> Vec<ShipType> {
 pub fn start_level(world: &mut World) -> Result<(NisRun, Vec<Fired>), String> {
     let run = world.nis_level().ok_or("the world holds no NIS level")?;
     let (mission, n) = (run.mission, run.nis);
-    let kind = if mission == 1 { Kind::Opening } else { Kind::Level(n) };
+    let kind = if mission == 1 {
+        Kind::Opening
+    } else {
+        Kind::Level(n)
+    };
     let (nis, script) = run.nis_files();
     let data = load_files(world.assets(), &nis, &script)?;
     let modules = level_modules(run);
