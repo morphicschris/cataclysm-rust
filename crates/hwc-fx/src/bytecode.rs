@@ -151,7 +151,7 @@ pub fn wr(code: &mut Vec<u8>, at: u32, v: u32) {
 }
 
 /// One decoded instruction, for inspection and debugging.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Instr {
     Nop,
     TimeTest { opcode: u32, skip: u32, operand: u32 },

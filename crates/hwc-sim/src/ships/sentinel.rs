@@ -55,7 +55,7 @@ const UPGRADE_FIELD_1: u32 = 0x2000;
 pub const SPECIAL2_FIELD_FORMATION: u32 = 0x1000;
 
 /// Per-ship state (`ShipSpecifics`, +0x638).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SentinelSpec {
     /// +0x638: the field of this sentinel's formation is on here.
     pub field_on: bool,
@@ -82,7 +82,7 @@ pub struct SentinelSpec {
 
 /// Per-type statics (`SentinelStaticInit`, 0x5c06b0: the side-step keywords, which the combat
 /// statics read).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SentinelStatics {}
 
 impl SentinelStatics {

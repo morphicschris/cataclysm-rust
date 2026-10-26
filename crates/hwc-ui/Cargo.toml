@@ -7,6 +7,7 @@ publish.workspace = true
 description = "Front-end manager (menu system) of Homeworld: Cataclysm: .fib screens, region tree, UI controls, textured frames, fonts, options"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 hwc-formats = { path = "../hwc-formats" }
 wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }

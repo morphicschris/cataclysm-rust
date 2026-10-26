@@ -60,7 +60,7 @@ pub mod swarmer {
 }
 
 /// Per-ship state of a hive frigate (`ShipSpecifics`, +0x638).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct HiveSpec {
     /// +0x638: when the next lost swarmer is replaced.
     pub regen_time: f32,
@@ -84,7 +84,7 @@ pub struct HiveSpec {
 
 /// Per-swarmer state (`ShipSpecifics` from +0x640; the side-step state at +0x638 is
 /// [`crate::object::Ship::side_step`]).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SwarmerSpec {
     /// +0x640: slot in the hive.
     pub index: i32,
@@ -101,7 +101,7 @@ pub struct SwarmerSpec {
 }
 
 /// Per-type statics (`HiveFrigateStaticInit`, 0x5afef0).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct HiveStatics {
     /// Time to replace a lost swarmer (15 s).
     pub regen_time: f32,

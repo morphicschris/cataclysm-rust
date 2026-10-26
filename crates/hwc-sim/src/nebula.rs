@@ -71,7 +71,7 @@ pub const CHUNK_FORE: u32 = 1;
 pub const CHUNK_AFT: u32 = 2;
 
 /// `Nebulae.script` (table at 0x87e3d8..0x87e420) plus the render-list distance it relies on.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NebulaTweaks {
     /// `NEB_RADIUS` (spaceobj size; also in [`crate::statics::Tweaks`]).
     pub radius: f32,
@@ -187,7 +187,7 @@ impl NebulaTweaks {
 }
 
 /// A chunk (`nebChunk`, 0x58 bytes): a node tendrils meet at, and a resource object.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Chunk {
     pub flags: u32,
     pub num_tendrils: u32,
@@ -223,7 +223,7 @@ impl Chunk {
 
 /// One level of detail of a tendril's cylinder (`nebTendrilLOD`): `slices * (stacks + 1)`
 /// world-space vertices and unit normals, ring by ring from the tendril's start.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct TendrilLod {
     pub slices: u32,
     pub stacks: u32,
@@ -232,7 +232,7 @@ pub struct TendrilLod {
 }
 
 /// A tendril (`nebTendril`, 0xfc bytes): one straight segment of a chain between two chunks.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Tendril {
     pub flags: u32,
     /// Start and end chunk (indices into [`Nebula::chunks`]).
@@ -283,14 +283,14 @@ impl Tendril {
 }
 
 /// One nebula (`nebulae_t`).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Nebula {
     pub chunks: Vec<Chunk>,
     pub tendrils: Vec<Tendril>,
 }
 
 /// The camera the render list and the tendril selection use (`mrCamera`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NebulaCamera {
     pub eye: Vector,
     pub look_at: Vector,
@@ -299,7 +299,7 @@ pub struct NebulaCamera {
 }
 
 /// What `nebSetFog` left for the renderer.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct NebulaFog {
     /// `rndFogOn` (only the software renderers ever enable GL fog with it).
     pub on: bool,
@@ -313,7 +313,7 @@ pub struct NebulaFog {
 }
 
 /// All nebulae of the level (`nebNebulae[]`, `numNebulae`).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Nebulae {
     pub tweaks: NebulaTweaks,
     tweaks_loaded: bool,
@@ -424,7 +424,7 @@ pub fn angular_deviation(new: Vector, a: Vector, b: Vector) -> Ext {
 }
 
 /// `nebPickChunk` modes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Pick {
     /// `NEB_INITIAL_CHUNK`: the most tendrilled of the first 16 free chunks.
     Initial,

@@ -16,7 +16,7 @@ const FILE_RESOURCE: &str = "Resource.script";
 const FILE_TWEAK: &str = "Tweak.script";
 
 /// The base-building tunables.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BaseTweaks {
     // --- Resource.script
     /// `COLLECTRESOURCE_DIST` (0x885440).

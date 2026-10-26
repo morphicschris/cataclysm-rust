@@ -33,7 +33,7 @@ const LINK_LAUNCHERS: [usize; 2] = [2, 3];
 
 /// Per-ship state (+0x67c..+0x694; +0x638..+0x650 is the interceptor state kept in
 /// [`crate::object::Ship::interceptor`], +0x650 the link partner in the base state).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AcolyteSpec {
     /// +0x67c: the pods were opened by the attack logic.
     pub pods_opened: bool,
@@ -67,7 +67,7 @@ impl Default for AcolyteSpec {
 
 /// Per-type statics (`AcolyteStaticInit`: the interceptor statics, kept in
 /// [`crate::combat_statics::TypeCombat::interceptor`]).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct AcolyteStatics {}
 
 impl AcolyteStatics {

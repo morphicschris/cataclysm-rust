@@ -12,7 +12,7 @@ pub const DISABLE_REASON_CRYSTAL: usize = 0xc;
 pub const SPECIAL_CRYSTAL: u32 = 0x4_0000;
 
 /// Per-ship state (+0x638..+0x640).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct CrystalSpec {
     /// +0x638: resource units it still holds (handed out while a depot processes it).
     pub resources: i32,
@@ -23,7 +23,7 @@ pub struct CrystalSpec {
 }
 
 /// Per-type statics (`CrystalStaticInit`, 0x5aaaa0: `resourceValue`, at 0x91b670 / 0x91b674).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct CrystalStatics {
     pub resource_value: i32,
 }

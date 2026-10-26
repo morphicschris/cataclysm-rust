@@ -18,7 +18,7 @@ pub use runtime::KasRuntime;
 pub(crate) use runtime::dispatch;
 
 /// `CurrentMissionScope`: which level of code is running.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum Scope {
     /// Mission-level code (variables and timers live at mission scope).
     #[default]
@@ -30,7 +30,7 @@ pub enum Scope {
 }
 
 /// The calling context of a runtime function.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Cx {
     /// Label of the current team (`CurrentTeamP`), if any. Mission-level code sees whatever team
     /// ran last, as in the original.
@@ -47,7 +47,7 @@ pub struct Cx {
 pub type Team = Option<Hash>;
 
 /// A resolved ship selection argument.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Ships {
     /// NULL.
     Null,
@@ -58,7 +58,7 @@ pub enum Ships {
 }
 
 /// A resolved position argument.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Point {
     /// NULL.
     Null,

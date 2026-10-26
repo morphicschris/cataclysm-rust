@@ -42,7 +42,7 @@ const REPAIR_BEAM_EFFECT: usize = 18;
 const FACE_ACCURACY: f32 = f32::from_bits(0x3f7d_70a4);
 
 /// What a worker's special does (+0x640).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Role {
     Repair,
     Salvage,
@@ -61,7 +61,7 @@ pub mod state {
 }
 
 /// The worker-repair fields of a ship.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct WorkerRepairState {
     /// +0x600: workers that picked the ship while it was whole.
     pub idle_picks: i32,
@@ -90,7 +90,7 @@ pub struct WorkerRepairState {
 
 /// The repair statics of a worker type (`WorkerRepairStaticInit`, 0x5c2410, and
 /// `jackRetractTime` of `WorkerStaticInit`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RepairStatics {
     pub jack_retract_time: f32,
     pub repair_distance: f32,

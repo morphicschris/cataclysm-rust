@@ -63,6 +63,7 @@ pub mod present;
 pub mod research;
 pub mod resource;
 pub mod salvage;
+pub mod save;
 pub mod ships;
 pub mod shockwave;
 pub mod statics;

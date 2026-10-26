@@ -24,7 +24,7 @@ const PIO2_X87_SHIFT: i32 = 67;
 /// The x87 leaves arguments at or beyond 2^63 unreduced.
 const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct Dd {
     hi: f64,
     lo: f64,

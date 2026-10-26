@@ -5,7 +5,7 @@ use crate::object::ShipId;
 use crate::universe::Universe;
 
 /// Per-ship render state of the special abilities.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct RenderFlags {
     /// Fully cloaked (`cloakIsCloaked`).
     pub cloaked: bool,

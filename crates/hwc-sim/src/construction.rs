@@ -16,7 +16,7 @@ use crate::statics::{ShipClass, ShipRace, ShipType};
 use crate::universe::Universe;
 
 /// One job of a factory (`shipinprogress`).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct BuildJob {
     /// [0] ships queued.
     pub n_jobs: i32,
@@ -43,7 +43,7 @@ pub struct BuildJob {
 }
 
 /// A factory (`shipsinprogress`, 0x1b48 bytes).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Factory {
     /// +0x10: the building ship.
     pub ship: Option<ShipId>,
@@ -431,7 +431,7 @@ fn ship_build_complete(u: &mut Universe, factory: ShipId, idx: usize, cost_div: 
 }
 
 /// How `processUpdateExternalConstruction` (0x449a60) updates a hull.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExternalUpdate {
     /// Mode 0: finished.
     Complete,

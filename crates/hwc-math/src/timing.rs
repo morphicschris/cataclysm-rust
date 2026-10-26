@@ -52,7 +52,7 @@ pub fn scale_ticks(ticks: i32, speed_factor: f32) -> i32 {
 }
 
 /// Per-task tick accounting (`taskdata.ticksLeft` / `ticksPerCall`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TaskTicker {
     pub ticks_per_call: u32,
     pub carry: u32,
@@ -87,7 +87,7 @@ impl TaskTicker {
 }
 
 /// The scheduler's frame clock: game-speed scaling plus the time accumulators.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TaskClock {
     pub frequency: f32,
     pub speed_index: usize,

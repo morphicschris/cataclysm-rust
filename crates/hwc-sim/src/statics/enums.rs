@@ -8,7 +8,7 @@ macro_rules! named_enum {
         $vis:vis enum $name:ident : $names:ident { $($variant:ident = $text:literal),* $(,)? }
     ) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
         #[repr(u8)]
         $vis enum $name { $($variant),* }
 

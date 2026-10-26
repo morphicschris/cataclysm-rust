@@ -17,7 +17,7 @@ use hwc_math::trig::{fcos, fsin};
 use hwc_math::{Matrix, Vector};
 
 /// `particleType`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[repr(u32)]
 pub enum PartType {
     Points = 0,
@@ -72,7 +72,7 @@ pub const PART_LOOP: u32 = 2;
 
 /// A pointer the original stored in `pat` or a particle: a location in an effect's constant
 /// data or variable block, or the static random offset array.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DataRef {
     Const { stat: u32, offset: u32 },
     Var { effect: u32, offset: u32 },
@@ -89,7 +89,7 @@ pub trait DataSource {
 pub const RANDOM_OFFSET_COUNT: usize = 100;
 
 /// `particleAttribs` (`pat`): the attributes the next created system will use.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Pat {
     pub world_vel: Vector,
     /// Cataclysm: second copy of the spawning effect's velocity (copied into each particle).
@@ -487,7 +487,7 @@ impl Particle {
 }
 
 /// One particle (the 0x100-byte record).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Particle {
     pub lifespan: f32,
     pub waitspan: f32,
@@ -538,7 +538,7 @@ pub struct Particle {
 
 /// A lens-flare object driven by a type-6 particle (the 0x40-byte record linked into the
 /// lens-flare list).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LensFlare {
     pub position: Vector,
     /// Field +0xc (1.0 at creation).
@@ -554,7 +554,7 @@ pub struct LensFlare {
 }
 
 /// A particle system.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PartSystem {
     pub kind: PartType,
     pub flags: u32,

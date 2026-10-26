@@ -120,7 +120,7 @@ where
 }
 
 /// MSVC `rand()`: `state = state * 214013 + 2531011`, returns bits 16..30.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MsvcRand {
     pub state: u32,
 }

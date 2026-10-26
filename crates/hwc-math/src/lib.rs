@@ -29,6 +29,7 @@ pub mod fastmath;
 pub mod fpu;
 pub mod matrix;
 pub mod random;
+pub mod serde_array;
 pub mod spline;
 pub mod timing;
 pub mod trig;

@@ -61,7 +61,7 @@ pub const RAN_PARTICLES_CAT: usize = 25;
 pub const RAN_ETG_CAT: usize = 26;
 
 /// `ranstream`: generator state. Field order matches the saved-game layout.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(C)]
 pub struct RanStream {
     pub x: u32,
@@ -107,7 +107,7 @@ impl Default for RanStream {
 }
 
 /// The game's set of random streams (`ranStream[]`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Randy {
     pub streams: [RanStream; STREAM_COUNT],
 }

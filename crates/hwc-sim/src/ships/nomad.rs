@@ -35,7 +35,7 @@ pub mod pulse {
 }
 
 /// Per-ship state (+0x638..+0x650).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct NomadSpec {
     /// +0x638 / +0x63c: the upper and lower field emitters.
     pub emitters: [Option<ShipId>; 2],
@@ -46,7 +46,7 @@ pub struct NomadSpec {
 }
 
 /// Per-type statics (the moon's static init is empty).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct NomadStatics {}
 
 impl NomadStatics {

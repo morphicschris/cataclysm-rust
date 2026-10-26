@@ -51,7 +51,7 @@ pub fn name(t: u32) -> &'static str {
 }
 
 /// `FormationCommand` (command +0x230..+0x28c).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FormationInfo {
     pub formation_type: u32,
     pub locked: bool,

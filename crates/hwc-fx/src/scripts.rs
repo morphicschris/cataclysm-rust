@@ -134,7 +134,7 @@ const DEFAULT_BULLET_COLOR: u32 = 0xffff_b864; // colRGB(100,184,255)
 const R1_BULLET_COLOR: u32 = 0xff00_b4ff; // colRGB(255,180,0)
 
 /// The event tables.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EtgTables {
     pub death: Vec<Lod>,
     pub death_derelict: Vec<Lod>,
@@ -469,7 +469,7 @@ impl Loader<'_> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum SlotRef {
     Death(usize),
     DeathDerelict(usize),

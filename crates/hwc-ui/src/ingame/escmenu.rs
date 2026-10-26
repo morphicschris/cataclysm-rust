@@ -21,7 +21,12 @@ pub struct State {
     pub save_name: String,
     /// The objective whose fleet intelligence is shown (none: the mission briefing).
     pub objective: Option<usize>,
+    /// The name waiting on the overwrite question (`OverwriteGamePopup`).
+    pub overwrite: Option<String>,
 }
+
+/// The front end's overwrite question, which the save screen opens over itself.
+pub const OVERWRITE_POPUP: &str = "OverwriteGamePopup";
 
 /// The escape menu variant for this game (`gpStartInGameEscapeMenu`).
 pub fn screen_for(fe: &Fe) -> &'static str {
@@ -113,19 +118,46 @@ pub fn register(fe: &mut Fe) {
             return;
         }
         let name = entered_name(fe);
+        // `gpSaveGame`: a name already in the list asks first.
+        let folder = crate::cataclysm::list_folder(fe, false);
+        let exists = fe.game.saves.as_ref().is_some_and(|s| {
+            name.chars().count() >= crate::saves::MIN_NAME && s.exists(&s.key_for(folder, &name))
+        });
+        if exists && fe.find_screen(OVERWRITE_POPUP).is_some() {
+            fe.game.ig.esc.overwrite = Some(name);
+            fe.screen_start(OVERWRITE_POPUP);
+            return;
+        }
         close_manager(fe);
         fe.game.ig.request(GameRequest::SaveGame(name));
+    });
+    fe.callback_add("OverwriteGameYes", |fe, call| {
+        if fe.first_call(call) || fe.last_call(call) {
+            return;
+        }
+        let Some(name) = fe.game.ig.esc.overwrite.take() else {
+            return;
+        };
+        close_manager(fe);
+        fe.game.ig.request(GameRequest::SaveGame(name));
+    });
+    fe.callback_add("OverwriteGameNo", |fe, call| {
+        if fe.first_call(call) || fe.last_call(call) {
+            return;
+        }
+        fe.game.ig.esc.overwrite = None;
+        fe.current_screen_delete();
     });
     fe.callback_add("IG_LoadGame", |fe, call| {
         if fe.first_call(call) || fe.last_call(call) {
             return;
         }
-        let Some(name) = selected_game(fe) else {
+        let Some(key) = crate::cataclysm::selected_save(fe).map(|e| e.key) else {
             return;
         };
         fe.game.ig.esc.game_over = false;
         close_manager(fe);
-        fe.game.ig.request(GameRequest::LoadGame(name));
+        fe.game.ig.request(GameRequest::LoadGame(key));
     });
     fe.callback_add("PO_CloseObjectiveWindow", |fe, call| {
         if fe.first_call(call) || fe.last_call(call) {
@@ -151,11 +183,7 @@ fn entered_name(fe: &Fe) -> String {
 }
 
 fn selected_game(fe: &Fe) -> Option<String> {
-    let a = fe.find_atom("FE_GameWindowInit")?;
-    let l = fe.list(a)?;
-    l.selected
-        .and_then(|i| l.items.get(i))
-        .map(|i| i.text.clone())
+    crate::cataclysm::selected_save(fe).map(|e| e.name)
 }
 
 /// `poPopupTextDraw`: the objective's fleet intelligence, word wrapped.

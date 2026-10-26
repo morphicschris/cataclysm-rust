@@ -42,7 +42,7 @@ pub mod btf {
 }
 
 /// One blob.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Blob {
     pub centre: Vector,
     pub radius: f32,
@@ -285,7 +285,7 @@ fn object_list_median(objects: &[ObjRef], objs: &Objects, statics: &StaticWorld,
 }
 
 /// The universe's collision blob list (`universe.collBlobList`), in list order.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BlobList {
     pub blobs: Vec<Blob>,
     /// `universe.collUpdateAllBlobs`: drop every blob on the next rebuild.

@@ -66,7 +66,7 @@ pub mod tactalk {
 const SLALOM_MAX_WAYPOINTS: usize = 15;
 
 /// Progress of the running manoeuvre.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum FlightmanInfo {
     FlipTurn { pitch: f32, roll: f32, finished: f32, roll_left: bool },
     Corkscrew { yaw: f32, roll: f32, increment: f32, roll_left: bool },
@@ -87,7 +87,7 @@ pub enum FlightmanInfo {
 
 /// Turn about one axis by `limit` radians (positive `dir`: pitch up / roll right / yaw left).
 /// Returns true once the accumulated angle has reached the limit.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum Axis {
     PitchUp,
     PitchDown,

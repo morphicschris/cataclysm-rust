@@ -59,7 +59,7 @@ pub struct Response {
 }
 
 /// The ten hot-key groups.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HotKeyGroups {
     groups: [Vec<ShipId>; GROUP_COUNT],
 }

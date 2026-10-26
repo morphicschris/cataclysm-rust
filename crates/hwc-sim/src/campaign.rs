@@ -72,7 +72,7 @@ pub mod leave_state {
 
 /// A ship's single-player hyperspace record (`ShipSinglePlayerGameInfo`, ship +0x4c4) and the
 /// roll-call bits of its special flags.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ShipHs {
     /// `shipHyperspaceState` (+0x20).
     pub state: u32,
@@ -100,7 +100,7 @@ pub struct ShipHs {
 
 /// The single-player state of the jump between missions (`singlePlayerGameInfo` and the few
 /// globals around it).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HyperState {
     /// 0xaaf94c `playerCanHyperspace`: the mission created its "Hyperspace" objective.
     pub player_can_hyperspace: bool,
@@ -204,7 +204,7 @@ impl HyperState {
 /// What reaches the next mission (`singlePlayerLoadNewLevel`'s view of the world): the ships in
 /// hyperspace with what is docked inside them, the player (RUs, technology, research, labs),
 /// the game clock and the random streams.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Carry {
     /// The mission the fleet left.
     pub mission: u32,
@@ -314,7 +314,7 @@ pub(crate) fn restore_player(u: &mut Universe, c: &Carry) {
 // ---------------------------------------------------------------------------------------------
 
 /// Why the hyperspace button did nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HyperspaceRefused {
     /// The mission has not offered the jump yet (no "Hyperspace" objective).
     NotAvailable,

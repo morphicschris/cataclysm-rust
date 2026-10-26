@@ -88,7 +88,7 @@ pub mod dpt {
 pub const CAP_SLIPGATE: u32 = 0x4000;
 
 /// What [`dock_point_type`] needs to know about the ship docked with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DockWith {
     /// The ship has dock points at all.
     pub has_dock: bool,

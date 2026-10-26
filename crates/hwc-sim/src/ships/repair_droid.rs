@@ -26,12 +26,12 @@ const RAN_DROIDS: usize = 0;
 const NONE: i32 = -1;
 
 /// Per-ship state (`sRepairDroid` and `bRepairDroid` ships have none of their own).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct RepairDroidSpec {}
 
 /// Per-type statics of the repair-droid ship types (`RepairDroidStaticInit`, 0x5bd350:
 /// `repositionTime`, `circleRange`, `fullMovementFreedom`, at 0x8d35f8).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct RepairDroidStatics {
     pub reposition_time: f32,
     pub circle_range: f32,
@@ -78,7 +78,7 @@ pub mod state {
 
 /// One droid (a 0x2c-byte slot plus its 0x63c-byte stand-in ship object). Positions are in the
 /// host ship's coordinates.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Droid {
     /// +0x04: see [`state`].
     pub state: u8,
@@ -123,7 +123,7 @@ impl Default for Droid {
 }
 
 /// A ship's droids (`droidCreateArray`, 0x18 bytes).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DroidArray {
     pub droids: Vec<Droid>,
     /// +0x0c: the dock point the last droid left from.

@@ -81,7 +81,7 @@ pub mod hs_effect {
 }
 
 /// `singleplayer.script` (table at 0x88a0e0).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SpTweaks {
     pub clipt_neg_thresh: f32,
     pub clipt_neg_scalar: f32,
@@ -198,7 +198,7 @@ impl SpTweaks {
 }
 
 /// Choices for a headless run.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MissionConfig {
     /// The mission number (1..17).
     pub mission: u32,
@@ -232,7 +232,7 @@ impl MissionConfig {
 }
 
 /// What a log line records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LogKind {
     /// Level loading, NIS skips, hyperspace, single-player state changes.
     Flow,
@@ -249,7 +249,7 @@ pub enum LogKind {
 }
 
 /// One log line.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LogEntry {
     /// `univUpdateCounter` when it happened.
     pub frame: u32,
@@ -266,7 +266,7 @@ impl fmt::Display for LogEntry {
 }
 
 /// A mission objective (`Objective`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Objective {
     pub label: String,
     pub brief: String,
@@ -277,7 +277,7 @@ pub struct Objective {
 
 /// A ship of the player's fleet travelling in hyperspace between levels (an entry of the
 /// original's `ShipsInHyperspace` list, with the ships inside it).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FleetShip {
     pub ship_type: ShipType,
     /// Offset from the mothership when the fleet left (ship info +0x2c..+0x34: along the
@@ -313,7 +313,7 @@ impl FleetShip {
 }
 
 /// A ship on its way in from hyperspace (`UpdateArrivingShip`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ArrivingShip {
     pub ship_type: ShipType,
     /// The ship, once it is back in the universe.
@@ -336,7 +336,7 @@ pub struct ArrivingShip {
 }
 
 /// Camera state the KAS camera functions read and write.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct CameraState {
     pub angle: f32,
     pub declination: f32,
@@ -346,7 +346,7 @@ pub struct CameraState {
 }
 
 /// Game-side state of a running mission (everything but the universe and the interpreter).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Game {
     /// Presentation calls KAS made (speech, location cards, music), in order, for the game's
     /// front end to play; the simulation never reads them (drain it after each step).
@@ -377,7 +377,14 @@ pub struct Game {
     pub construction: Vec<(String, String, i32)>,
     /// `player->resourceUnits` per player.
     pub resource_units: Vec<i32>,
+    /// `SaveLevel(level, name)` asked for this update (`kasfSaveLevelRequest`); handled at the
+    /// end of the update ([`MissionRun::step`]), which turns it into [`Game::autosave`].
     pub pending_save: Option<(i32, String)>,
+    /// The mission autosave due now (`kasfSaveLevelDeferred`): set at the end of the update
+    /// that asked for it, with `G_TimesGameLoaded = 0` and `G_AutoSave = 1` in the KAS
+    /// variables. The front end writes the file before the next update and then calls
+    /// [`MissionRun::autosave_written`]; the next update tidies up if it did not.
+    pub autosave: Option<AutoSave>,
     pub mission_failed: bool,
     /// `MissionCompleted` was called (the campaign is won, or the tutorial is over).
     pub mission_completed: bool,
@@ -506,7 +513,7 @@ pub fn swap_remove_all(v: &mut Vec<ShipId>, id: ShipId) -> bool {
 }
 
 /// Why a mission could not start.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MissionError(pub String);
 
 impl fmt::Display for MissionError {
@@ -578,8 +585,40 @@ pub fn opening_nis_fleet(src: &dyn DataSource, statics: &StaticWorld, mission: u
     Ok(fleet)
 }
 
+/// KAS globals of the mission autosave (`kasfSaveLevelDeferred`, `kasAutoSaveOnLoad`).
+pub const AUTO_SAVE: &str = "G_AutoSave";
+pub const TIMES_GAME_LOADED: &str = "G_TimesGameLoaded";
+
+/// A mission autosave (`SaveLevel(level, name)`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AutoSave {
+    pub level: i32,
+    pub name: String,
+}
+
+impl AutoSave {
+    /// The file name the original gives it: `NN - name` (`"%02d - %s"`), the bare name for the
+    /// tutorial (level 0, in the training folder).
+    pub fn file_name_for(level: i32, name: &str) -> String {
+        if level == 0 {
+            name.to_string()
+        } else {
+            format!("{level:02} - {name}")
+        }
+    }
+
+    pub fn file_name(&self) -> String {
+        Self::file_name_for(self.level, &self.name)
+    }
+
+    /// Saved in the training folder (the tutorial's lessons).
+    pub fn training(&self) -> bool {
+        self.level == 0
+    }
+}
+
 /// A running mission: the universe, the KAS interpreter and the game-side state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MissionRun {
     pub universe: Universe,
     pub kas: Interpreter,
@@ -733,6 +772,40 @@ impl MissionRun {
 
     /// One universe update with the single-player and KAS work in their places.
     pub fn step(&mut self) {
+        if self.game.autosave.is_some() {
+            self.autosave_written();
+        }
+        self.update();
+        // `kasfSaveLevelDeferred` at the end of `univUpdate`: the request of this update.
+        if let Some((level, name)) = self.game.pending_save.take() {
+            self.kas.set_var(None, var_hash(TIMES_GAME_LOADED), 0);
+            self.kas.set_var(None, var_hash(AUTO_SAVE), 1);
+            self.game.log(LogKind::Flow, format!("autosave: {}", AutoSave::file_name_for(level, &name)));
+            self.game.autosave = Some(AutoSave { level, name });
+        }
+    }
+
+    /// The autosave of [`Game::autosave`] has been written (or skipped): `G_AutoSave` goes, so
+    /// that later saves are not autosaves.
+    pub fn autosave_written(&mut self) {
+        self.game.autosave = None;
+        self.kas.remove_var(None, var_hash(AUTO_SAVE));
+    }
+
+    /// `kasAutoSaveOnLoad`, right after a saved game is loaded: when it is a mission autosave
+    /// (`G_AutoSave` is set), `G_TimesGameLoaded` goes up by one and the front end writes the
+    /// same file again at once, then calls [`autosave_written`](Self::autosave_written).
+    /// Returns whether it was an autosave.
+    pub fn loaded(&mut self) -> bool {
+        if self.kas.var(None, var_hash(AUTO_SAVE)).is_none() {
+            return false;
+        }
+        let n = self.kas.var(None, var_hash(TIMES_GAME_LOADED)).unwrap_or(0);
+        self.kas.set_var(None, var_hash(TIMES_GAME_LOADED), n.wrapping_add(1));
+        true
+    }
+
+    fn update(&mut self) {
         let MissionRun { universe, kas, game } = self;
         let mut hooks = Hooks { kas, game };
         universe.update_with(&mut hooks);
@@ -948,6 +1021,7 @@ pub(crate) fn empty_game(config: MissionConfig) -> Game {
         construction: Vec::new(),
         resource_units: vec![0; 2],
         pending_save: None,
+        autosave: None,
         mission_failed: false,
         mission_completed: false,
         delete_when_mission_ends: Vec::new(),
@@ -1385,14 +1459,14 @@ impl DataSource for GameDataSource<'_> {
 }
 
 /// A NIS the mission asked for (the number in `G_PlayNis` / `G_PlayNislet`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NisRequest {
     Nis(i32),
     Nislet(i32),
 }
 
 /// A KAS ping call (`ping.c`'s `pingAnomaly*` on the sensors manager), by label.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PingOrder {
     /// `kasfPingAddSingleShip`: a ping following the selection's first ship.
     Ship { label: String, ship: ShipId },
@@ -1406,7 +1480,7 @@ pub enum PingOrder {
 }
 
 /// Which wide-screen call was made.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WideScreenKind {
     /// `kasfWideScreenIn` (0x492a40).
     In,
@@ -1421,7 +1495,7 @@ pub enum WideScreenKind {
 
 /// A wide-screen call: the letterbox moves in or out over `frames` frames, from game time
 /// `time`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WideScreenEvent {
     pub kind: WideScreenKind,
     pub frames: i32,
@@ -1437,7 +1511,7 @@ impl Game {
 }
 
 /// A presentation call made by KAS, recorded as data.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Presentation {
     /// `SpeechEvent(event, variable)` at game time `time`.
     Speech { event: i32, variable: i32, time: f32 },

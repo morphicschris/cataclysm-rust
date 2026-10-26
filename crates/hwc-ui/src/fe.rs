@@ -474,6 +474,21 @@ impl<G> FrontEnd<G> {
         Ok(())
     }
 
+    /// Loads only the screens named `keep` of a `.fib` (screens another file's links reach).
+    pub fn load_fib_screens(&mut self, data: &[u8], keep: &[&str]) -> Result<(), String> {
+        let first = self.screens.len();
+        self.load_fib_data(data)?;
+        let mut i = first;
+        while i < self.screens.len() {
+            if keep.contains(&self.screens[i].name.as_str()) && self.screens[..i].iter().all(|s| s.name != self.screens[i].name) {
+                i += 1;
+            } else {
+                self.screens.remove(i);
+            }
+        }
+        Ok(())
+    }
+
     /// Applies the resolution rules to one screen: background atoms stretch to the screen
     /// edges they touch, everything else is centred, and atoms entirely off the 640x480 layout
     /// are hidden.

@@ -15,7 +15,7 @@ use crate::tactics::{self, MaxVelocityContext};
 use crate::tunables::SimTweaks;
 
 /// What the physics step needs from the universe.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct PhysContext {
     /// `universe.phystimeelapsed`.
     pub dt: f32,

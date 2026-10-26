@@ -70,7 +70,7 @@ pub type EffectId = u32;
 pub type OwnerId = u32;
 
 /// The state of an object effects can be attached to.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Owner {
     pub position: Vector,
     pub velocity: Vector,
@@ -107,7 +107,7 @@ impl Default for Owner {
 }
 
 /// Requests from effect scripts to the rest of the game.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum FxEvent {
     /// `playSound(event)` (`soundEffect`: the effect itself is the sound's object, so it plays
     /// at the effect's position).
@@ -127,7 +127,7 @@ pub enum FxEvent {
 }
 
 /// An effect instance (`Effect`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Effect {
     pub id: EffectId,
     /// Index of its static in the library.
@@ -156,7 +156,7 @@ pub struct Effect {
 }
 
 /// Spawn parameters set by `setEff*` (`etgEffOffset`).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EffOffset {
     pub offset_lof: f32,
     pub offset_r: f32,
@@ -173,7 +173,7 @@ pub struct EffOffset {
     pub delta_spin: u32,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct Exec {
     stat: usize,
     block: usize,
@@ -182,7 +182,7 @@ struct Exec {
 }
 
 /// How a function argument was produced, for pointer-typed parameters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum ArgKind {
     Value,
     ConstPtr,
@@ -190,8 +190,12 @@ enum ArgKind {
 }
 
 /// The effect world.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct FxWorld {
+    /// The compiled effects: game data, not saved; a loaded world takes the library given to
+    /// [`relink::with_library`]. Only what the effects change while they run is saved: each
+    /// effect's creation history (`etgHistory`).
+    #[serde(serialize_with = "relink::save_history", deserialize_with = "relink::load_with_history")]
     pub lib: Library,
     pub pat: Pat,
     pub eff_offset: EffOffset,
@@ -206,6 +210,7 @@ pub struct FxWorld {
     pub systems: Vec<Option<PartSystem>>,
     pub lens_flares: Vec<LensFlare>,
     pub random_offsets: Vec<Vector>,
+    #[serde(serialize_with = "relink::sorted_owners")]
     pub owners: HashMap<OwnerId, Owner>,
     pub events: Vec<FxEvent>,
     pub warnings: Vec<String>,
@@ -226,6 +231,66 @@ pub struct FxWorld {
     effector_duration: f32,
     create_callback: Option<(u32, EffectId)>,
     current_effect: usize,
+}
+
+/// Linking a deserialised [`FxWorld`] back to its compiled effects.
+pub mod relink {
+    use std::cell::RefCell;
+
+    use crate::compiler::Library;
+
+    thread_local! {
+        static LIBRARY: RefCell<Option<Library>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `f` (a deserialisation) with `lib` as the library of every effect world it creates.
+    pub fn with_library<R>(lib: Library, f: impl FnOnce() -> R) -> R {
+        let old = LIBRARY.with(|l| l.borrow_mut().replace(lib));
+        let r = f();
+        LIBRARY.with(|l| *l.borrow_mut() = old);
+        r
+    }
+
+    /// Saves the owner map in key order, so that equal worlds save to equal bytes.
+    pub(super) fn sorted_owners<S: serde::Serializer>(
+        owners: &std::collections::HashMap<super::OwnerId, super::Owner>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let sorted: std::collections::BTreeMap<_, _> = owners.iter().collect();
+        serde::Serialize::serialize(&sorted, s)
+    }
+
+    /// The run-time part of a library: every effect's history ring (`iHistory`, times).
+    pub(super) fn save_history<S: serde::Serializer>(lib: &Library, s: S) -> Result<S::Ok, S::Error> {
+        let h: Vec<(i32, &[f32])> = lib.statics.iter().map(|e| (e.i_history, &e.history[..])).collect();
+        serde::Serialize::serialize(&h, s)
+    }
+
+    /// The library set by [`with_library`] with the saved history put back.
+    pub(super) fn load_with_history<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Library, D::Error> {
+        let h: Vec<(i32, Vec<f32>)> = serde::Deserialize::deserialize(d)?;
+        let mut lib = library();
+        if h.len() != lib.statics.len() {
+            return Err(serde::de::Error::custom(format!(
+                "the saved effects ({}) are not the game's ({})",
+                h.len(),
+                lib.statics.len()
+            )));
+        }
+        for (e, (i, times)) in lib.statics.iter_mut().zip(h) {
+            if times.len() != e.history.len() {
+                return Err(serde::de::Error::custom(format!("effect {}: history length differs", e.name)));
+            }
+            e.i_history = i;
+            e.history = times;
+        }
+        Ok(lib)
+    }
+
+    /// The library set by [`with_library`] (an empty one outside it).
+    fn library() -> Library {
+        LIBRARY.with(|l| l.borrow().clone()).unwrap_or_default()
+    }
 }
 
 struct WorldData<'a> {

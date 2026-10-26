@@ -241,6 +241,12 @@ impl InGameUi {
             fe.load_fib_data(&data)
                 .map_err(|e| format!("{name}: {e}"))?;
         }
+        // The save screen's overwrite question lives in the front end's file.
+        if let Some(data) = source.read(r"FEMan\front_end.fib") {
+            if let Err(e) = fe.load_fib_screens(&data, &[escmenu::OVERWRITE_POPUP]) {
+                fe.log_once(format!("front_end.fib: {e}"));
+            }
+        }
         Ok(InGameUi {
             fe,
             held: HashSet::new(),
@@ -483,6 +489,11 @@ impl InGameUi {
     }
 
     /// Shift/Alt/Ctrl held now, as binding modifier flags.
+    /// The modifier keys held (`keys::MOD_*`).
+    pub fn modifiers_held(&self) -> u8 {
+        self.modifiers()
+    }
+
     fn modifiers(&self) -> u8 {
         let mut m = 0;
         if self.held.contains(&key::SHIFT) {

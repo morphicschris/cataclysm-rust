@@ -38,6 +38,9 @@ mod play;
 mod preview;
 mod profile;
 #[cfg(test)]
+mod save_checks;
+mod saves;
+#[cfg(test)]
 mod quality_shots;
 #[cfg(test)]
 mod resui_shots;

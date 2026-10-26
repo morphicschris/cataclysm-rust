@@ -23,7 +23,7 @@ const DPT_SALVAGE: i32 = 27;
 const DPT_SALVAGE_LATCH: i32 = 28;
 
 /// A depot slot (5 dwords at the depot's specifics).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct DepotSlot {
     pub ship: Option<ShipId>,
     /// Start and end of the retrofit (integer seconds, as the original stores them).

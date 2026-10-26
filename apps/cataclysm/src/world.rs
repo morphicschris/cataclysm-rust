@@ -286,6 +286,23 @@ pub struct World {
     pub zoom_clear: bool,
 }
 
+/// The main camera and what it follows, as saved with a game ([`World::view_state`]).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ViewState {
+    pub look_at: [f32; 3],
+    pub angle: f32,
+    pub declination: f32,
+    pub distance: f32,
+    pub closest_zoom: f32,
+    pub farthest_zoom: f32,
+    pub ignore_zoom: bool,
+    pub zoom_target: Option<f32>,
+    pub focus: Vec<ShipId>,
+    pub follow_focus: bool,
+    pub focus_close: bool,
+    pub camera_pending: bool,
+}
+
 /// Engine vector to render vector.
 fn v3(v: hwc_math::Vector) -> Vec3 {
     Vec3::new(v.x, v.y, v.z)
@@ -1023,6 +1040,46 @@ impl World {
         if self.camera.distance < min {
             self.camera.zoom_target = Some(min);
         }
+    }
+
+    /// The main camera and its focus, for a saved game (the camera is part of the game: the
+    /// nebulae's update reads it).
+    pub fn view_state(&self) -> ViewState {
+        let c = &self.camera;
+        ViewState {
+            look_at: c.look_at.to_array(),
+            angle: c.angle,
+            declination: c.declination,
+            distance: c.distance,
+            closest_zoom: c.closest_zoom,
+            farthest_zoom: c.farthest_zoom,
+            ignore_zoom: c.ignore_zoom,
+            zoom_target: c.zoom_target,
+            focus: self.focus.clone(),
+            follow_focus: self.follow_focus,
+            focus_close: self.focus_close,
+            camera_pending: self.camera_pending,
+        }
+    }
+
+    /// Puts back a saved [`view_state`](Self::view_state).
+    pub fn restore_view(&mut self, v: &ViewState) {
+        let c = &mut self.camera;
+        c.look_at = Vec3::from_array(v.look_at);
+        c.angle = v.angle;
+        c.declination = v.declination;
+        c.distance = v.distance;
+        c.closest_zoom = v.closest_zoom;
+        c.farthest_zoom = v.farthest_zoom;
+        c.ignore_zoom = v.ignore_zoom;
+        c.zoom_target = v.zoom_target;
+        c.up_vector = None;
+        self.focus = v.focus.clone();
+        self.follow_focus = v.follow_focus;
+        self.focus_close = v.focus_close;
+        self.camera_pending = v.camera_pending;
+        // No blending from where the ships were before the game was loaded.
+        self.snapshot();
     }
 
     /// The player zoomed: the close-up focus lets go (`CAM_USER_ZOOMED`).

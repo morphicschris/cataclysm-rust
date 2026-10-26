@@ -20,11 +20,11 @@ use crate::statics::{ShipStaticInfo, ShipType};
 use crate::universe::Universe;
 
 /// Per-ship state (the header reserves four unused bytes).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct DfgSpec {}
 
 /// Per-type statics (`DFGFrigateStaticInit` 0x5ab420).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct DfgStatics {
     /// `fieldRadius`, and its square.
     pub field_radius: f32,

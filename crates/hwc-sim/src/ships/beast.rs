@@ -48,7 +48,7 @@ pub const FLAGS2_STUN_SPIN: u32 = 0x80;
 const BEAST_BULLET_TYPE: u32 = 0x13;
 
 /// A ship's Beast state (+0x4e0..+0x4f8, +0x614, and for the cascade types +0x638..).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Infection {
     /// +0x4e0: infection hits taken.
     pub attacks: i32,
@@ -72,7 +72,7 @@ pub struct Infection {
 
 /// A cascade (+0x638): the target chosen by the special, the beams in flight, whether the ship
 /// was flying at its target.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Cascade {
     /// +0x638.
     pub target: Option<ShipId>,
@@ -83,7 +83,7 @@ pub struct Cascade {
 }
 
 /// One beam of a cascade (0x1c-byte node: +0x10 bullet, +0x14 source, +0x18 target).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CascadeEntry {
     pub bullet: Option<BulletId>,
     pub source: Option<ShipId>,
@@ -92,12 +92,12 @@ pub struct CascadeEntry {
 
 /// Per-ship state of the Beast mothership's module (`BeastMothershipInit` keeps none beyond
 /// the cascade).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct BeastMothershipSpec {}
 
 /// Per-type statics (`HeavyCruiserStaticInit`, `CarrierStaticInit`, `BeastMothershipStaticInit`:
 /// whether the type has the cascade, which loads `beastweapon.script`).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct BeastStatics {
     pub has_cascade: bool,
 }

@@ -38,7 +38,7 @@ pub mod kind {
 }
 
 /// One shock wave (`ShockWave`, 25 dwords).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Shockwave {
     /// +0x00: the kind ([`kind`]).
     pub kind: u32,
@@ -183,7 +183,7 @@ const HOW_SHOCKWAVE: i32 = 0x29a;
 
 /// The waves in flight (`swList`, 0x9036e0) and the big-gun shells they push
 /// (`swSpecialShipList`, 0x9036f0).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Shockwaves {
     pub waves: Vec<Shockwave>,
     pub special: Vec<BulletId>,

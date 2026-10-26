@@ -44,7 +44,7 @@ pub mod emp {
 
 /// Per-ship state (+0x638..+0x70c; the side-step state is the generic
 /// [`crate::object::Ship::side_step`]).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct AcvSpec {
     /// +0x6e4: the ships the last pulse hit and the ACVs that joined it (drawn as arcs).
     pub emp_targets: Vec<ShipId>,
@@ -64,7 +64,7 @@ pub struct AcvSpec {
 
 /// Per-type statics (`ACVStaticInit`: +4 `EMP_Max_Combine_Distance`, +8 `EMP_Range`; the
 /// side-step parameters are [`crate::combat_statics::TypeCombat::side_step`]).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct AcvStatics {
     pub max_combine_distance: f32,
     pub emp_range: f32,

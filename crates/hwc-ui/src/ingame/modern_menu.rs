@@ -114,6 +114,8 @@ pub struct Row {
     pub selectable: bool,
     pub selected: bool,
     pub keys: Option<KeyRow>,
+    /// A second line of a saved game's row: its mission and when it was saved.
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -730,6 +732,16 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
             }
             Tag::List => {
                 let keys = atom.name.as_deref() == Some("OP_KeyBindingsList");
+                // A save list shows each game's mission and date beside its name.
+                let saves = match atom.name.as_deref() {
+                    Some("FE_GameWindowInit") => {
+                        Some(crate::cataclysm::save_entries(fe, crate::cataclysm::list_folder(fe, false)))
+                    }
+                    Some("FE_TutorialGameWindowInit") => {
+                        Some(crate::cataclysm::save_entries(fe, crate::saves::SaveFolder::Training))
+                    }
+                    _ => None,
+                };
                 let (rows, top, total, page) = match fe.list(a) {
                     Some(l) => {
                         let top = l.upper.min(l.items.len());
@@ -741,6 +753,10 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
                                 selectable: it.can_select,
                                 selected: it.selected,
                                 keys: keys.then(|| key_row(fe, it.data)),
+                                detail: saves
+                                    .and_then(|s| s.get(it.data as usize))
+                                    .map(|e| e.detail.clone())
+                                    .filter(|d| !d.is_empty()),
                             })
                             .collect();
                         (rows, top, l.items.len(), l.max_visible)
@@ -2515,13 +2531,33 @@ fn draw_list(
                 } else {
                     lerp(TEXT, WHITE, hv)
                 };
+                // A saved game's mission and date at the right, when there is room.
+                let mut room = row.width() - f.px(24.0);
+                if let Some(d) = &r.detail {
+                    let dw = pen.advance(Face::Bold, spx, ssp, d);
+                    if (dw as f32) < room as f32 * 0.55 {
+                        write_right(
+                            canvas,
+                            pen,
+                            Face::Bold,
+                            spx,
+                            ssp,
+                            row.x1 - f.px(12.0),
+                            mid_baseline(*row, spx),
+                            if r.selected { LABEL } else { DIM },
+                            None,
+                            d,
+                        );
+                        room -= dw + f.px(16.0);
+                    }
+                }
                 let t = fit(
                     pen,
                     Face::Semibold,
                     npx,
                     0.0,
                     &r.text,
-                    (row.width() - f.px(24.0)) as f32,
+                    room as f32,
                 );
                 write(
                     canvas,

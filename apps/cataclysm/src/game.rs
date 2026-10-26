@@ -84,7 +84,18 @@ pub enum Outcome {
     /// The NIS of the NIS level has stopped (`singlePlayerNisStoppedCB`): the mission loads
     /// (`NisLevelRun::finish`) from the world's NIS level.
     NisLevelDone,
+    /// Load this saved game (`gpLoadGame`: the game ends and the saved one loads).
+    LoadGame(std::path::PathBuf),
 }
+
+/// The modern quick save and quick load keys (`hwcQuickSave`; Shift+F5 and Shift+F9, as the
+/// original has none and F5..F9 are its formation keys).
+pub const QUICK_SAVE_KEY: u16 = 0x74;
+pub const QUICK_LOAD_KEY: u16 = 0x78;
+/// How often (in drawn frames) the picture for a saved game's thumbnail is taken.
+const THUMB_EVERY: u64 = 30;
+/// Thumbnail width in pixels.
+const THUMB_WIDTH: u32 = 160;
 
 /// What is under the pointer (`mouseCursorObjPtr`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -241,6 +252,21 @@ pub struct Game {
     pub double_click_type: bool,
     /// The last plain click on one of the player's ships, for the double click.
     last_ship_click: Option<(ShipId, std::time::Instant)>,
+    /// Where the saved games are (none: saving is off, as in the headless tests that do not
+    /// set it).
+    pub saves: Option<Rc<crate::saves::SaveDir>>,
+    /// The latest mission autosave written or loaded (`CurrentLevelName`): "restart level"
+    /// loads it.
+    pub level_save: Option<std::path::PathBuf>,
+    /// The latest picture of the main view for a saved game's thumbnail.
+    thumb: Option<hwc_sim::save::Thumbnail>,
+    frames: u64,
+    /// The music to start on the next update (a loaded game plays its track from the start).
+    resume_music: Option<i32>,
+    /// A saved game to load on the next update (the quick-load key).
+    pending_load: Option<std::path::PathBuf>,
+    /// Shift+F5 / Shift+F9 quick save and load (`hwcQuickSave`, off by default).
+    pub quick_save_keys: bool,
 }
 
 /// A factory job with ships still to build: (factory, job, ship type).
@@ -361,6 +387,13 @@ impl Game {
             double_click_type: options.get("hwcDoubleClickSelectType") != 0,
             last_ship_click: None,
             plate_from_right: false,
+            saves: None,
+            level_save: None,
+            thumb: None,
+            frames: 0,
+            resume_music: None,
+            pending_load: None,
+            quick_save_keys: options.get("hwcQuickSave") != 0,
             nis_notes: Vec::new(),
             queued_nis: None,
             debug_keys: std::env::var_os("HWC_DEBUG_KEYS").is_some(),
@@ -469,6 +502,24 @@ impl Game {
                 _ => {}
             }
             return;
+        }
+        if self.quick_save_keys && self.ui.modifiers_held() == keys::MOD_SHIFT {
+            match ev {
+                InputEvent::KeyDown(QUICK_SAVE_KEY) => {
+                    let r = self.save_named(crate::saves::QUICK_SAVE);
+                    self.report_save(r);
+                    return;
+                }
+                InputEvent::KeyDown(QUICK_LOAD_KEY) => {
+                    if let Some(p) = self.quick_save_path().filter(|p| p.is_file()) {
+                        self.pending_load = Some(p);
+                    } else {
+                        self.post("There is no quick save to load.");
+                    }
+                    return;
+                }
+                _ => {}
+            }
         }
         if self.debug_keys && ev == InputEvent::KeyDown(DEBUG_HYPERSPACE_KEY) {
             let r = self.world.run_mut().force_hyperspace();
@@ -1257,9 +1308,11 @@ impl Game {
             GameRequest::SetPaused(p) => self.paused = p,
             GameRequest::QuitToMain => out.push(Outcome::Leave),
             GameRequest::RestartLevel => out.push(Outcome::Restart),
-            GameRequest::SaveGame(_) | GameRequest::LoadGame(_) => {
-                self.post("Saving and loading are not available yet.")
+            GameRequest::SaveGame(name) => {
+                let r = self.save_named(&name);
+                self.report_save(r);
             }
+            GameRequest::LoadGame(key) => out.push(Outcome::LoadGame(key.into())),
             GameRequest::Sound(e) => sound(audio, e),
             GameRequest::Speech { event, .. } => {
                 if let Some(a) = audio {
@@ -1569,6 +1622,169 @@ impl Game {
     }
 
     // ---------------------------------------------------------------------------------------
+    // Saved games
+    // ---------------------------------------------------------------------------------------
+
+    /// Where saved games go and the save lists read them from.
+    pub fn set_saves(&mut self, dir: Rc<crate::saves::SaveDir>) {
+        let store: Rc<dyn hwc_ui::saves::SaveStore> = dir.clone();
+        self.ui.fe.game.saves = Some(store);
+        self.saves = Some(dir);
+    }
+
+    /// Whether the game can be saved now: a mission is running, with no NIS or movie playing
+    /// and the mission not over (the original's escape menu is not reachable then either).
+    pub fn can_save(&self) -> Result<(), &'static str> {
+        if self.world.mission_run().is_none() || self.nis.is_some() || self.queued_nis.is_some() {
+            return Err("The game cannot be saved during a cinematic.");
+        }
+        if self.movie || self.next_mission || self.nis_level_done || self.end.is_some() {
+            return Err("The game cannot be saved now.");
+        }
+        if self.world.run().game.pending_nis.is_some() {
+            return Err("The game cannot be saved during a cinematic.");
+        }
+        Ok(())
+    }
+
+    /// The interface's part of a saved game.
+    pub fn ui_state(&self) -> crate::saves::UiState {
+        crate::saves::UiState {
+            view: self.world.view_state(),
+            selection: self.selection.clone(),
+            hotkeys: self.hotkeys.clone(),
+            music: self.music,
+            pings: self.pings.clone(),
+            ping_sensor_states: self.ping_sensor_states.clone(),
+            pings_seeded: self.pings_seeded,
+            letterbox: self.letterbox.clone(),
+            keep_letterbox_after_nis: self.keep_letterbox_after_nis,
+            formation_index: self.formation_index,
+            level_save: self.level_save.clone(),
+        }
+    }
+
+    /// Puts back the interface of a loaded game (the simulation is the world's already). The
+    /// saved music track starts again from its beginning, as in the original.
+    pub fn restore_ui(&mut self, ui: crate::saves::UiState) {
+        self.world.restore_view(&ui.view);
+        let u = self.world.universe();
+        self.selection = ui.selection.into_iter().filter(|&id| selectable(u, id)).collect();
+        self.hotkeys = ui.hotkeys;
+        self.music = ui.music;
+        self.resume_music = ui.music;
+        // The letterbox keeps the screen shape's choice of bar height.
+        let tall = self.letterbox.tall;
+        self.letterbox = ui.letterbox;
+        self.letterbox.tall = tall;
+        self.keep_letterbox_after_nis = ui.keep_letterbox_after_nis;
+        let tweaks = self.pings.tweaks.clone();
+        self.pings = ui.pings;
+        self.pings.tweaks = tweaks;
+        self.ping_sensor_states = ui.ping_sensor_states;
+        self.pings_seeded = ui.pings_seeded;
+        self.formation_index = ui.formation_index;
+        self.level_save = ui.level_save;
+        self.paused = false;
+        self.carried_groups = None;
+    }
+
+    /// Writes the game to `path` under `description`.
+    pub fn save_to(&mut self, path: &std::path::Path, description: &str, autosave: bool) -> Result<(), String> {
+        let ui = self.ui_state();
+        let run = self.world.run();
+        let header = crate::saves::header(run, description, autosave, self.thumb.clone());
+        crate::saves::write(path, &header, run, &ui).map_err(|e| e.to_string())
+    }
+
+    /// The folder this game's saves go in.
+    fn save_folder(&self) -> hwc_ui::saves::SaveFolder {
+        if self.world.mission() == 0 {
+            hwc_ui::saves::SaveFolder::Training
+        } else {
+            hwc_ui::saves::SaveFolder::SinglePlayer
+        }
+    }
+
+    /// The quick save's file.
+    pub fn quick_save_path(&self) -> Option<std::path::PathBuf> {
+        let d = self.saves.as_ref()?;
+        Some(d.path_for(self.save_folder(), crate::saves::QUICK_SAVE))
+    }
+
+    /// `gpSaveGame`: saves under the name the player typed.
+    pub fn save_named(&mut self, name: &str) -> Result<std::path::PathBuf, String> {
+        let name = name.trim();
+        if name.chars().count() < hwc_ui::saves::MIN_NAME {
+            return Err(self.string_or("strAtLeast2Chars", "A saved game's name needs at least 2 characters."));
+        }
+        self.can_save().map_err(str::to_string)?;
+        let dir = self.saves.clone().ok_or("Saved games are not available.")?;
+        let path = dir.path_for(self.save_folder(), name);
+        self.save_to(&path, name, false)?;
+        Ok(path)
+    }
+
+    /// The message after a save (`strSavedGame`, or the error in red).
+    fn report_save(&mut self, r: Result<std::path::PathBuf, String>) {
+        match r {
+            Ok(_) => {
+                let t = self.string_or("strSavedGame", "Game saved.");
+                self.post(&t);
+            }
+            Err(e) => {
+                eprintln!("cataclysm: save: {e}");
+                self.messages.push(GameMessage {
+                    text: e,
+                    colour: RED,
+                    ship: None,
+                    time: self.world.universe().total_time_elapsed,
+                });
+            }
+        }
+    }
+
+    fn string_or(&self, key: &str, default: &str) -> String {
+        self.strings
+            .get(key)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    }
+
+    /// `kasfSaveLevelDeferred`: the autosave the mission asked for this update
+    /// (`NN - <name>`, the tutorial's in the training folder), which "restart level" loads.
+    fn autosave_if_due(&mut self) {
+        let Some(a) = self.world.run().game.autosave.clone() else { return };
+        if let Some(dir) = self.saves.clone() {
+            let folder = if a.training() {
+                hwc_ui::saves::SaveFolder::Training
+            } else {
+                hwc_ui::saves::SaveFolder::SinglePlayer
+            };
+            let name = a.file_name();
+            let path = dir.path_for(folder, &name);
+            self.level_save = Some(path.clone());
+            let r = self.save_to(&path, &name, true).map(|_| path);
+            self.report_save(r);
+        }
+        self.world.run_mut().autosave_written();
+    }
+
+    /// After loading a saved game (`kasAutoSaveOnLoad`): a mission autosave counts the load
+    /// and is written again at once; it becomes the level "restart" loads.
+    pub fn after_load(&mut self, path: &std::path::Path) {
+        if self.world.run_mut().loaded() {
+            self.level_save = Some(path.to_path_buf());
+            let description = crate::saves::read_description(path).unwrap_or_default();
+            if let Err(e) = self.save_to(path, &description, true) {
+                eprintln!("cataclysm: {}: {e}", path.display());
+            }
+            self.world.run_mut().autosave_written();
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
     // Frame
     // ---------------------------------------------------------------------------------------
 
@@ -1576,8 +1792,17 @@ impl Game {
     /// mission's cues, the sound.
     pub fn update(&mut self, dt: f32, audio: &mut Option<Audio>) -> Vec<Outcome> {
         let mut out = Vec::new();
+        if let Some(p) = self.pending_load.take() {
+            out.push(Outcome::LoadGame(p));
+            return out;
+        }
         if let Some((run, fired)) = self.queued_nis.take() {
             self.begin_nis(run, fired, audio);
+        }
+        if let Some(track) = self.resume_music.take() {
+            if let Some(a) = audio.as_mut() {
+                a.play_music(track);
+            }
         }
         self.real_time += dt;
         let requests = self.with_host(|ui, host| ui.update(host, dt));
@@ -1671,6 +1896,9 @@ impl Game {
                 self.groups_after_step(&before, audio);
                 self.pings_after_step(&jobs);
                 self.after_step(audio);
+                // `kasfSaveLevelDeferred`: the mission's autosave, before an NIS it asked for
+                // starts.
+                self.autosave_if_due();
             }
             self.nis_step(audio);
             if !opening {
@@ -2466,6 +2694,11 @@ impl Game {
             self.world.camera = c;
         }
         self.draw_nis_fade();
+        // The main view's picture for a saved game's thumbnail, now and then.
+        self.frames += 1;
+        if self.frames % THUMB_EVERY == 1 && self.nis.is_none() && self.ui.manager().is_none() {
+            self.thumb = crate::saves::thumbnail(&self.canvas, THUMB_WIDTH);
+        }
         if !self.letterbox.fully && self.nis.is_none() {
             let _p = profile::span("marks");
             self.draw_marks();

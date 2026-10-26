@@ -31,7 +31,7 @@ pub const DEFAULT_SHIP_MATRIX: Matrix = Matrix { m: [0.0, 0.0, 1.0, 0.0, -1.0, 0
 pub const DEFAULT_WORLD_BOUNDS: Vector = Vector::new(100_000.0, 100_000.0, 100_000.0);
 
 /// Why a ship could not be created.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CreateError {
     /// The race has no statics for this ship type (the original disables such types).
     NoStatics(ShipType),
@@ -51,7 +51,7 @@ impl std::error::Error for CreateError {}
 
 /// Things that happened during an update, for presentation (effects, sounds). The simulation
 /// itself never reads them; they are cleared at the start of every update.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SimEvent {
     /// A gun fired a bullet or beam.
     GunFired { ship: ShipId, gun: usize, bullet: BulletId },
@@ -66,7 +66,7 @@ pub enum SimEvent {
 
 /// Events of the missile, special-ability, cloak and fog code (kept apart from [`SimEvent`] so
 /// presentation code that matches every `SimEvent` keeps compiling); cleared every update.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SpecialEvent {
     /// A launcher fired a missile or dropped a mine.
     MissileFired { ship: ShipId, gun: usize, missile: MissileId },
@@ -104,10 +104,13 @@ struct NoHooks;
 impl UpdateHooks for NoHooks {}
 
 /// The simulation state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Universe {
+    /// Game data: not saved, linked back on load ([`crate::save::Relink`]).
+    #[serde(skip, default = "crate::save::statics")]
     pub statics: Arc<StaticWorld>,
-    /// Per-type combat routines and their statics (built once from `statics`).
+    /// Per-type combat routines and their statics (built once from `statics`; not saved).
+    #[serde(skip, default = "crate::save::combat")]
     pub combat: Arc<CombatStatics>,
     pub tweaks: SimTweaks,
     pub ships: ShipTable,

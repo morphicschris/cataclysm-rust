@@ -15,7 +15,7 @@ use crate::statics::{DataSource, ShipType};
 const DEG_TO_RAD: f32 = 0.017_453_292;
 
 /// Flight-manoeuvre tunables (FlightMan.script).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FlightManTweaks {
     pub flipturn_maxrotspeedflip: f32,
     pub flipturn_pauseafterfliptime: f32,
@@ -225,7 +225,7 @@ impl Default for FlightManTweaks {
 }
 
 /// Combat tunables.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CombatTweaks {
     // --- AIShip.script
     pub interceptor_break_tolerance: f32,
@@ -239,6 +239,7 @@ pub struct CombatTweaks {
     pub row_go_down_instead_of_up_ratio: f32,
     pub dont_use_velocity_pred_if_below: f32,
     /// `rowAvoidBy` (0x8a783c): distance a ship keeps out of the way of each type.
+    #[serde(with = "hwc_math::serde_array")]
     pub row_avoid_by: [f32; ShipType::COUNT],
 
     // --- CommandLayer.script
@@ -434,7 +435,7 @@ const ROW_AVOID_BY: [f32; ShipType::COUNT] = [
     0.0, 2000.0, 4000.0, 500.0, 0.0, 1700.0, 1700.0, 500.0, 1600.0, 1000.0, 1000.0, 1000.0, 1000.0, 0.0, 0.0, 0.0,
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum Conv {
     Real,
     /// `scriptSetReal32SqrCB`.

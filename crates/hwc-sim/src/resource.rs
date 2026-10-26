@@ -22,11 +22,11 @@ use crate::statics::{ResourceInfo, ShipType};
 use crate::universe::{Universe, DEFAULT_SHIP_MATRIX};
 
 /// A resource's identity (`resourceID`), handed out in creation order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ResourceId(pub u16);
 
 /// Resource kinds (`ObjType`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResourceKind {
     /// Asteroid of type 0..4.
     Asteroid(u8),
@@ -37,7 +37,7 @@ pub enum ResourceKind {
 }
 
 /// A resource object (`Resource` / `Asteroid` / `DustCloud`, 0x1b4 bytes).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Resource {
     pub id: ResourceId,
     pub kind: ResourceKind,
@@ -70,7 +70,7 @@ pub struct Resource {
 }
 
 /// The resources (`universe.ResourceList`) by id, in list order.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ResourceTable {
     pub list: Vec<Resource>,
     /// `universe.resourceNumber`.

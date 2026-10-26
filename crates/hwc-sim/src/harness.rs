@@ -14,7 +14,7 @@ use crate::tunables::SimTweaks;
 use crate::universe::{CreateError, Universe};
 
 /// FNV-1a over 64 bits (fixed, platform independent).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct Fnv64(u64);
 
 impl Default for Fnv64 {
@@ -58,7 +58,7 @@ pub fn world_hash(u: &Universe) -> u64 {
 /// What [`world_hash_with`] leaves out: some ships (with the numbers of later ships closed up,
 /// as if those ships had never been created) and the special-ability state. Used to show that a
 /// change of the hash comes only from new state.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct HashView {
     /// Ships not hashed.
     pub skip: Vec<ShipId>,
@@ -225,7 +225,7 @@ fn hash_base(h: &mut Fnv64, u: &Universe, view: &HashView) {
 }
 
 /// One ship to create at the start.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Spawn {
     pub ship_type: ShipType,
     pub player: usize,
@@ -233,7 +233,7 @@ pub struct Spawn {
 }
 
 /// A scripted order.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Order {
     /// Move the ships (by spawn index) through `waypoints`; `from` is where the order was
     /// given from (the original passes the selection's centre).
@@ -270,14 +270,14 @@ pub enum Order {
 }
 
 /// A resource object to place.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResourceSpawn {
     pub kind: ResourceKind,
     pub position: Vector,
 }
 
 /// A scenario: the races of the players, the ships and the orders by tick.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Scenario {
     pub name: &'static str,
     pub players: Vec<ShipRace>,

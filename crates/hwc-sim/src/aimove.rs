@@ -42,7 +42,7 @@ pub const SAME_FORMATION: i32 = 8;
 pub const NO_FORMATION: i32 = 7;
 
 /// What a move does.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MoveKind {
     /// `MOVE_MOVETEAM` (`aimProcessMove`): the team flies to `destination`.
     MoveTeam { destination: Vector },
@@ -75,7 +75,7 @@ pub enum MoveKind {
 }
 
 /// `AITeamMove`, with the fields the modelled moves use.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TeamMove {
     pub kind: MoveKind,
     /// +0x164: the move has given its order (`processing`).
@@ -129,7 +129,7 @@ impl TeamMove {
 }
 
 /// A team's move list (`team->moves`) and its current move (`team->curMove`).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct TeamMoves {
     pub moves: Vec<TeamMove>,
     pub current: Option<usize>,

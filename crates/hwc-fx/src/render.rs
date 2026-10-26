@@ -9,7 +9,7 @@
 use hwc_math::{HMatrix, Matrix, Vector};
 
 /// How a primitive is blended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Blend {
     /// No blending (alpha == 1 and the texture has no alpha).
     Opaque,
@@ -20,7 +20,7 @@ pub enum Blend {
 }
 
 /// A camera-facing textured quad or untextured disc.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Sprite {
     /// Centre in world space.
     pub position: Vector,
@@ -49,7 +49,7 @@ pub struct Sprite {
 }
 
 /// A line segment (`createLines`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Line {
     pub start: Vector,
     pub end: Vector,
@@ -60,7 +60,7 @@ pub struct Line {
 }
 
 /// A jittered polyline (`createEBolts`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Bolt {
     pub points: Vec<Vector>,
     pub width: f32,
@@ -71,7 +71,7 @@ pub struct Bolt {
 }
 
 /// A point (`createPoints`), at most 3 pixels.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Point {
     pub position: Vector,
     pub size: f32,
@@ -80,7 +80,7 @@ pub struct Point {
 }
 
 /// A cube particle (`PART_CUBES`; not created by any ETG function).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Cube {
     pub position: Vector,
     /// Edge length: `drawBox(scale / 2)` spans `±size / 2`.
@@ -91,7 +91,7 @@ pub struct Cube {
 }
 
 /// A mesh particle.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MeshInstance {
     /// Mesh path (as registered).
     pub mesh: Option<String>,
@@ -206,7 +206,7 @@ fn sub(a: Vector, b: Vector) -> Vector {
 }
 
 /// A lens flare driven by a type-6 particle.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Flare {
     pub position: Vector,
     pub intensity: f32,
@@ -215,7 +215,7 @@ pub struct Flare {
 }
 
 /// Which list of a [`RenderList`] a [`Span`] covers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PrimKind {
     Sprites,
     Lines,
@@ -227,7 +227,7 @@ pub enum PrimKind {
 }
 
 /// One particle system's primitives, in the order the original drew the systems.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     pub kind: PrimKind,
     /// Range in the list named by `kind`.
@@ -240,7 +240,7 @@ pub struct Span {
 }
 
 /// Everything one draw pass produced.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RenderList {
     pub sprites: Vec<Sprite>,
     pub lines: Vec<Line>,

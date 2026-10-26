@@ -53,7 +53,7 @@ pub fn kas_frame_due(univ_update_counter: u32, update_rate: u32, kas_frame: u32)
 }
 
 /// A KAS variable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Var {
     /// Scope key: 0 for mission scope, else the owning team's label.
     pub scope: Hash,
@@ -64,7 +64,7 @@ pub struct Var {
 }
 
 /// A KAS timer (counts down in game seconds).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Timer {
     /// Scope key, as for [`Var`].
     pub scope: Hash,
@@ -83,10 +83,12 @@ pub struct Timer {
 }
 
 /// A team's message queue (`team->msgQueue`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MsgQueue {
     count: usize,
+    #[serde(with = "hwc_math::serde_array")]
     msgs: [Hash; MSG_QUEUE_LEN],
+    #[serde(with = "hwc_math::serde_array")]
     senders: [Hash; MSG_QUEUE_LEN],
 }
 
@@ -125,7 +127,7 @@ impl MsgQueue {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct TeamSlot {
     label: Hash,
     script: bool,
@@ -149,15 +151,18 @@ pub struct TeamView<'a> {
     pub queue: Option<&'a MsgQueue>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum Flow {
     Next,
     Return,
 }
 
 /// Runs one mission.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Interpreter {
+    /// The mission IR: game data, not saved; a loaded interpreter takes the one given to
+    /// [`relink::with_mission`].
+    #[serde(skip, default = "relink::mission")]
     mission: Arc<Mission>,
     started: bool,
     vars: Vec<Var>,
@@ -173,6 +178,43 @@ pub struct Interpreter {
 }
 
 const MAX_WARNINGS: usize = 1000;
+
+/// Linking a deserialised [`Interpreter`] back to its mission: the IR comes from the game
+/// data, so a saved game holds only the interpreter's state.
+pub mod relink {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    use crate::ir::Mission;
+
+    thread_local! {
+        static MISSION: RefCell<Option<Arc<Mission>>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `f` (a deserialisation) with `mission` as the IR of every interpreter it creates.
+    pub fn with_mission<R>(mission: Arc<Mission>, f: impl FnOnce() -> R) -> R {
+        let old = MISSION.with(|m| m.borrow_mut().replace(mission));
+        let r = f();
+        MISSION.with(|m| *m.borrow_mut() = old);
+        r
+    }
+
+    /// The mission set by [`with_mission`] (an empty one outside it).
+    pub(super) fn mission() -> Arc<Mission> {
+        MISSION.with(|m| m.borrow().clone()).unwrap_or_else(|| {
+            Arc::new(Mission {
+                name: String::new(),
+                name_hash: 0,
+                lstrings: Vec::new(),
+                fsms: Vec::new(),
+                init: Default::default(),
+                watch: Default::default(),
+                names: Default::default(),
+                fidelity: crate::ir::Fidelity::Exact,
+            })
+        })
+    }
+}
 
 impl Interpreter {
     /// A new interpreter for `mission` (nothing runs until [`start`](Self::start)).

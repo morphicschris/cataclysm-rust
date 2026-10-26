@@ -16,7 +16,7 @@ use crate::tunables::BlobProperties;
 use crate::universe::Universe;
 
 /// One battle ping: where, how big, and the ships in it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BattlePing {
     pub centre: Vector,
     pub radius: f32,

@@ -43,7 +43,7 @@ const REALLY_BIG: f32 = f32::from_bits(0x6258_d727);
 
 /// Where a missile launcher's mine goes when its layer drops a wall (the minelayer's custom
 /// state, +0x658.. in the layer; see `ships::minelayer`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ForcedMine {
     /// The layer's mine formation (+0x6b0 in the layer).
     pub formation: u32,
@@ -59,7 +59,7 @@ pub struct ForcedMine {
 }
 
 /// A missile or mine.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Missile {
     pub id: MissileId,
     /// +0x14 (`ROTATABLE | IMPACTABLE | NOT_BUMPABLE | TARGETABLE` at creation; `DEAD` 0x800).
@@ -163,7 +163,7 @@ impl Missile {
 }
 
 /// Missiles by id (ids are never reused).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MissileTable {
     slots: Vec<Option<Missile>>,
 }
@@ -681,7 +681,7 @@ fn stop_drift(m: &mut Missile, friction: f32) {
 }
 
 /// What a mine flies at: a ship's collision centre or a point (the wall position).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum MineGoal {
     Ship(ShipId),
     Point(Vector),

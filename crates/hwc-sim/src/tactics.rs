@@ -48,7 +48,7 @@ pub fn speed_multiplier(ship: &Ship, stat: &ShipStaticInfo) -> Ext {
 }
 
 /// Inputs from outside the ship that `tacticsGetShipsMaxVelocity` looks at.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct MaxVelocityContext {
     /// The ship's command is a formation of type sphere.
     pub in_sphere_formation: bool,

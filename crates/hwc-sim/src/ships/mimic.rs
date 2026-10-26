@@ -77,7 +77,7 @@ const LAST_PLAYER_RACE_TYPE: i32 = 0x3b;
 const LAST_PIRATE_TYPE: i32 = 0x61;
 
 /// What a Mimic looks like (+0x704..+0x72c, the pending one at +0x730..+0x758).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Disguise {
     /// Ship type index (-1: an asteroid or nothing).
     pub ship_type: i32,
@@ -119,7 +119,7 @@ impl Default for Disguise {
 }
 
 /// Per-ship state.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MimicSpec {
     pub state: u8,
     /// Morph progress (+0x75c): 1 own shape, 0 the disguise.
@@ -159,7 +159,7 @@ impl Default for MimicSpec {
 /// and the standard corvette the side-step statics (`repositionTime`...), both kept in
 /// [`crate::combat_statics::TypeCombat`]; the static flags +0x211..+0x213 they set are not
 /// used by the simulation.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct MimicStatics {}
 
 impl MimicStatics {
@@ -170,7 +170,7 @@ impl MimicStatics {
 }
 
 /// The disguise order (`FUN_00449520` / `clProcess` case 0xf), command +0x2e8..+0x2f4.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DisguiseOrder {
     /// 0 end the disguise, 1 a ship type, 2 an asteroid.
     pub kind: i32,
@@ -1082,7 +1082,7 @@ pub fn pick_random_disguise_type(
 
 /// One entry of a player's disguise menu (8 bytes: a ship type, or for the resource list in
 /// slot 8 an asteroid type in the second word).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct DisguiseEntry {
     pub ship_type: i32,
     pub asteroid: i32,
@@ -1090,7 +1090,7 @@ pub struct DisguiseEntry {
 
 /// The disguise menus (`MimicInitDisguiseTables` 0x5b46c0 and friends, 0x91b6b0): per player
 /// (and slot 8, the asteroids) the types offered and the default one.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DisguiseTables {
     pub entries: [Vec<DisguiseEntry>; 9],
     pub defaults: [i32; 9],

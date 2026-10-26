@@ -17,7 +17,7 @@ pub const REASON_EMP: usize = 9;
 const EMP_VELOCITY_DAMPING: f32 = 0.9;
 
 /// A stopwatch (`Stopwatch`: start time, duration, a marker and the real-time flag).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Stopwatch {
     pub start: f32,
     pub duration: f32,
@@ -59,7 +59,7 @@ impl Stopwatch {
 }
 
 /// A ship's disable state (+0x528..+0x570).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct DisableState {
     /// +0x528: shocked by an EMP (velocity is damped while disabled).
     pub emp_shocked: bool,
@@ -82,7 +82,7 @@ pub struct DisableState {
 
 /// The flicker effect a KAS-flagged ship shows after an EMP (+0x4d0..+0x4dc): its state (0 off,
 /// 1 flickering, else ending), the next flicker time, the end time and the fixed delay.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Flicker {
     pub state: i32,
     pub next: f32,

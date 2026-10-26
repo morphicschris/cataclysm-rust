@@ -34,7 +34,7 @@ const SEARCH_MASK: u32 = 31;
 const SEARCH_FRAME: u32 = 27;
 
 /// Per-ship state.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProximitySpec {
     pub state: i32,
     /// Blink circle radius (+0x640).
@@ -44,7 +44,7 @@ pub struct ProximitySpec {
 }
 
 /// Per-type statics (`ProximitySensorStaticInit`, the `SearchRate` table at 0x8bb9b0).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProximityStatics {
     pub search_rate: i32,
     pub search_rate_after_found: i32,

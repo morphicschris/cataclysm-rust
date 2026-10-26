@@ -15,7 +15,7 @@ mod table;
 pub use table::FUNCTIONS;
 
 /// Index of a runtime function in the kas2c function table (0..486).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct FuncId(pub u16);
 
 impl FuncId {

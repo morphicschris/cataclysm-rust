@@ -13,7 +13,7 @@ pub const CLASS_COLUMNS: usize = 13;
 pub const DEFAULT_CLASS: usize = 12;
 
 /// `CustShipAttack` routine of a type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AttackKind {
     /// `GenericInterceptorAttack` (fighters).
     Interceptor,
@@ -34,7 +34,7 @@ pub enum AttackKind {
 }
 
 /// `CustShipAttackPassive` routine of a type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PassiveKind {
     /// `GenericInterceptorPassiveAttack`.
     Interceptor,
@@ -47,7 +47,7 @@ pub enum PassiveKind {
 }
 
 /// `CustShipFire` routine of a type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FireKind {
     /// `GenericInterceptorFire`: the active gun only.
     Interceptor,
@@ -64,7 +64,7 @@ pub enum FireKind {
 }
 
 /// `FlightManProb` (0x148 bytes): probabilities of the flight manoeuvres by situation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct FlightManProb {
     pub prob_turnaround: [u32; 7],
     pub cum_turnaround: [u32; 7],
@@ -85,7 +85,7 @@ pub struct FlightManProb {
 }
 
 /// `GenericInterceptorStatics`: per tactic (3) and target class (12 + default).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InterceptorStatics {
     /// `gunsFireTime`.
     pub fire_time: f32,
@@ -103,7 +103,7 @@ pub struct InterceptorStatics {
 }
 
 /// Side-step parameters (`repositionTime`, `circleRange`, `fullMovementFreedom`).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SideStepStatics {
     pub reposition_time: f32,
     pub circle_range: f32,
@@ -111,7 +111,7 @@ pub struct SideStepStatics {
 }
 
 /// Combat data of one ship type.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TypeCombat {
     pub attack: AttackKind,
     pub passive: PassiveKind,
@@ -129,7 +129,7 @@ pub struct TypeCombat {
 }
 
 /// Combat data of every ship type.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct CombatStatics {
     pub types: Vec<Option<TypeCombat>>,
 }

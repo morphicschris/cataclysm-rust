@@ -41,7 +41,7 @@ pub use ir::Mission;
 use std::fmt;
 
 /// A load or parse error.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Error {
     /// Description, innermost context last.
     pub message: String,

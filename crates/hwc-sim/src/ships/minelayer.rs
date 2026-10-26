@@ -67,7 +67,7 @@ pub mod mine_ai {
 
 /// Per-ship state (+0x638..+0x6c0; the side-step state at +0x638 is the generic
 /// [`crate::object::Ship::side_step`], unused by the minelayer's own attack).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct MinelayerSpec {
     /// +0x640: see [`mining`].
     pub mining_status: i32,
@@ -101,7 +101,7 @@ pub struct MinelayerSpec {
 }
 
 /// Per-type statics (`MinelayerCorvetteStaticInit`, the struct at custom statics +0).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct MinelayerStatics {
     /// +0xc / +0x64.
     pub num_mines_in_side: i32,
@@ -191,7 +191,7 @@ impl MinelayerStatics {
 }
 
 /// A mine formation (a wall of mines laid by a minelayer; `MineFormationInfo`).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct MineFormation {
     pub id: u32,
     /// The mines of the wall, in the order they were dropped (`MineList`).

@@ -19,7 +19,7 @@ use crate::statics::{ShipClass, ShipType};
 use crate::universe::Universe;
 
 /// How a mission ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Ending {
     /// The mission offered the jump ("Hyperspace" objective) and the fleet took it.
     Hyperspace,
@@ -32,7 +32,7 @@ pub enum Ending {
 }
 
 /// The player stand-in for one mission.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Autoplay {
     /// Updates after the fleet arrived before the jump is forced.
     pub budget: u32,
@@ -47,7 +47,7 @@ pub struct Autoplay {
     /// What the plan did, for logs and the viewer (`(update, text)`).
     pub notes: Vec<(u32, String)>,
     /// Per-mission plan marks (what was done once).
-    marks: Vec<&'static str>,
+    marks: Vec<String>,
     /// Mission 3: since when the Clee-San has hung at the mouth of its dock.
     m3_stuck_since: Option<u32>,
     /// Since when the jump waits for tilted capital ships to right themselves.
@@ -80,11 +80,11 @@ impl Autoplay {
     }
 
     /// Records `mark` once; true the first time.
-    fn once(&mut self, mark: &'static str) -> bool {
-        if self.marks.contains(&mark) {
+    fn once(&mut self, mark: &str) -> bool {
+        if self.marks.iter().any(|m| m == mark) {
             return false;
         }
-        self.marks.push(mark);
+        self.marks.push(mark.to_string());
         true
     }
 
@@ -849,7 +849,7 @@ impl Autoplay {
 }
 
 /// The player's ships by role.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct Fleet {
     mothership: Option<ShipId>,
     all: Vec<ShipId>,

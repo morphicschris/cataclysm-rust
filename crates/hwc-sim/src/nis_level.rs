@@ -58,7 +58,7 @@ pub fn nis_after_arrival(mission: u32) -> Option<u32> {
 }
 
 /// Where `singlePlayerStartNis` centres the NIS.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NisPlacement {
     /// `StartPointPlayer` of the NIS level (the origin when it has none).
     pub position: Vector,
@@ -73,7 +73,7 @@ pub struct NisPlacement {
 }
 
 /// The NIS level phase before a mission.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NisLevelRun {
     /// The universe with the NIS level in it (and the carried fleet in hyperspace).
     pub universe: Universe,

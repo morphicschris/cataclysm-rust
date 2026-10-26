@@ -110,7 +110,7 @@ pub mod damage_mode {
 }
 
 /// Per-ship state (+0x650..+0x6e0).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct MothershipSpec {
     /// +0x650: Beast damage mode chosen, +0x654: it is burning health now.
     pub damage_mode: u32,
@@ -141,7 +141,7 @@ pub struct MothershipSpec {
 /// Per-type statics (`MothershipStaticInit` 0x5b6150): the per-tactic bullet ranges and 90 %
 /// of the minimum ranges. (Beast motherships also load the cascade weapon script there; that
 /// is the Beast module's.)
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct MothershipStatics {
     pub range: [f32; 3],
     pub min_range: [f32; 3],

@@ -55,7 +55,7 @@ pub mod waypoint_mode {
 }
 
 /// `CommandToDo`, reduced to the parts the move and formation orders use.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CommandToDo {
     pub id: CommandId,
     pub selection: Vec<ShipId>,
@@ -101,7 +101,7 @@ pub struct CommandToDo {
 }
 
 /// The dock part of a command.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct DockInfo {
     /// +0x290: dock purpose (see [`crate::dock::purpose`]).
     pub purpose: i32,
@@ -112,7 +112,7 @@ pub struct DockInfo {
 }
 
 /// The resource-collection part of a command.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct CollectInfo {
     /// +0x2a0: the resource being harvested.
     pub resource: Option<crate::resource::ResourceId>,
@@ -123,7 +123,7 @@ pub struct CollectInfo {
 }
 
 /// `CommandLayer`: the to-do list in order, over a store indexed by [`CommandId`].
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CommandLayer {
     slots: Vec<Option<CommandToDo>>,
     /// The to-do list (new commands are appended).
@@ -870,7 +870,7 @@ pub mod attack_group {
 
 /// A formation's ships by how they attack (`formGroups` 0x43e150), each list in selection
 /// order: heavy defenders, corvettes, capital and other ships, and the other fighters.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FormGroups {
     pub defenders: Vec<ShipId>,
     pub corvettes: Vec<ShipId>,

@@ -5,6 +5,7 @@
 //! [`Request`]s for the application.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use crate::assets::Language;
 use crate::canvas::{BlitMode, Color, Image, Rect, BLACK, WHITE};
@@ -15,6 +16,7 @@ use crate::fe::{Call, FrontEnd};
 use crate::fer::Fer;
 use crate::options::Options;
 use crate::region::{AtomRef, RegionId};
+use crate::saves::{SaveEntry, SaveFolder, SaveStore};
 use crate::text::{self, Shadow};
 
 /// Something the front end asks the application to do.
@@ -24,7 +26,7 @@ pub enum Request {
     Quit,
     /// A single-player game or the training mission would start here.
     StartGame { tutorial: bool, difficulty: i32 },
-    /// Load a saved game.
+    /// Load a saved game (its [`SaveEntry::key`]).
     LoadGame(String),
     /// Multiplayer screens (not recreated yet).
     Multiplayer,
@@ -76,8 +78,11 @@ pub struct Cataclysm {
     pub renderers: Vec<String>,
     pub resolutions: Vec<(i32, i32)>,
     pub key_bindings: Vec<(String, String)>,
-    pub saved_games: Vec<String>,
-    pub training_games: Vec<String>,
+    /// The single-player and training save lists as last filled from [`Self::saves`].
+    pub saved_games: Vec<SaveEntry>,
+    pub training_games: Vec<SaveEntry>,
+    /// Where the saved games are (set by the game; the lists are empty without it).
+    pub saves: Option<Rc<dyn SaveStore>>,
     pub colors: ColorPicker,
     pub credits: Option<Credits>,
     /// Where the options are saved on accept.
@@ -115,6 +120,7 @@ impl Cataclysm {
             key_bindings: Vec::new(),
             saved_games: Vec::new(),
             training_games: Vec::new(),
+            saves: None,
             colors,
             credits: None,
             config_path: None,
@@ -306,6 +312,16 @@ pub fn register(fe: &mut Fe) {
         game_list(fe, call, true)
     });
     fe.callback_add("LoadMultiSinglePlayerGameFromMain", load_game);
+    fe.callback_add("IG_DeleteGame", |fe, call| {
+        if fe.first_call(call) || fe.last_call(call) {
+            return;
+        }
+        delete_selected_game(fe);
+        // The confirmation closes over the rebuilt list.
+        if fe.current_screen_name().is_some_and(|n| n.starts_with("DeleteGamePopup")) {
+            fe.current_screen_delete();
+        }
+    });
     fe.callback_add("SelectSinglePlayerGame", |fe, _| {
         fe.screen_start("Load_game");
     });
@@ -660,39 +676,83 @@ fn start_game(fe: &mut Fe, name: &str) {
     });
 }
 
-/// `gpGameWindowInit`: the saved-game list.
+/// The folder a save list shows: training for the tutorial's list (and in the tutorial), the
+/// single-player games otherwise (`gpGameWindowInit`).
+pub fn list_folder(fe: &Fe, training: bool) -> SaveFolder {
+    if training || fe.game.ig.view.player.tutorial {
+        SaveFolder::Training
+    } else {
+        SaveFolder::SinglePlayer
+    }
+}
+
+/// The saved games of `folder` read again from the store.
+pub fn refresh_saves(fe: &mut Fe, folder: SaveFolder) -> Vec<SaveEntry> {
+    let games = fe.game.saves.as_ref().map(|s| s.list(folder)).unwrap_or_default();
+    match folder {
+        SaveFolder::Training => fe.game.training_games = games.clone(),
+        SaveFolder::SinglePlayer => fe.game.saved_games = games.clone(),
+    }
+    games
+}
+
+/// The entries a list of `folder` was filled from.
+pub fn save_entries(fe: &Fe, folder: SaveFolder) -> &[SaveEntry] {
+    match folder {
+        SaveFolder::Training => &fe.game.training_games,
+        SaveFolder::SinglePlayer => &fe.game.saved_games,
+    }
+}
+
+/// The save list atoms and the folder each shows.
+const LISTS: [(&str, bool); 2] = [("FE_GameWindowInit", false), ("FE_TutorialGameWindowInit", true)];
+
+/// The saved game selected in whichever save list is up.
+pub fn selected_save(fe: &Fe) -> Option<SaveEntry> {
+    LISTS.iter().find_map(|&(n, training)| {
+        let i = crate::saves::selected_index(fe, n)?;
+        save_entries(fe, list_folder(fe, training)).get(i).cloned()
+    })
+}
+
+/// `gpGameWindowInit`: the saved-game list, read from the game's saves.
 fn game_list(fe: &mut Fe, call: &Call, training: bool) {
     let Some(a) = call.atom else { return };
     if !fe.first_call(call) {
         return;
     }
-    fe.list_init(a, "Arial_12.hff", 18);
-    let games = if training {
-        fe.game.training_games.clone()
-    } else {
-        fe.game.saved_games.clone()
-    };
-    if let Some(l) = fe.list_mut(a) {
-        for (i, g) in games.iter().enumerate() {
-            l.add(g.clone(), i as u32, i == 0);
+    let folder = list_folder(fe, training);
+    let games = refresh_saves(fe, folder);
+    crate::saves::fill_list(fe, a, &games);
+}
+
+/// `gpDeleteGame`: the selected saved game is deleted and the list rebuilt in place (the
+/// selection moves up when it was the last row).
+pub fn delete_selected_game(fe: &mut Fe) {
+    for (name, training) in LISTS {
+        let Some(a) = fe.find_atom(name) else { continue };
+        let Some(i) = crate::saves::selected_index(fe, name) else { continue };
+        let folder = list_folder(fe, training);
+        let Some(entry) = save_entries(fe, folder).get(i).cloned() else { continue };
+        let deleted = fe.game.saves.as_ref().is_some_and(|s| s.delete(&entry.key));
+        if !deleted {
+            fe.log_once(format!("could not delete saved game {}", entry.key));
         }
-    }
-    if let Some(id) = fe.atom(a).region {
-        fe.list_scroll_adjust(id);
+        let games = refresh_saves(fe, folder);
+        crate::saves::fill_list(fe, a, &games);
+        let row = i.min(games.len().saturating_sub(1));
+        if let Some(l) = fe.list_mut(a) {
+            if !l.items.is_empty() {
+                l.select(row);
+            }
+        }
+        return;
     }
 }
 
 /// `utyLoadMultiSinglePlayerGame`: load the selected saved game.
 fn load_game(fe: &mut Fe, _call: &Call) {
-    let selected = ["FE_GameWindowInit", "FE_TutorialGameWindowInit"]
-        .iter()
-        .find_map(|n| {
-            let a = fe.find_atom(n)?;
-            let l = fe.list(a)?;
-            l.selected
-                .and_then(|i| l.items.get(i))
-                .map(|item| item.text.clone())
-        });
+    let selected = selected_save(fe).map(|e| e.key);
     match selected {
         Some(name) => {
             fe.all_screens_delete();

@@ -7,3 +7,4 @@ publish.workspace = true
 description = "Deterministic math foundation for the Homeworld: Cataclysm recreation (x87/MSVC6-faithful vectors, matrices, RNG, CRT emulation, timing)"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }

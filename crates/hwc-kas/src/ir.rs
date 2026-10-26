@@ -12,7 +12,7 @@ use crate::functions::{FuncId, ParamType};
 use crate::Hash;
 
 /// How faithfully a mission IR represents the compiled code.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Fidelity {
     /// Built from the machine code (exact).
     Exact,
@@ -22,7 +22,7 @@ pub enum Fidelity {
 }
 
 /// One mission (or the tutorial).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Mission {
     /// Script name as passed to `kasMissionStart`, e.g. `Mission01` (any case).
     pub name: String,
@@ -43,7 +43,7 @@ pub struct Mission {
 }
 
 /// A localised string table: three `char*` (English, French, German).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LString {
     /// Display name (`LSTRING_<name>` in the text form), if any.
     pub name: Option<String>,
@@ -54,7 +54,7 @@ pub struct LString {
 }
 
 /// An FSM: code that controls one team.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Fsm {
     /// FSM label hash.
     pub hash: Hash,
@@ -67,7 +67,7 @@ pub struct Fsm {
 }
 
 /// One FSM state.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct State {
     /// State label hash.
     pub hash: Hash,
@@ -78,7 +78,7 @@ pub struct State {
 }
 
 /// An INIT or WATCH body (one kas2c-generated C function).
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Block {
     /// Address of the compiled function, if known.
     pub addr: Option<u32>,
@@ -87,7 +87,7 @@ pub struct Block {
 }
 
 /// A statement.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Stmt {
     /// A runtime call whose result (if any) is discarded.
     Call(Call),
@@ -148,7 +148,7 @@ pub enum Stmt {
 }
 
 /// One arm of a [`Stmt::Switch`].
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SwitchArm {
     /// Values that select this arm.
     pub values: Vec<i32>,
@@ -157,7 +157,7 @@ pub struct SwitchArm {
 }
 
 /// One message handler of a [`Stmt::MsgLoop`].
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MsgHandler {
     /// Message hashes handled.
     pub msgs: Vec<Hash>,
@@ -166,7 +166,7 @@ pub struct MsgHandler {
 }
 
 /// A boolean condition with C short-circuit semantics.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Cond {
     /// Always true.
     True,
@@ -190,7 +190,7 @@ impl Cond {
 }
 
 /// Comparison operators (signed unless prefixed with U).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[allow(missing_docs)]
 pub enum CmpOp {
     Eq,
@@ -241,7 +241,7 @@ impl CmpOp {
 }
 
 /// A signed 32-bit integer expression (KAS has no floating point).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Expr {
     /// Constant.
     Int(i32),
@@ -258,7 +258,7 @@ pub enum Expr {
 }
 
 /// Binary operators.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BinOp {
     /// Wrapping add.
     Add,
@@ -337,7 +337,7 @@ impl BinOp {
 }
 
 /// A runtime function call.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Call {
     /// Table index.
     pub func: FuncId,
@@ -346,7 +346,7 @@ pub struct Call {
 }
 
 /// A call argument, shaped by the parameter type.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Arg {
     /// `SDWORD` / `BOOL`.
     Int(Expr),
@@ -383,7 +383,7 @@ impl Arg {
 }
 
 /// A team reference.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TeamRef {
     /// NULL.
     Null,
@@ -394,7 +394,7 @@ pub enum TeamRef {
 }
 
 /// A ship selection reference.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ShipsRef {
     /// NULL.
     Null,
@@ -405,7 +405,7 @@ pub enum ShipsRef {
 }
 
 /// A position reference.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PointRef {
     /// NULL.
     Null,
@@ -420,7 +420,7 @@ pub enum PointRef {
 }
 
 /// A string argument.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StrRef {
     /// NULL.
     Null,
@@ -467,7 +467,7 @@ impl Mission {
 }
 
 /// Which code a block belongs to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BlockOwner {
     /// Mission-level code (scope 0).
     Mission,

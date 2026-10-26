@@ -253,7 +253,7 @@ pub fn command_availability(u: &Universe, player: usize, ships: &[ShipId]) -> Av
 }
 
 /// The items of the special-action menu (`PopupMenu` items 25..48), in menu order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SpecialItem {
     Harvest,
     Repair,
@@ -455,7 +455,7 @@ pub fn any_can_upgrade(u: &Universe, player: usize, selection: &[ShipId]) -> boo
 }
 
 /// What `mrFindNearestSpecialTarget` looks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TargetKind {
     Salvageable,
     Ally,
@@ -513,7 +513,7 @@ pub fn find_nearest_special_target(u: &Universe, player: usize, ship: ShipId, ki
 }
 
 /// The special orders of `mrSpecialTargetOrder` (0x55ea10).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TargetOrder {
     Salvage,
     Repair,

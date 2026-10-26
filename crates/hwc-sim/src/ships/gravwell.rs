@@ -30,7 +30,7 @@ const STOPPED_SPEED_SQ: f32 = 2500.0;
 const SPIN_LIMIT: f32 = 0.7;
 
 /// A ship the well holds (`GravStruct`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Held {
     pub ship: ShipId,
     /// 0: braking, 1: tumbling and pushed out.
@@ -40,7 +40,7 @@ pub struct Held {
 }
 
 /// Per-ship state (+0x638..+0x65c).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct GravWellSpec {
     /// +0x638: the field is on.
     pub field_on: bool,
@@ -61,7 +61,7 @@ pub struct GravWellSpec {
 /// The caught ships' effect timers ([`GravWellSpec::caught_effect_time`]). Effect state: set
 /// only with effects, left out of comparisons and of the debug output (and so of the world
 /// hash).
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CaughtEffectTimes(pub Vec<(ShipId, f32)>);
 
 impl CaughtEffectTimes {
@@ -90,7 +90,7 @@ impl std::fmt::Debug for CaughtEffectTimes {
 }
 
 /// Per-type statics (`GravWellGeneratorStaticInit` 0x5aeab0).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct GravWellStatics {
     pub radius: f32,
     pub radius_sq: f32,

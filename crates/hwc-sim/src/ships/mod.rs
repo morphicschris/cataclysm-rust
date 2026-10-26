@@ -55,7 +55,7 @@ pub mod slipgate;
 pub mod worker_repair;
 
 /// The ship module a type uses (which `CustShipHeader`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Module {
     Acolyte,
     Acv,
@@ -140,7 +140,7 @@ pub fn module_of(t: ShipType) -> Module {
 }
 
 /// Per-ship state of the modules (`ShipSpecifics`).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ShipSpec {
     #[default]
     None,
@@ -170,7 +170,7 @@ pub enum ShipSpec {
 
 /// Per-type statics the modules' static initialisers read from the ship files
 /// (`CustShipStaticInit`, kept at static +0x194).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum TypeStatics {
     #[default]
     None,
@@ -706,7 +706,7 @@ pub fn cl_special(u: &mut Universe, ships: &[ShipId], targets: &[ShipId]) {
 }
 
 /// Presentation events of the ship modules (for the renderer and sound).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Effect {
     /// An ACV's EMP went off with this radius.
     EmpBlast { radius: f32 },

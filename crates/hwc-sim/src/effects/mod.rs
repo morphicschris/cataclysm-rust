@@ -57,7 +57,7 @@ pub const EAF_ALL_BUT_NLIPS: u32 = eaf::POSITION | eaf::COORDSYS | eaf::VELOCITY
 pub const SOF_FORCE_VISIBLE: u32 = 0x1_0000;
 
 /// The compiled effects and their event tables, loaded once and shared by every universe.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EffectData {
     pub lib: Library,
     pub tables: Arc<EtgTables>,
@@ -93,7 +93,7 @@ impl EffectData {
 }
 
 /// The original's effect switches (all on in the shipped game).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EffectOptions {
     /// `etgFireEffectsEnabled` (0x870b5c).
     pub fire: bool,
@@ -115,7 +115,7 @@ impl Default for EffectOptions {
 }
 
 /// What owns an effect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FxOwner {
     Ship(ShipId),
     Bullet(BulletId),
@@ -163,9 +163,11 @@ impl From<ShipId> for FxOwner {
 }
 
 /// Effects in a universe.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Effects {
     pub world: FxWorld,
+    /// Game data: not saved, linked back on load.
+    #[serde(skip, default = "crate::save::etg_tables")]
     pub tables: Arc<EtgTables>,
     pub options: EffectOptions,
     /// The effect of each bullet (`bullet->effect`, +0x134).

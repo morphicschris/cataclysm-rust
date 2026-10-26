@@ -18,7 +18,7 @@ use crate::fpu::{eq_or_unordered, ld, st, Ext};
 use crate::REALLY_BIG;
 
 /// `tcb`: tension, continuity, bias of one key.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[repr(C)]
 pub struct Tcb {
     pub tension: f32,
@@ -27,7 +27,7 @@ pub struct Tcb {
 }
 
 /// `splinecurve`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SplineCurve {
     pub time_elapsed: f32,
     pub current_point: i32,
@@ -38,7 +38,7 @@ pub struct SplineCurve {
 }
 
 /// The function-static state of `bsCurveUpdate`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SplineCache {
     pub last_time: f32,
     pub hermite: [f32; 4],

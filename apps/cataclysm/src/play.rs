@@ -68,6 +68,11 @@ pub struct Loading {
     groups: Option<CarriedGroups>,
     game: Option<Game>,
     step: Step,
+    /// Loading a saved game: its file, and its interface once read.
+    saved: Option<std::path::PathBuf>,
+    saved_ui: Option<crate::saves::UiState>,
+    /// Where the game's saves go (given to the game when it is ready).
+    pub saves: Option<Rc<crate::saves::SaveDir>>,
 }
 
 /// The player's team colours from the options (`PlayerBaseColor` / `PlayerStripeColor`, once
@@ -110,8 +115,28 @@ impl Loading {
             groups: None,
             game: None,
             step: Step::Start,
+            saved: None,
+            saved_ui: None,
+            saves: None,
         })
     }
+
+    /// Loading a saved game (`gameStart(file)`: `PreLoadGame`, the statics, `LoadGame`) behind
+    /// the loading screen of its mission. No level file is read and no NIS level plays: the
+    /// game carries on where it was saved.
+    pub fn from_save(
+        data: Rc<GameData>,
+        session: &Session,
+        path: &std::path::Path,
+        size: (i32, i32),
+    ) -> Result<Loading, String> {
+        let h = hwc_sim::save::read_header(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut l = Loading::new(data, session, h.mission, h.skill, size)?;
+        l.saved = Some(path.to_path_buf());
+        l.opening_nis = false;
+        Ok(l)
+    }
+
 
     /// The next mission of the campaign: the fleet that jumped out of the mission before
     /// arrives in it (`singlePlayerLoadNewLevel`).
@@ -211,6 +236,7 @@ impl Loading {
                 // `singlePlayerLoadNewLevel` for the mission.
                 let sim = match self.after_nis.take() {
                     Some(n) => self.loader.finish(*n, &self.assets).map(Sim::Mission),
+                    None if self.saved.is_some() => self.read_saved().map(Sim::Mission),
                     None if self.plays_nis_level() => self
                         .loader
                         .start_nis_level(&self.assets, self.centre)
@@ -255,6 +281,15 @@ impl Loading {
                 let world = self.world.take().expect("world");
                 match Game::new(self.source.clone(), session, world) {
                     Ok(mut g) => {
+                        if let Some(d) = &self.saves {
+                            g.set_saves(d.clone());
+                        }
+                        if let Some(ui) = self.saved_ui.take() {
+                            g.restore_ui(ui);
+                            if let Some(p) = &self.saved {
+                                g.after_load(p);
+                            }
+                        }
                         if let Some((run, fired)) = self.nis.take() {
                             g.queue_nis(run, fired);
                         }
@@ -292,6 +327,16 @@ impl Loading {
         };
         self.step = next;
         Progress::Working
+    }
+
+    /// `LoadGame`: the saved game, linked to the statics just loaded.
+    fn read_saved(&mut self) -> Result<hwc_sim::mission::MissionRun, String> {
+        let path = self.saved.clone().expect("saved game");
+        let statics = self.loader.statics.clone().expect("statics");
+        let relink = crate::saves::relink(&self.assets, statics, self.mission)?;
+        let (_, payload) = crate::saves::read(&path, &relink).map_err(|e| format!("{}: {e}", path.display()))?;
+        self.saved_ui = Some(payload.ui);
+        Ok(payload.run)
     }
 
     fn fail(&mut self, why: String) -> Progress {

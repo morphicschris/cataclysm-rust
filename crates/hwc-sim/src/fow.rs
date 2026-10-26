@@ -22,14 +22,14 @@ pub const CELL_SIZE: f32 = 10_000.0;
 const DISCOVERY_INTERVAL: f32 = 10.0;
 
 /// One cell: viewers and explored flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Cell {
     pub viewers: i32,
     pub explored: bool,
 }
 
 /// A fog-of-war grid (`FOWGrid`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FowGrid {
     /// Cells along x, y, z.
     pub dims: [i32; 3],
@@ -133,7 +133,7 @@ impl FowGrid {
 }
 
 /// The fog state of the universe.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct FogOfWar {
     /// One grid per player (only the local player's exists).
     pub grids: Vec<Option<FowGrid>>,

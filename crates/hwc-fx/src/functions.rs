@@ -11,7 +11,7 @@ use crate::bytecode::evt::*;
 
 /// Implementations a compiled `Function` opcode can call (stored as the function slot).
 #[allow(missing_docs)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[repr(u32)]
 pub enum Fun {
     SetDefaults,
@@ -228,7 +228,7 @@ impl Fun {
 }
 
 /// Compile-time hooks run after a call is parsed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Resolve {
     None,
     /// `etgCreationResolve`: the following `{ ... }` becomes per-particle callback code.
@@ -238,7 +238,7 @@ pub enum Resolve {
 }
 
 /// One row of the function table.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FuncEntry {
     pub name: &'static str,
     pub fun: Fun,

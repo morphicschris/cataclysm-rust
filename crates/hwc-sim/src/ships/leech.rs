@@ -60,7 +60,7 @@ const LATCH_ACCURACY: f32 = f32::from_bits(0x3f7f_f972);
 const NO_AVOID: u32 = 0x40;
 
 /// Per-ship state (`ship+0x638..+0x680`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LeechSpec {
     pub state: u8,
     /// Drain mode (+0x639): 6 attach, 7 resource units, 8 health.
@@ -122,7 +122,7 @@ impl Default for LeechSpec {
 
 /// Per-type statics (`LeechStaticInit` 0x5b2510 reads nothing; the drain rates are the
 /// targets' `leechRUsPerSecond` / `leechHPsPerSecond`).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct LeechStatics {}
 
 impl LeechStatics {

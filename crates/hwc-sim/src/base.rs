@@ -109,8 +109,9 @@ pub mod game_flags {
 
 /// A technology set (`TechSet`, 0xa8 bytes): one flag per technology plus a mode word
 /// (2 = all technologies, -2 = disabled, 0 = as listed).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Techs {
+    #[serde(with = "hwc_math::serde_array")]
     pub has: [i32; NUM_TECHS],
     pub mode: i32,
 }
@@ -177,7 +178,7 @@ impl Techs {
 }
 
 /// Which research table a player uses (`player+0x350`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ResearchTableKind {
     /// `SPRS*`.
     SinglePlayerSomtaaw,
@@ -189,7 +190,7 @@ pub enum ResearchTableKind {
 }
 
 /// A research topic (`ResearchTopic`, 0x18 bytes in the player's topic list).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResearchTopic {
     /// Unique number (stands for the node pointer the labs hold).
     pub id: u32,
@@ -208,7 +209,7 @@ pub mod lab_status {
 }
 
 /// A research lab (`player+0x360`, 8 bytes each).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Lab {
     pub status: i32,
     /// The topic being researched (its [`ResearchTopic::id`]).
@@ -216,7 +217,7 @@ pub struct Lab {
 }
 
 /// Per-player base state (fields of Cataclysm's `Player`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PlayerBase {
     /// +0x00: the player's mothership.
     pub mothership: Option<ShipId>,
@@ -314,7 +315,7 @@ impl PlayerBase {
 }
 
 /// Per-player game statistics the base code updates (`gameStats`, stride 0x7f8).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct PlayerStats {
     /// 0xa080b8: total resource units gained.
     pub ru_total: i32,
@@ -329,7 +330,7 @@ pub struct PlayerStats {
 }
 
 /// The game-wide statistics.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GameStats {
     pub players: Vec<PlayerStats>,
     /// 0xa080a0: resource units collected by everyone.
@@ -392,7 +393,7 @@ impl GameStats {
 }
 
 /// How the game was set up (globals the base code tests).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GameOptions {
     /// `tpGameCreated.flag` (0x87bfb4), see [`game_flags`].
     pub flags: u32,
@@ -428,7 +429,7 @@ impl Default for GameOptions {
 }
 
 /// `ClampInfo` (+0x1bc, 0x38 bytes): what a ship is clamped to and what is clamped to it.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ClampInfo {
     /// +0x00: the host (`None` when only hosting slaves).
     pub host: Option<ShipId>,
@@ -442,14 +443,15 @@ pub struct ClampInfo {
 
 /// Dock-point occupancy of a ship with dock points (+0x4a8): points in use per dock-point type
 /// and the reservation of every point.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DockOccupancy {
+    #[serde(with = "hwc_math::serde_array")]
     pub used_per_type: [u8; 35],
     pub reserved: Vec<bool>,
 }
 
 /// Ships inside a carrier, mothership or other dock (+0x4b4, a list plus two counters).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct InsideShips {
     pub ships: Vec<ShipId>,
     /// +0x0c: fighters and micro ships inside.
@@ -459,7 +461,7 @@ pub struct InsideShips {
 }
 
 /// The harvesting routine a resourcer uses (`ship+0x390`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum HarvestFn {
     #[default]
     None,
@@ -470,7 +472,7 @@ pub enum HarvestFn {
 }
 
 /// A salvager's job (`SalvageSpec`, at +0x644 for workers).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SalvageSpec {
     /// [0]: state (0..14).
     pub state: u32,
@@ -485,7 +487,7 @@ pub struct SalvageSpec {
 }
 
 /// Mothership module break-away state (`ShipModule` specifics, +0x638..).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ModuleSpec {
     /// +0x638: 1 once the module has broken away from its host.
     pub broken_away: bool,
@@ -506,7 +508,7 @@ pub struct ModuleSpec {
 }
 
 /// Link state of two ships merging (Acolyte + Acolyte -> ACV; +0x650 partner, +0x654 state).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct LinkSpec {
     pub partner: Option<ShipId>,
     /// 0 none, 2 initiator approaching, 3 aligning, 4 merging, 5 passive partner.
@@ -516,7 +518,7 @@ pub struct LinkSpec {
 }
 
 /// Per-ship base state (fields of Cataclysm's `Ship`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ShipBase {
     /// +0x1bc `clampInfo`.
     pub clamp: Option<ClampInfo>,
@@ -645,7 +647,7 @@ impl Default for ShipBase {
 }
 
 /// Game-wide base state.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct BaseState {
     pub options: GameOptions,
     /// `universe.curPlayerIndex`: the player whose build manager runs on this machine.
@@ -674,7 +676,7 @@ pub struct BaseState {
 }
 
 /// Things the base code reports (speech, messages and effects in the original).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BaseEvent {
     /// A ship finished construction (`cmShipBuildComplete`).
     ShipBuilt { ship: Option<ShipId>, ship_type: ShipType, player: usize },
@@ -729,7 +731,7 @@ pub mod create_flags {
 }
 
 /// How [`create_ship`] creates a ship.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct CreateOptions {
     /// See [`create_flags`].
     pub flags: u32,

@@ -11,7 +11,7 @@ use hwc_math::{Matrix, Vector};
 use crate::statics::{ShipRace, ShipType};
 
 /// Object kinds (`ObjType`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ObjType {
     Ship = 0,
     Bullet = 1,
@@ -25,7 +25,7 @@ pub enum ObjType {
 }
 
 /// A ship's identity: `shipID.shipNumber`, handed out in creation order and never reused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ShipId(pub u16);
 
 impl ShipId {
@@ -63,15 +63,15 @@ impl ShipId {
 }
 
 /// A bullet's identity (slot in the bullet store; slots are reused once a bullet is gone).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BulletId(pub u32);
 
 /// A missile's or mine's identity (`missileID`, handed out in creation order).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct MissileId(pub u32);
 
 /// A reference to any object in the universe lists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ObjRef {
     Ship(ShipId),
     Bullet(BulletId),
@@ -121,7 +121,7 @@ pub mod attack_situation {
 pub const RECENT_ATTACK_DURATION: u8 = 80;
 
 /// `SpecificAttackVars` (+0x374).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct AttackVars {
     /// One target per gun, for ships that can target several at once (+0x374).
     pub multiple_targets: Option<Vec<Option<ShipId>>>,
@@ -137,7 +137,7 @@ pub struct AttackVars {
 }
 
 /// A gun's run-time state (`Gun`, 0x88 bytes in Cataclysm).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Gun {
     /// +0x00. Weapon technology currently fitted (index into `WeaponType`).
     pub level: u32,
@@ -163,7 +163,7 @@ pub struct Gun {
 }
 
 /// Per-type ship state kept in `ShipSpecifics` (+0x638 onwards) by the combat code.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct InterceptorSpec {
     /// +0x638 `lasttimefired`.
     pub last_time_fired: f32,
@@ -184,7 +184,7 @@ pub struct InterceptorSpec {
 
 /// Attack-side-step state (`attackSideStep` parameters) for corvettes and the multi-beam
 /// frigate.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SideStepSpec {
     /// Time the side step started.
     pub time: f32,
@@ -261,7 +261,7 @@ pub mod special {
 }
 
 /// `PosInfo` (+0x58).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct PosInfo {
     pub position: Vector,
     pub velocity: Vector,
@@ -275,7 +275,7 @@ pub const ISMOVING_MOVING: u16 = 1;
 pub const ISMOVING_ROTATING: u16 = 2;
 
 /// `RotInfo` (+0x98).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct RotInfo {
     /// Columns are the object's up, right and heading vectors in world space.
     pub coordsys: Matrix,
@@ -284,7 +284,7 @@ pub struct RotInfo {
 }
 
 /// The parts of `CollInfo` (+0xd4) the simulation keeps up to date.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct CollInfo {
     /// Collision sphere centre relative to the position, in world orientation.
     pub coll_offset: Vector,
@@ -297,7 +297,7 @@ pub struct CollInfo {
 }
 
 /// `NonStats` (+0x17c): the per-instance copy of the guidance statics.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct NonStats {
     pub thrust_strength: [f32; 6],
     pub rot_strength: [f32; 6],
@@ -325,15 +325,15 @@ pub mod rot {
 }
 
 /// Index into the command layer's command store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CommandId(pub u32);
 
 /// Index into the universe's collision blob list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BlobId(pub u32);
 
 /// A ship instance (`Ship`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Ship {
     pub id: ShipId,
     pub ship_type: ShipType,
@@ -619,7 +619,7 @@ impl Ship {
 }
 
 /// A player (`Player`), reduced to what the slice uses.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Player {
     pub index: usize,
     pub race: ShipRace,
@@ -640,7 +640,7 @@ impl Player {
 }
 
 /// Ships by number (`ShipIDToPtr`): numbers are handed out sequentially and never reused.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ShipTable {
     slots: Vec<Option<Ship>>,
 }
@@ -683,7 +683,7 @@ impl ShipTable {
 }
 
 /// A bullet or beam (`Bullet`, 0x164 bytes in Cataclysm).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Bullet {
     pub id: BulletId,
     /// +0x14.
@@ -736,7 +736,7 @@ pub struct Bullet {
 }
 
 /// Bullets by slot; slots are reused (in a fixed order, so runs stay deterministic).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BulletTable {
     slots: Vec<Option<Bullet>>,
     free: Vec<u32>,

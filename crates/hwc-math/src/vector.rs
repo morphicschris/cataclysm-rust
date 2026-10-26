@@ -11,7 +11,7 @@ use crate::fastmath::fsqrt;
 use crate::fpu::{eq_or_unordered, ld, lt_or_unordered, st, Ext};
 
 /// `vector`: three `real32`s.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[repr(C)]
 pub struct Vector {
     pub x: f32,
@@ -20,7 +20,7 @@ pub struct Vector {
 }
 
 /// `hvector`: homogeneous four-component vector.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[repr(C)]
 pub struct HVector {
     pub x: f32,

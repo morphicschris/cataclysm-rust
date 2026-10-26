@@ -15,14 +15,14 @@ use crate::fpu::{eq_or_unordered, ld, st};
 use crate::vector::{HVector, Vector};
 
 /// `matrix`: 3x3, column-major.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[repr(C)]
 pub struct Matrix {
     pub m: [f32; 9],
 }
 
 /// `hmatrix`: 4x4 homogeneous, column-major.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[repr(C)]
 pub struct HMatrix {
     pub m: [f32; 16],

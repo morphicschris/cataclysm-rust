@@ -44,7 +44,7 @@ pub const BIG_GUN_BULLET: u32 = 0x12;
 pub type Rgb = [u8; 4];
 
 /// `ping.script`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Tweaks {
     pub anomaly: KindTweaks,
     pub battle: KindTweaks,
@@ -56,7 +56,7 @@ pub struct Tweaks {
 }
 
 /// One kind's look (`Anomaly*`, `Battle*`, `NewShip*`). `min_screen` is in pixels.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct KindTweaks {
     pub color: Rgb,
     pub size: f32,
@@ -149,14 +149,14 @@ pub fn blob_properties(source: &dyn hwc_ui::AssetSource) -> hwc_sim::tunables::B
 }
 
 /// What a ping is centred on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Owner {
     Ship(ShipId),
     Bullet(BulletId),
 }
 
 /// The ping's expiry test (`pingeval`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Eval {
     /// `pingAnomalyPingTimeout`: KAS and objective pings. A ping on ships follows their centre
     /// and goes when the last of them dies; an object ping stays where its object died.
@@ -175,7 +175,7 @@ pub enum Eval {
     Battle { ships: Vec<ShipId> },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Ping {
     pub color: Rgb,
     pub size: f32,
@@ -255,7 +255,7 @@ pub const LEGEND: [(&str, u32); 5] = [
 ];
 
 /// The ping list and its drawing state.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Pings {
     pub list: Vec<Ping>,
     pub tweaks: Tweaks,

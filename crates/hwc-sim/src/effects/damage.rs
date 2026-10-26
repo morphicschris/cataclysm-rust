@@ -51,7 +51,7 @@ const HS_INACTIVE: u32 = 0;
 const HS_FINISHED: u32 = 7;
 
 /// The damage-effect record of one ship.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DamageSlots {
     /// `ship->showingDamage[level][i]` (+0x3ac).
     pub showing: [[Option<EffectId>; 2]; 3],

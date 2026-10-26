@@ -29,13 +29,13 @@ pub const CLOAK_RATE: f32 = f32::from_bits(0x3dcc_cccd);
 const MIN_RANGE_FACTOR: f32 = 0.9;
 
 /// Per-ship state.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct CloakerSpec {
     pub cloak: crate::cloak::Cloak,
 }
 
 /// Per-type statics (`CustShipStaticInit`).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct CloakerStatics {
     /// `P1IonArrayFrigateStaticInit`: the attack range per tactic (the bullet ranges) and the
     /// minimum range per tactic (the minimum bullet ranges x 0.9). The cloaked fighter uses the

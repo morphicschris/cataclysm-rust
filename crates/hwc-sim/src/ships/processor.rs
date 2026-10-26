@@ -31,7 +31,7 @@ const REPAIR_BEAM_EFFECT: usize = 18;
 const MAX_BEAM_WIDTH: f32 = 250.0;
 
 /// One repair beam (8 dwords at +0x77c: ship, dock point, target, stopwatch, effect).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RepairBeam {
     /// The `DPT_AutoRepair` dock point it shines from.
     pub point: usize,
@@ -44,13 +44,13 @@ pub struct RepairBeam {
 }
 
 /// Per-ship state: the beams (+0x77c, count at +0x7fc).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProcessorSpec {
     pub beams: Vec<RepairBeam>,
 }
 
 /// Processors have no static initialiser of their own.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProcessorStatics {}
 
 impl ProcessorStatics {

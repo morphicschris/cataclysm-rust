@@ -34,7 +34,7 @@ pub mod state {
 }
 
 /// A cloak (`CloakStruct`, 24 bytes).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Cloak {
     pub state: i32,
     pub power: f32,

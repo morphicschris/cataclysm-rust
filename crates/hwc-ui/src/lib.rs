@@ -22,6 +22,7 @@ pub mod letterbox;
 pub mod options;
 pub mod present;
 pub mod region;
+pub mod saves;
 pub mod scale;
 pub mod session;
 pub mod subtitle;

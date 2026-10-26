@@ -37,7 +37,7 @@ const CRUISE_LIMIT_VEL: f32 = -400.0;
 
 /// Per-ship state (missile destroyer +0x638..+0x64c; missile corvettes +0x640..+0x650 after
 /// their side-step state, which is the generic [`crate::object::Ship::side_step`]).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct MissileShipSpec {
     /// Last missile regeneration.
     pub last_regen: f32,
@@ -52,7 +52,7 @@ pub struct MissileShipSpec {
 }
 
 /// Per-type statics (`MissileDestroyerStaticInit` / `P1MissileCorvetteStaticInit`).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct MissileShipStatics {
     /// +0 / +0xc: the bullet ranges and 0.9 times the minimum ranges, per tactic.
     pub gun_range: [f32; 3],

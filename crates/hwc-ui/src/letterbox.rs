@@ -33,7 +33,7 @@ pub fn tall_bar_height(width: i32, height: i32) -> i32 {
 }
 
 /// The letterbox state (`nisScissorFadeIn/Out/Time`, `nisScissorFade`, `nisFullyScissored`).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Letterbox {
     pub fade_in: f32,
     pub fade_out: f32,

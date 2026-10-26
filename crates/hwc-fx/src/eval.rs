@@ -8,14 +8,14 @@
 //! The input is upper-cased first, so function names are case-insensitive.
 
 /// Errors the evaluator can report.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EvalError {
     Syntax,
     DivZero,
     Range,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 enum Tok {
     Plus,
     Minus,
@@ -36,7 +36,7 @@ enum Tok {
     Eol,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 enum Func {
     Acos,
     Asin,

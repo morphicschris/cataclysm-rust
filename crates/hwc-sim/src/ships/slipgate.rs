@@ -24,7 +24,7 @@ pub mod gate_state {
 }
 
 /// `SlipgateSpec` (+0x638..).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SlipgateSpec {
     /// +0x638: the paired gate.
     pub partner: Option<ShipId>,

@@ -32,7 +32,7 @@ const CANNON_BUILD_TIME: f32 = f32::from_bits(0x3c23_d70a);
 const CANNON_UPGRADE_PERCENT: f32 = 10.0;
 
 /// Per-ship state (+0x638..+0x139c).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DreadnoughtSpec {
     /// +0x638: when a missile was last regenerated.
     pub last_regenerate: f32,
@@ -67,7 +67,7 @@ impl Default for DreadnoughtSpec {
 /// Per-type statics (`DreadnoughtStaticInit` 0x5ab970). The first six values of the table are
 /// the per-tactic bullet ranges (+0x1a4..) and 90 % of the minimum ranges (+0x1b0..), as for
 /// the other capital-ship modules.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct DreadnoughtStatics {
     pub range: [f32; 3],
     pub min_range: [f32; 3],

@@ -40,7 +40,7 @@ pub const DEG_TO_RAD: f32 = 0.017_453_292;
 pub const COMPUTER_PLAYER: usize = 1;
 
 /// A labelled volume (`Volume`): `AISphere` or `AIBox`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Volume {
     /// `VOLUME_SPHERE` (type 0): centre and radius (half the diameter in the file).
     Sphere { center: Vector, radius: f32 },
@@ -85,7 +85,7 @@ pub fn distance_squared(a: Vector, b: Vector) -> f64 {
 }
 
 /// A labelled path (`AIPath`).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct KasPath {
     pub closed: bool,
     /// Points by index (`n/total` in the file, 1-based there); unset points stay at the origin.
@@ -93,7 +93,7 @@ pub struct KasPath {
 }
 
 /// A KAS team (`AITeam` of type `ScriptTeam`) as far as missions use it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct KasTeam {
     /// `kasLabel` (+0x58): the label hash.
     pub label: Hash,
@@ -119,7 +119,7 @@ impl KasTeam {
 }
 
 /// What a resource object is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResourceKind {
     /// `OBJ_AsteroidType`, with the asteroid type 0..4.
     Asteroid(u8),
@@ -131,7 +131,7 @@ pub enum ResourceKind {
 
 /// A resource object created by a level, as the level set it up. Asteroids and dust clouds
 /// also exist in the simulation ([`crate::resource`], `id`); gas clouds are records only.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LevelResource {
     pub kind: ResourceKind,
     /// The simulation's resource object.
@@ -147,7 +147,7 @@ pub struct LevelResource {
 }
 
 /// The layout of a resource volume.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum VolumeShape {
     Sphere,
     Cylinder,
@@ -156,7 +156,7 @@ pub enum VolumeShape {
 
 /// A resource volume (`ResourceVolume`, 0xb0 bytes); only volumes with the regrow attribute are
 /// kept by the original.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResourceVolume {
     pub shape: VolumeShape,
     pub centre: Vector,
@@ -176,7 +176,7 @@ pub struct ResourceVolume {
 }
 
 /// A derelict created by a level.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LevelDerelict {
     pub derelict_type: DerelictType,
     pub position: Vector,
@@ -187,7 +187,7 @@ pub struct LevelDerelict {
 }
 
 /// Sensors-manager tweaks set from the level file (`SMMissionTweaks`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SmTweaks {
     pub depth_cue_radius: f32,
     pub depth_cue_start_radius: f32,
@@ -216,7 +216,7 @@ impl Default for SmTweaks {
 
 /// Asteroid spin tables from `resource.script` (`ASTEROID_LO_ROTATE`, `ASTEROID_HI_ROTATE`,
 /// `ASTEROID_ROTATE_PROB`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResourceTweaks {
     pub lo_rotate: [f32; 5],
     pub hi_rotate: [f32; 5],
@@ -270,7 +270,7 @@ impl ResourceTweaks {
 }
 
 /// Game state the loader reads.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LevelContext {
     /// `singlePlayerGame`.
     pub single_player: bool,
@@ -283,7 +283,7 @@ pub struct LevelContext {
 }
 
 /// Everything a level created besides ships, and the KAS labels it defined.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct LevelState {
     /// The level file is MissionMan output (positions absolute).
     pub mission_man: bool,
@@ -365,7 +365,7 @@ impl LevelState {
 }
 
 /// Why a level could not be loaded.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LevelError(pub String);
 
 impl std::fmt::Display for LevelError {
@@ -530,7 +530,7 @@ pub fn update_clamped(u: &mut Universe, state: &LevelState) {
 }
 
 /// Where a mission sphere puts its contents (`MissionSphereInfo`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 struct SphereInfo {
     player: usize,
     position: Vector,

@@ -51,7 +51,7 @@ pub const PARADE_SCRIPTS: [&str; 12] = [
 ];
 
 /// One slot of a parade table (`SlotInfo`).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SlotInfo {
     pub up_offset: f32,
     pub right_offset: f32,
@@ -64,9 +64,28 @@ pub struct SlotInfo {
 }
 
 /// The twelve parade tables.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ParadeTables {
+    #[serde(with = "slot_tables")]
     pub types: Vec<[SlotInfo; NUM_SLOTS]>,
+}
+
+/// Serde for the per-script slot tables (arrays longer than serde's own 32).
+mod slot_tables {
+    use super::{SlotInfo, NUM_SLOTS};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &[[SlotInfo; NUM_SLOTS]], s: S) -> Result<S::Ok, S::Error> {
+        let rows: Vec<&[SlotInfo]> = v.iter().map(|r| &r[..]).collect();
+        rows.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<[SlotInfo; NUM_SLOTS]>, D::Error> {
+        let rows: Vec<Vec<SlotInfo>> = Vec::deserialize(d)?;
+        rows.into_iter()
+            .map(|r| r.try_into().map_err(|_| serde::de::Error::custom("parade slot table length")))
+            .collect()
+    }
 }
 
 impl Default for ParadeTables {
@@ -107,7 +126,7 @@ impl ParadeTables {
 }
 
 /// One slot of a parade: its row of subslots and the highest one used (-1: empty).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MilitarySlot {
     pub highest_used: i32,
     pub subslots: Vec<Option<ShipId>>,
@@ -126,7 +145,7 @@ impl MilitarySlot {
 }
 
 /// `MilitaryParadeCommand`: the host and its slots.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MilitaryParade {
     pub around: ShipId,
     /// Parade type (index into [`PARADE_SCRIPTS`], -1 for a host without one).

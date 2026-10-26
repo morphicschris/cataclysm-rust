@@ -122,7 +122,7 @@ const SNAP_POINTS: [&str; 9] =
     ["SnapCenter", "SnapStarbFT", "SnapStarbFB", "SnapPortFT", "SnapPortFB", "SnapStarbBT", "SnapStarbBB", "SnapPortBT", "SnapPortBB"];
 
 /// Per-ship state (`ShipSpecifics`, +0x638).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct RammingSpec {
     /// +0x638: see [`state`].
     pub state: u8,
@@ -150,7 +150,7 @@ pub struct RammingSpec {
 }
 
 /// Per-type statics (`RammingFrigateStaticInit`, 0x5ba480; the ship file's ram keywords).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct RammingStatics {
     /// `RamDamage`.
     pub ram_damage: f32,

@@ -7,6 +7,7 @@ publish.workspace = true
 description = "Effects for the Homeworld: Cataclysm recreation: the ETG effect-script compiler and interpreter and the particle system"
 
 [dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
 hwc-formats = { path = "../hwc-formats" }
 hwc-math = { path = "../hwc-math" }
 

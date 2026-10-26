@@ -40,7 +40,7 @@ const MODE_VARIABLES: usize = 3;
 const MODE_NOTHING: usize = 64;
 
 /// A compile error: the situations where the original would crash or report a fatal error.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CompileError {
     pub file: String,
     pub line: usize,
@@ -56,7 +56,7 @@ impl std::fmt::Display for CompileError {
 impl std::error::Error for CompileError {}
 
 /// An `alternate` decision record (`etgalternate`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Decision {
     pub kind: u32,
     pub low: u32,
@@ -64,7 +64,7 @@ pub struct Decision {
 }
 
 /// A loaded effect (`etgeffectstatic`).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct EffectStatic {
     /// File name without directories, as registered.
     pub name: String,
@@ -116,7 +116,7 @@ impl FileSource for hwc_formats::gamedata::GameData {
 }
 
 /// Files from a directory holding an extracted archive (paths matched ignoring case).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct DirSource {
     pub root: std::path::PathBuf,
 }
@@ -141,7 +141,7 @@ impl FileSource for HashMap<String, Vec<u8>> {
 }
 
 /// Effect statics plus the texture and mesh registries their code refers to.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Library {
     pub statics: Vec<EffectStatic>,
     /// Registered texture paths; a texture handle is an index here (`0xffffffff` = none).
@@ -154,7 +154,7 @@ pub struct Library {
 }
 
 /// A parsed line's symbol (`etgvarentry`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct VarEntry {
     name: String,
     offset: u32,
@@ -166,12 +166,12 @@ struct VarEntry {
     code_block: u8,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum OpenFn {
     CallbackOpen,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum CloseFn {
     ParseModeRestore,
     CodeBlockEnd,
@@ -185,13 +185,13 @@ enum CloseFn {
 }
 
 /// A code location (`block`, byte offset), standing in for the original's pointers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 struct CodeRef {
     block: usize,
     offset: u32,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct NestEntry {
     open: Option<OpenFn>,
     close: Option<CloseFn>,
@@ -1338,7 +1338,7 @@ impl Parser<'_> {
 }
 
 /// Parse-table actions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum P {
     Nop,
     If,

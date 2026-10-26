@@ -18,7 +18,7 @@ use crate::statics::DataSource;
 const DEG_TO_RAD: f32 = 0.017_453_292;
 
 /// Collision blob properties (`collBlobProperties`, all from `Tweak.script`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BlobProperties {
     pub density_low: f32,
     pub density_high: f32,
@@ -34,7 +34,7 @@ pub struct BlobProperties {
 }
 
 /// Every run-time tunable the movement slice reads.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimTweaks {
     // --- AIShip.script (table 0x743780, values at 0x7436a0..)
     pub velocity_scale_factor: f32,
@@ -223,7 +223,7 @@ impl Default for SimTweaks {
 }
 
 /// How a keyword converts its value (the original's script setters).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 enum Conv {
     /// `scriptSetReal32CB`.
     Real,

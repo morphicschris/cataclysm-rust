@@ -68,6 +68,8 @@ struct Gpu {
 }
 
 struct App {
+    /// The player's saved games.
+    saves: Rc<crate::saves::SaveDir>,
     session: Session,
     audio: Option<Audio>,
     intro: Option<Intro>,
@@ -193,7 +195,11 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         None
     };
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
+    let saves = Rc::new(crate::saves::SaveDir::locate(&data));
+    let mut session = session;
+    session.fe.game.saves = Some(saves.clone());
     let mut app = App {
+        saves,
         session,
         audio,
         intro,
@@ -628,9 +634,35 @@ impl App {
         self.session.fe.all_screens_delete();
         let size = self.session.placement.canvas;
         match Loading::new(self.data.clone(), &self.session, mission, difficulty, size) {
-            Ok(l) => self.loading = Some(Box::new(l)),
+            Ok(mut l) => {
+                l.saves = Some(self.saves.clone());
+                self.loading = Some(Box::new(l))
+            }
             Err(e) => {
                 eprintln!("cataclysm: cannot start mission {mission}: {e}");
+                self.back_to_menu();
+            }
+        }
+    }
+
+    /// `utyLoadMultiSinglePlayerGame` / `gpLoadGame`: a saved game loads behind its mission's
+    /// loading screen (the game running, if any, ends first and the music stops).
+    fn load_saved_game(&mut self, path: &std::path::Path) {
+        self.game = None;
+        self.loading = None;
+        if let Some(a) = &mut self.audio {
+            a.stop_music(0.0);
+            a.stop_all_sfx();
+        }
+        self.session.fe.all_screens_delete();
+        let size = self.session.placement.canvas;
+        match Loading::from_save(self.data.clone(), &self.session, path, size) {
+            Ok(mut l) => {
+                l.saves = Some(self.saves.clone());
+                self.loading = Some(Box::new(l));
+            }
+            Err(e) => {
+                eprintln!("cataclysm: cannot load {}: {e}", path.display());
                 self.back_to_menu();
             }
         }
@@ -671,7 +703,10 @@ impl App {
         }
         let size = self.session.placement.canvas;
         match Loading::new(self.data.clone(), &self.session, next, skill, size) {
-            Ok(l) => self.loading = Some(Box::new(l.with_carry(carry, centre).with_groups(groups))),
+            Ok(mut l) => {
+                l.saves = Some(self.saves.clone());
+                self.loading = Some(Box::new(l.with_carry(carry, centre).with_groups(groups)))
+            }
             Err(e) => {
                 eprintln!("cataclysm: cannot start mission {next}: {e}");
                 self.back_to_menu();
@@ -694,7 +729,10 @@ impl App {
         let size = self.session.placement.canvas;
         let mission = nis.mission;
         match Loading::after_nis_level(self.data.clone(), &self.session, *nis, skill, size) {
-            Ok(l) => self.loading = Some(Box::new(l.with_groups(groups))),
+            Ok(mut l) => {
+                l.saves = Some(self.saves.clone());
+                self.loading = Some(Box::new(l.with_groups(groups)))
+            }
             Err(e) => {
                 eprintln!("cataclysm: cannot start mission {mission}: {e}");
                 self.back_to_menu();
@@ -832,6 +870,7 @@ impl App {
         };
         let mut leave = false;
         let mut restart = false;
+        let mut load: Option<std::path::PathBuf> = None;
         let mut animatic = None;
         let mut next = false;
         let mut nis_level_done = false;
@@ -855,7 +894,12 @@ impl App {
                 game::Outcome::Animatic(n) => animatic = Some(n),
                 game::Outcome::NextMission => next = true,
                 game::Outcome::NisLevelDone => nis_level_done = true,
+                game::Outcome::LoadGame(p) => load = Some(p),
             }
+        }
+        if let Some(p) = load {
+            self.load_saved_game(&p);
+            return Ok(true);
         }
         if nis_level_done {
             self.after_nis_level();
@@ -878,9 +922,15 @@ impl App {
         };
         if leave || restart {
             let (mission, difficulty) = (g.world.mission(), g.world.skill());
+            // `SP_Restart_Level` (`gpLoadGivenGame`): the latest mission autosave, when there
+            // is one; the mission from its start otherwise.
+            let level_save = g.level_save.clone().filter(|p| p.is_file());
             self.back_to_menu();
             if restart {
-                self.start_loading(mission, difficulty);
+                match level_save {
+                    Some(p) => self.load_saved_game(&p),
+                    None => self.start_loading(mission, difficulty),
+                }
             }
             return Ok(true);
         }
@@ -1157,7 +1207,7 @@ impl App {
                 // (`singlePlayerInit`).
                 self.start_loading(if tutorial { 0 } else { 1 }, difficulty);
             }
-            Request::LoadGame(name) => eprintln!("cataclysm: would load saved game {name}"),
+            Request::LoadGame(key) => self.load_saved_game(std::path::Path::new(&key)),
             Request::Multiplayer => eprintln!("cataclysm: multiplayer is not available yet"),
             Request::OpenUrl(url) => eprintln!("cataclysm: troubleshooting page: {url}"),
         }
