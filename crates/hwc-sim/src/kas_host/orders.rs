@@ -122,10 +122,11 @@ impl super::SimHost<'_> {
         sel.iter().copied().filter(|&id| self.wrap_ok(id)).collect()
     }
 
-    /// `aiuWrapDock`: the ships fit for orders dock with `host` (when it is fit too), or each
-    /// with the nearest ship it can dock at. Returns whether an order was given.
+    /// `aiuWrapDock` + `clWrapDock`: the ships fit for orders (less those already docking or
+    /// launching with a host) dock with `host` (when it is fit too), or each with the nearest
+    /// ship it can dock at. Returns whether an order was given.
     pub(super) fn wrap_dock(&mut self, sel: &[ShipId], purpose: i32, host: Option<ShipId>) -> bool {
-        let ok = self.wrap_filter(sel);
+        let mut ok = self.wrap_filter(sel);
         if ok.is_empty() {
             return false;
         }
@@ -134,7 +135,10 @@ impl super::SimHost<'_> {
                 return false;
             }
         }
-        crate::dock::cl_dock(self.u, &ok, purpose, host);
+        command::make_ships_controllable(self.u, &mut ok);
+        if !ok.is_empty() {
+            crate::dock::cl_dock(self.u, &ok, purpose, host);
+        }
         true
     }
 
@@ -148,18 +152,15 @@ impl super::SimHost<'_> {
         true
     }
 
-    /// The team's dock (`aimCreateDock` + `aimProcessDock`): `kind` is the kind created
-    /// without a host; with a fit first ship of `with_team` it is `kind | 1`.
+    /// The team's dock move (`aitDeleteAllTeamMoves` + `aimCreateDock`): `kind` is the flags
+    /// without a host; with a fit first ship of `with_team` the move docks with it
+    /// (`kind | AT_SHIP`). The next computer-player pass gives the order ([`crate::aimove`]).
     pub(super) fn team_dock(&mut self, cx: &Cx, with_team: Team, kind: u32) {
         let first = with_team.and_then(|h| self.g.level.team(h)).and_then(|t| t.ships.first().copied());
         let host = first.filter(|&h| self.wrap_ok(h));
-        let kind = if host.is_some() { kind | 1 } else { kind };
-        let (purpose, with_host) = aim_dock_purpose(kind);
-        let sel = self.team_ships(cx);
-        if sel.is_empty() {
-            return;
-        }
-        self.wrap_dock(&sel, purpose, if with_host { host } else { None });
+        let kind = if host.is_some() { kind | crate::aimove::dock_flags::AT_SHIP } else { kind };
+        self.delete_all_team_moves(cx);
+        self.add_team_move(cx, crate::aimove::TeamMove::dock(kind, host, false, true));
     }
 
     /// A point argument with its fourth component: labelled points as stored, the centres of
@@ -440,14 +441,74 @@ macro_rules! orders_methods {
         /// `kasfDockSupportWith`: dock (for support) with the team's first ship, or the
         /// nearest.
         fn dock_support_with(&mut self, cx: &Cx, with_team: Team) {
-            self.delete_all_team_moves(cx);
             self.team_dock(cx, with_team, 0);
+        }
+
+        /// `kasfDock` / `kasfDockSupport` (one function, 0x48fb90): a dock move with the
+        /// nearest host (the team argument is not read).
+        fn dock(&mut self, cx: &Cx, _with_team: Team) {
+            self.team_dock(cx, None, 0);
+        }
+
+        fn dock_support(&mut self, cx: &Cx) {
+            self.team_dock(cx, None, 0);
+        }
+
+        /// `kasfShipsDockSupportWith`: the ships dock (refuel/repair) with the first host.
+        fn ships_dock_support_with(&mut self, _cx: &Cx, ships: Ships, with_ships: Ships) {
+            let sel = self.ships(ships);
+            let host = self.ships(with_ships).first().copied();
+            self.wrap_dock(&sel, crate::dock::purpose::DOCK, host);
+        }
+
+        /// `kasfDockStayMothership`: a dock-and-stay move with the mothership of the first
+        /// ship's player, when it is fit for orders.
+        fn dock_stay_mothership(&mut self, cx: &Cx) {
+            let first = self.team_ships(cx).first().copied();
+            let ms = first.and_then(|id| self.u.ships.get(id)).and_then(|s| self.u.base.players.get(s.player)).and_then(|p| p.mothership);
+            if let Some(ms) = ms.filter(|&m| self.wrap_ok(m)) {
+                self.delete_all_team_moves(cx);
+                self.add_team_move(cx, crate::aimove::TeamMove::dock(crate::aimove::dock_flags::AT_SHIP | crate::aimove::dock_flags::STAY, Some(ms), false, true));
+            }
+        }
+
+        /// `kasfTeamDocking`: the team's `TEAM_DOCKING` flag.
+        fn team_docking(&mut self, cx: &Cx) -> i32 {
+            i32::from(cx.team.and_then(|h| self.g.level.team(h)).is_some_and(|t| t.moves.docking))
+        }
+
+        /// `kasfShipsLaunch`: the ships are marked as launching and ordered to launch from the
+        /// host (`aiuWrapDock` purpose launch).
+        fn ships_launch(&mut self, _cx: &Cx, ships: Ships, host: Ships) {
+            let sel = self.ships(ships);
+            let h = self.ships(host).first().copied();
+            self.mark_launching(&sel);
+            self.wrap_dock(&sel, crate::dock::purpose::LAUNCH, h);
+        }
+
+        /// `kasfShipsFinishedLaunching`: every ship is out of its launch cone and in the
+        /// universe (true for an empty list).
+        fn ships_finished_launching(&mut self, _cx: &Cx, ships: Ships) -> i32 {
+            let sel = self.ships(ships);
+            i32::from(self.finished_launching(&sel))
+        }
+
+        /// `kasfSlipgateDockInstant`: the team is put inside the slipgate at once.
+        fn slipgate_dock_instant(&mut self, cx: &Cx, slipgate: Ships) {
+            let sel = self.team_ships(cx);
+            if sel.is_empty() {
+                return;
+            }
+            let Some(gate) = self.ships(slipgate).first().copied() else { return };
+            self.put_inside(&sel, gate);
+            if self.u.ships.get(gate).is_some_and(|h| matches!(h.ship_type.index(), 8 | 0x2a)) {
+                crate::ships::hive::reset_swarmers(self.u, gate);
+            }
         }
 
         /// `kasfDockStay`: dock and stay with the team's first ship, or the nearest.
         fn dock_stay(&mut self, cx: &Cx, with_team: Team) {
-            self.delete_all_team_moves(cx);
-            self.team_dock(cx, with_team, 2);
+            self.team_dock(cx, with_team, crate::aimove::dock_flags::STAY);
         }
 
         /// `kasfShipsDockStay`: dock and stay (in mission 9 the selection led by ship type
@@ -460,8 +521,9 @@ macro_rules! orders_methods {
             self.wrap_dock(&sel, purpose, host);
         }
 
-        /// `kasfShipsDockInstant`: the ships are put inside the host's first ship at once (the
-        /// hive frigates reset their swarmers).
+        /// `kasfShipsDockInstant`: the ships are put inside the host's first ship at once
+        /// (`univRemoveShipFromOutside`, `dockPutShipInside`; the hive frigates reset their
+        /// swarmers).
         fn ships_dock_instant(&mut self, _cx: &Cx, ship_sel: Ships, host_sel: Ships) {
             let Some(&host) = self.ships(host_sel).first() else {
                 self.log(LogKind::Warning, "ShipsDockInstant: no host");

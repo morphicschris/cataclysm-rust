@@ -92,7 +92,82 @@ impl SimHost<'_> {
         match self.g.level.teams[ti].moves.moves[cur].kind.clone() {
             MoveKind::MoveTeam { destination } => self.process_move_team(ti, cur, destination),
             MoveKind::Intercept { .. } => self.process_intercept(ti, cur),
+            MoveKind::Dock { .. } => self.process_dock(ti, cur),
+            MoveKind::Launch => self.process_launch(ti, cur),
         }
+    }
+
+    /// `aimProcessDock` (Cataclysm's: no health test, the purpose from the move's flags). The
+    /// first pass gives the dock order and keeps a copy of the team; later passes drop the
+    /// ships that are out again with no host, or that stay at a refuelling point; the move is
+    /// done when none is left.
+    fn process_dock(&mut self, ti: usize, cur: usize) -> bool {
+        let ships = self.g.level.teams[ti].ships.clone();
+        if ships.is_empty() {
+            return true;
+        }
+        let m = &self.g.level.teams[ti].moves.moves[cur];
+        let MoveKind::Dock { flags, host, .. } = m.kind.clone() else { return true };
+        if !m.processing {
+            let (purpose, with_host) = super::orders::aim_dock_purpose(flags);
+            let host = if with_host { host } else { None };
+            self.wrap_dock(&ships, purpose, host);
+            let t = &mut self.g.level.teams[ti];
+            if let MoveKind::Dock { docking, .. } = &mut t.moves.moves[cur].kind {
+                *docking = ships;
+            }
+            t.moves.moves[cur].processing = true;
+            t.moves.docking = true;
+            return false;
+        }
+        let done: Vec<ShipId> = ships
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.u.ships.get(id).is_some_and(|s| {
+                    let out_free = s.base.dock_with.is_none() && s.flags & crate::object::sof::HIDE == 0;
+                    let staying = s.special_flags & crate::base::special::DOCK_STAY != 0 && refuelling_at_carrier_mother(s);
+                    out_free || staying
+                })
+            })
+            .collect();
+        let t = &mut self.g.level.teams[ti];
+        let MoveKind::Dock { docking, .. } = &mut t.moves.moves[cur].kind else { return true };
+        for id in done {
+            if let Some(i) = docking.iter().position(|&d| d == id) {
+                docking.swap_remove(i);
+            }
+        }
+        if docking.is_empty() {
+            t.moves.docking = false;
+            return true;
+        }
+        false
+    }
+
+    /// `aimProcessLaunch`: the team's ships inside the host of its first ship are launched
+    /// (`clWrapLaunchMultipleShips`); ships staying at a refuelling point are let go instead.
+    /// Until one of the two applies the move waits.
+    fn process_launch(&mut self, ti: usize, cur: usize) -> bool {
+        let ships = self.g.level.teams[ti].ships.clone();
+        let Some(&first) = ships.first() else { return false };
+        if let Some(host) = crate::base::find_ship_i_am_inside(self.u, first) {
+            let inside: Vec<ShipId> = ships.iter().copied().filter(|&id| self.u.ships.ship(host).base.inside.as_ref().is_some_and(|i| i.ships.contains(&id))).collect();
+            crate::dock::cl_launch_multiple_ships(self.u, &inside, host);
+            self.g.level.teams[ti].moves.moves[cur].processing = true;
+            return true;
+        }
+        let stays = self.u.ships.get(first).is_some_and(|s| s.special_flags & crate::base::special::DOCK_STAY != 0 && refuelling_at_carrier_mother(s));
+        if stays {
+            for &id in &ships {
+                if let Some(s) = self.u.ships.get_mut(id) {
+                    s.special_flags &= !crate::base::special::DOCK_STAY;
+                }
+            }
+            self.g.level.teams[ti].moves.moves[cur].processing = true;
+            return true;
+        }
+        false
     }
 
     /// `aiuWrapMove` (0x41eeb0): the fit, mobile ships move from the position of the
@@ -196,3 +271,8 @@ impl SimHost<'_> {
 }
 
 use crate::object::ShipId;
+
+/// `ShipIsRefuelingAtCarrierMother`: docked with a host and inside it or latched to it.
+pub(super) fn refuelling_at_carrier_mother(s: &crate::object::Ship) -> bool {
+    s.base.dock_with.is_some() && matches!(s.base.dock_state, crate::dock::state::INSIDE | crate::dock::state::LATCHED)
+}

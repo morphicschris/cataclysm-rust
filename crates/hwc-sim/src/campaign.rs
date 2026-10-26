@@ -338,7 +338,7 @@ pub fn hyperspace_button(u: &mut Universe, game: &mut Game) -> Result<(), Hypers
     let now = u.total_time_elapsed;
     if skips_roll_call(game.config.mission) {
         // kasWideScreenInHyperspace(90): five seconds of wide screen first.
-        game.wide_screen = true;
+        game.wide_screen_call(crate::mission::WideScreenKind::InHyperspace, 90, u.total_time_elapsed);
         game.hyper.no_roll_call_until = st(ld(now) + 5.0);
         game.log(LogKind::Flow, "hyperspace: no roll call in this mission (the fleet jumps in 5 s)");
         return Ok(());
@@ -398,7 +398,7 @@ pub fn go_now(u: &mut Universe, game: &mut Game) -> bool {
     if game.sp_state != sp_state::WAITING_ROLLCALL || skips_roll_call(game.config.mission) {
         return false;
     }
-    game.wide_screen = true;
+    game.wide_screen_call(crate::mission::WideScreenKind::InHyperspace, 90, u.total_time_elapsed);
     let small = non_hyperspacing_ships(u);
     crate::dock::cl_dock(u, &small, crate::dock::purpose::INSTANT_STAY, None);
     for id in hyperspacing_ships(u) {
@@ -421,7 +421,7 @@ pub fn emergency_hyperspace(u: &mut Universe, game: &mut Game) -> bool {
     if game.sp_state != sp_state::WAITING_ROLLCALL || skips_roll_call(game.config.mission) {
         return false;
     }
-    game.wide_screen = true;
+    game.wide_screen_call(crate::mission::WideScreenKind::InHyperspace, 90, u.total_time_elapsed);
     for id in non_hyperspacing_ships(u) {
         crate::command::remove_ships_from_doing_stuff(u, &[id]);
         game.hyper.rec(id).abandoned = true;
@@ -1181,6 +1181,8 @@ impl Carry {
         }
         let techs: Vec<String> = p.tech.has.iter().map(|t| t.to_string()).collect();
         let _ = writeln!(o, "tech {} {}", p.tech.mode, techs.join(" "));
+        let allowed: Vec<String> = p.research_allowed.iter().map(|&a| u8::from(a).to_string()).collect();
+        let _ = writeln!(o, "allowed {}", allowed.join(" "));
         let _ = writeln!(o, "player {} {} {} {} {} {}", p.su_capacity, p.auto_launch, u8::from(p.can_do_research), p.next_topic_id, p.max_tech_level, p.upgrade_bits);
         for t in &p.topics {
             let _ = writeln!(o, "topic {} {} {}", t.id, t.tech, f(t.time_left));
@@ -1256,6 +1258,11 @@ impl Carry {
                     c.player.tech.mode = n(1)? as i32;
                     for i in 0..crate::base::NUM_TECHS {
                         c.player.tech.has[i] = n(i + 2)? as i32;
+                    }
+                }
+                "allowed" => {
+                    for i in 0..c.player.research_allowed.len() {
+                        c.player.research_allowed[i] = n(i + 1)? != 0;
                     }
                 }
                 "player" => {

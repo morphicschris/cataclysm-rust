@@ -75,7 +75,7 @@ fn main() {
             Some(c) => MissionRun::start_campaign(statics.clone(), tweaks.clone(), &src, script, config, c),
         }
         .unwrap_or_else(|e| panic!("mission {m}: {e}"));
-        if effects {
+        if effects && run.universe.effects.is_none() {
             // As the viewer and the game run it: with the effects attached.
             hwc_sim::effects::attach(&mut run.universe, &hwc_sim::effects::EffectData::load_from(&src));
         }
@@ -88,6 +88,7 @@ fn main() {
                 LogKind::Unimplemented => *unimpl.entry(e.text.split(" (").next().unwrap_or("").to_string()).or_insert(0) += 1,
                 LogKind::Flow | LogKind::Objective | LogKind::Warning if log => println!("  {e}"),
                 LogKind::Call if log && config_calls => println!("  {e}"),
+                LogKind::State if log && std::env::var_os("HWC_LOG_STATES").is_some() => println!("  {e}"),
                 _ => {}
             }
         }

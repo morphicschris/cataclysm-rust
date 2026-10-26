@@ -161,19 +161,24 @@ macro_rules! ai_ui_methods {
 
         /// `kasfPingAddSingleShip` (0x491440): an anomaly ping on the selection's first ship.
         fn ping_add_single_ship(&mut self, _cx: &Cx, ships: Ships, label: Str<'_>) {
-            if self.ships(ships).first().is_some() {
+            if let Some(&ship) = self.ships(ships).first() {
                 let n = Self::str_text(label);
-                self.g.pings.push(n);
+                self.g.pings.push(n.clone());
+                self.g.ping_orders.push(crate::mission::PingOrder::Ship { label: n, ship });
             }
         }
 
         /// `kasfPingMultipleAddShips` (0x4941a0): one ping per ship, labelled `label` followed
         /// by the ship's index.
         fn ping_multiple_add_ships(&mut self, _cx: &Cx, ships: Ships, label: Str<'_>) {
-            let n = self.ships(ships).len();
-            if n > 0 {
+            let v = self.ships(ships);
+            if !v.is_empty() {
                 let l = Self::str_text(label);
-                self.g.pings.extend(ai_ui::multiple_ping_labels(&l, n));
+                let labels = ai_ui::multiple_ping_labels(&l, v.len());
+                for (label, &ship) in labels.iter().zip(&v) {
+                    self.g.ping_orders.push(crate::mission::PingOrder::Ships { label: label.clone(), ships: vec![ship] });
+                }
+                self.g.pings.extend(labels);
             }
         }
 
@@ -223,8 +228,9 @@ macro_rules! ai_ui_methods {
         /// `kasfWideScreenIn` (0x492a40): the letterbox comes in (time compression back to
         /// normal, chase mode off, effects ducked: front-end matters). Its body is the same as
         /// `WideScreenInDontCloseSensors`.
-        fn wide_screen_in(&mut self, _cx: &Cx, _frames: i32) {
-            self.g.wide_screen = true;
+        fn wide_screen_in(&mut self, _cx: &Cx, frames: i32) {
+            let t = self.u.total_time_elapsed;
+            self.g.wide_screen_call(crate::mission::WideScreenKind::In, frames, t);
         }
 
         // ---- sound -----------------------------------------------------------------------

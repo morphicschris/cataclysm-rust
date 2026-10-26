@@ -505,3 +505,68 @@ fn banked_nis_camera() {
     );
     rig.shot(g, "11_m4_after_nis");
 }
+
+/// Mission 1: a Ctrl band box over the whole view gathers only ships that are not the
+/// player's (`mrSelectHold`'s attack filters), a plain one only the player's, an Alt one
+/// everything; then the sensors manager with an objective ping and a new-ship ping and the
+/// tactical overlay's legend (`12_m1_sensors_pings`).
+#[test]
+fn band_boxes_and_sensors_pings() {
+    use crate::host::PLAYER;
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(1, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    rig.frames_until(g, 16 * 60, "the fleet arriving in mission 1", |g| {
+        g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE
+    });
+    g.render(&mut rig.renderer, SIZE).expect("render");
+    let drag = |rig: &mut Rig, g: &mut Game, modifier: Option<u16>| -> Vec<hwc_sim::ShipId> {
+        if let Some(k) = modifier {
+            g.input(InputEvent::KeyDown(k), &mut rig.audio);
+        }
+        g.input(InputEvent::MouseMove { x: 2, y: 2 }, &mut rig.audio);
+        g.input(InputEvent::MouseButton { left: true, down: true }, &mut rig.audio);
+        g.input(InputEvent::MouseMove { x: SIZE.0 - 3, y: SIZE.1 - 3 }, &mut rig.audio);
+        rig.frame(g);
+        let gathered = g.selecting.clone();
+        g.input(InputEvent::MouseButton { left: true, down: false }, &mut rig.audio);
+        if let Some(k) = modifier {
+            g.input(InputEvent::KeyUp(k), &mut rig.audio);
+        }
+        rig.frame(g);
+        gathered
+    };
+    let own = |g: &Game, id: hwc_sim::ShipId| g.world.universe().ship(id).is_some_and(|s| s.player == PLAYER);
+    let plain = drag(&mut rig, g, None);
+    assert!(!plain.is_empty(), "nothing of the fleet in view");
+    assert!(plain.iter().all(|&id| own(g, id)));
+    let ctrl = drag(&mut rig, g, Some(0x11));
+    assert!(ctrl.iter().all(|&id| !own(g, id)), "a Ctrl band box lit up own ships: {ctrl:?}");
+    let alt = drag(&mut rig, g, Some(0x12));
+    assert!(plain.iter().all(|id| alt.contains(id)));
+
+    // The sensors manager with two pings around the mothership.
+    let u = g.world.universe();
+    let ms = u.base.players[PLAYER].mothership.expect("mothership");
+    let at = u.ship(ms).expect("mothership").posinfo.position;
+    let now = u.total_time_elapsed;
+    g.pings.anomaly_point("TestObjective", at, now);
+    g.pings.new_ship(hwc_math::Vector::new(at.x + 3000.0, at.y, at.z), now);
+    g.ui.fe.game.ig.overlay.tactical = true;
+    g.toggle_sensors(&mut rig.audio);
+    rig.frames_until(g, 16 * 10, "the sensors manager", |g| {
+        g.sensors.phase() == crate::sensors::Phase::Sensors && !g.sensors.zooming()
+    });
+    // A second into the pulse.
+    for _ in 0..16 {
+        rig.frame(g);
+    }
+    rig.shot(g, "12_m1_sensors_pings");
+    assert_eq!(g.pings.list.len(), 2);
+    assert_eq!(g.pings.anomaly_remove("testobj"), 1);
+}

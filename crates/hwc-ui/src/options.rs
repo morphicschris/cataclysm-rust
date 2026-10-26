@@ -114,6 +114,13 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     ("DetailQuality", 0),
     ("SetTextureRequirements", 0),
     ("DifficultySetting", 2),
+    // The recreation's own options (not in the original), each a user-requested change.
+    // 1: ships are drawn at full detail whatever their distance; 0: the original's
+    // level-of-detail selection (`--lod`).
+    ("hwcFullDetailShips", 1),
+    // 1: with ships selected, a right click on empty space opens the move plate and
+    // Shift+right click the menu; 0: the original's right click (`--right-click`).
+    ("hwcRightClickMove", 1),
     // Registry values.
     ("deviceIndex", -1),
     ("screenWidth", 640),
@@ -294,6 +301,19 @@ impl Options {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recreation_options_default_on_and_round_trip() {
+        let o = Options::default();
+        assert!(o.get_bool("hwcFullDetailShips"));
+        assert!(o.get_bool("hwcRightClickMove"));
+        let (back, errors) = Options::from_text("hwcFullDetailShips = 0
+hwcRightClickMove = 0
+");
+        assert!(errors.is_empty());
+        assert!(!back.get_bool("hwcFullDetailShips"));
+        assert!(!back.get_bool("hwcRightClickMove"));
+    }
 
     #[test]
     fn round_trip() {

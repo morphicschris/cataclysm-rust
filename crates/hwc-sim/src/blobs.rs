@@ -35,6 +35,10 @@ pub mod btf {
     pub const DONT_UPDATE: u32 = 0x0100;
     pub const CLEAR_OBJECT_FLAGS: u32 = 0x0200;
     pub const RECENT_DEATH: u32 = 0x1000;
+    /// A ship in the blob was recently attacked (`bobUpdateObjsInBlobCollInfo`).
+    pub const GETTING_ATTACKED: u32 = 0x0040;
+    /// A ship in the blob is attacking.
+    pub const ATTACKING: u32 = 0x0080;
 }
 
 /// One blob.
@@ -535,9 +539,19 @@ impl BlobList {
     /// `collUpdateObjsInCollBlobs` → `bobUpdateObjsInBlobCollInfo` (0x426070) for every blob.
     pub fn update_objects(&mut self, objs: &mut Objects, statics: &StaticWorld) {
         for blob in &mut self.blobs {
-            // (The "getting attacked"/"attacking" flags 0x40/0x80 for the sensors are not
-            // modelled.)
             blob.flags &= !0xc0;
+            // The sensors' battle flags: a ship recently attacked (0x40), a ship attacking (0x80).
+            for &r in &blob.objects {
+                if let ObjRef::Ship(id) = r {
+                    let s = objs.ships.ship(id);
+                    if s.recently_attacked != 0 {
+                        blob.flags |= btf::GETTING_ATTACKED;
+                    }
+                    if s.ship_is_attacking && s.ship_is_attacking2 {
+                        blob.flags |= btf::ATTACKING;
+                    }
+                }
+            }
             for &r in &blob.objects {
                 let d = st(fsqrt(dist_sq_ext(objs.coll_point(r), blob.centre)));
                 objs.set_dist_blob(r, d, None);
@@ -545,6 +559,33 @@ impl BlobList {
             sort_by_optimize_dist(&mut blob.objects, objs);
             fill_specific_lists(blob, objs, statics);
         }
+    }
+
+    /// `bobSubBlobListCreate` (0x426530): the objects of `parent` that pass `keep` (ships only:
+    /// other objects are left out) each start a blob of `props.start_sphere_size`, sorted by
+    /// their squared distance from the parent's centre, then combined with `props` as
+    /// `bobListUpdate` does. The result is a list of new blobs (the parent is untouched).
+    pub fn sub_blobs(parent: &Blob, objs: &mut Objects, statics: &StaticWorld, props: &BlobProperties, keep: &dyn Fn(&Objects, ShipId) -> bool) -> Vec<Blob> {
+        let mut list = BlobList::default();
+        for &r in &parent.objects {
+            let ObjRef::Ship(id) = r else { continue };
+            if !keep(objs, id) {
+                continue;
+            }
+            let s = objs.ships.ship(id);
+            let mass = statics.ship(s.ship_type).map_or(0.0, |st| st.header.mass);
+            let p = s.posinfo.position;
+            let mut b = Blob::single(r, p, mass, props);
+            let d = Vector::new(parent.centre.x - p.x, parent.centre.y - p.y, parent.centre.z - p.z);
+            b.sort_distance = st((ld(d.x) * ld(d.x) + ld(d.y) * ld(d.y)) + ld(d.z) * ld(d.z));
+            list.blobs.push(b);
+        }
+        if list.blobs.is_empty() {
+            return Vec::new();
+        }
+        merge_sort(&mut list.blobs, &|a: &Blob, b: &Blob| a.sort_distance > b.sort_distance);
+        list.combine(objs, statics, props);
+        list.blobs
     }
 
     /// `bobFindNearestBlobToObject` (0x425cd0): nearest blob centre to `point` and the squared

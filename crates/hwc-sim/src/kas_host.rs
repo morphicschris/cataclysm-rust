@@ -207,46 +207,37 @@ impl SimHost<'_> {
         }
     }
 
-    /// The first ship of a selection that is still in the universe.
-    fn first(&self, s: Ships) -> Option<ShipId> {
-        self.ships(s).into_iter().find(|&id| self.live(id))
+    /// `univRemoveShipFromOutside` + `dockPutShipInside` for each ship: the instant dock
+    /// helpers and `ShipsCreateLaunch` put ships straight into the host's inside list.
+    fn put_inside(&mut self, ships: &[ShipId], host: ShipId) {
+        if self.u.ships.get(host).is_none() {
+            return;
+        }
+        for &id in ships {
+            if self.u.ships.get(id).is_none() {
+                continue;
+            }
+            if self.u.ship_list.contains(&id) {
+                crate::base::remove_ship_from_outside(self.u, id);
+            }
+            crate::dock::put_ship_inside(self.u, id, host);
+        }
     }
 
-    /// Hides `ships` inside `host` (`dockPutShipInside` for the instant dock helpers).
-    fn put_inside(&mut self, ships: &[ShipId], host: ShipId) {
-        command::remove_ships_from_doing_stuff(self.u, ships);
+    /// Marks ships as launched by KAS (`specialFlags |= 0x800000 | 0x1000000`); the dock code
+    /// clears 0x1000000 once a ship has flown out of its launch cone.
+    fn mark_launching(&mut self, ships: &[ShipId]) {
         for &id in ships {
             if let Some(s) = self.u.ships.get_mut(id) {
-                s.flags |= sof::HIDE | sof::DONT_APPLY_PHYSICS;
-                s.posinfo.velocity = Vector::ZERO;
+                s.special_flags |= LAUNCH_PENDING | LAUNCHING;
             }
-            self.g.docked.retain(|d| d.0 != id);
-            self.g.docked.push((id, host));
         }
     }
 
-    /// Takes `ships` out of their host next to it (the launch manoeuvre is not modelled: the
-    /// ships appear beside the host and the launch counts as finished).
-    fn launch_out(&mut self, ships: &[ShipId]) {
-        for (k, &id) in ships.iter().enumerate() {
-            let Some(host) = self.g.docked.iter().find(|d| d.0 == id).map(|d| d.1) else { continue };
-            self.g.docked.retain(|d| d.0 != id);
-            let Some(h) = self.u.ships.get(host) else { continue };
-            let (hp, hs) = (h.posinfo.position, h.rotinfo.coordsys);
-            let r = self.u.statics.ship(h.ship_type).map_or(0.0, |s| s.header.coll.coll_sphere_size);
-            let side = if k.is_multiple_of(2) { 1.0 } else { -1.0 };
-            let p = hp + hs.col(1).scale(side * r) + hs.col(2).scale((k / 2) as f32 * 150.0);
-            let statics = self.u.statics.clone();
-            if let Some(s) = self.u.ships.get_mut(id) {
-                s.flags &= !(sof::HIDE | sof::DONT_APPLY_PHYSICS);
-                s.special_flags &= !(LAUNCHING | LAUNCH_PENDING);
-                s.posinfo.position = p;
-                s.rotinfo.coordsys = hs;
-                if let Some(stat) = statics.ship(s.ship_type) {
-                    crate::physics::update_obj_rot_info(s, stat);
-                }
-            }
-        }
+    /// `kasfTeamFinishedLaunching` / `kasfShipsFinishedLaunching` on a list: every ship is out
+    /// of its launch cone and in the universe.
+    fn finished_launching(&self, sel: &[ShipId]) -> bool {
+        sel.iter().all(|&id| self.u.ships.get(id).is_some_and(|s| s.special_flags & LAUNCHING == 0) && self.u.ship_list.contains(&id))
     }
 }
 
@@ -345,27 +336,18 @@ impl KasRuntime for SimHost<'_> {
         self.team_formation(cx, crate::formation::kind::WALL);
     }
 
+    /// `kasfDockInstant`: a dock move (stay, instant) with the team's first ship when it is fit
+    /// for orders, otherwise with the nearest host.
     fn dock_instant(&mut self, cx: &Cx, with_team: Team) {
-        self.delete_all_team_moves(cx);
-        let host = with_team.and_then(|h| self.g.level.team(h)).and_then(|t| t.ships.first().copied()).filter(|&id| {
-            self.u.ships.get(id).is_some_and(|s| s.flags & (sof::HYPERSPACE | sof::DISABLED) == 0)
-        });
-        let sel = self.team_ships(cx);
-        match host {
-            Some(h) => self.put_inside(&sel, h),
-            None => self.log(LogKind::Warning, "DockInstant: no host to dock with"),
-        }
+        self.team_dock(cx, with_team, crate::aimove::dock_flags::STAY | crate::aimove::dock_flags::INSTANT);
     }
 
+    /// `kasfLaunch`: the team is marked as launching and gets a launch move.
     fn launch(&mut self, cx: &Cx) {
-        self.delete_all_team_moves(cx);
         let sel = self.team_ships(cx);
-        for &id in &sel {
-            if let Some(s) = self.u.ships.get_mut(id) {
-                s.special_flags |= LAUNCH_PENDING | LAUNCHING;
-            }
-        }
-        self.launch_out(&sel);
+        self.mark_launching(&sel);
+        self.delete_all_team_moves(cx);
+        self.add_team_move(cx, crate::aimove::TeamMove::launch(false, true));
     }
 
     fn team_docked_ready_for_launch(&mut self, cx: &Cx) -> i32 {
@@ -396,42 +378,43 @@ impl KasRuntime for SimHost<'_> {
         if sel.is_empty() {
             return 0;
         }
-        let busy = sel.iter().any(|&id| {
-            self.u.ships.get(id).is_none_or(|s| s.special_flags & LAUNCHING != 0) || self.g.docked.iter().any(|d| d.0 == id)
-        });
-        i32::from(!busy)
+        i32::from(self.finished_launching(&sel))
     }
 
+    /// `kasfShipsCreateLaunch` (0x495290): the ships are created, put inside the host's first
+    /// ship and ordered to launch from it (`aiuWrapDock` purpose launch), so they come out
+    /// through its launch points one after another. Ships for the human player take the host's
+    /// "not player controlled" state (and disable reason 1 with it).
     fn ships_create_launch(&mut self, cx: &Cx, created_ships: Ships, shiptype: Str<'_>, count: i32, host: Ships, owner: i32) {
         let _ = cx;
-        let Some(h) = self.first(host) else { return };
-        let Some(t) = shiptype.text().and_then(ShipType::from_name) else {
-            self.set_ships(created_ships, Vec::new());
-            return;
-        };
+        let Some(h) = self.ships(host).first().copied() else { return };
+        self.set_ships(created_ships, Vec::new());
         let mut v = Vec::new();
-        let mission = self.g.config.mission;
-        for _ in 0..count.max(0) {
-            match level::create_ship(self.u, &mut self.g.level, mission, t, owner.clamp(0, 1) as usize, Vector::ZERO) {
-                Ok(id) => v.push(id),
-                Err(e) => self.g.log(LogKind::Warning, format!("ShipsCreateLaunch: {e}")),
+        if let Some(t) = shiptype.text().and_then(ShipType::from_name) {
+            let mission = self.g.config.mission;
+            for _ in 0..count.max(0) {
+                match level::create_ship(self.u, &mut self.g.level, mission, t, owner.clamp(0, 1) as usize, Vector::ZERO) {
+                    Ok(id) => v.push(id),
+                    Err(e) => self.g.log(LogKind::Warning, format!("ShipsCreateLaunch: {e}")),
+                }
             }
         }
+        self.set_ships(created_ships, v.clone());
         if owner == 0 {
+            let not_controlled = self.u.ships.get(h).is_some_and(|x| x.special_flags2 & NOT_PLAYER_CONTROLLED != 0);
             for &id in &v {
+                self.set_uncontrollable(id, not_controlled);
                 if let Some(s) = self.u.ships.get_mut(id) {
-                    s.special_flags2 |= NOT_PLAYER_CONTROLLED;
+                    crate::base::set_disable_reason(s, not_controlled, 1);
                 }
             }
         }
         self.put_inside(&v, h);
-        for &id in &v {
-            if let Some(s) = self.u.ships.get_mut(id) {
-                s.special_flags |= LAUNCH_PENDING | LAUNCHING;
-            }
+        if self.u.ships.get(h).is_some_and(|x| matches!(x.ship_type.index(), 8 | 0x2a)) {
+            crate::ships::hive::reset_swarmers(self.u, h);
         }
-        self.set_ships(created_ships, v.clone());
-        self.launch_out(&v);
+        self.mark_launching(&v);
+        self.wrap_dock(&v, crate::dock::purpose::LAUNCH, Some(h));
     }
 
     fn reinforce_team_with_ships(&mut self, cx: &Cx, teamtoreinforce: Team, shipstoadd: Ships) {
@@ -942,8 +925,13 @@ impl KasRuntime for SimHost<'_> {
         self.g.techs.push(t);
     }
 
+    /// `kasfAllowPlayerToResearch` (0x492310, `AllowPlayerToResearch`): the research manager
+    /// offers the technology from now on ([`crate::research::available_topics`]).
     fn tech_set_research(&mut self, _cx: &Cx, tech_name: Str<'_>) {
         let t = Self::str_text(tech_name);
+        if let Some(tech) = crate::statics::Technology::from_name(&t) {
+            crate::research::allow_research(self.u, HUMAN_PLAYER, tech.index());
+        }
         self.g.research_allowed.push(t);
     }
 
@@ -1253,12 +1241,14 @@ impl KasRuntime for SimHost<'_> {
         self.u.universe_paused = false;
     }
 
-    fn wide_screen_in_dont_close_sensors(&mut self, _cx: &Cx, _frames: i32) {
-        self.g.wide_screen = true;
+    fn wide_screen_in_dont_close_sensors(&mut self, _cx: &Cx, frames: i32) {
+        let t = self.u.total_time_elapsed;
+        self.g.wide_screen_call(crate::mission::WideScreenKind::InDontCloseSensors, frames, t);
     }
 
-    fn wide_screen_out(&mut self, _cx: &Cx, _frames: i32) {
-        self.g.wide_screen = false;
+    fn wide_screen_out(&mut self, _cx: &Cx, frames: i32) {
+        let t = self.u.total_time_elapsed;
+        self.g.wide_screen_call(crate::mission::WideScreenKind::Out, frames, t);
     }
 
     fn camera_focus(&mut self, _cx: &Cx, ships: Ships) {
@@ -1335,20 +1325,26 @@ impl KasRuntime for SimHost<'_> {
     }
 
     fn ping_add_ships(&mut self, _cx: &Cx, ships: Ships, label: Str<'_>) {
-        if !self.ships(ships).is_empty() {
+        let v = self.ships(ships);
+        if !v.is_empty() {
             let n = Self::str_text(label);
-            self.g.pings.push(n);
+            self.g.pings.push(n.clone());
+            self.g.ping_orders.push(mission::PingOrder::Ships { label: n, ships: v });
         }
     }
 
-    fn ping_add_point(&mut self, _cx: &Cx, _vector: Point, label: Str<'_>) {
+    fn ping_add_point(&mut self, _cx: &Cx, vector: Point, label: Str<'_>) {
         let n = Self::str_text(label);
-        self.g.pings.push(n);
+        self.g.pings.push(n.clone());
+        if let Some(at) = self.point(vector) {
+            self.g.ping_orders.push(mission::PingOrder::Point { label: n, at });
+        }
     }
 
     fn ping_remove(&mut self, _cx: &Cx, label: Str<'_>) {
         let n = Self::str_text(label);
         self.g.pings.retain(|p| !p.eq_ignore_ascii_case(&n));
+        self.g.ping_orders.push(mission::PingOrder::Remove { label: n });
     }
 }
 

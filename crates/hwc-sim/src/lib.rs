@@ -24,6 +24,7 @@ pub mod autobehaviour;
 pub mod autoplay;
 pub mod base;
 pub mod base_tweaks;
+pub mod battle_ping;
 pub mod blobs;
 pub mod bullet;
 pub mod campaign;

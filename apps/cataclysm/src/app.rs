@@ -108,6 +108,9 @@ struct App {
     debug_keys: bool,
     /// `--autoplay`: the simulation's test player plays each mission.
     autoplay: bool,
+    /// `--lod` and `--right-click` (None: the options file decides).
+    full_detail: Option<bool>,
+    right_click_move: Option<bool>,
 }
 
 pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), String> {
@@ -170,6 +173,8 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         movie_scale: if args.scale_given { args.scale } else { ScaleMode::Stretch },
         debug_keys: args.debug_keys,
         autoplay: args.autoplay,
+        full_detail: args.full_detail,
+        right_click_move: args.right_click_move,
     };
     if app.intro.is_none() {
         app.front_end_start();
@@ -553,6 +558,12 @@ impl App {
                         game.autoplay = Some(hwc_sim::autoplay::Autoplay::new(16 * 60 * 30));
                     }
                     game.rollcall_below_band = self.rollcall_below_band;
+                    if let Some(v) = self.full_detail {
+                        game.world.full_detail = v;
+                    }
+                    if let Some(v) = self.right_click_move {
+                        game.right_click_move = v;
+                    }
                     if let Some(a) = &mut self.audio {
                         a.stop_music(0.0);
                         a.set_in_game(true);
@@ -624,6 +635,15 @@ impl App {
             return Ok(true);
         };
         g.render(r, size)?;
+        // The move plate put the pointer somewhere (`mousePositionSet`): the system pointer
+        // follows, so the next movement starts from there.
+        if let Some((x, y)) = g.take_pointer_warp() {
+            self.mouse = (x, y);
+            let (wx, wy) = self.session.placement.to_window(x, y);
+            let _ = gpu
+                .window
+                .set_cursor_position(winit::dpi::PhysicalPosition::new(wx, wy));
+        }
         if self.session.cursor_visible {
             g.draw_cursor();
         }

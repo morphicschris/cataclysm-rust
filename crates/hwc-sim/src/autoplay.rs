@@ -48,6 +48,10 @@ pub struct Autoplay {
     pub notes: Vec<(u32, String)>,
     /// Per-mission plan marks (what was done once).
     marks: Vec<&'static str>,
+    /// Mission 3: since when the Clee-San has hung at the mouth of its dock.
+    m3_stuck_since: Option<u32>,
+    /// Since when the jump waits for tilted capital ships to right themselves.
+    tilt_since: Option<u32>,
 }
 
 /// How often the orders are reviewed (every 4 s).
@@ -66,6 +70,8 @@ impl Autoplay {
             explore: 0,
             notes: Vec::new(),
             marks: Vec::new(),
+            m3_stuck_since: None,
+            tilt_since: None,
         }
     }
 
@@ -91,7 +97,7 @@ impl Autoplay {
                 let v: Vec<String> = run.game.level.team(kas_hash(&t)).map(|x| x.ships.clone()).unwrap_or_default().iter().filter_map(|&id| {
                     let s = run.universe.ships.get(id)?;
                     let att = s.recent_attacker.and_then(|a| run.universe.ships.get(a)).map(|a| format!("{:?}/p{}", a.ship_type, a.player));
-                    Some(format!("{:?} hp {:.0} p{} att {:?} flags {:x} flags2 {:x} pos {:?} vel {:?} cmd {:?} tac {} dead {}", s.ship_type, s.health, s.player, att, s.flags, s.flags2, s.posinfo.position, s.posinfo.velocity, s.command.and_then(|c| run.universe.commands.get(c)).map(|c| (c.order, c.attributes, c.selection.len(), c.waypoints.clone())), s.tactics, run.universe.ship_list.contains(&id)))
+                    Some(format!("{:?} {} dock {:?}/{}/{} hp {:.0} p{} att {:?} flags {:x} flags2 {:x} pos {:?} vel {:?} cmd {:?} tac {} dead {}", s.ship_type, id.0, s.base.dock_with, s.base.dock_state, s.base.dock_point, s.health, s.player, att, s.flags, s.flags2, s.posinfo.position, s.posinfo.velocity, s.command.and_then(|c| run.universe.commands.get(c)).map(|c| (c.order, c.attributes, c.selection.len(), c.waypoints.clone())), s.tactics, run.universe.ship_list.contains(&id)))
                 }).collect();
                 let ids = run.game.level.team(kas_hash(&t)).map(|x| x.ships.clone()).unwrap_or_default();
                 let homing: Vec<String> = run.universe.missiles.iter().filter(|m| m.target.is_some_and(|x| ids.contains(&x))).map(|m| {
@@ -111,9 +117,9 @@ impl Autoplay {
                 if let Some(s) = run.universe.ships.get(id) {
                     let c = s.command.and_then(|c| run.universe.commands.get(c));
                     let line = format!(
-                        "ship {} {:?} p{} hp {:.0} pos ({:.0},{:.0},{:.0}) idle {} target {:?} cmd {:?}",
+                        "ship {} {:?} p{} hp {:.0} pos ({:.0},{:.0},{:.0}) idle {} target {:?} cmd {:?} flags {:x} dock {:?}/{}",
                         id.0, s.ship_type, s.player, s.health, s.posinfo.position.x, s.posinfo.position.y, s.posinfo.position.z, s.ship_idle, s.attack.target,
-                        c.map(|c| (c.order, c.attributes, c.attack_targets.clone(), c.waypoints.clone()))
+                        c.map(|c| (c.order, c.attributes, c.attack_targets.clone(), c.waypoints.clone())), s.flags, s.base.dock_with, s.base.dock_state
                     );
                     if now.is_multiple_of(32) {
                         self.note(now, line);
@@ -150,9 +156,25 @@ impl Autoplay {
             }
             sp_state::WAITING_ROLLCALL => {
                 let t = *self.rollcall_at.get_or_insert(now);
-                // A player gives the fleet a minute to dock, then goes.
-                if run.game.hyper.rollcall_remaining == 0 || now.saturating_sub(t) >= 16 * 60 {
+                if std::env::var_os("HWC_DEBUG_GUARDS").is_some() && now.is_multiple_of(160) {
+                    let u = &run.universe;
+                    let out: Vec<String> = u.ship_list.iter().filter(|&&id| u.ships.ship(id).player == HUMAN_PLAYER && crate::campaign::is_fleet_ship(u, run.game.config.mission, id)).filter(|&&id| !crate::campaign::can_hyperspace(u, u.ships.ship(id).ship_type)).map(|&id| {
+                        let s = u.ships.ship(id);
+                        format!("{}:{:?} dock {:?}/{} cmd {:?}", id.0, s.ship_type, s.base.dock_with, s.base.dock_state, s.command.and_then(|c| u.commands.get(c)).map(|c| (c.order, c.dock.purpose)))
+                    }).collect();
+                    let mh = run.universe.base.players[HUMAN_PLAYER].mothership.map(|m| u.ships.ship(m).heading()).unwrap_or(Vector::ZERO);
+                    let caps: Vec<String> = u.ship_list.iter().filter(|&&id| u.ships.ship(id).player == HUMAN_PLAYER && crate::campaign::is_fleet_ship(u, run.game.config.mission, id) && crate::campaign::can_hyperspace(u, u.ships.ship(id).ship_type)).map(|&id| {
+                        let s = u.ships.ship(id);
+                        let h = s.heading();
+                        format!("{}:{:?} dot {:.3} upz {:.3} h {:?} mh {:?} rot {:?} cmd {:?} flags {:x}", id.0, s.ship_type, h.x * mh.x + h.y * mh.y + h.z * mh.z, s.rotinfo.coordsys.m[2], h, mh, s.rotinfo.rotspeed, s.command.and_then(|c| u.commands.get(c)).map(|c| c.order), s.flags)
+                    }).collect();
+                    self.note(now, format!("rollcall remaining {} outside {out:?} caps {caps:?}", run.game.hyper.rollcall_remaining));
+                }
+                // A player gives the fleet three minutes to dock and line up, then presses
+                // "go now" once (the stragglers dock at once and join the parade).
+                if now.saturating_sub(t) >= 16 * 180 && self.once("go now") {
                     run.hyperspace_go_now();
+                    self.note(now, "roll call: go now");
                 }
             }
             _ => {}
@@ -178,7 +200,34 @@ impl Autoplay {
     /// instantly when the mission has none) and waits for builds to finish.
     fn ready_to_jump(&mut self, run: &mut MissionRun) -> bool {
         let u = &run.universe;
-        !under_construction_any(u)
+        if under_construction_any(u) {
+            return false;
+        }
+        // The capital ships must be able to line up with the mothership for the jump: a player
+        // waits until none is still tumbling on its side (idle ships right themselves).
+        let m = run.game.config.mission;
+        let acc = run.game.sp_tweaks.heading_accuracy;
+        let tilted: Vec<ShipId> = u
+            .ship_list
+            .iter()
+            .copied()
+            .filter(|&id| u.ships.ship(id).player == HUMAN_PLAYER && crate::campaign::is_fleet_ship(u, m, id) && crate::campaign::can_hyperspace(u, u.ships.ship(id).ship_type))
+            .filter(|&id| !matches!(crate::base::class_of(u, u.ships.ship(id).ship_type), Some(ShipClass::Mothership | ShipClass::Component)))
+            .filter(|&id| u.ships.ship(id).rotinfo.coordsys.m[2] < acc)
+            .collect();
+        if tilted.is_empty() {
+            return true;
+        }
+        // Stop them so that they right themselves; give up waiting after two minutes.
+        let since = *self.tilt_since.get_or_insert(u.update_counter);
+        let waited = u.update_counter.saturating_sub(since) > 16 * 120;
+        if !waited {
+            let busy: Vec<ShipId> = tilted.iter().copied().filter(|&id| !idle(u, id)).collect();
+            if !busy.is_empty() {
+                crate::command::cl_halt(&mut run.universe, &busy);
+            }
+        }
+        waited
     }
 
     fn give_orders(&mut self, run: &mut MissionRun) {
@@ -194,6 +243,28 @@ impl Autoplay {
             let jobs: Vec<String> = u.base.factories.iter().flat_map(|f| f.jobs.iter().filter(|j| j.n_jobs > 0).map(|j| format!("{:?}x{}", j.info, j.n_jobs))).collect();
             let world: i64 = u.base.resources.list.iter().map(|r| i64::from(r.resource_value)).sum();
             self.note(now, format!("RU {} workers {orders:?} jobs {jobs:?} world {world}", u.base.players[HUMAN_PLAYER].resource_units));
+            if let Some(&w) = fleet.workers.first() {
+                let wp = u.ships.ship(w).posinfo.position;
+                let near = crate::resource::find_nearest_resource(u, w, 0.0, Vector::ZERO);
+                let unh = u.base.resources.list.iter().filter(|r| r.attributes & crate::base::attributes::RESOURCE_UNHARVESTABLE != 0).count();
+                let busy = u.base.resources.list.iter().filter(|r| crate::resource::already_being_harvested(u, None, r.id)).count();
+                let b = u.world_bounds;
+                let out = u.base.resources.list.iter().filter(|r| !(r.position.x.abs() <= b.x && r.position.y.abs() <= b.y && r.position.z.abs() <= b.z)).count();
+                let na = u.base.resources.list.iter().filter(|r| r.not_accessible != 0).count();
+                let cid = u.ships.ship(w).command;
+                let st_ = u.statics.ship(ShipType::sWorker).unwrap();
+                let cr = cid.and_then(|c| u.commands.get(c)).and_then(|c| c.collect.resource);
+                let rr = cr.and_then(|r| u.base.resources.get(r)).map(|r| format!("{:?} {:?} v{:?} val {}", r.kind, r.position, r.velocity, r.resource_value));
+                self.note(now, format!("collect {cr:?} {rr:?} hs {} {} fn {:?}", u.ships.ship(w).base.harvest_state, u.ships.ship(w).base.harvest_state2, u.ships.ship(w).base.harvest_fn));
+                self.note(now, format!("cmd {cid:?} sel {:?} me {w:?} in todo {} carried {} max {} at_once {}", cid.and_then(|c| u.commands.get(c)).map(|c| c.selection.clone()), cid.is_some_and(|c| u.commands.todo.contains(&c)), u.ships.ship(w).base.resources, st_.max_resources, st_.resources_at_one_time));
+                self.note(now, format!("worker at {wp:?} nearest {near:?} n {} unharvestable {unh} busy {busy} outside {out} not_accessible {na} bounds {b:?} cur_player {} ai {}", u.base.resources.list.len(), u.base.cur_player, u.base.players[0].ai));
+            }
+        }
+        if std::env::var_os("HWC_DEBUG_BUILD").is_some() && (now / ORDER_PERIOD).is_multiple_of(16) {
+            let list = crate::level::construction_list(&run.universe, ms);
+            let p = &run.universe.base.players[HUMAN_PLAYER];
+            let techs: Vec<String> = (0..crate::base::NUM_TECHS).filter(|&t| p.tech.contains(t)).filter_map(crate::statics::Technology::from_index).map(|t| format!("{t:?}")).collect();
+            self.note(now, format!("offers {list:?} tech {techs:?} RU {}", p.resource_units));
         }
         match mission {
             1 => self.mission1(run, &fleet, ms),
@@ -232,10 +303,25 @@ impl Autoplay {
         let mp = run.universe.ships.ship(ms).posinfo.position;
         let target = if run.game.objective("DestroyBombers").is_some() {
             Some("TaiidanBombers")
-        } else if run.game.objective("DestroyResourcers").is_some() {
+        } else if run.game.objective("DestroyResourcers").is_some() || {
+            // Enemy harvesters in sight are taken out before they strip the few asteroids.
+            let seen = enemies(&run.universe);
+            team_ships(run, "TaiidanResourcers").iter().any(|s| seen.contains(s))
+        } {
             Some("TaiidanResourcers")
         } else if run.game.objective("DestroyProxAttackers").is_some() {
-            ["TaiidanProxAttackAbomb1", "TaiidanProxAttackMGCorv1", "TaiidanProxAttackHInt1"].into_iter().find(|t| !team_ships(run, t).is_empty())
+            // The attackers nearest the proximity sensors first (they must not lose them all).
+            let sensors: Vec<Vector> = team_ships(run, "KushanProximityArray").iter().map(|&id| run.universe.ships.ship(id).posinfo.position).collect();
+            let near = |run: &MissionRun, t: &str| -> f32 {
+                team_ships(run, t).iter().map(|&id| {
+                    let p = run.universe.ships.ship(id).posinfo.position;
+                    sensors.iter().map(|&q| (p - q).mag_sq()).fold(f32::MAX, f32::min)
+                }).fold(f32::MAX, f32::min)
+            };
+            ["TaiidanProxAttackAbomb1", "TaiidanProxAttackMGCorv1", "TaiidanProxAttackHInt1"]
+                .into_iter()
+                .filter(|t| !team_ships(run, t).is_empty())
+                .min_by(|a, b| near(run, a).total_cmp(&near(run, b)))
         } else if run.game.objective("DestroyDestroyer").is_some() {
             Some("TaiidanDestroyer")
         } else {
@@ -251,7 +337,8 @@ impl Autoplay {
         }
         match target.map(|t| (t, team_ships(run, t))) {
             Some((t, ships)) if !ships.is_empty() => {
-                strike(&mut run.universe, &fleet.combat, &ships, 8);
+                let group = if run.game.objective("DestroyProxAttackers").is_some() { 4 } else { 8 };
+                strike(&mut run.universe, &fleet.combat, &ships, group);
                 if self.once(t) {
                     self.note(now, format!("M1: fleet attacks {t}"));
                 }
@@ -369,9 +456,37 @@ impl Autoplay {
         };
         let cp = run.universe.ships.ship(c).posinfo.position;
         if run.game.objective("Find").is_some() {
-            move_ships(&mut run.universe, &fleet.recons, cp);
-            if self.once("m3 find") {
-                self.note(now, "M3: recons fly to the Clee-San");
+            // The Clee-San is open to mines for a moment once found: mines lying near it are
+            // set off by Acolyte decoys first, while the recons wait out of sight.
+            let mines: Vec<Vector> = run
+                .universe
+                .missiles
+                .iter()
+                .filter(|m| m.kind == crate::missile::kind::MINE && !m.is_dead() && (m.posinfo.position - cp).mag_sq() < 6000.0 * 6000.0)
+                .map(|m| m.posinfo.position)
+                .collect();
+            if mines.is_empty() {
+                move_ships(&mut run.universe, &fleet.recons, cp);
+                if self.once("m3 find") {
+                    self.note(now, "M3: recons fly to the Clee-San");
+                }
+            } else {
+                let decoys: Vec<ShipId> = fleet.combat.iter().copied().filter(|&id| run.universe.ships.ship(id).ship_type == ShipType::sAcolyte).take(mines.len().min(4)).collect();
+                for (k, &d) in decoys.iter().enumerate() {
+                    move_ships(&mut run.universe, &[d], mines[k]);
+                }
+                for &r in &fleet.recons {
+                    let rp = run.universe.ships.ship(r).posinfo.position;
+                    let fow = run.universe.statics.ship(ShipType::sRecon).map_or(0.0, |s| s.fow_radius);
+                    if (rp - cp).mag_sq() < (fow + 4000.0) * (fow + 4000.0) {
+                        let mut away = rp - cp;
+                        away.normalize();
+                        move_ships(&mut run.universe, &[r], cp + away.scale(fow + 6000.0));
+                    }
+                }
+                if !decoys.is_empty() && self.once("m3 find mines") {
+                    self.note(now, format!("M3: decoys clear {} mines by the Clee-San before it is found", mines.len()));
+                }
             }
         }
         if run.game.objective("Mimic").is_some() {
@@ -384,9 +499,56 @@ impl Autoplay {
             }
         }
         if run.game.objective("Lure").is_some() {
+            // The Clee-San will not set off while mines are within 14 km of it: Acolytes fly
+            // at them as decoys and set them off.
+            let mines: Vec<Vector> = run
+                .universe
+                .missiles
+                .iter()
+                .filter(|m| m.kind == crate::missile::kind::MINE && !m.is_dead() && (m.posinfo.position - cp).mag_sq() < 15000.0 * 15000.0)
+                .map(|m| m.posinfo.position)
+                .collect();
+            let decoys: Vec<ShipId> = fleet.combat.iter().copied().filter(|&id| run.universe.ships.ship(id).ship_type == ShipType::sAcolyte).rev().take(mines.len().min(3)).collect();
+            for (k, &d) in decoys.iter().enumerate() {
+                move_ships(&mut run.universe, &[d], mines[k]);
+            }
+            if std::env::var_os("HWC_DEBUG_GUARDS").is_some() {
+                let st_ = run.kas.team(kas_hash("CleeSan")).and_then(|t| t.state).map(|h| format!("{h:08x}"));
+                let dpos: Vec<String> = decoys.iter().map(|&d| format!("{:.0}", (run.universe.ships.ship(d).posinfo.position - mines[0]).mag_sq().sqrt())).collect();
+                self.note(now, format!("M3 lure: mines<15k {} state {st_:?} decoy d {dpos:?} ms d {:.0} Mimic var {:?}", mines.len(), (mp - cp).mag_sq().sqrt(), run.var(Some("CleeSan"), "Mimic")));
+            }
+            if !decoys.is_empty() && self.once("m3 mines") {
+                self.note(now, format!("M3: decoys set off the mines near the Clee-San ({} mines)", mines.len()));
+            }
+        }
+        if run.game.objective("Lure").is_some() {
             // The Clee-San comes once the mothership is near it: bring the mothership over.
             let d = (cp - mp).mag_sq();
-            if d > 5000.0 * 5000.0 && idle(&run.universe, ms) {
+            // Once it is docking with the mothership, the mothership holds still for it.
+            let docking = run.universe.ships.ship(c).base.dock_with == Some(ms);
+            let ms_moving = run.universe.ships.ship(ms).command.and_then(|k| run.universe.commands.get(k)).is_some_and(|k| k.order == crate::command::order::MOVE);
+            if docking && std::env::var_os("HWC_DEBUG_GUARDS").is_some() {
+                let u = &run.universe;
+                let users: Vec<String> = u.ships.iter().filter(|s| s.base.dock_with.is_some_and(|w| w == ms || crate::clamp::slaves_of(u, ms).contains(&w))).map(|s| format!("{}:{:?} st{} pt{} w{:?}", s.id.0, s.ship_type, s.base.dock_state, s.base.dock_point, s.base.dock_with.map(|w| u.ships.ship(w).ship_type))).collect();
+                let t = crate::dock::point_type_for(u, ShipType::dEcclesiam, 0, crate::dock::purpose::DOCK_STAY, ms);
+                let rp = crate::dock::reserved_point(u, c, ms).map(|p| format!("type {:?} pos {:?} normal {:?} up {} heading {}", p.dock_type, p.position, p.cone_normal, p.up_direction, p.heading_direction));
+                let cs = u.ships.ship(c);
+                self.note(now, format!("M3 dock users {users:?} ecc point type {t} d {:.0} point {rp:?} ecc heading {:?} up {:?} rotspeed {:?} torque {:?} flags {:x} drot {}", (cp - mp).mag_sq().sqrt(), cs.rotinfo.coordsys.col(2), cs.rotinfo.coordsys.col(0), cs.rotinfo.rotspeed, cs.rotinfo.torque, cs.flags, cs.dont_rotate_ever));
+            }
+            if docking && d < 6000.0 * 6000.0 {
+                // A Clee-San that has hung at the mouth of its dock for half a minute gets
+                // the mothership moved a little under it (the cone turns with it).
+                let stuck = run.universe.ships.ship(c).base.dock_state == crate::dock::state::FLY_TO_ORIGIN;
+                let since = if stuck { *self.m3_stuck_since.get_or_insert(now) } else { self.m3_stuck_since.take().map_or(now, |_| now) };
+                if stuck && now.saturating_sub(since) > 16 * 30 {
+                    let side = run.universe.ships.ship(ms).rotinfo.coordsys.col(1).scale(1500.0);
+                    move_ships(&mut run.universe, &[ms], mp + side);
+                    self.m3_stuck_since = Some(now);
+                    self.note(now, "M3: the mothership shifts under the docking Clee-San");
+                } else if ms_moving && !stuck {
+                    crate::command::cl_halt(&mut run.universe, &[ms]);
+                }
+            } else if d > 5000.0 * 5000.0 && idle(&run.universe, ms) {
                 move_ships(&mut run.universe, &[ms], cp);
                 if self.once("m3 lure") {
                     self.note(now, "M3: mothership moves to the Clee-San");
@@ -432,10 +594,14 @@ impl Autoplay {
         let now = run.universe.update_counter;
         let mp = run.universe.ships.ship(ms).posinfo.position;
         build_up_to(&mut run.universe, ms, ShipType::sRecon, 2);
-        build_up_to(&mut run.universe, ms, ShipType::sWorker, 3);
-        build_up_to(&mut run.universe, ms, ShipType::sAcolyte, 16);
+        build_up_to(&mut run.universe, ms, ShipType::sWorker, 7);
         if run.game.objective("BuildEngineering").is_some() {
-            build_up_to(&mut run.universe, ms, ShipType::sMothershipSpecial, 1);
+            queue_up_to(&mut run.universe, ms, ShipType::sMothershipSpecial, 1);
+        }
+        // The fleet: Acolytes first, then ACVs (EMP and missiles against fighters).
+        if count_type(&run.universe, ShipType::sMothershipSpecial) > 0 || run.game.objective("BuildEngineering").is_none() {
+            build_up_to(&mut run.universe, ms, ShipType::sAcolyte, 30);
+            build_up_to(&mut run.universe, ms, ShipType::sACV, 6);
         }
         if run.game.objective("InterceptBentusi").is_some() {
             if let Some(&city) = team_ships(run, "trCity").first() {
@@ -446,99 +612,239 @@ impl Autoplay {
                 }
             }
         }
-        // The Caal-Shto is helpless: half the fleet guards it; the rest goes for the heavy
-        // cruiser first (it infects what it reaches), then for the rest of the Beast.
+        // The Caal-Shto is helpless: once it is ours to protect the fleet stays with it and
+        // fights whatever comes near; with nothing near, a third stays and the rest hunt the
+        // Beast ships nearest to it.
         let caal = team_ships(run, "CaalShto");
         let protecting = !caal.is_empty() && (run.game.objective("ProtectCaalShto").is_some() || run.game.objective("DestroyBeast").is_some());
-        // While the Beast is near the Caal-Shto the whole fleet guards it.
-        let threatened = protecting && {
-            let cp = run.universe.ships.ship(caal[0]).posinfo.position;
-            enemies(&run.universe).iter().any(|&e| (run.universe.ships.ship(e).posinfo.position - cp).mag_sq() < 12000.0 * 12000.0)
-        };
-        if protecting {
-            let half = if threatened { fleet.combat.len() } else { fleet.combat.len() / 2 };
-            guard(&mut run.universe, &fleet.combat[..half], &caal);
-            if std::env::var_os("HWC_DEBUG_GUARDS").is_some() {
-                let u = &run.universe;
-                let cp = u.ships.ship(caal[0]).posinfo.position;
-                let g: Vec<String> = fleet.combat[..half].iter().map(|&id| {
-                    let s = u.ships.ship(id);
-                    let c = s.command.and_then(|c| u.commands.get(c));
-                    format!("{}:{:?} d{:.0} {:?}", id.0, s.ship_type, (s.posinfo.position - cp).mag_sq().sqrt(), c.map(|c| (c.order, c.attributes, c.attack_targets.len())))
-                }).collect();
-                let near: Vec<String> = u.ship_list.iter().filter(|&&e| u.ships.ship(e).player != HUMAN_PLAYER && (u.ships.ship(e).posinfo.position - cp).mag_sq() < 6000.0 * 6000.0).map(|&e| format!("{}:{:?}", e.0, u.ships.ship(e).ship_type)).collect();
-                let rocked = u.ships.ship(caal[0]).getting_rocked;
-                self.note(now, format!("M5 guards {g:?} enemies near {near:?} rocked {rocked:?}"));
-            }
-        }
-        if threatened {
+        if !protecting {
+            // Until then the fleet stays home (the Bentusi's end clears 22.5 km around it).
+            defend(&mut run.universe, fleet, mp, 15000.0);
             return;
         }
-        if run.game.objective("DestroyBeast").is_some() {
-            let rest: Vec<ShipId> = fleet.combat[fleet.combat.len() / 2..].to_vec();
-            let cruiser = team_ships(run, "bHCruise1");
-            if !cruiser.is_empty() {
-                strike(&mut run.universe, &rest, &cruiser, 4);
-                if self.once("m5 cruiser") {
-                    self.note(now, "M5: strike on the Beast heavy cruiser");
+        let cp = run.universe.ships.ship(caal[0]).posinfo.position;
+        if std::env::var_os("HWC_DEBUG_FLEET").is_some() {
+            let u = &run.universe;
+            let n_near = enemies(u).into_iter().filter(|&e| (u.ships.ship(e).posinfo.position - cp).mag_sq() < 10000.0 * 10000.0).count();
+            let ours = fleet.combat.iter().filter(|&&id| (u.ships.ship(id).posinfo.position - cp).mag_sq() < 6000.0 * 6000.0).count();
+            self.note(now, format!("M5 caal hp {:.0} combat {} near caal {ours} enemies near {n_near} RU {} su {}/{} workers {}", u.ships.ship(caal[0]).health, fleet.combat.len(), u.base.players[HUMAN_PLAYER].resource_units, u.base.players[HUMAN_PLAYER].su_used, u.base.players[HUMAN_PLAYER].su_capacity, fleet.workers.len()));
+        }
+        if self.once("m5 protect") {
+            self.note(now, "M5: the fleet protects the Caal-Shto");
+        }
+        let u = &mut run.universe;
+        let mut near: Vec<ShipId> = enemies(u).into_iter().filter(|&e| (u.ships.ship(e).posinfo.position - cp).mag_sq() < 10000.0 * 10000.0).collect();
+        near.sort_by(|&a, &b| (u.ships.ship(a).posinfo.position - cp).mag_sq().total_cmp(&(u.ships.ship(b).posinfo.position - cp).mag_sq()));
+        if !near.is_empty() {
+            near.truncate(6);
+            let ready: Vec<ShipId> = fleet.combat.iter().copied().filter(|&id| !attacking_any(u, id, &near)).collect();
+            attack(u, &ready, &near);
+            return;
+        }
+        let keep = fleet.combat.len() / 3;
+        let (home, hunters) = fleet.combat.split_at(keep);
+        for &id in home {
+            if idle(u, id) && (u.ships.ship(id).posinfo.position - cp).mag_sq() > 4000.0 * 4000.0 {
+                move_ships(u, &[id], cp);
+            }
+        }
+        if run.game.objective("DestroyBeast").is_some() && hunters.len() >= 12 {
+            let f = Fleet { combat: hunters.to_vec(), ..fleet.clone() };
+            attack_near(&mut run.universe, &f, cp, f32::MAX);
+            if self.once("m5 hunt") {
+                self.note(now, "M5: hunting the rest of the Beast fleet");
+            }
+        } else {
+            for &id in hunters {
+                if idle(u, id) && (u.ships.ship(id).posinfo.position - cp).mag_sq() > 4000.0 * 4000.0 {
+                    move_ships(u, &[id], cp);
                 }
-            } else {
-                let f = Fleet { combat: rest, ..fleet.clone() };
-                attack_near(&mut run.universe, &f, mp, f32::MAX);
             }
-            return;
         }
-        // Until the Bentusi is gone, the fleet stays home (the blast clears 22.5 km around it).
-        defend(&mut run.universe, fleet, mp, 15000.0);
     }
 
     // ---- Mission 6: Kadiir nebula -------------------------------------------------------
 
+    /// The Caal-Shto goes from nav point to nav point while the mothership is within 12 km
+    /// of it and fewer than five mines are within 16 km; it stops for a single mine. The
+    /// player scouts the nav points with recons (the last one by finding the heavy cruiser
+    /// near it), keeps the mothership and the fleet with the Caal-Shto, sets the mines off
+    /// with decoys, hunts the Taiidan scouts before they get home to their station (that
+    /// would wake the Death fleet), and clears the heavy cruiser's group ahead of the
+    /// Caal-Shto at the last nav point.
     fn mission6(&mut self, run: &mut MissionRun, fleet: &Fleet, ms: ShipId) {
         let now = run.universe.update_counter;
         let mp = run.universe.ships.ship(ms).posinfo.position;
-        build_up_to(&mut run.universe, ms, ShipType::sRecon, 5);
+        build_up_to(&mut run.universe, ms, ShipType::sRecon, 8);
         build_up_to(&mut run.universe, ms, ShipType::sWorker, 3);
-        build_up_to(&mut run.universe, ms, ShipType::sAcolyte, 14);
+        build_up_to(&mut run.universe, ms, ShipType::sAcolyte, 24);
+        build_up_to(&mut run.universe, ms, ShipType::sACV, 6);
         let point = |run: &MissionRun, n: &str| run.game.level.point(kas_hash(n)).map(|p| Vector::new(p[0], p[1], p[2]));
-        // Explore the station with a recon; then hold a recon at each nav point.
-        if run.game.objective("Explore").is_some() {
-            if let (Some(&r), Some(&st_)) = (fleet.recons.first(), team_ships(run, "TStation").first()) {
-                let p = run.universe.ships.ship(st_).posinfo.position;
+        let navs: Vec<Vector> = ["Nav1", "Nav2", "Nav3", "Nav4", "Nav5"].iter().filter_map(|n| point(run, n)).collect();
+        let caal = team_ships(run, "CaalShto").first().copied();
+        let station = team_ships(run, "TStation").first().map(|&s| run.universe.ships.ship(s).posinfo.position);
+        let mut recons = fleet.recons.clone();
+        // A recon explores the station, then the rest scout.
+        if run.game.objective("Explore").is_some() && !recons.is_empty() {
+            let r = recons.remove(0);
+            if let Some(p) = station {
                 move_ships(&mut run.universe, &[r], p);
                 if self.once("m6 explore") {
                     self.note(now, "M6: recon explores the Taiidan base");
                 }
             }
         }
-        let navs: Vec<Vector> = ["Nav1", "Nav2", "Nav3", "Nav4", "Nav5"].iter().filter_map(|n| point(run, n)).collect();
+        // One recon to each nav point.
         if run.var(None, "G_discovered") == Some(1) || run.game.objective("Scout").is_some() {
-            for (k, &r) in fleet.recons.iter().skip(1).enumerate().take(4) {
-                if let Some(&to) = navs.get(k) {
-                    if (run.universe.ships.ship(r).posinfo.position - to).mag_sq() > 3000.0 * 3000.0 && idle(&run.universe, r) {
-                        move_ships(&mut run.universe, &[r], to);
-                    }
+            for (k, &to) in navs.iter().enumerate() {
+                let Some(&r) = recons.get(k) else { break };
+                if (run.universe.ships.ship(r).posinfo.position - to).mag_sq() > 3000.0 * 3000.0 && idle(&run.universe, r) {
+                    move_ships(&mut run.universe, &[r], to);
                 }
             }
-        }
-        if run.game.objective("Escort").is_some() {
-            if let Some(&c) = team_ships(run, "CaalShto").first() {
-                let cp = run.universe.ships.ship(c).posinfo.position;
-                if std::env::var_os("HWC_DEBUG_GUARDS").is_some() {
-                    let u = &run.universe;
-                    let near = |p: usize, r: f32| u.ship_list.iter().filter(|&&e| u.ships.ship(e).player == p && (u.ships.ship(e).posinfo.position - cp).mag_sq() < r * r).count();
-                    let ms_d = (mp - cp).mag_sq().sqrt();
-                    let busy = fleet.combat.iter().filter(|&&id| !idle(u, id)).count();
-                    self.note(now, format!("M6 caal hp {:.0} combat {} busy {busy} ours<6k {} theirs<6k {} ms d {ms_d:.0} recons {}", u.ships.ship(c).health, fleet.combat.len(), near(HUMAN_PLAYER, 6000.0), near(1, 6000.0), fleet.recons.len()));
-                }
-                if (cp - mp).mag_sq() > 4000.0 * 4000.0 {
-                    move_ships(&mut run.universe, &[ms], cp);
-                }
-                attack_near(&mut run.universe, fleet, cp, 18000.0);
-                return;
+            if self.once("m6 scout") {
+                self.note(now, "M6: recons scout the nav points");
             }
         }
-        defend(&mut run.universe, fleet, mp, 18000.0);
+        let spare: Vec<ShipId> = recons.iter().copied().skip(navs.len()).collect();
+        let Some(c) = caal else {
+            defend(&mut run.universe, fleet, mp, 12000.0);
+            return;
+        };
+        let cp = run.universe.ships.ship(c).posinfo.position;
+        let bits = run.kas.var(Some(kas_hash("CaalShto")), 0x0005_26b3).unwrap_or(0);
+        if std::env::var_os("HWC_DEBUG_GUARDS").is_some() {
+            let u = &run.universe;
+            let mines = u.missiles.iter().filter(|m| m.kind == crate::missile::kind::MINE && (m.posinfo.position - cp).mag_sq() < 16000.0 * 16000.0).count();
+            let state = run.kas.team(kas_hash("CaalShto")).and_then(|t| t.state).map(|h| format!("{h:08x}"));
+            let near = |p: usize, r: f32| u.ship_list.iter().filter(|&&e| u.ships.ship(e).player == p && (u.ships.ship(e).posinfo.position - cp).mag_sq() < r * r).count();
+            self.note(
+                now,
+                format!(
+                    "M6 caal hp {:.0} at ({:.0},{:.0}) bits {bits} mines<16k {mines} state {state:?} death {:?} combat {} ours<6k {} theirs<10k {} ms d {:.0} recons {}",
+                    u.ships.ship(c).health,
+                    cp.x,
+                    cp.y,
+                    run.var(None, "G_Death"),
+                    fleet.combat.len(),
+                    near(HUMAN_PLAYER, 6000.0),
+                    near(1, 10000.0),
+                    (mp - cp).mag_sq().sqrt(),
+                    fleet.recons.len()
+                ),
+            );
+            let close: Vec<String> = u.ship_list.iter().filter(|&&e| u.ships.ship(e).player == 1 && (u.ships.ship(e).posinfo.position - cp).mag_sq() < 12000.0f32 * 12000.0).map(|&e| format!("{}:{:?} hp{:.0} vis {}", e.0, u.ships.ship(e).ship_type, u.ships.ship(e).health, crate::visibility::visible_to_player(u, e, HUMAN_PLAYER))).collect();
+            if !close.is_empty() {
+                self.note(now, format!("M6 near caal: {close:?}"));
+            }
+        }
+        // Before the last leg the heavy cruiser's group waits near the last nav point; it
+        // calls the Death fleet when it sees the Caal-Shto or the mothership. The player holds
+        // the mothership back (the Caal-Shto waits for it) until the group is gone.
+        let visible = enemies(&run.universe);
+        let cruiser_group: Vec<ShipId> = match (navs.get(3), navs.get(4)) {
+            (Some(_), Some(&n5)) if bits & 8 != 0 && (cp - n5).mag_sq() < 50000.0 * 50000.0 => {
+                let cruiser = team_ships(run, "HvCruiser");
+                let mut v: Vec<ShipId> = visible.iter().copied().filter(|&e| (run.universe.ships.ship(e).posinfo.position - n5).mag_sq() < 25000.0 * 25000.0 || cruiser.contains(&e)).collect();
+                v.sort_by(|&a, &b| (run.universe.ships.ship(a).posinfo.position - cp).mag_sq().total_cmp(&(run.universe.ships.ship(b).posinfo.position - cp).mag_sq()));
+                v
+            }
+            _ => Vec::new(),
+        };
+        let hold = !cruiser_group.is_empty();
+        if hold {
+            let n5 = navs[4];
+            let mut away = cp - n5;
+            away.normalize();
+            let back = cp + away.scale(15000.0);
+            if (mp - back).mag_sq() > 3000.0 * 3000.0 && (mp - cp).mag_sq() < 13000.0 * 13000.0 {
+                move_ships(&mut run.universe, &[ms], back);
+            }
+            if self.once("m6 hold") {
+                self.note(now, "M6: the mothership holds back until the heavy cruiser's group is gone");
+            }
+        }
+        // The mothership keeps with the Caal-Shto: it flies a little ahead of it towards the
+        // point the Caal-Shto is heading for (the Caal-Shto waits whenever the mothership is
+        // more than 12 km away, and only goes on once it is within 6 km).
+        if run.game.objective("Escort").is_some() && !hold {
+            let goal = point(run, "ESCORT").unwrap_or(cp);
+            let mut dir = goal - cp;
+            let left = dir.mag_sq().sqrt();
+            let dest = if left > 3000.0 {
+                dir.normalize();
+                cp + dir.scale(3000.0)
+            } else {
+                goal
+            };
+            let going = run.universe.ships.ship(ms).command.and_then(|k| run.universe.commands.get(k)).is_some_and(|k| k.order == crate::command::order::MOVE && k.waypoints.last().is_some_and(|w| (*w - dest).mag_sq() < 1500.0 * 1500.0));
+            if !going && (mp - dest).mag_sq() > 1500.0 * 1500.0 {
+                move_ships(&mut run.universe, &[ms], dest);
+            }
+            if self.once("m6 escort") {
+                self.note(now, "M6: the mothership escorts the Caal-Shto");
+            }
+        }
+        // Mines near the Caal-Shto: a decoy flies at each until it goes off.
+        let mines: Vec<Vector> = run
+            .universe
+            .missiles
+            .iter()
+            .filter(|m| m.kind == crate::missile::kind::MINE && !m.is_dead() && (m.posinfo.position - cp).mag_sq() < 17000.0 * 17000.0)
+            .map(|m| m.posinfo.position)
+            .collect();
+        let mut decoys: Vec<ShipId> = spare;
+        decoys.extend(fleet.combat.iter().copied().filter(|&id| run.universe.ships.ship(id).ship_type == ShipType::sAcolyte).rev().take(2));
+        let used = mines.len().min(decoys.len());
+        for (k, &m) in mines.iter().take(used).enumerate() {
+            let d = decoys[k];
+            if idle(&run.universe, d) || (run.universe.ships.ship(d).posinfo.position - m).mag_sq() > 2000.0 * 2000.0 {
+                move_ships(&mut run.universe, &[d], m);
+            }
+        }
+        if !mines.is_empty() && self.once("m6 mines") {
+            self.note(now, format!("M6: decoys set off {} mines near the Caal-Shto", mines.len()));
+        }
+        let combat: Vec<ShipId> = fleet.combat.iter().copied().filter(|id| !decoys[..used].contains(id)).collect();
+        // The Taiidan scouts: a hunting group goes for any it can see.
+        let scouts: Vec<ShipId> = ["Scouts", "Scouts2", "Scouts3", "Scouts4"].iter().flat_map(|t| team_ships(run, t)).collect();
+        let seen: Vec<ShipId> = scouts.into_iter().filter(|s| visible.contains(s)).collect();
+        let (hunters, escort) = combat.split_at(combat.len() / 2);
+        if !seen.is_empty() {
+            let ready: Vec<ShipId> = hunters.iter().copied().filter(|&id| !attacking_any(&run.universe, id, &seen)).collect();
+            attack(&mut run.universe, &ready, &seen);
+            if self.once("m6 scouts") {
+                self.note(now, "M6: hunting the Taiidan scouts");
+            }
+        }
+        // The heavy cruiser's group is cleared by the whole fleet, nearest first.
+        if hold {
+            let targets: Vec<ShipId> = cruiser_group.iter().copied().take(6).collect();
+            let ready: Vec<ShipId> = combat.iter().copied().filter(|&id| !attacking_any(&run.universe, id, &targets)).collect();
+            attack(&mut run.universe, &ready, &targets);
+            if self.once("m6 cruiser") {
+                self.note(now, "M6: the fleet clears the heavy cruiser's group at the last nav point");
+            }
+            return;
+        }
+        // The rest stay with the Caal-Shto and fight what comes within 10 km of it (once the
+        // Death fleet is out, everyone and within 16 km).
+        let death = run.var(None, "G_Death") == Some(1);
+        let (escort, range) = if death { (&combat[..], 16000.0f32) } else { (escort, 10000.0f32) };
+        let mut near: Vec<ShipId> = visible.iter().copied().filter(|&e| (run.universe.ships.ship(e).posinfo.position - cp).mag_sq() < range * range).collect();
+        near.sort_by(|&a, &b| (run.universe.ships.ship(a).posinfo.position - cp).mag_sq().total_cmp(&(run.universe.ships.ship(b).posinfo.position - cp).mag_sq()));
+        if !near.is_empty() {
+            near.truncate(6);
+            let ready: Vec<ShipId> = escort.iter().copied().filter(|&id| !attacking_any(&run.universe, id, &near)).collect();
+            attack(&mut run.universe, &ready, &near);
+            return;
+        }
+        let home: Vec<ShipId> = if seen.is_empty() { combat.clone() } else { escort.to_vec() };
+        for id in home {
+            if idle(&run.universe, id) && (run.universe.ships.ship(id).posinfo.position - cp).mag_sq() > 4000.0 * 4000.0 {
+                move_ships(&mut run.universe, &[id], cp);
+            }
+        }
     }
 }
 
@@ -584,8 +890,14 @@ impl Fleet {
     }
 }
 
+/// A ship with nothing to do: no order, or only holding its place in the fleet's military
+/// parade (where the arrival and the jump leave the ships until the player orders them).
 fn idle(u: &Universe, id: ShipId) -> bool {
-    u.ships.get(id).is_some_and(|s| s.command.and_then(|c| u.commands.get(c)).is_none_or(|c| c.order == crate::command::order::NULL && c.attributes & crate::command::attr::PROTECTING == 0))
+    u.ships.get(id).is_some_and(|s| {
+        s.command.and_then(|c| u.commands.get(c)).is_none_or(|c| {
+            (c.order == crate::command::order::NULL && c.attributes & crate::command::attr::PROTECTING == 0) || c.order == crate::command::order::MILITARY_PARADE
+        })
+    })
 }
 
 /// The live, visible ships of a KAS team (by its label in the level files).
@@ -630,6 +942,11 @@ fn strike(u: &mut Universe, ships: &[ShipId], targets: &[ShipId], group: usize) 
     if free.len() >= group || (busy >= group && !free.is_empty()) {
         attack(u, &free, targets);
     }
+}
+
+/// Whether `id` is attacking one of `targets`.
+fn attacking_any(u: &Universe, id: ShipId, targets: &[ShipId]) -> bool {
+    u.ships.get(id).and_then(|s| s.command).and_then(|c| u.commands.get(c)).is_some_and(|c| c.order == crate::command::order::ATTACK && c.attack_targets.iter().any(|t| targets.contains(t)))
 }
 
 /// Ships not already attacking one of `targets` attack them.
@@ -694,7 +1011,12 @@ fn defend(u: &mut Universe, fleet: &Fleet, at: Vector, range: f32) {
 
 /// Idle workers harvest.
 fn harvest(u: &mut Universe, fleet: &Fleet) {
-    let idle_workers: Vec<ShipId> = fleet.workers.iter().copied().filter(|&w| u.ships.ship(w).command.is_none()).collect();
+    let idle_workers: Vec<ShipId> = fleet
+        .workers
+        .iter()
+        .copied()
+        .filter(|&w| u.ships.ship(w).command.and_then(|c| u.commands.get(c)).is_none_or(|c| c.order == crate::command::order::MILITARY_PARADE))
+        .collect();
     if !idle_workers.is_empty() {
         crate::resource::cl_collect_resource(u, &idle_workers, None);
     }
@@ -722,10 +1044,10 @@ fn build_up_to(u: &mut Universe, ms: ShipId, t: ShipType, n: usize) {
     crate::construction::queue_build(u, ms, t, 1);
 }
 
-/// Starts researching `tech` when a lab is free.
+/// Starts researching `tech` when the research manager offers it and a lab is free.
 fn research(u: &mut Universe, tech: &str) {
     if let Some(t) = crate::statics::Technology::from_name(tech) {
-        if !u.base.players[HUMAN_PLAYER].tech.contains(t.index()) {
+        if crate::research::available_topics(u, HUMAN_PLAYER).contains(&t.index()) {
             crate::research::research_tech_if_lab_free(u, HUMAN_PLAYER, t.index());
         }
     }

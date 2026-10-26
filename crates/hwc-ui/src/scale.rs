@@ -75,11 +75,31 @@ impl Placement {
         let cy = (y as f32 - vy) * self.canvas.1 as f32 / vh.max(1.0);
         (cx.floor() as i32, cy.floor() as i32)
     }
+
+    /// Canvas pixel to the window position of its centre (where to put the system pointer so
+    /// that [`to_canvas`](Self::to_canvas) gives the pixel back).
+    pub fn to_window(&self, x: i32, y: i32) -> (f64, f64) {
+        let (vx, vy, vw, vh) = self.viewport;
+        let wx = vx + (x as f32 + 0.5) * vw / self.canvas.0.max(1) as f32;
+        let wy = vy + (y as f32 + 0.5) * vh / self.canvas.1.max(1) as f32;
+        (f64::from(wx), f64::from(wy))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_positions_round_trip() {
+        for mode in [ScaleMode::Original, ScaleMode::Fit, ScaleMode::Integer, ScaleMode::Stretch] {
+            let p = Placement::new(mode, (1600, 1000));
+            for (x, y) in [(0, 0), (17, 300), (p.canvas.0 - 1, p.canvas.1 - 1)] {
+                let (wx, wy) = p.to_window(x, y);
+                assert_eq!(p.to_canvas(wx, wy), (x, y), "{mode:?} ({x}, {y})");
+            }
+        }
+    }
 
     #[test]
     fn original_is_one_to_one() {

@@ -216,11 +216,18 @@ pub struct MissionConfig {
     /// [`Game::pending_nis`] until [`MissionRun::nis_finished`] (otherwise they count as
     /// finished at once, or after [`nislet_seconds`](Self::nislet_seconds)).
     pub hold_nis: bool,
+    /// Attach the ETG effects when the mission loads (when the data has them). The effects
+    /// are part of the simulation in the original: an exploding ship stays in the universe as
+    /// a hulk until its death effect deletes it (`deleteParentShip`), so a run without them
+    /// diverges from one with them. On by default (off with `HWC_NO_EFFECTS` set), so that
+    /// headless runs and drawn runs give the same world.
+    pub effects: bool,
 }
 
 impl MissionConfig {
     pub fn new(mission: u32) -> Self {
-        MissionConfig { mission, skill: 2, nislet_seconds: 0.0, speech_seconds: None, log_calls: true, hold_nis: false }
+        let effects = std::env::var_os("HWC_NO_EFFECTS").is_none();
+        MissionConfig { mission, skill: 2, nislet_seconds: 0.0, speech_seconds: None, log_calls: true, hold_nis: false, effects }
     }
 }
 
@@ -351,6 +358,8 @@ pub struct Game {
     pub selections: Vec<(Hash, Vec<ShipId>)>,
     pub objectives: Vec<Objective>,
     pub pings: Vec<String>,
+    /// The KAS ping calls in order, for a front end to draw ([`PingOrder`]; drained by it).
+    pub ping_orders: Vec<PingOrder>,
     pub pointers: Vec<String>,
     pub tut_flags: Vec<String>,
     /// The sensors manager is open (0x900620) and the KAS sensors flag (0x900608).
@@ -358,6 +367,9 @@ pub struct Game {
     pub sensors_kas_flag: i32,
     pub sensors_look_at: Vector,
     pub wide_screen: bool,
+    /// The wide-screen (letterbox) calls in order, with their frame counts, for a front end
+    /// to animate (drained by the presentation layer like [`Game::presentation`]).
+    pub wide_screen_events: Vec<WideScreenEvent>,
     pub camera: CameraState,
     pub music: Option<i32>,
     pub techs: Vec<String>,
@@ -372,7 +384,8 @@ pub struct Game {
     pub delete_when_mission_ends: Vec<ShipId>,
     /// Repair modifiers set by KAS (+0x3dc), by ship.
     pub repair_modifiers: Vec<(ShipId, f32)>,
-    /// Ships docked inside another ship by KAS (`DockInstant`, `ShipsCreateLaunch`): (ship, host).
+    /// No longer filled: KAS docking and launching use the dock code (`Ship::base.inside`).
+    /// Kept for API compatibility.
     pub docked: Vec<(ShipId, ShipId)>,
     /// 0x91b324: the last intel event (subtitle) has ended.
     pub intel_ended: bool,
@@ -455,6 +468,15 @@ impl Game {
         }
         for t in &mut self.level.teams {
             swap_remove_all(&mut t.ships, id);
+            // aimDockShipDied: the ship leaves the dock moves' lists; a dead host is forgotten.
+            for m in &mut t.moves.moves {
+                if let crate::aimove::MoveKind::Dock { host, docking, .. } = &mut m.kind {
+                    swap_remove_all(docking, id);
+                    if *host == Some(id) {
+                        *host = None;
+                    }
+                }
+            }
         }
         self.level.clamps.retain(|&(m, h)| m != id && h != id);
         for m in &mut self.level.motherships {
@@ -620,6 +642,12 @@ impl MissionRun {
         // gameStart runs with the single-player flag set: the players take the single-player
         // research tables (rmInitializeResearchStruct), not the multiplayer ones.
         crate::base::init(&mut universe);
+        // The single-player game gives the computer player an AI player (`aiplayerInit`, the
+        // KAS teams live in it), so its ships count as computer-controlled: harvesters look
+        // for resources anywhere (`rescollectFindNearestResource` tests `player->aiPlayer`).
+        if let Some(p) = universe.base.players.get_mut(level::COMPUTER_PLAYER) {
+            p.ai = true;
+        }
         if let Some(c) = carry {
             crate::campaign::restore_player(&mut universe, c);
         }
@@ -691,6 +719,12 @@ impl MissionRun {
         }
         // singlePlayerNisStoppedCB sets the state that starts the KAS mission next frame.
         game.sp_state = sp_state::START_KAS;
+        if game.config.effects {
+            let data = crate::effects::EffectData::load_from(src);
+            if !data.is_empty() {
+                crate::effects::attach(&mut universe, &data);
+            }
+        }
         Ok(MissionRun { universe, kas, game })
     }
 
@@ -702,6 +736,20 @@ impl MissionRun {
         // Ships that died this update leave KAS selections and teams.
         let dead: Vec<ShipId> = universe.events.iter().filter_map(|e| if let SimEvent::ShipDied { ship, .. } = e { Some(*ship) } else { None }).collect();
         for id in dead {
+            game.ship_removed(id);
+        }
+        // Ships wiped without a death of their own (inside a host that died, retired, merged)
+        // leave them too (`univDeleteWipeInsideShipOutOfExistence` -> `aiplayerShipDied`).
+        let mut wiped: Vec<ShipId> = Vec::new();
+        for t in &game.level.teams {
+            wiped.extend(t.ships.iter().copied().filter(|&id| id.mine().is_none() && id.meteor().is_none() && universe.ships.get(id).is_none()));
+        }
+        for (_, sel) in &game.selections {
+            wiped.extend(sel.iter().copied().filter(|&id| id.mine().is_none() && id.meteor().is_none() && universe.ships.get(id).is_none()));
+        }
+        wiped.sort_unstable_by_key(|s| s.0);
+        wiped.dedup();
+        for id in wiped {
             game.ship_removed(id);
         }
         level::update_clamped(universe, &game.level);
@@ -882,6 +930,8 @@ pub(crate) fn empty_game(config: MissionConfig) -> Game {
         sensors_kas_flag: 0,
         sensors_look_at: Vector::ZERO,
         wide_screen: false,
+        wide_screen_events: Vec::new(),
+        ping_orders: Vec::new(),
         camera: CameraState::default(),
         presentation: Vec::new(),
         music: None,
@@ -1298,6 +1348,51 @@ impl DataSource for GameDataSource<'_> {
 pub enum NisRequest {
     Nis(i32),
     Nislet(i32),
+}
+
+/// A KAS ping call (`ping.c`'s `pingAnomaly*` on the sensors manager), by label.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PingOrder {
+    /// `kasfPingAddSingleShip`: a ping following the selection's first ship.
+    Ship { label: String, ship: ShipId },
+    /// `kasfPingAddShips`: one ping following the selection as a group; and
+    /// `kasfPingMultipleAddShips`: one per ship, labelled `label` + index (`"%s%d"`).
+    Ships { label: String, ships: Vec<ShipId> },
+    /// `kasfPingAddPoint`: a ping at a point.
+    Point { label: String, at: Vector },
+    /// `kasfPingRemove`: the pings with this label go.
+    Remove { label: String },
+}
+
+/// Which wide-screen call was made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WideScreenKind {
+    /// `kasfWideScreenIn` (0x492a40).
+    In,
+    /// `kasfWideScreenInDontCloseSensors` (0x492ba0).
+    InDontCloseSensors,
+    /// `kasWideScreenInHyperspace` (0x492af0): the hyperspace button and the roll call's
+    /// go-now / emergency buttons, with 90 frames.
+    InHyperspace,
+    /// `kasfWideScreenOut` (0x492c50).
+    Out,
+}
+
+/// A wide-screen call: the letterbox moves in or out over `frames` frames, from game time
+/// `time`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WideScreenEvent {
+    pub kind: WideScreenKind,
+    pub frames: i32,
+    pub time: f32,
+}
+
+impl Game {
+    /// Records a wide-screen call (sets [`Game::wide_screen`] and queues the event).
+    pub fn wide_screen_call(&mut self, kind: WideScreenKind, frames: i32, time: f32) {
+        self.wide_screen = kind != WideScreenKind::Out;
+        self.wide_screen_events.push(WideScreenEvent { kind, frames, time });
+    }
 }
 
 /// A presentation call made by KAS, recorded as data.

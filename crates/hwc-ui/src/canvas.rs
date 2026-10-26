@@ -246,11 +246,21 @@ impl Canvas {
 
     /// Non-antialiased line (both endpoints drawn).
     pub fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, c: Color) {
+        self.line_stippled(x0, y0, x1, y1, c, 0xffff);
+    }
+
+    /// A line drawn through a 16-pixel stipple pattern like `glLineStipple(1, pattern)`: the
+    /// n-th pixel from the start is drawn when bit `n % 16` of the pattern is set.
+    pub fn line_stippled(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, c: Color, pattern: u16) {
         let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
         let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
         let (mut x, mut y, mut err) = (x0, y0, dx + dy);
+        let mut n = 0u32;
         loop {
-            self.put(x, y, c);
+            if pattern & (1 << (n % 16)) != 0 {
+                self.put(x, y, c);
+            }
+            n += 1;
             if x == x1 && y == y1 {
                 break;
             }
@@ -354,6 +364,20 @@ pub fn over(src: Color, dst: Color) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stippled_lines_follow_the_pattern() {
+        let mut c = Canvas::new(32, 1);
+        c.clear([0, 0, 0, 255]);
+        c.line_stippled(0, 0, 31, 0, [255, 255, 255, 255], 0xff00);
+        let lit: Vec<bool> = (0..32).map(|x| c.get(x, 0)[0] == 255).collect();
+        for (x, &on) in lit.iter().enumerate() {
+            assert_eq!(on, x % 16 >= 8, "pixel {x}");
+        }
+        let mut d = Canvas::new(8, 8);
+        d.line(0, 0, 7, 7, [255, 0, 0, 255]);
+        assert!((0..8).all(|i| d.get(i, i)[0] == 255));
+    }
 
     #[test]
     fn rotation_is_clockwise() {

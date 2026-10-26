@@ -410,24 +410,19 @@ impl GameUiHost for SimHost<'_> {
         } else {
             "R1"
         };
+        // `rmUpdateTechList`: what the player may start researching comes from the
+        // simulation (in single player, what the mission allowed).
+        let available = research::available_topics(u, PLAYER);
         Technology::ALL
             .iter()
             .map(|&t| {
                 let i = t.index();
-                let depends_met = table.tech_depend[i]
-                    .iter()
-                    .all(|d| self.tech_has(&p.tech, d.index()));
                 let lab = research::tech_lab(i);
-                let lab_present = if self.race() == ShipRace::Beast {
-                    p.labs[0].status != lab_status::ABSENT
-                } else {
-                    lab >= 0 && p.labs[lab as usize].status != lab_status::ABSENT
-                };
                 let state = if self.tech_has(&p.tech, i) {
                     TechState::Researched
                 } else if p.topics.iter().any(|x| x.tech == i) {
                     TechState::Researching
-                } else if depends_met && lab_present && table.tech_time[i] > 0 {
+                } else if available.contains(&i) {
                     TechState::Available
                 } else {
                     TechState::Unavailable
@@ -454,15 +449,19 @@ impl GameUiHost for SimHost<'_> {
         let mut rows = Vec::new();
         let labs = if self.race() == ShipRace::Beast { 1 } else { 5 };
         for (lab, heading) in LAB_HEADINGS.iter().enumerate().take(labs) {
+            // A lab's heading shows only over topics of its own (`rmUpdateTechList`).
+            let topics: Vec<u32> = techs
+                .iter()
+                .filter(|t| (labs == 1 || t.lab == lab) && t.state != TechState::Unavailable)
+                .map(|t| t.id)
+                .collect();
+            if topics.is_empty() {
+                continue;
+            }
             rows.push(ResearchRow::Header {
                 name: self.text(heading).trim().to_string(),
             });
-            for t in techs
-                .iter()
-                .filter(|t| (labs == 1 || t.lab == lab) && t.state != TechState::Unavailable)
-            {
-                rows.push(ResearchRow::Tech(t.id));
-            }
+            rows.extend(topics.into_iter().map(ResearchRow::Tech));
         }
         rows
     }

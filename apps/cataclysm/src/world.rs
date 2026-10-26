@@ -135,6 +135,18 @@ impl Frame {
     }
 }
 
+#[cfg(test)]
+impl Frame {
+    /// Each drawn ship with the level it is drawn at.
+    pub fn ship_levels(&self) -> Vec<(ShipId, usize)> {
+        self.items
+            .iter()
+            .zip(&self.ids)
+            .filter_map(|(item, (id, _))| id.map(|id| (id, item.lod)))
+            .collect()
+    }
+}
+
 /// What `Sandbox::frame` prepared for one drawn frame.
 pub struct Frame {
     items: Vec<Item>,
@@ -214,6 +226,12 @@ pub struct World {
     trail_tweaks: TrailTweaks,
     engine_fx: Option<EngineEffectAssets>,
     pub lod: LodSelector,
+    /// Ships are drawn at their most detailed level whatever their size on screen (a
+    /// user-requested change, on by default; `--lod original` or `hwcFullDetailShips = 0`
+    /// restore the original's screen-size selection). Only the drawing changes: the level
+    /// the original would pick is still worked out and reported by [`ship_lod`](Self::ship_lod)
+    /// (the hot-key numbers' font) and [`Frame::is_mesh`] (the sensors manager's meshes).
+    pub full_detail: bool,
     fx: BTreeMap<ShipId, ShipFx>,
     pub lighting: SceneLighting,
     background_path: Option<String>,
@@ -263,6 +281,16 @@ fn matrix(m: &hwc_math::Matrix, p: Vec3) -> Mat4 {
         p.extend(1.0),
     )
 }
+/// The level a ship is drawn at: the most detailed one with full detail on, else the level
+/// the original's selection picked.
+fn drawn_lod(full_detail: bool, nominal: usize) -> usize {
+    if full_detail {
+        0
+    } else {
+        nominal
+    }
+}
+
 impl World {
     /// The mission's world: level background and lighting, the camera on the start point
     /// until the mothership comes out of hyperspace. `player_colors` replaces colour scheme 0
@@ -318,6 +346,7 @@ impl World {
             trail_tweaks,
             engine_fx: None,
             lod: LodSelector::default(),
+            full_detail: true,
             fx: BTreeMap::new(),
             lighting: SceneLighting::default(),
             background_path,
@@ -963,7 +992,8 @@ impl World {
             fx.lod = self
                 .lod
                 .select(gpu.level_count(), fx.lod, r, d2, gpu.lod_table());
-            let lod = fx.lod;
+            let nominal = fx.lod;
+            let lod = drawn_lod(self.full_detail, nominal);
             let pose = fx_pose(art, fx, lod.min(art.bindings.len().saturating_sub(1)));
             let st = u.statics.ship(t);
             let scheme = self
@@ -1051,7 +1081,7 @@ impl World {
             let mesh = art
                 .table
                 .as_ref()
-                .and_then(|t| t.levels.get(lod))
+                .and_then(|t| t.levels.get(nominal))
                 .is_none_or(|l| l.kind == LodKind::Mesh);
             frame.ids.push((Some(id), mesh));
             // TODO(render states): cloak fade/wipe, phase blend, Beast infection and EMP
@@ -1413,27 +1443,6 @@ impl World {
         ])
     }
 
-    /// Ray through a pixel: (origin, direction).
-    pub fn ray(&self, size: (u32, u32), px: [f32; 2]) -> (Vec3, Vec3) {
-        let inv = self.view_proj(size).inverse();
-        let nx = px[0] / size.0 as f32 * 2.0 - 1.0;
-        let ny = 1.0 - px[1] / size.1 as f32 * 2.0;
-        let a = inv * Vec4::new(nx, ny, 0.0, 1.0);
-        let b = inv * Vec4::new(nx, ny, 1.0, 1.0);
-        let (a, b) = (a.truncate() / a.w, b.truncate() / b.w);
-        (a, (b - a).normalize())
-    }
-
-    /// Where the ray through a pixel meets the horizontal plane at height `z`.
-    pub fn plane_point(&self, size: (u32, u32), px: [f32; 2], z: f32) -> Option<Vec3> {
-        let (o, d) = self.ray(size, px);
-        if d.z.abs() < 1e-5 {
-            return None;
-        }
-        let t = (z - o.z) / d.z;
-        (t > 0.0).then(|| o + d * t)
-    }
-
     /// The level of detail a ship was last drawn at (`ship->currentLOD`).
     pub fn ship_lod(&self, id: ShipId) -> Option<usize> {
         self.fx.get(&id).map(|f| f.lod)
@@ -1595,6 +1604,13 @@ fn original_bullets(u: &Universe, out: &mut EffectBatch) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_detail_draws_the_top_level() {
+        assert_eq!(drawn_lod(true, 3), 0);
+        assert_eq!(drawn_lod(false, 3), 3);
+        assert_eq!(drawn_lod(false, 0), 0);
+    }
 
     #[test]
     fn hyperspace_planes_follow_hs_get_equation() {

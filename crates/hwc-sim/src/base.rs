@@ -232,6 +232,11 @@ pub struct PlayerBase {
     pub ai: bool,
     /// +0x20: auto-launch bits (1 = mothership, 2/4/8 = carriers).
     pub auto_launch: u32,
+    /// The single-player "may be researched" flags per technology (0xa49a00, set by KAS
+    /// `TechSetResearch` / `AllowPlayerToResearch`, cleared only by `gameStart`, so they carry
+    /// over from mission to mission). One global array in the original; kept on the human
+    /// player here.
+    pub research_allowed: Vec<bool>,
     /// +0x2c: ships counted against the unit caps.
     pub total_ships: i32,
     /// +0x30: ships per type (unit caps).
@@ -282,6 +287,7 @@ impl PlayerBase {
             ai: false,
             // gameStart turns every auto-launch bit on.
             auto_launch: 0x1f,
+            research_allowed: vec![false; NUM_TECHS],
             total_ships: 0,
             ship_count: vec![0; NUM_SHIP_TYPES],
             class_count: [0; ShipClass::COUNT],

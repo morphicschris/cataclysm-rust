@@ -818,6 +818,53 @@ fn finish_attack(u: &mut Universe, cid: CommandId) {
     }
 }
 
+/// The approach of a formation ordered to attack (`clProcess` 0x447400, formation attack):
+/// until `doneInitialAttack`, while the first target is at least 10 km and beyond the leader's
+/// gun range for its tactics, the leader flies at it at the formation's travel speed and the
+/// others keep their slots. True while approaching.
+fn formation_attack_approach(u: &mut Universe, cid: CommandId) -> bool {
+    let Some(cmd) = u.commands.get(cid).cloned() else { return false };
+    if cmd.attack_in_range {
+        return false;
+    }
+    if let Some(&target) = cmd.attack_targets.first().filter(|t| u.ships.get(**t).is_some()) {
+        let leader = cmd.selection[0];
+        let (l, t) = (u.ships.ship(leader), u.ships.ship(target));
+        let range = u.statics.ship(t.ship_type).map_or(0.0, |ts| crate::aiship::range_to_target(ts, crate::aiship::trajectory(l, t)));
+        let gun = u.statics.ship(l.ship_type).map_or(0.0, |ls| ls.bullet_range[l.tactics.min(2)]);
+        if 10000.0 <= range && ld(gun) <= range {
+            let at = t.posinfo.position;
+            crate::aiship::fly_to_point_avoiding_objs(u, leader, Some(at), 10, cmd.formation.travel_vel, None);
+            u.ships.ship_mut(leader).ship_idle = false;
+            formation::process(u, cid, false, false);
+            return true;
+        }
+    }
+    if let Some(c) = u.commands.get_mut(cid) {
+        c.attack_in_range = true;
+    }
+    false
+}
+
+/// The target rules of `processAttackToDoInFormation`: the leader picks its own target; a
+/// wingman takes the leader's when it has none and the leader's target is not in a formation
+/// (or the leader is aggressive: focus fire), and is put on it whenever the leader's target is
+/// not in a formation.
+fn share_leader_target(u: &mut Universe, cid: CommandId) {
+    let Some(cmd) = u.commands.get(cid).cloned() else { return };
+    let leader = cmd.selection[0];
+    let focus = u.ships.ship(leader).tactics == crate::object::tactics::AGGRESSIVE;
+    let Some(lt) = u.ships.ship(leader).attack.target.filter(|t| u.ships.get(*t).is_some()) else { return };
+    let lt_loose = u.ships.ship(lt).command.and_then(|c| u.commands.get(c)).is_none_or(|c| c.attributes & attr::FORMATION == 0);
+    for &id in &cmd.selection[1..] {
+        let s = u.ships.ship(id);
+        let none = s.attack.target.is_none_or(|t| u.ships.get(t).is_none());
+        if (none && (lt_loose || focus)) || (lt_loose && s.attack.target != Some(lt)) {
+            u.ships.ship_mut(id).attack.target = Some(lt);
+        }
+    }
+}
+
 /// `clProcess` (0x447400) for the orders of this slice.
 pub fn cl_process(u: &mut Universe) {
     let todo = u.commands.todo.clone();
@@ -871,10 +918,26 @@ pub fn cl_process(u: &mut Universe) {
                     formation::process(u, cid, false, false);
                 }
                 order::ATTACK => {
-                    // (Formations attack ship by ship here; the in-formation attack of
-                    // holdFormationDuringBattle is not modelled.)
+                    if formation_attack_approach(u, cid) {
+                        continue;
+                    }
+                    // `processAttackToDo` (evasive leader or a lone ship) or
+                    // `processAttackToDoInFormation` (neutral and aggressive leaders hold the
+                    // formation: `holdFormationDuringBattle`). The in-formation attack is
+                    // modelled by its target rules (the wingmen take the leader's target when
+                    // it is not itself in a formation, or always when aggressive) on top of the
+                    // ships' own attack; sphere and claw formations keep their shape.
+                    let cmd = u.commands.get(cid).expect("command").clone();
+                    let leader = cmd.selection[0];
+                    let t = u.ships.ship(leader).tactics.min(2);
+                    let hold = u.tweaks.combat.hold_formation_during_battle[t] != 0 && cmd.selection.len() > 1;
+                    if hold {
+                        share_leader_target(u, cid);
+                    }
                     if process_attack_to_do(u, cid) {
                         finish_attack(u, cid);
+                    } else if hold && matches!(cmd.formation.formation_type, formation::kind::SPHERE | formation::kind::CLAW) {
+                        formation::process(u, cid, false, true);
                     }
                 }
                 order::DOCK => {

@@ -170,3 +170,75 @@ fn mission01_world_resources_drop_as_asteroids_are_harvested() {
     let after = world_resources(&run.universe);
     assert!(after < before, "no resource units harvested ({before} left)");
 }
+
+/// The single-player research gating: the research manager does not offer linking until the
+/// mission's script allows it (`TechSetResearch("TECH_LINK")`, when the bombers' objective is
+/// done), and offers it from then on (once its lab is there).
+#[test]
+fn mission01_linking_is_unavailable_until_the_script_allows_it() {
+    let Some(d) = data() else { return };
+    let link = hwc_sim::statics::Technology::from_name("TECH_LINK").expect("TECH_LINK").index();
+    let mut run = start(d);
+    let mut ap = hwc_sim::autoplay::Autoplay::new(16 * 4500);
+    let mut allowed_at = None;
+    for _ in 0..16 * 3000 {
+        ap.tick(&mut run);
+        run.step();
+        let u = &run.universe;
+        let allowed = hwc_sim::research::research_allowed(u, 0, link);
+        let offered = hwc_sim::research::available_topics(u, 0).contains(&link);
+        if !allowed {
+            assert!(!offered, "linking offered at update {} before the script allowed it", u.update_counter);
+        } else {
+            allowed_at.get_or_insert(u.update_counter);
+            let lab = hwc_sim::research::tech_lab(link);
+            let lab_here = lab < 0 || u.base.players[0].labs[lab as usize].status != hwc_sim::base::lab_status::ABSENT;
+            if lab_here && !u.base.players[0].tech.contains(link) && !hwc_sim::research::researching(u, 0, link) {
+                assert!(offered, "linking allowed but not offered at update {}", u.update_counter);
+            }
+        }
+        if run.mission_complete() {
+            break;
+        }
+    }
+    assert!(allowed_at.is_some(), "the script allows linking during the mission");
+    // The KAS pings came through as orders: the resourcers' ping and its removal.
+    use hwc_sim::mission::PingOrder;
+    let pings = &run.game.ping_orders;
+    assert!(pings.iter().any(|p| matches!(p, PingOrder::Ships { label, ships } if label == "ResourcerPing" && !ships.is_empty())), "{pings:?}");
+    assert!(pings.iter().any(|p| matches!(p, PingOrder::Remove { label } if label == "ResourcerPing")), "{pings:?}");
+    // Nothing the script never allowed is offered.
+    let u = &run.universe;
+    for t in hwc_sim::research::available_topics(u, 0) {
+        assert!(hwc_sim::research::research_allowed(u, 0, t), "technology {t} offered without TechSetResearch");
+    }
+}
+
+/// The Taiidan resource collectors fly to the unexplored region and, once discovered, harvest:
+/// the computer player has an AI player, so they find resources (they sat still before).
+#[test]
+fn mission01_taiidan_resourcers_move_and_harvest() {
+    let Some(d) = data() else { return };
+    let mut run = start(d);
+    let mut ap = hwc_sim::autoplay::Autoplay::new(16 * 4500);
+    let team = kas_hash("TaiidanResourcers");
+    let first: Vec<_> = run.game.level.team(team).map(|t| t.ships.clone()).unwrap_or_default();
+    assert!(!first.is_empty(), "the level has the resource collectors");
+    let p0: Vec<_> = first.iter().map(|&id| run.universe.ships.ship(id).posinfo.position).collect();
+    let (mut moved, mut harvested) = (false, false);
+    for _ in 0..16 * 2000 {
+        ap.tick(&mut run);
+        run.step();
+        let u = &run.universe;
+        for (k, &id) in first.iter().enumerate() {
+            let Some(s) = u.ships.get(id) else { continue };
+            moved |= (s.posinfo.position - p0[k]).mag_sq() > 1000.0 * 1000.0;
+            harvested |= s.base.resources > 0;
+        }
+        if moved && harvested {
+            break;
+        }
+    }
+    assert!(moved, "the resource collectors move");
+    assert!(harvested, "the resource collectors harvest");
+}

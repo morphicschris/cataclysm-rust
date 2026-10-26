@@ -304,10 +304,51 @@ fn mission_one_plays_through_the_game_path() {
         "move order given"
     );
 
-    // Right click without moving: the menu.
-    rig.click(g, SIZE.0 / 2, SIZE.1 / 2, false);
+    // Right click without moving on empty space: the move plate (the user-requested default);
+    // Shift+right click and the original's right click: the menu.
+    let menu_open = |g: &Game| hwc_ui::ingame::popup::is_open(&g.ui.fe);
+    let candidates = [(1, 2), (1, 4), (3, 4), (1, 1), (3, 1), (3, 3), (1, 3)];
+    let empty = candidates
+        .iter()
+        .map(|&(a, b)| (SIZE.0 * a / 4, SIZE.1 * b / 5))
+        .find(|&(x, y)| {
+            rig.input(g, InputEvent::MouseMove { x, y });
+            rig.frame(g);
+            g.hover.is_none()
+        })
+        .expect("some empty space on screen");
+    let (ex, ey) = empty;
+    rig.click(g, ex, ey, false);
+    assert!(matches!(g.mode, Mode::Move { .. }), "right click opens the plate");
+    assert!(!menu_open(g));
+    rig.click(g, ex, ey, false);
+    assert_eq!(g.mode, Mode::Select, "a second right click cancels it");
+    rig.input(g, InputEvent::KeyDown(0x10));
+    rig.click(g, ex, ey, false);
+    rig.input(g, InputEvent::KeyUp(0x10));
+    rig.frame(g);
+    assert_eq!(g.mode, Mode::Select);
+    assert!(menu_open(g), "Shift+right click opens the menu");
+    rig.key(g, 0x1b);
+    // On a ship: what it did before (here the menu or the ship's action), never the plate.
+    if let Some(p) = ship_px(g, ms) {
+        rig.input(g, InputEvent::MouseMove { x: p.0, y: p.1 });
+        rig.frame(g);
+        if g.hover.is_some() {
+            rig.click(g, p.0, p.1, false);
+            assert_eq!(g.mode, Mode::Select, "a right click on a ship opens no plate");
+            if menu_open(g) {
+                rig.key(g, 0x1b);
+            }
+        }
+    }
+    g.right_click_move = false;
+    rig.click(g, ex, ey, false);
+    assert_eq!(g.mode, Mode::Select);
+    assert!(menu_open(g), "the original's right click opens the menu");
     rig.render(g, "09_right_click_menu");
     rig.key(g, 0x1b);
+    g.right_click_move = true;
 
     // A few hundred updates more, then the research and launch managers.
     rig.frames(g, 300);
@@ -525,6 +566,25 @@ fn sensors_manager_and_pointers() {
     );
     rig.frame(g);
     rig.shot(g, "23_sensors_move_plate");
+    // Shift lifts the destination in the sensors manager too.
+    rig.input(g, InputEvent::KeyDown(0x10));
+    rig.frame(g);
+    rig.shot(g, "23b_sensors_plate_shift");
+    rig.input(
+        g,
+        InputEvent::MouseMove {
+            x: SIZE.0 / 2 + 120,
+            y: SIZE.1 / 2 - 20,
+        },
+    );
+    rig.frame(g);
+    rig.shot(g, "23c_sensors_plate_height");
+    assert_eq!(g.plate().unwrap().spec, crate::plate::Spec::Height);
+    assert!(g.plate().unwrap().spec_z > 100.0, "height {}", g.plate().unwrap().spec_z);
+    rig.input(g, InputEvent::KeyUp(0x10));
+    rig.frame(g);
+    rig.shot(g, "23d_sensors_plate_released");
+    assert_eq!(g.plate().unwrap().spec, crate::plate::Spec::Plane);
     rig.input(
         g,
         InputEvent::MouseButton {
@@ -939,4 +999,114 @@ fn sensors_frame_times() {
     let sensors = time(g, &mut rig, 64);
     eprintln!("main view: update {:.1} ms, frame {:.1} ms (max {:.1})", main.0, main.1, main.2);
     eprintln!("sensors:   update {:.1} ms, frame {:.1} ms (max {:.1})", sensors.0, sensors.1, sensors.2);
+}
+
+/// Full detail draws every ship at its top level while the original's level is still worked
+/// out; the move plate's height mode follows the pointer up the vertical and survives a Shift
+/// release and press; the order goes to the raised point.
+#[test]
+fn full_detail_and_the_move_plate_height() {
+    const SHIFT: u16 = 0x10;
+    let Some((data, mut rig)) = setup() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut loading = Loading::new(data.clone(), &rig.session, 1, 2, SIZE).expect("loading");
+    loading.opening_nis = false;
+    loading.loader.play_nislets = false;
+    let mut game = loop {
+        match loading.advance(&rig.session, Some(&mut rig.renderer), DT) {
+            Progress::Working => {}
+            Progress::Ready(g) => break g,
+            Progress::Abandon(e) => panic!("mission 1 did not start: {e}"),
+        }
+    };
+    let g = &mut *game;
+    rig.frames(g, 260);
+    let px = (SIZE.0 as u32, SIZE.1 as u32);
+
+    // Level of detail: from far away the original's selection drops levels; full detail
+    // draws level 0 and still reports the original's level.
+    assert!(g.world.full_detail, "full detail is the default");
+    let distance = g.world.camera.distance;
+    g.world.camera.distance = 60_000.0;
+    g.world.full_detail = false;
+    for _ in 0..3 {
+        let _ = g.world.frame(px);
+    }
+    let original = g.world.frame(px).ship_levels();
+    assert!(original.iter().any(|&(_, l)| l > 0), "nothing dropped a level: {original:?}");
+    g.world.full_detail = true;
+    let full = g.world.frame(px).ship_levels();
+    assert!(!full.is_empty() && full.iter().all(|&(_, l)| l == 0), "{full:?}");
+    assert!(full.iter().any(|&(id, _)| g.world.ship_lod(id).unwrap_or(0) > 0));
+    g.world.camera.distance = distance;
+    rig.frames(g, 4);
+
+    // The plate: select the movable ships and press M.
+    rig.drag(g, (2, 2), (SIZE.0 - 3, SIZE.1 - 3));
+    let ms = g.world.universe().base.players[0].mothership;
+    g.selection.retain(|&id| Some(id) != ms);
+    assert!(!g.selection.is_empty());
+    rig.key(g, 0x4d);
+    assert!(g.plate().is_some(), "plate up");
+    let start = (SIZE.0 / 2 + 120, SIZE.1 / 2 + 80);
+    rig.input(g, InputEvent::MouseMove { x: start.0, y: start.1 });
+    rig.frame(g);
+    rig.render(g, "30_plate_plane");
+    let plate = *g.plate().unwrap();
+    assert_eq!(plate.spec, crate::plate::Spec::Plane);
+    assert_eq!(plate.spec_z, 0.0);
+    let foot = plate.plane;
+    // Shift: height mode; the pointer is put back on the plane point.
+    rig.input(g, InputEvent::KeyDown(SHIFT));
+    rig.frame(g);
+    rig.render(g, "31_plate_shift");
+    assert_eq!(g.plate().unwrap().spec, crate::plate::Spec::Height);
+    let _ = g.take_pointer_warp();
+    // Up the screen, a little to the side: the destination rises over the same foot.
+    rig.input(g, InputEvent::MouseMove { x: start.0 + 15, y: start.1 - 90 });
+    rig.frame(g);
+    rig.render(g, "32_plate_height");
+    let plate = *g.plate().unwrap();
+    assert!(plate.spec_z > 100.0, "height {}", plate.spec_z);
+    assert!(plate.height.truncate().distance(foot.truncate()) < 1.0);
+    assert!(g.take_pointer_warp().is_some(), "the pointer is held on the vertical");
+    // Higher on the screen is higher in space.
+    rig.input(g, InputEvent::MouseMove { x: start.0, y: start.1 - 150 });
+    rig.frame(g);
+    rig.render(g, "33_plate_higher");
+    let higher = g.plate().unwrap().spec_z;
+    assert!(higher > plate.spec_z, "{higher} <= {}", plate.spec_z);
+    // Shift up: back on the plate, the height kept.
+    rig.input(g, InputEvent::KeyUp(SHIFT));
+    rig.frame(g);
+    rig.render(g, "34_plate_released");
+    let released = *g.plate().unwrap();
+    assert_eq!(released.spec, crate::plate::Spec::Plane);
+    assert!((released.height.z - released.plane.z - higher).abs() < 1.0);
+    // Shift again: height mode from that height.
+    rig.input(g, InputEvent::KeyDown(SHIFT));
+    rig.frame(g);
+    rig.render(g, "35_plate_again");
+    assert_eq!(g.plate().unwrap().spec, crate::plate::Spec::Height);
+    assert!((g.plate().unwrap().spec_z - higher).abs() < 60.0);
+    rig.input(g, InputEvent::KeyUp(SHIFT));
+    rig.frame(g);
+    rig.render(g, "36_plate_before_click");
+    // Click: the ships go to the raised point.
+    let dest = g.plate().unwrap().destination();
+    assert!(dest.z - g.plate().unwrap().centre.z > 100.0);
+    rig.input(g, InputEvent::MouseButton { left: true, down: true });
+    rig.input(g, InputEvent::MouseButton { left: true, down: false });
+    rig.frame(g);
+    assert_eq!(g.mode, Mode::Select);
+    let u = g.world.universe();
+    let moving = g.selection.iter().any(|&id| {
+        u.ship(id)
+            .and_then(|s| s.command)
+            .and_then(|c| u.commands.get(c))
+            .is_some_and(|c| c.order == order::MOVE)
+    });
+    assert!(moving, "move order given");
 }

@@ -5,6 +5,7 @@
 
 mod app;
 mod audio;
+mod bandbox;
 #[cfg(test)]
 mod campaign_shots;
 mod crash;
@@ -21,6 +22,8 @@ mod nebula_view;
 mod nis;
 #[cfg(test)]
 mod nis_shots;
+mod pings;
+mod plate;
 mod play;
 mod preview;
 mod sensors;
@@ -77,6 +80,13 @@ options:
   --rollcall-below-subtitles
                         open the hyperspace roll call below the speech band (the original
                         keeps it in the top-left corner, under the band and portrait)
+  --lod <mode>          full (default, a user-requested change: ships are drawn at their
+                        most detailed level at any distance) or original (the original's
+                        level-of-detail selection); options file: hwcFullDetailShips = 1/0
+  --right-click <mode>  modern (default, a user-requested change: with ships selected a
+                        right click on empty space opens the move plate, Shift+right click
+                        the menu) or original (the menu, or the context-sensitive action);
+                        options file: hwcRightClickMove = 1/0
   -h, --help            this text
 
 The original's switches /window, /fullscreen and /disableAVI are accepted too.
@@ -101,6 +111,12 @@ pub struct Args {
     pub debug_keys: bool,
     pub rollcall_below_band: bool,
     pub autoplay: bool,
+    /// `--lod`: Some(true) full detail, Some(false) the original's selection, None the
+    /// options file's `hwcFullDetailShips`.
+    pub full_detail: Option<bool>,
+    /// `--right-click`: Some(true) modern, Some(false) original, None the options file's
+    /// `hwcRightClickMove`.
+    pub right_click_move: Option<bool>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -121,6 +137,8 @@ fn parse_args() -> Result<Args, String> {
         debug_keys: false,
         rollcall_below_band: false,
         autoplay: false,
+        full_detail: None,
+        right_click_move: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -158,6 +176,20 @@ fn parse_args() -> Result<Args, String> {
                 let v = value("--scale")?;
                 a.scale = ScaleMode::parse(&v).ok_or_else(|| format!("unknown scale mode {v}"))?;
                 a.scale_given = true;
+            }
+            "--lod" => {
+                a.full_detail = Some(match value("--lod")?.to_ascii_lowercase().as_str() {
+                    "full" => true,
+                    "original" => false,
+                    v => return Err(format!("unknown --lod mode {v}")),
+                })
+            }
+            "--right-click" => {
+                a.right_click_move = Some(match value("--right-click")?.to_ascii_lowercase().as_str() {
+                    "modern" => true,
+                    "original" => false,
+                    v => return Err(format!("unknown --right-click mode {v}")),
+                })
             }
             "--filter" => a.linear = value("--filter")?.eq_ignore_ascii_case("linear"),
             "--size" => {

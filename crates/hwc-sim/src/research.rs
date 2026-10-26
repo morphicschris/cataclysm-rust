@@ -265,6 +265,55 @@ pub fn research_tech_if_lab_free(u: &mut Universe, player: usize, tech: usize) -
     true
 }
 
+/// `AllowPlayerToResearch` (0x529a40, KAS `TechSetResearch`): the technology may be
+/// researched in single player from now on.
+pub fn allow_research(u: &mut Universe, player: usize, tech: usize) {
+    if let Some(a) = u.base.players.get_mut(player).and_then(|p| p.research_allowed.get_mut(tech)) {
+        *a = true;
+    }
+}
+
+/// `CanPlayerResearch` (0x529ae0).
+pub fn research_allowed(u: &Universe, player: usize, tech: usize) -> bool {
+    u.base.players.get(player).and_then(|p| p.research_allowed.get(tech)).copied().unwrap_or(false)
+}
+
+/// Whether the player is researching `tech` (`Researching`, 0x4eda30).
+pub fn researching(u: &Universe, player: usize, tech: usize) -> bool {
+    u.base.players.get(player).is_some_and(|p| p.topics.iter().any(|t| t.tech == tech))
+}
+
+/// The research topics the research manager offers the player (`rmUpdateTechList`, 0x4f2170:
+/// list entries in state 0), in technology order: not known, not being researched, and its
+/// lab present; in single player the mission must also have allowed it (`TechSetResearch`),
+/// with no prerequisite test; in multiplayer every technology it depends on must be known
+/// instead (and technology 0x22 is left out: it needs a game option the multiplayer setup
+/// does not give here).
+pub fn available_topics(u: &Universe, player: usize) -> Vec<usize> {
+    let Some(p) = u.base.players.get(player) else { return Vec::new() };
+    let table = table_for(u, p.research_table);
+    (0..NUM_TECHS)
+        .filter(|&t| {
+            if p.tech.contains(t) || researching(u, player, t) {
+                return false;
+            }
+            let lab = tech_lab(t);
+            let lab_here = lab < 0 || p.labs.get(lab as usize).is_some_and(|l| l.status != lab_status::ABSENT);
+            if !lab_here {
+                return false;
+            }
+            if u.single_player {
+                return research_allowed(u, player, t);
+            }
+            if t == 0x22 {
+                return false;
+            }
+            let need = table.tech_depend.get(t).map_or(0, |d| d.0);
+            (0..NUM_TECHS).filter(|&i| need & (1 << i) != 0).all(|i| p.tech.contains(i))
+        })
+        .collect()
+}
+
 /// `rmCanBuildShip` (0x4edab0): the player has every technology the type depends on.
 pub fn can_build_ship(u: &Universe, player: usize, t: ShipType, at_mothership: bool) -> bool {
     let p = &u.base.players[player];

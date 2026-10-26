@@ -307,6 +307,15 @@ impl<'a> Fog<'a> {
         }
     }
 
+    /// `selFowPointHidden(p, FALSE)`: inside the grid and seen by none of the player's ships
+    /// (no grid, or outside it, hides nothing).
+    pub fn point_hidden(&self, p: hwc_math::Vector) -> bool {
+        match (self.grid, self.cell(p)) {
+            (Some(g), Some(c)) => g.viewer_count(c) < 1,
+            _ => false,
+        }
+    }
+
     /// Ever seen (resources, slipgates).
     pub fn explored(&self, p: hwc_math::Vector) -> bool {
         match (self.grid, self.cell(p)) {
@@ -1137,8 +1146,8 @@ impl Sensors {
         }
     }
 
-    /// The layer drawn after the meshes: ship points and icons (`smShipsDraw`) and the
-    /// hot-key numbers of the selected ships (`smShipHotkeyNumbersDraw`).
+    /// The layer drawn after the meshes: ship points and icons (`smShipsDraw`). The pings and
+    /// then the hot-key numbers ([`Sensors::draw_hotkey_numbers`]) follow.
     pub fn draw_over(&self, canvas: &mut Canvas, inp: &SceneInput, meshes_drawn: &[ShipId]) {
         let u = inp.world.universe();
         let fog = Fog::of(u);
@@ -1205,6 +1214,10 @@ impl Sensors {
                 canvas.line(a.0, a.1, b.0, b.1, color);
             }
         }
+    }
+
+    /// `smShipHotkeyNumbersDraw`: drawn after the pings.
+    pub fn draw_hotkey_numbers(&self, canvas: &mut Canvas, inp: &SceneInput) {
         self.draw_hotkeys(canvas, inp);
     }
 

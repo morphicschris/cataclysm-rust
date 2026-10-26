@@ -140,16 +140,9 @@ impl SimHost<'_> {
         n
     }
 
-    /// The ships inside `host` (`ship+0x4b4`): the dock code's list, then the ships KAS put
-    /// inside it with the instant dock helpers.
+    /// The ships inside `host` (`ship+0x4b4`, the dock code's list).
     pub(super) fn inside_of(&self, host: ShipId) -> Vec<ShipId> {
-        let mut v: Vec<ShipId> = self.u.ships.get(host).and_then(|h| h.base.inside.as_ref()).map(|i| i.ships.clone()).unwrap_or_default();
-        for &(s, h) in &self.g.docked {
-            if h == host && !v.contains(&s) {
-                v.push(s);
-            }
-        }
-        v
+        self.u.ships.get(host).and_then(|h| h.base.inside.as_ref()).map(|i| i.ships.clone()).unwrap_or_default()
     }
 
     /// `salvDockedShipIterate` from the start: the ships clamped to `host` that are salvagers
@@ -202,6 +195,17 @@ impl SimHost<'_> {
 
 macro_rules! select_methods {
     () => {
+        /// `kasfShipsSelectDocked` (`kasPredShipDocked`): ships hidden inside a host or in
+        /// hyperspace.
+        fn ships_select_docked(&mut self, _cx: &Cx, new_ships: Ships, old_ships: Ships) -> i32 {
+            self.filter(new_ships, old_ships, |h, id| h.u.ships.get(id).is_some_and(|s| s.flags & (sof::HIDE | sof::HYPERSPACE) != 0))
+        }
+
+        /// `kasfShipsSelectNotDocked` (`kasPredShipNotDocked`): not hidden, unless in hyperspace.
+        fn ships_select_not_docked(&mut self, _cx: &Cx, new_ships: Ships, original_ships: Ships) -> i32 {
+            self.filter(new_ships, original_ships, |h, id| h.u.ships.get(id).is_some_and(|s| s.flags & sof::HIDE == 0 || s.flags & sof::HYPERSPACE != 0))
+        }
+
         /// `kasfShipsSelectClass`: ships whose static class is the named one.
         fn ships_select_class(&mut self, _cx: &Cx, new_ships: Ships, original_ships: Ships, ship_class: Str<'_>) -> i32 {
             let class = ship_class.text().and_then(crate::statics::ShipClass::from_name);

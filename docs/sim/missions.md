@@ -261,18 +261,41 @@ corvette flying back to its patrol point fires at any visible enemy within its
 the same. Mines may home on it once `ShipsEffectedByMines(.., 0)` clears flag 0x20 (bit set =
 ignored by mines, as in the binary).
 
-Still ending otherwise: mission 5 fails when the Bentusi's blast wipes the Beast fighters
-attacking it: their teams (`BEASTFighters`) re-create six Acolytes each from the Beast carrier at
-once (36 in the same update), and in the `Create` state they miss the `#010a2ed4` message that
-would scuttle them, so they attack the player's ships and the helpless Caal-Shto (health held at
-40 %) with `TacticsAggressive`. In the original `ShipsCreateLaunch` puts them inside the carrier
-and launches them through its launch points one after another (`dockPutShipInside`,
-`aiuWrapDock`); here KAS launches are instant, so the whole swarm arrives together and overwhelms
-the guards. Mission 6 fails at about 890 s from the warp fleet: the Caal-Shto (a kCarrier held at
-40 %, no repair) stops while five or more mines are within 16 km of it (`Wait` -> `Stop`), the
-scripted fleet's attacks near it trigger the Taiidan `Death` fleet (standard and ion cannon
-frigates, standard destroyers), and that fleet kills it; the mines are never cleared and the
-"Scout" nav points are not all reached.
+KAS docking and launching go through the dock code (`dock.rs`): `ShipsCreateLaunch` creates
+the ships, puts them inside the host (`univRemoveShipFromOutside`, `dockPutShipInside`) and orders
+them to launch (`aiuWrapDock` purpose launch), so they come out through the host's launch points
+one after another; `ShipsLaunch` likewise; `Launch` and the team docks (`Dock`, `DockSupport[With]`,
+`DockStay`, `DockStayMothership`, `DockInstant`) are AI moves (`aimCreateLaunch`, `aimCreateDock`;
+`aimProcessLaunch`, `aimProcessDock`, `TEAM_DOCKING` for `TeamDocking`) carried out by the next
+computer-player pass; `ShipsDockInstant`, `SlipgateDockInstant` put ships inside at once;
+`TeamFinishedLaunching`/`ShipsFinishedLaunching` test `specialFlags & 0x1000000` and the universe
+list. Ships wiped inside a dying host leave KAS teams and selections.
+
+The computer player has an AI player in single player (`Player.aiPlayer`, +0x1c): its harvesters
+find resources anywhere (`rescollectFindNearestResource`; mission 1's resource collectors now
+harvest), and the auto-behaviours of computer ships run. The effects are attached when a mission
+loads (`MissionConfig::effects`, off with `HWC_NO_EFFECTS`): a dead ship stays a hulk until its
+death effect deletes it, so a run without effects diverges at the first death; with them, headless
+and drawn runs (with a camera) give the same world (`tests/render_lockstep.rs`).
+
+Single-player research gating (`rmUpdateTechList`): `research::available_topics` lists what the
+research manager offers: not known, not being researched, its lab present, and allowed by the
+mission (`TechSetResearch` = `AllowPlayerToResearch`; the flags carry over between missions and
+in the carry-over file). Formations ordered to attack close on the target in formation until it is
+within 10 km and the leader's gun range (`attack_in_range`, +0x27a); neutral and aggressive leaders
+then share their target with the wingmen (`processAttackToDoInFormation`'s target rules; the
+per-class `delegateCommand` attack is the ships' own attack here); the formation is kept when the
+attack ends.
+
+Status with the scripted player (headless, `--speech 3`): missions 1 (fresh start), 4 and 6 (from
+the `warp.script` fleet) complete for real. Mission 3 from the warp fleet now usually fails: the
+Clee-San, open to mines for ten seconds after it is found (`ShipsEffectedByMines(.., 0)`, then 1),
+is killed by mines that arrive at that moment. Mission 5 fails: the Bentusi's explosion kills its
+attackers before the scuttle message reaches their teams, so the teams re-create six Beast
+Acolytes each from the carrier (36, launched one by one), and with the bombers and corvettes that
+follow they beat the scripted fleet at the Caal-Shto. Mission 2 from mission 1's carry-over fails
+when mission 1 ends with one worker and no RUs. The full chain (`real_campaign_chain_mission1_to_mission6`)
+is `#[ignore]`d.
 
 The viewer and the headless runs differ in speech timing only: headless runs end intel events
 after `--speech` seconds (3 by default), the viewer after the real speech/subtitle length. Mission
@@ -288,12 +311,12 @@ time.
 * The player's fleet is recreated when it comes out of hyperspace, so it gets new ship numbers
   after the level's ships; in the original the ships keep the numbers they got in the NIS and
   the level's numbering restarts at 0 (duplicates in the original's ID table).
-* Docked ships (the fleet's recons and workers, KAS `DockInstant`, `ShipsCreateLaunch`) are
-  hidden and frozen inside their host; launching puts them beside the host at once (no launch
-  path, no docking AI); launches therefore finish immediately.
-* `UpgradeShips` does nothing (no research upgrades yet); `PatrolPath`, docking and launching
-  orders are issued at once instead of through the AI move layer (only `MoveTo` and `Intercept`
-  create team moves).
+* The fleet's recons and workers that travelled docked in mission 1's opening are put beside the
+  mothership at once when the fleet arrives (`launch_new_ship`), not launched through its doors.
+* Player attack orders on mines are not supported (`cl_attack` keeps ships only); mines are set
+  off by flying a ship into them.
+* `UpgradeShips` does nothing (no research upgrades yet); `PatrolPath` is issued at once instead
+  of through the AI move layer.
 * `HasShipBeenDiscovered` uses the human player's ships' `fowRadius` instead of the fog-of-war
   grid; enemy selection treats every ship as visible (no cloaking, no Mimic disguise).
 * `IntelEventEnded` only ends by the safety timeout unless `--speech` simulates the subtitle;

@@ -29,17 +29,24 @@ use hwc_ui::AssetSource;
 use hwc_ui::ingame::cursor::{self, avail, Availability, Pointer, PointerAction};
 
 use crate::audio::Audio;
+use crate::bandbox;
+use crate::pings::{self, Owner as PingOwner, Pings, Tweaks as PingTweaks};
 use crate::host::{selectable, sim_id, SimHost, PLAYER};
 use crate::hotkeys::{CarriedGroups, HotKeyGroups};
 use crate::mission::{Cue, CueReader};
 use crate::nis::{self, Kind as NisKind, NisRun};
 use hwc_nis::{Action as NisAction, Fired};
 use crate::sensors::{self, Phase, Sensors};
+use crate::plate::{self, Plate};
 use crate::world::World;
 
 /// Pixels the pointer may move between press and release and still count as a click
 /// (`selClickBoxWidth/Height`: a band box needs `|dx| + 1 > 5`).
 const CLICK_SLOP: i32 = 5;
+/// Outline of the ships a band box gathers (`selSelectingDraw`, colour at 0x888970).
+const SELECTING_COLOR: Color = [192, 192, 0, 255];
+/// The tactical overlay's text colour (`TO_TextColor`, 0xffff4040).
+const PING_LEGEND_TEXT: Color = [0x40, 0x40, 0xff, 255];
 /// Right-button movement that still opens the menu (`MR_MouseMovementClickLimit`).
 const RIGHT_CLICK_LIMIT: f32 = 6.0;
 /// Frames the mission's letterbox takes to come in or go out. The simulation records only
@@ -55,13 +62,10 @@ const DEBUG_HYPERSPACE_KEY: u16 = 0x43;
 const RED: [u8; 4] = [255, 0, 0, 255];
 /// `hyperspaceWhiteout`'s blue (70, 70, 255).
 const WHITEOUT_BLUE: [f32; 3] = [70.0, 70.0, 255.0];
-/// UI sound events of the move mechanism (`UI_MovementGUIon/off`).
-const MOVEMENT_GUI_ON: u32 = 0x109;
-const MOVEMENT_GUI_OFF: u32 = 0x10a;
+/// UI sound events of the move mechanism (`piePointModeOnOff`, `mrMoveShipsExecute`).
+const MOVEMENT_GUI_ON: u32 = plate::SOUND_ON;
+const MOVEMENT_GUI_OFF: u32 = plate::SOUND_OFF;
 const CLICK: u32 = 0x108;
-
-const PLATE: Color = [60, 120, 255, 160];
-const PLATE_LINE: Color = [255, 220, 60, 255];
 
 /// What the application must do after a frame.
 #[derive(Debug, Clone, PartialEq)]
@@ -95,10 +99,8 @@ pub enum Hover {
 pub enum Mode {
     Select,
     /// The move pie plate is up (`piePointSpecMode`): the destination follows the pointer on
-    /// the selection's plane, with a height while Enable_Height_Move is held.
-    Move {
-        height: f32,
-    },
+    /// the selection's plane, or up and down its vertical while Enable_Height_Move is held.
+    Move(Plate),
 }
 
 /// How the mission ended.
@@ -114,7 +116,7 @@ pub struct Game {
     strings: Strings,
     cues: CueReader,
     pub selection: Vec<ShipId>,
-    selecting: Vec<ShipId>,
+    pub(crate) selecting: Vec<ShipId>,
     /// The hot-key groups (`selHotKeyGroup`).
     pub hotkeys: HotKeyGroups,
     /// Groups coming from the mission before, held until the mission's own level loads (an NIS
@@ -177,7 +179,29 @@ pub struct Game {
     pub autoplay: Option<hwc_sim::autoplay::Autoplay>,
     /// An NIS set up on the loading screen, started on the first frame.
     queued_nis: Option<(NisRun, Vec<Fired>)>,
+    /// The sensors manager's pings.
+    pub pings: Pings,
+    /// The local player's proximity sensors' states after the last update.
+    ping_sensor_states: Vec<(ShipId, i32)>,
+    /// The level's own pings (anomalous derelicts) were made.
+    pings_seeded: bool,
+    /// Ping sounds of the last sensors frame, played on the next update.
+    ping_sounds: Vec<u32>,
+    /// The move plate's colours and readout font (`tweak.script`).
+    plate_colors: plate::Colors,
+    plate_font: Option<Rc<hwc_formats::font::Font>>,
+    /// Where the plate moved the pointer this frame: the application puts the system pointer
+    /// there (`mousePositionSet`).
+    pointer_warp: Option<(i32, i32)>,
+    /// A user-requested change, on by default (`hwcRightClickMove`, `--right-click`): with
+    /// ships selected a right click on empty space opens the move plate and Shift+right click
+    /// the menu; a right click on a ship or a resource does what it always did. Off: the
+    /// original's right click (the menu, or the context-sensitive action).
+    pub right_click_move: bool,
 }
+
+/// A factory job with ships still to build: (factory, job, ship type).
+type PendingJob = (ShipId, usize, ShipType);
 
 fn v3(v: hwc_math::Vector) -> Vec3 {
     Vec3::new(v.x, v.y, v.z)
@@ -216,6 +240,7 @@ impl Game {
             .map(|s| sensors::Icons::from_script(&s))
             .unwrap_or_default();
         let tweak = read("tweak.script");
+        let pings = Pings::new(PingTweaks::from_script(read("ping.script").as_ref()));
         let mut sensors = Sensors::new(tweaks, sensors::Toggles::from_options(&options), icons);
         sensors.instant = options.get("InstantTransition") != 0;
         let pointer = Pointer::new(hwc_ui::Resources::new(source.clone()));
@@ -264,6 +289,14 @@ impl Game {
             hover: None,
             nis: None,
             keep_letterbox_after_nis: false,
+            pings,
+            ping_sensor_states: Vec::new(),
+            pings_seeded: false,
+            ping_sounds: Vec::new(),
+            plate_colors: plate::Colors::from_tweaks(tweak.as_ref()),
+            plate_font: res.font(&plate::readout_font_name(tweak.as_ref())),
+            pointer_warp: None,
+            right_click_move: options.get("hwcRightClickMove") != 0,
             nis_notes: Vec::new(),
             queued_nis: None,
             debug_keys: std::env::var_os("HWC_DEBUG_KEYS").is_some(),
@@ -277,6 +310,7 @@ impl Game {
         // Mission 1's start sets the flag that keeps the letterbox of its first NIS.
         g.keep_letterbox_after_nis = g.world.mission_run().is_some_and(|r| r.game.config.mission == 1);
         g.world.lens_flares = options.get("enableLensFlare") != 0;
+        g.world.full_detail = options.get("hwcFullDetailShips") != 0;
         let mut subs = Subtitles::load(&res, true, &g.world.team_schemes());
         if let Some(s) = subs.as_mut() {
             s.language = options.get("language").max(0) as usize;
@@ -364,14 +398,6 @@ impl Game {
                     .mouse_drag(dx as f32, dy as f32, both, min);
                 return;
             }
-            if let Mode::Move { height } = self.mode {
-                if self.ui.action_held(keys::ENABLE_HEIGHT_MOVE) {
-                    let scale = self.world.camera.distance / self.size().1 as f32 * 2.0;
-                    self.mode = Mode::Move {
-                        height: height - dy as f32 * scale,
-                    };
-                }
-            }
         }
         let used = self.with_host(|ui, host| ui.handle_input(host, ev));
         if used {
@@ -407,8 +433,15 @@ impl Game {
                     // Pressing right while band-boxing stops the band box.
                     self.left_down = None;
                     self.selecting.clear();
+                    // The plate holds still while the camera turns (`piePointModePause`).
+                    if let Mode::Move(p) = &mut self.mode {
+                        p.pause(true);
+                    }
                 } else if self.right_down {
                     self.right_down = false;
+                    if let Mode::Move(p) = &mut self.mode {
+                        p.pause(false);
+                    }
                     if self.right_moved <= RIGHT_CLICK_LIMIT {
                         self.right_click(audio);
                     }
@@ -425,20 +458,21 @@ impl Game {
     fn left_release(&mut self, start: Option<(i32, i32)>, audio: &mut Option<Audio>) {
         let size = self.size();
         let p = [self.mouse.0 as f32, self.mouse.1 as f32];
-        if let Mode::Move { height } = self.mode {
-            if let Some(dest) = self.move_destination(height) {
-                let sel = self.mobile_selection();
-                if !sel.is_empty() {
-                    let from = group_centre(self.world.universe(), &sel);
-                    let d = hwc_math::Vector::new(dest.x, dest.y, dest.z);
-                    command::cl_move(
-                        self.world.universe_mut(),
-                        &sel,
-                        command::waypoint_mode::ONCE,
-                        from,
-                        &[d],
-                    );
-                }
+        if let Mode::Move(plate) = self.mode {
+            // `piePointSpecExecute` -> `mrMoveShipsExecute`.
+            let dest = plate.destination();
+            let sel = self.mobile_selection();
+            if !sel.is_empty() && dest.is_finite() {
+                let c = plate.centre;
+                let from = hwc_math::Vector::new(c.x, c.y, c.z);
+                let d = hwc_math::Vector::new(dest.x, dest.y, dest.z);
+                command::cl_move(
+                    self.world.universe_mut(),
+                    &sel,
+                    command::waypoint_mode::ONCE,
+                    from,
+                    &[d],
+                );
             }
             sound(audio, MOVEMENT_GUI_OFF);
             self.mode = Mode::Select;
@@ -450,37 +484,7 @@ impl Game {
         self.selecting.clear();
         if dragged {
             let a = [start.0 as f32, start.1 as f32];
-            let inside = self.ships_in_box(a, p);
-            if self.ui.action_held(keys::BANDBOX_FOCUS) {
-                if !inside.is_empty() {
-                    self.focus_on(inside, audio);
-                }
-            } else if self.ui.action_held(keys::BANDBOX_ATTACK)
-                || self.ui.action_held(keys::BANDBOX_FORCE_ATTACK)
-            {
-                let force = self.ui.action_held(keys::BANDBOX_FORCE_ATTACK);
-                let u = self.world.universe();
-                let targets: Vec<ShipId> = inside
-                    .into_iter()
-                    .filter(|id| !self.selection.contains(id))
-                    .filter(|&id| force || u.ship(id).is_some_and(|s| s.player != PLAYER))
-                    .collect();
-                self.attack(&targets);
-            } else {
-                let own: Vec<ShipId> = inside
-                    .into_iter()
-                    .filter(|&id| selectable(self.world.universe(), id))
-                    .collect();
-                if self.ui.action_held(keys::MULTIPLE_SELECT) {
-                    for id in own {
-                        if !self.selection.contains(&id) {
-                            self.selection.push(id);
-                        }
-                    }
-                } else {
-                    self.selection = own;
-                }
-            }
+            self.band_box_release(a, p, audio);
             return;
         }
         // A click.
@@ -547,6 +551,11 @@ impl Game {
         if self.selection.is_empty() {
             return;
         }
+        // The user-requested right click: on empty space the move plate, Shift for the menu.
+        if self.right_click_opens_plate() {
+            self.start_move(audio);
+            return;
+        }
         // `mrRightClickSmartOrder`: with a context-sensitive scheme the action under the
         // pointer, otherwise (and in the sensors manager) the menu.
         if !self.sensors.is_open() && self.context_scheme() {
@@ -558,6 +567,22 @@ impl Game {
             }
         }
         self.with_host(|ui, host| ui.open_popup(host, false));
+    }
+
+    /// With [`right_click_move`](Self::right_click_move): a right click with nothing under
+    /// the pointer, Shift not held and ships that can move selected opens the move plate.
+    fn right_click_opens_plate(&self) -> bool {
+        self.right_click_move
+            && self.hover.is_none()
+            && !self.ui.action_held(keys::MULTIPLE_SELECT)
+            && !self.ui.action_held(keys::ENABLE_HEIGHT_MOVE)
+            && !self.mobile_selection().is_empty()
+    }
+
+    /// Takes the pointer position the plate asked for this frame (the window code moves the
+    /// system pointer there).
+    pub fn take_pointer_warp(&mut self) -> Option<(i32, i32)> {
+        self.pointer_warp.take()
     }
 
     /// A context-sensitive action scheme is on (`RightClick_CSA` or `Homeworld_CSA`).
@@ -743,7 +768,7 @@ impl Game {
     }
 
     /// Opens or closes the sensors manager (`Toggle_SensorsManager`).
-    fn toggle_sensors(&mut self, audio: &mut Option<Audio>) {
+    pub(crate) fn toggle_sensors(&mut self, audio: &mut Option<Audio>) {
         if self.sensors.is_open() {
             self.close_sensors(audio);
         } else if let Some(e) = self.sensors.begin(&mut self.world) {
@@ -770,6 +795,87 @@ impl Game {
                     self.mode = Mode::Select;
                 }
             }
+        }
+    }
+
+    /// The band box's mode from the modifiers held.
+    fn band_box_mode(&self) -> bandbox::Mode {
+        bandbox::Mode::from_held(|a| self.ui.action_held(a))
+    }
+
+    /// Ships inside the box with their facts for the local player.
+    fn band_box_inside(&self, a: [f32; 2], b: [f32; 2]) -> Vec<(ShipId, bandbox::Facts)> {
+        let u = self.world.universe();
+        self.ships_in_box(a, b)
+            .into_iter()
+            .filter_map(|id| Some((id, bandbox::Facts::of(u, id, PLAYER)?)))
+            .collect()
+    }
+
+    /// The "selecting" list of a band box being dragged (`mrSelectHold`).
+    fn band_box_selecting(&self, mode: bandbox::Mode, a: [f32; 2], b: [f32; 2]) -> Vec<ShipId> {
+        let inside = self.band_box_inside(a, b);
+        let u = self.world.universe();
+        let sel = bandbox::Selected {
+            ships: &self.selection,
+            attack_capable: !bandbox::attack_capable(u, &self.selection).is_empty(),
+            hold_capable: !bandbox::hold_capable(u, &self.selection).is_empty(),
+        };
+        bandbox::selecting(mode, &inside, &sel)
+    }
+
+    /// `mrBandBoxRelease`: the band box's order.
+    fn band_box_release(&mut self, a: [f32; 2], b: [f32; 2], audio: &mut Option<Audio>) {
+        use bandbox::Mode;
+        let mode = self.band_box_mode();
+        let selecting = self.band_box_selecting(mode, a, b);
+        match mode {
+            Mode::ForceAttack | Mode::Attack => {
+                if selecting.is_empty() {
+                    return;
+                }
+                // The selection narrows to the ships able to attack.
+                let attackers = bandbox::attack_capable(self.world.universe(), &self.selection);
+                self.selection = attackers.clone();
+                if attackers.is_empty() {
+                    return;
+                }
+                let facts: Vec<(ShipId, bandbox::Facts)> = {
+                    let u = self.world.universe();
+                    selecting
+                        .iter()
+                        .filter_map(|&id| Some((id, bandbox::Facts::of(u, id, PLAYER)?)))
+                        .collect()
+                };
+                let targets = bandbox::attack_targets(&facts, &attackers, mode == Mode::ForceAttack);
+                if !targets.is_empty() {
+                    command::cl_attack(self.world.universe_mut(), &attackers, &targets);
+                }
+            }
+            Mode::Guard => {
+                if selecting.is_empty() {
+                    return;
+                }
+                let guards = bandbox::hold_capable(self.world.universe(), &self.selection);
+                self.selection = guards.clone();
+                if !guards.is_empty() {
+                    command::cl_protect(self.world.universe_mut(), &guards, &selecting);
+                }
+            }
+            Mode::Focus => {
+                if !selecting.is_empty() {
+                    self.focus_on(selecting, audio);
+                }
+            }
+            Mode::MultipleSelect => {
+                for id in selecting {
+                    if !self.selection.contains(&id) {
+                        self.selection.push(id);
+                    }
+                }
+            }
+            // The special band box's target menu is not recreated: it selects like a plain box.
+            Mode::Select | Mode::Special => self.selection = selecting,
         }
     }
 
@@ -823,12 +929,36 @@ impl Game {
             .then(|| v3(group_centre(self.world.universe(), &self.selection)))
     }
 
-    /// The pie plate's destination under the pointer.
-    pub fn move_destination(&self, height: f32) -> Option<Vec3> {
-        let c = self.selection_centre()?;
-        let p = [self.mouse.0 as f32, self.mouse.1 as f32];
-        let on_plane = self.world.plane_point(self.size(), p, c.z)?;
-        Some(on_plane + Vec3::new(0.0, 0.0, height))
+    /// `selCentrePointCompute`: the middle of the selection's bounding box and its ships'
+    /// average collision size.
+    fn plate_centre(&self) -> Option<(Vec3, f32)> {
+        let u = self.world.universe();
+        let c = pings::selection_centre(u, &self.selection)?;
+        let sizes: Vec<f32> = self
+            .selection
+            .iter()
+            .filter_map(|&id| u.ship(id))
+            .map(|s| {
+                u.statics
+                    .ship(s.ship_type)
+                    .map_or(0.0, |st| st.header.coll.coll_sphere_size)
+            })
+            .collect();
+        let avg = sizes.iter().sum::<f32>() / sizes.len().max(1) as f32;
+        Some((v3(c), avg))
+    }
+
+    /// The camera the plate works with (the sensors camera while the sensors manager is up).
+    fn plate_view(&self) -> plate::View {
+        let size = self.size();
+        let aspect = size.0 as f32 / size.1.max(1) as f32;
+        let c = &self.world.camera;
+        plate::View {
+            view: c.view(),
+            proj: c.projection(aspect),
+            eye: c.eye(),
+            size,
+        }
     }
 
     fn attack(&mut self, targets: &[ShipId]) {
@@ -1125,7 +1255,10 @@ impl Game {
             return;
         }
         if self.mode == Mode::Select {
-            self.mode = Mode::Move { height: 0.0 };
+            let Some((c, size)) = self.plate_centre() else {
+                return;
+            };
+            self.mode = Mode::Move(Plate::new(c, size));
             sound(audio, MOVEMENT_GUI_ON);
         } else {
             self.mode = Mode::Select;
@@ -1144,6 +1277,13 @@ impl Game {
         ];
         if let Some(i) = arrows.iter().position(|&x| x == a) {
             self.pan_arrows[i] = down;
+            return;
+        }
+        // `kbcbHeightMovementDown/Up`: not while the camera turns.
+        if a == keys::ENABLE_HEIGHT_MOVE {
+            if let (Mode::Move(p), false) = (&mut self.mode, self.right_down) {
+                p.toggle(down);
+            }
             return;
         }
         if !down {
@@ -1277,8 +1417,11 @@ impl Game {
         if let (Some(a), Mode::Select, false) = (self.left_down, self.mode, self.right_down) {
             let b = self.mouse;
             if (a.0 - b.0).abs() >= CLICK_SLOP || (a.1 - b.1).abs() >= CLICK_SLOP {
+                let mode = self.band_box_mode();
                 self.selecting =
-                    self.ships_in_box([a.0 as f32, a.1 as f32], [b.0 as f32, b.1 as f32]);
+                    self.band_box_selecting(mode, [a.0 as f32, a.1 as f32], [b.0 as f32, b.1 as f32]);
+            } else {
+                self.selecting.clear();
             }
         }
         self.world.paused = (self.paused && self.nis.is_none())
@@ -1294,6 +1437,7 @@ impl Game {
             // An NIS level has no mission yet: only its universe updates.
             let opening = self.world.nis_level().is_some();
             let before = self.hotkeys.snapshot(self.world.universe());
+            let jobs = self.pending_jobs();
             if opening {
                 self.world.step_universe();
             } else {
@@ -1308,6 +1452,7 @@ impl Game {
             }
             if !opening {
                 self.groups_after_step(&before, audio);
+                self.pings_after_step(&jobs);
                 self.after_step(audio);
             }
             self.nis_step(audio);
@@ -1332,6 +1477,9 @@ impl Game {
                 !self.paused,
                 self.world.universe(),
             );
+        }
+        for e in std::mem::take(&mut self.ping_sounds) {
+            sound(audio, e);
         }
         self.update_presentation(dt, audio);
         if self.nis_level_done {
@@ -1389,6 +1537,181 @@ impl Game {
             }
         }
     }
+
+    /// The local player's factory jobs that have ships to build.
+    fn pending_jobs(&self) -> Vec<PendingJob> {
+        let u = self.world.universe();
+        let mut out = Vec::new();
+        for f in &u.base.factories {
+            let Some(fs) = f.ship.filter(|&id| u.ship(id).is_some_and(|s| s.player == PLAYER)) else {
+                continue;
+            };
+            for (i, j) in f.jobs.iter().enumerate() {
+                if let (true, Some(t)) = (j.n_jobs > 0, j.info) {
+                    out.push((fs, i, t));
+                }
+            }
+        }
+        out
+    }
+
+    /// The pings the game makes itself, after an update: the level's anomalous derelicts,
+    /// big-gun shells, proximity-sensor alerts, the last ship of a build job; deaths and the
+    /// evaluation task.
+    fn pings_after_step(&mut self, jobs_before: &[PendingJob]) {
+        use hwc_sim::ships::{proximity, ShipSpec, TypeStatics};
+        use hwc_sim::universe::SimEvent;
+        let run = self.world.run();
+        let u = &run.universe;
+        let now = u.total_time_elapsed;
+        let p = &mut self.pings;
+        if !self.pings_seeded {
+            self.pings_seeded = true;
+            for d in &run.game.level.derelicts {
+                if d.attributes & 0x20 != 0 {
+                    p.anomaly_point(pings::DERELICT_PING, d.position, now);
+                }
+            }
+        }
+        for e in &u.events {
+            match *e {
+                SimEvent::ShipDied { ship, position, .. } => {
+                    p.object_died(PingOwner::Ship(ship), position);
+                }
+                SimEvent::GunFired { bullet, .. } => {
+                    if let Some(b) = u
+                        .bullets
+                        .get(bullet)
+                        .filter(|b| b.bullet_type == pings::BIG_GUN_BULLET)
+                    {
+                        p.anomaly_object(pings::BIG_GUN_PING, PingOwner::Bullet(bullet), b.posinfo.position, now);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // `pingRemovePingByOwner` as a shell goes.
+        let gone: Vec<PingOwner> = p
+            .list
+            .iter()
+            .filter_map(|q| match q.owner {
+                Some(PingOwner::Bullet(b)) if u.bullets.get(b).is_none() => Some(PingOwner::Bullet(b)),
+                _ => None,
+            })
+            .collect();
+        for o in gone {
+            p.remove_by_owner(o);
+        }
+        // Proximity sensors that just found something.
+        let found = |st: i32| st == proximity::state::FOUND || st == proximity::state::TRACKING;
+        let mut states = Vec::new();
+        for &id in &u.ship_list {
+            let Some(s) = u.ship(id).filter(|s| s.player == PLAYER) else { continue };
+            let ShipSpec::ProximitySensor(spec) = &s.spec else { continue };
+            let was = self
+                .ping_sensor_states
+                .iter()
+                .find(|(x, _)| *x == id)
+                .map(|&(_, st)| st);
+            if was == Some(proximity::state::SEARCHING) && found(spec.state) {
+                if let TypeStatics::ProximitySensor(st) = hwc_sim::ships::type_statics(u, s.ship_type) {
+                    p.proximity(
+                        id,
+                        s.posinfo.position,
+                        st.search_radius,
+                        st.sensor_blink_rate.max(1e-3),
+                        st.blip_color,
+                        now,
+                    );
+                }
+            }
+            states.push((id, spec.state));
+        }
+        self.ping_sensor_states = states;
+        // The last ship of a job: a ping at its factory.
+        let mut pending: Vec<PendingJob> = jobs_before.to_vec();
+        for e in &u.base.events {
+            let BaseEvent::ShipBuilt { ship_type, player, .. } = *e else { continue };
+            if player != PLAYER {
+                continue;
+            }
+            let done = pending.iter().position(|&(f, i, t)| {
+                t == ship_type
+                    && u.base.factories.iter().any(|fa| {
+                        fa.ship == Some(f) && fa.jobs.get(i).is_some_and(|j| j.n_jobs == 0)
+                    })
+            });
+            if let Some(k) = done {
+                let (f, ..) = pending.remove(k);
+                if let Some(fs) = u.ship(f) {
+                    p.new_ship(fs.posinfo.position, now);
+                }
+            }
+        }
+        p.update(u, now, |id| {
+            u.ship(id).is_some_and(
+                |s| matches!(&s.spec, ShipSpec::ProximitySensor(x) if found(x.state)),
+            )
+        });
+    }
+
+    /// `pingListDraw` in the sensors view: the circles, their sounds and, with the tactical
+    /// overlay, the legend.
+    fn draw_pings(&mut self, px: (u32, u32), sounds: &mut Vec<u32>) {
+        let u = self.world.universe();
+        let fog = sensors::Fog::of(u);
+        let now = u.total_time_elapsed;
+        let eye = self.world.camera.eye();
+        let world = &self.world;
+        let centre_of = |o: PingOwner| match o {
+            PingOwner::Ship(id) => u.ship(id).map(|s| s.posinfo.position),
+            PingOwner::Bullet(b) => u.bullets.get(b).map(|b| b.posinfo.position),
+        };
+        let project = |c: hwc_math::Vector, r: f32| {
+            sensors::project_sphere(world, px, v3(c), r).map(|k| (k.x, k.y, k.r))
+        };
+        let (circles, sound, masks) = self.pings.frame(
+            now,
+            hwc_math::Vector::new(eye.x, eye.y, eye.z),
+            centre_of,
+            project,
+            |c| fog.point_hidden(c),
+            self.sensors.zooming(),
+        );
+        for c in &circles {
+            pings::draw_circle(&mut self.canvas, c);
+        }
+        sounds.extend(sound);
+        if !self.ui.fe.game.ig.overlay.tactical {
+            return;
+        }
+        let legend = self.pings.legend(now, masks);
+        let Some(font) = self.group_fonts[2].clone() else { return };
+        let rh = text::height(&font);
+        let mut y = rh;
+        for (name, colour) in legend {
+            let c = pings::Circle {
+                x: rh * 3 / 2,
+                y: y + rh / 2,
+                r: rh / 2,
+                segments: self.pings.tweaks.to_segments,
+                color: colour,
+            };
+            pings::draw_circle(&mut self.canvas, &c);
+            let label = self.strings.get(name).unwrap_or(name).trim().to_string();
+            text::print(
+                &mut self.canvas,
+                &font,
+                (f64::from(rh) * 2.5) as i32,
+                y,
+                PING_LEGEND_TEXT,
+                label.as_bytes(),
+                (Shadow::from_bits(0), [0, 0, 0, 255]),
+            );
+            y += rh + 1;
+        }
+    }
+
 
     fn after_step(&mut self, audio: &mut Option<Audio>) {
         let u = &self.world.run().universe;
@@ -1965,6 +2288,15 @@ impl Game {
         self.pointer.draw(&mut self.canvas, x, y);
     }
 
+    /// The move plate, while it is up.
+    #[cfg(test)]
+    pub fn plate(&self) -> Option<&Plate> {
+        match &self.mode {
+            Mode::Move(p) => Some(p),
+            Mode::Select => None,
+        }
+    }
+
     /// The pointer shown this frame.
     #[cfg(test)]
     pub fn cursor(&self) -> cursor::CursorKind {
@@ -2023,6 +2355,18 @@ impl Game {
             }
         }
         self.sensors.draw_over(&mut self.canvas, &inp, &meshes);
+        let mut sounds = Vec::new();
+        self.draw_pings(px, &mut sounds);
+        self.ping_sounds.extend(sounds);
+        let inp = sensors::SceneInput {
+            world: &self.world,
+            size: px,
+            selection: &self.selection,
+            groups: &groups,
+            time: self.real_time,
+            font: font.as_deref(),
+        };
+        self.sensors.draw_hotkey_numbers(&mut self.canvas, &inp);
         Ok(())
     }
 
@@ -2034,7 +2378,18 @@ impl Game {
         // Health bars are the main view's (`selSelectedDraw`).
         let marked: &[ShipId] = if in_sensors { &[] } else { &self.selection };
         let selecting: &[ShipId] = if in_sensors { &[] } else { &self.selecting };
-        for (i, &id) in marked.iter().chain(selecting).enumerate() {
+        // `selSelectingDraw`: the band box's gathered ships are outlined, not given bars.
+        let mut outlines = Vec::new();
+        for &id in selecting {
+            let Some(s) = u.ship(id) else { continue };
+            if s.flags & hwc_sim::object::sof::DEAD != 0 {
+                continue;
+            }
+            if let Some((lo, hi)) = self.world.screen_box(size, s) {
+                outlines.push(Rect::new(lo[0] as i32, lo[1] as i32, hi[0] as i32, hi[1] as i32));
+            }
+        }
+        for (i, &id) in marked.iter().enumerate() {
             let Some(s) = u.ship(id) else { continue };
             if s.flags & hwc_sim::object::sof::DEAD != 0 {
                 continue;
@@ -2063,6 +2418,9 @@ impl Game {
                 f,
                 number.map(|n| (n, lod)),
             ));
+        }
+        for r in outlines {
+            self.canvas.outline_rect(r, SELECTING_COLOR);
         }
         for (x, y, r, f, number) in bars {
             use hwc_ui::ingame::overlay;
@@ -2103,56 +2461,86 @@ impl Game {
             }
         }
 
-        if let Mode::Move { height } = self.mode {
-            self.draw_plate(height);
+        if matches!(self.mode, Mode::Move(_)) {
+            self.draw_plate();
         }
     }
 
-    /// The move pie plate: rings and spokes on the plane through the selection, the line to
-    /// the destination and its height.
-    fn draw_plate(&mut self, height: f32) {
-        let size = self.size();
-        let Some(c) = self.selection_centre() else {
+    /// The move pie plate (`piePointSpecDraw`): the point work of the frame, then the disc,
+    /// the lines to the destination, the ships' drop lines and the distance readout.
+    fn draw_plate(&mut self) {
+        let Mode::Move(mut plate) = self.mode else {
             return;
         };
-        let dest = self.move_destination(height);
-        let radius = dest.map_or(2000.0, |d| (d - c).truncate().length().max(300.0));
-        let mut lines: Vec<([f32; 2], [f32; 2], Color)> = Vec::new();
-        let proj = |p: Vec3| self.world.project(size, p);
-        for k in 1..=3 {
-            let r = radius * k as f32 / 3.0;
-            let pts: Vec<Option<[f32; 2]>> = (0..=48)
-                .map(|i| {
-                    let a = i as f32 / 48.0 * std::f32::consts::TAU;
-                    proj(c + Vec3::new(a.cos() * r, a.sin() * r, 0.0))
-                })
-                .collect();
-            for w in pts.windows(2) {
-                if let (Some(a), Some(b)) = (w[0], w[1]) {
-                    lines.push((a, b, PLATE));
+        // The selection is gone (`pieShipDied`): the plate goes too.
+        let Some((centre, avg)) = self.plate_centre() else {
+            self.mode = Mode::Select;
+            return;
+        };
+        let view = self.plate_view();
+        let universe = v3(self.world.level().sm.universe_size);
+        let in_sensors = self.sensors.is_open();
+        let mut pointer = self.mouse;
+        if plate.update(centre, avg, &view, &mut pointer, universe, in_sensors) {
+            self.mouse = pointer;
+            self.pointer_warp = Some(pointer);
+        }
+        let ships = self
+            .sensors
+            .toggles
+            .pieplate_lines
+            .then(|| self.drop_ships(universe));
+        let font = self.plate_font.clone();
+        let readout_at = (!self.right_down).then_some(self.mouse);
+        let chime = plate.draw(
+            &mut self.canvas,
+            &view,
+            &self.plate_colors,
+            ships.as_deref(),
+            font.as_deref(),
+            readout_at,
+        );
+        if let Some(e) = chime {
+            self.ping_sounds.push(e);
+        }
+        self.mode = Mode::Move(plate);
+    }
+
+    /// The ships `pieAllShipsToPiePlateDraw` draws a line for: alive, shown, seen by the
+    /// player, inside the universe; not swarmers or components.
+    fn drop_ships(&self, universe: Vec3) -> Vec<plate::DropShip> {
+        use hwc_sim::object::sof;
+        use hwc_sim::statics::ShipClass;
+        let u = self.world.universe();
+        let fog = sensors::Fog::of(u);
+        u.ship_list
+            .iter()
+            .filter_map(|&id| {
+                let s = u.ship(id)?;
+                if s.flags & (sof::DEAD | sof::HIDE) != 0
+                    || matches!(s.ship_type, ShipType::sSwarmer | ShipType::bSwarmer)
+                    || s.base.dock_state == hwc_sim::dock::state::INSIDE
+                {
+                    return None;
                 }
-            }
-        }
-        for i in 0..8 {
-            let a = i as f32 / 8.0 * std::f32::consts::TAU;
-            if let (Some(p), Some(q)) = (
-                proj(c),
-                proj(c + Vec3::new(a.cos() * radius, a.sin() * radius, 0.0)),
-            ) {
-                lines.push((p, q, PLATE));
-            }
-        }
-        if let Some(d) = dest {
-            let foot = Vec3::new(d.x, d.y, c.z);
-            if let (Some(a), Some(b), Some(t)) = (proj(c), proj(foot), proj(d)) {
-                lines.push((a, b, PLATE_LINE));
-                lines.push((b, t, PLATE_LINE));
-            }
-        }
-        for (a, b, col) in lines {
-            self.canvas
-                .line(a[0] as i32, a[1] as i32, b[0] as i32, b[1] as i32, col);
-        }
+                let st = u.statics.ship(s.ship_type)?;
+                if st.ship_class == Some(ShipClass::Component)
+                    || !sensors::ship_visible(u, &fog, id)
+                {
+                    return None;
+                }
+                let p = v3(s.posinfo.position);
+                if (0..3).any(|i| p[i].abs() > universe[i]) {
+                    return None;
+                }
+                Some(plate::DropShip {
+                    id,
+                    position: p,
+                    radius: st.header.coll.coll_sphere_size,
+                    selected: self.selection.contains(&id),
+                })
+            })
+            .collect()
     }
 
     /// The mission-complete note.

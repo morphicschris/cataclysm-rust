@@ -19,7 +19,22 @@ pub mod move_type {
     pub const MOVE_TEAM: u32 = 6;
     pub const INTERCEPT: u32 = 9;
     pub const FANCY_GET_SHIPS: u32 = 0x16;
+    pub const DOCK: u32 = 0x17;
+    pub const LAUNCH: u32 = 0x18;
 }
+
+/// `dockmoveFlags` of a dock move (`aimCreateDock`).
+pub mod dock_flags {
+    /// Dock with the given ship (otherwise each ship finds the nearest).
+    pub const AT_SHIP: u32 = 1;
+    /// Stay docked until launched explicitly.
+    pub const STAY: u32 = 2;
+    /// Dock at once (`DOCK_INSTANTANEOUSLY`).
+    pub const INSTANT: u32 = 4;
+}
+
+/// The formation `aimCreateDock` gives its move (0x740aec).
+pub const DOCK_MOVE_FORMATION: i32 = 5;
 
 /// `SAME_FORMATION`: a move that keeps the previous move's formation.
 pub const SAME_FORMATION: i32 = 8;
@@ -43,6 +58,20 @@ pub enum MoveKind {
         /// +0x2c: the destination was the target's own destination (it was moving).
         target_moving: bool,
     },
+    /// `MOVE_DOCK` (`aimProcessDock`): the team docks (`aiuWrapDock`) and the move is done once
+    /// every ship that docked has come back out, or is staying at a carrier's or mothership's
+    /// refuelling point.
+    Dock {
+        /// +0x1c: [`dock_flags`].
+        flags: u32,
+        /// +0x18: the ship to dock with (cleared when it dies).
+        host: Option<ShipId>,
+        /// +0x14: the team's ships still docking (`selectMemDupSelection` of the team).
+        docking: Vec<ShipId>,
+    },
+    /// `MOVE_LAUNCH` (`aimProcessLaunch`): the team's ships inside the first ship's host are
+    /// launched (`clWrapLaunchMultipleShips`).
+    Launch,
 }
 
 /// `AITeamMove`, with the fields the modelled moves use.
@@ -66,7 +95,19 @@ impl TeamMove {
         match self.kind {
             MoveKind::MoveTeam { .. } => move_type::MOVE_TEAM,
             MoveKind::Intercept { .. } => move_type::INTERCEPT,
+            MoveKind::Dock { .. } => move_type::DOCK,
+            MoveKind::Launch => move_type::LAUNCH,
         }
+    }
+
+    /// `aimCreateDock` (0x40c2f0): tactics 2, the dock move formation.
+    pub fn dock(flags: u32, host: Option<ShipId>, wait: bool, remove: bool) -> Self {
+        TeamMove { kind: MoveKind::Dock { flags, host, docking: Vec::new() }, processing: false, wait, remove, formation: DOCK_MOVE_FORMATION, tactics: 2 }
+    }
+
+    /// `aimCreateLaunch`: tactics 2, `SAME_FORMATION`.
+    pub fn launch(wait: bool, remove: bool) -> Self {
+        TeamMove { kind: MoveKind::Launch, processing: false, wait, remove, formation: SAME_FORMATION, tactics: 2 }
     }
 
     /// `aimCreateMoveTeam`: tactics 2 (aggressive).
@@ -94,6 +135,9 @@ pub struct TeamMoves {
     pub current: Option<usize>,
     /// `teamDelay`: passes to wait before the next move is processed.
     pub delay: u8,
+    /// `TEAM_DOCKING` (`team->teamFlags & 0x4000`): set when a dock move gives its order,
+    /// cleared when it is done (`kasfTeamDocking`).
+    pub docking: bool,
 }
 
 impl TeamMoves {

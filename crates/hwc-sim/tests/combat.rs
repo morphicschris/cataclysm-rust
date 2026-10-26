@@ -96,3 +96,88 @@ fn frigates_engage_a_destroyer() {
     let (b, _) = play("frigates", 1600).unwrap();
     assert_eq!(a.hashes, b.hashes);
 }
+
+/// Battle pings: once the dogfight is on, the collision blob holding it is flagged and split
+/// into ping sub-blobs that hold the fighting ships, on the battle-ping frames.
+#[test]
+fn dogfight_makes_battle_pings() {
+    let Some(d) = data() else { return };
+    let mut run = Run::new(d.statics.clone(), d.tweaks.clone(), scenario("dogfight").unwrap()).unwrap();
+    let props = hwc_sim::battle_ping::ping_blob_properties(None);
+    let mut seen = 0;
+    for _ in 0..800 {
+        run.step();
+        if !hwc_sim::battle_ping::is_battle_ping_frame(&run.universe) {
+            continue;
+        }
+        let before = hwc_sim::harness::world_hash(&run.universe);
+        let pings = hwc_sim::battle_ping::battle_pings(&mut run.universe, &props);
+        assert_eq!(before, hwc_sim::harness::world_hash(&run.universe), "battle pings change nothing");
+        for p in &pings {
+            assert!(!p.ships.is_empty());
+            assert!(p.radius > 0.0);
+            for &s in &p.ships {
+                let pos = run.universe.ship(s).unwrap().posinfo.position;
+                assert!((pos - p.centre).mag_sq().sqrt() <= 2.0 * p.radius, "a ship of the ping lies within it");
+            }
+        }
+        seen += pings.len();
+    }
+    assert!(seen > 0, "the dogfight shows up as battle pings");
+}
+
+/// Attacking in formation (`clProcess`, formation attack): six Acolytes in delta formation,
+/// ordered to attack a target 20 km away, close on it in formation (one command, formation
+/// attribute kept, the wingmen in their slots near the leader), and the formation is still
+/// theirs when the attack ends.
+#[test]
+fn formation_keeps_formation_when_ordered_to_attack() {
+    use hwc_math::Vector;
+    use hwc_sim::harness::{Order, Scenario, Spawn};
+    use hwc_sim::statics::{ShipRace, ShipType};
+    let Some(d) = data() else { return };
+    let mut spawns: Vec<Spawn> = (0..6).map(|i| Spawn { ship_type: ShipType::sAcolyte, player: 0, position: Vector::new(-10000.0, i as f32 * 200.0, 0.0) }).collect();
+    spawns.push(Spawn { ship_type: ShipType::tResourceCollector, player: 1, position: Vector::new(10000.0, 0.0, 0.0) });
+    let ours: Vec<usize> = (0..6).collect();
+    let sc = Scenario {
+        name: "formation_attack",
+        players: vec![ShipRace::Somtaaw, ShipRace::Taiidan],
+        spawns,
+        orders: vec![
+            (0, Order::Tactics { ships: ours.clone(), tactics: hwc_sim::object::tactics::NEUTRAL }),
+            (0, Order::Formation { ships: ours.clone(), formation_type: hwc_sim::formation::kind::DELTA }),
+            (160, Order::Attack { ships: ours.clone(), targets: vec![6] }),
+        ],
+        resources: Vec::new(),
+        resource_units: Vec::new(),
+    };
+    let mut run = Run::new(d.statics.clone(), d.tweaks.clone(), sc).unwrap();
+    let ids = run.ids.clone();
+    let mut approached = 0;
+    let mut ended_in_formation = false;
+    for tick in 0..16 * 120 {
+        run.step();
+        let u = &run.universe;
+        if tick < 170 {
+            continue;
+        }
+        let cmd = |id| u.ship(id).and_then(|s| s.command).and_then(|c| u.commands.get(c));
+        let Some(c) = cmd(ids[0]) else { continue };
+        assert!(c.attributes & hwc_sim::command::attr::FORMATION != 0, "the formation is kept (tick {tick})");
+        assert!(ids[..6].iter().all(|&id| u.ship(id).is_none() || cmd(id).map(|x| x.id) == Some(c.id)), "one command (tick {tick})");
+        if c.order == hwc_sim::command::order::ATTACK && !c.attack_in_range {
+            approached += 1;
+            let lp = u.ship(ids[0]).unwrap().posinfo.position;
+            for &id in &ids[1..6] {
+                let p = u.ship(id).unwrap().posinfo.position;
+                assert!((p - lp).mag_sq().sqrt() < 3000.0, "wingman {} stays near the leader on the approach (tick {tick})", id.0);
+            }
+        }
+        if u.ship(ids[6]).is_none() && c.order == hwc_sim::command::order::NULL {
+            ended_in_formation = true;
+            break;
+        }
+    }
+    assert!(approached > 100, "the formation closed on the target in formation ({approached} updates)");
+    assert!(ended_in_formation, "the attack ended and the ships are back in their formation");
+}
