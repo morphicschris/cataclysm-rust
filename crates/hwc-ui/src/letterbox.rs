@@ -196,6 +196,20 @@ mod tests {
         assert_eq!(tall_bar_height(1920, 1080), 151);
         assert_eq!(tall_bar_height(640, 480), 67);
         assert_eq!(tall_bar_height(1280, 1024), bar_height(1280, 1024));
+        // Any shape and size: the tall bars stay about 14% of the height each (more on
+        // screens narrower than 4:3), and the picture between them never vanishes.
+        for (w, h) in [
+            (1280, 720),
+            (1680, 1050),
+            (2560, 1080),
+            (3440, 1440),
+            (3840, 2160),
+            (5120, 1440),
+            (1080, 1920),
+        ] {
+            let b = tall_bar_height(w, h);
+            assert!(b >= h * 13 / 100 && b < h / 2, "{w}x{h}: {b}");
+        }
         let mut l = Letterbox {
             tall: true,
             fully: true,
