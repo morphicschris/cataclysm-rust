@@ -253,6 +253,60 @@ fn in_mission(size: (i32, i32), tag: &str) {
         assert!(rig.shot(g, &format!("m1_objectives_collapsed_{tag}")));
         rig.click(g, x, y);
         assert_eq!(header(g).map(|p| p.1), Some(true));
+
+        // The hyperspace entry as the mission puts it in at the end: the button at the top,
+        // under the pointer, and the compact one by the folded header. Never clicked here.
+        let run = g.world.mission_run_mut().expect("mission");
+        run.game.objectives.push(hwc_sim::mission::Objective {
+            label: "hyperspace".into(),
+            brief: String::new(),
+            full: String::new(),
+            primary: true,
+            complete: false,
+        });
+        // With the panels settled: a speech band going away slides them back up as the
+        // overlay draws.
+        for _ in 0..16 * 30 {
+            if g.ui.state().overlay.top == 0 {
+                break;
+            }
+            rig.frame(g);
+            g.render(&mut rig.renderer, rig.size).expect("render");
+        }
+        let button = |g: &Game| {
+            let view = g.ui.state().view.clone();
+            modern_objectives::panel(&g.ui.fe, size.0, size.1, &view).and_then(|p| p.button)
+        };
+        let b = button(g).expect("no hyperspace button");
+        assert!(!b.compact);
+        assert!(rig.shot(g, &format!("m1_end_mission_{tag}")));
+        let (bx, by) = ((b.rect.x0 + b.rect.x1) / 2, (b.rect.y0 + b.rect.y1) / 2);
+        g.input(InputEvent::MouseMove { x: bx, y: by }, &mut rig.audio);
+        rig.frame(g);
+        assert!(rig.shot(g, &format!("m1_end_mission_hover_{tag}")));
+        g.input(
+            InputEvent::MouseMove {
+                x: size.0 / 2,
+                y: size.1 / 2,
+            },
+            &mut rig.audio,
+        );
+        g.ui.fe
+            .game
+            .options
+            .set_bool(modern_objectives::EXPANDED_KEY, false);
+        rig.frame(g);
+        let c = button(g).expect("no compact button");
+        assert!(c.compact && c.rect.x0 >= header(g).unwrap().0.x1);
+        assert!(rig.shot(g, &format!("m1_end_mission_collapsed_{tag}")));
+        g.ui.fe
+            .game
+            .options
+            .set_bool(modern_objectives::EXPANDED_KEY, true);
+        let run = g.world.mission_run_mut().expect("mission");
+        run.game.objectives.retain(|o| o.label != "hyperspace");
+        rig.frame(g);
+        assert!(button(g).is_none(), "the button outlived its objective");
     } else {
         eprintln!("no objectives in mission 1 yet at {tag}");
     }

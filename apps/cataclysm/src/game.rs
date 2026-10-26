@@ -7,6 +7,7 @@
 //! The window and the headless tests drive it the same way: [`Game::input`] for each event,
 //! [`Game::update`] once per frame, [`Game::render`] for the picture.
 
+use crate::intel_trace::IntelTraceKind;
 use std::rc::Rc;
 
 use glam::Vec3;
@@ -146,6 +147,8 @@ pub struct Game {
     /// the sensors manager was open (tests).
     #[cfg(test)]
     pub wide_screen_log: Vec<(hwc_sim::mission::WideScreenEvent, bool)>,
+    /// The fleet-intel presentation's trace (speech, subtitles, intel ends, wide screen).
+    pub intel_trace: crate::intel_trace::IntelTrace,
     pub mode: Mode,
     mouse: (i32, i32),
     left_down: Option<(i32, i32)>,
@@ -341,6 +344,7 @@ impl Game {
             letterbox: Letterbox::default(),
             #[cfg(test)]
             wide_screen_log: Vec::new(),
+            intel_trace: crate::intel_trace::IntelTrace::new(),
             mode: Mode::Select,
             mouse: (0, 0),
             left_down: None,
@@ -1669,7 +1673,11 @@ impl Game {
     pub fn restore_ui(&mut self, ui: crate::saves::UiState) {
         self.world.restore_view(&ui.view);
         let u = self.world.universe();
-        self.selection = ui.selection.into_iter().filter(|&id| selectable(u, id)).collect();
+        self.selection = ui
+            .selection
+            .into_iter()
+            .filter(|&id| selectable(u, id))
+            .collect();
         self.hotkeys = ui.hotkeys;
         self.music = ui.music;
         self.resume_music = ui.music;
@@ -1690,7 +1698,12 @@ impl Game {
     }
 
     /// Writes the game to `path` under `description`.
-    pub fn save_to(&mut self, path: &std::path::Path, description: &str, autosave: bool) -> Result<(), String> {
+    pub fn save_to(
+        &mut self,
+        path: &std::path::Path,
+        description: &str,
+        autosave: bool,
+    ) -> Result<(), String> {
         let ui = self.ui_state();
         let run = self.world.run();
         let header = crate::saves::header(run, description, autosave, self.thumb.clone());
@@ -1716,7 +1729,10 @@ impl Game {
     pub fn save_named(&mut self, name: &str) -> Result<std::path::PathBuf, String> {
         let name = name.trim();
         if name.chars().count() < hwc_ui::saves::MIN_NAME {
-            return Err(self.string_or("strAtLeast2Chars", "A saved game's name needs at least 2 characters."));
+            return Err(self.string_or(
+                "strAtLeast2Chars",
+                "A saved game's name needs at least 2 characters.",
+            ));
         }
         self.can_save().map_err(str::to_string)?;
         let dir = self.saves.clone().ok_or("Saved games are not available.")?;
@@ -1755,7 +1771,9 @@ impl Game {
     /// `kasfSaveLevelDeferred`: the autosave the mission asked for this update
     /// (`NN - <name>`, the tutorial's in the training folder), which "restart level" loads.
     fn autosave_if_due(&mut self) {
-        let Some(a) = self.world.run().game.autosave.clone() else { return };
+        let Some(a) = self.world.run().game.autosave.clone() else {
+            return;
+        };
         if let Some(dir) = self.saves.clone() {
             let folder = if a.training() {
                 hwc_ui::saves::SaveFolder::Training
@@ -2272,13 +2290,26 @@ impl Game {
             .and_then(|a| a.mission_speech(event, variable));
         let mission = self.world.mission();
         let actor = subtitle::actor_for_speech(0, event, true, mission);
+        let now = self.world.universe().total_time_elapsed;
+        let mut traced = None;
         if let (Some(s), Some(actor), Some(subs)) = (spoken, actor, self.subtitles.as_mut()) {
             let n = s.subtitles.len().max(1) as f32;
             let each = s.duration_ms.max(0) as f32 / 1000.0 / n;
             for t in &s.subtitles {
                 subs.add(actor, event, &text::to_latin1(t), each);
             }
+            if !s.subtitles.is_empty() {
+                traced = Some(IntelTraceKind::Speech {
+                    event,
+                    seconds: s.duration_ms.max(0) as f32 / 1000.0,
+                    fragments: s.subtitles.len(),
+                });
+            }
         }
+        self.intel_trace.push(
+            now,
+            traced.unwrap_or(IntelTraceKind::Unsubtitled { event }),
+        );
     }
 
     // ---------------------------------------------------------------------------------------
@@ -2726,10 +2757,18 @@ impl Game {
             };
             s.resize(self.canvas.width, self.canvas.height);
             s.draw(&mut self.canvas, now, None, state);
-            if s.take_message_ended() != 0 {
-                if let Some(run) = self.world.mission_run_mut() {
+            let report = s.take_message_ended();
+            self.intel_trace.message_ended(now, report);
+            let r = &s.regions[subtitle::region::LETTERBOX];
+            self.intel_trace
+                .region(now, r.cards.len(), r.aborted, r.continuous);
+            let on_screen = s.any_cards();
+            if let Some(run) = self.world.mission_run_mut() {
+                if report != 0 {
                     run.game.intel_ended = true;
                 }
+                // `subAnyCardsOnScreen` for the intel safety timeout.
+                run.game.subtitles_on_screen = on_screen;
             }
             // `moSetTop`: the HUD's top panels go below a portrait (next frame's overlay).
             self.ui.subtitle_top(s.hud_top());
@@ -2868,13 +2907,34 @@ impl Game {
             .mission_run_mut()
             .map(|r| std::mem::take(&mut r.game.wide_screen_events))
             .unwrap_or_default();
+        let ends = self
+            .world
+            .mission_run_mut()
+            .map(|r| std::mem::take(&mut r.game.intel_ends))
+            .unwrap_or_default();
+        for e in ends {
+            self.intel_trace
+                .push(e.time, IntelTraceKind::IntelEnded(e.reason));
+        }
         for e in events {
             let coming_in = e.kind != hwc_sim::mission::WideScreenKind::Out;
             if let Some(id) = self.letterbox.wide_screen_call(coming_in, e.frames) {
                 sound(audio, id);
             }
+            self.intel_trace.push(
+                e.time,
+                IntelTraceKind::WideScreen {
+                    kind: e.kind,
+                    frames: e.frames,
+                    sensors_open: self.sensors.is_open(),
+                },
+            );
             #[cfg(test)]
             self.wide_screen_log.push((e, self.sensors.is_open()));
+        }
+        if let Some(a) = audio.as_ref() {
+            let now = self.world.universe().total_time_elapsed;
+            self.intel_trace.playing(now, !a.mission_speech_over());
         }
         self.letterbox.update(dt);
         // Fleet intel holds the keyboard (`smFleetIntel`).

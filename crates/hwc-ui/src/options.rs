@@ -178,6 +178,13 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // screen (`--menus`); 0: the original screens. The original HUD brings back the
     // original too.
     ("hwcModernMenus", 1),
+    // The screen mode (`--window` / `--borderless` / `--fullscreen`, `--display-mode`):
+    // 0 a window at screenWidth x screenHeight, 1 a borderless window covering the monitor
+    // at its own resolution (the default, a user-requested change), 2 exclusive full screen
+    // at screenWidth x screenHeight (see `crate::display`).
+    ("hwcDisplayMode", 1),
+    // The full-screen refresh rate in millihertz; 0: the monitor's current rate.
+    ("hwcRefreshRate", 0),
     // Registry values.
     ("deviceIndex", -1),
     ("screenWidth", 640),

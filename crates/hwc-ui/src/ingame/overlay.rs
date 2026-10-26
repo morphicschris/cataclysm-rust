@@ -115,6 +115,8 @@ pub struct State {
     /// The modern objectives panel's flash, and its header (the collapse toggle) as laid out.
     pub modern_objectives: crate::ingame::modern_objectives::PanelState,
     objectives_header: Option<Rect>,
+    /// The modern objectives panel's hyperspace button as laid out: (game index, rect).
+    objectives_button: Option<(usize, Rect)>,
     /// The modern resources panel's header (its collapse toggle) as laid out.
     resources_header: Option<Rect>,
     /// The modern build queue, system log and selected-ships panels: their state, and their
@@ -339,6 +341,11 @@ pub fn layout(fe: &mut Fe) {
     }
     let mut objective_rects = Vec::new();
     let objectives_header = arr.objectives.as_ref().map(|p| p.header);
+    let objectives_button = arr
+        .objectives
+        .as_ref()
+        .and_then(|p| p.button.as_ref())
+        .map(|b| (b.live, b.rect));
     let resources_header = arr.resources.as_ref().map(|p| p.header);
     let modern_panels = arr.rects();
     if modern {
@@ -385,6 +392,7 @@ pub fn layout(fe: &mut Fe) {
     o.lines = lines;
     o.objective_rects = objective_rects;
     o.objectives_header = objectives_header;
+    o.objectives_button = objectives_button;
     o.resources_header = resources_header;
     o.build_header = arr.build.as_ref().map(|p| p.header);
     o.research_header = arr.research.as_ref().map(|p| p.header);
@@ -448,7 +456,7 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool, x: i32, y: i32) -> bool
         }
     }
     if !down {
-        return false;
+        return modern_release(fe, x, y);
     }
     if modern_click(fe, x, y) {
         return true;
@@ -548,6 +556,13 @@ pub fn over_modern_panel(fe: &Fe, x: i32, y: i32) -> bool {
 /// else on a panel the click is used up. Whether it was on a panel.
 pub fn modern_click(fe: &mut Fe, x: i32, y: i32) -> bool {
     let o = &fe.game.ig.overlay;
+    // The hyperspace button acts on the release over it (nothing while paused, as the
+    // original's line).
+    if o.objectives_button.is_some_and(|b| b.1.contains(x, y)) {
+        let paused = fe.game.ig.view.player.paused;
+        fe.game.ig.overlay.modern_objectives.pressed = !paused;
+        return true;
+    }
     if o.objectives_header.is_some_and(|r| r.contains(x, y)) {
         crate::ingame::modern_objectives::toggle(fe);
         layout(fe);
@@ -583,6 +598,21 @@ pub fn modern_click(fe: &mut Fe, x: i32, y: i32) -> bool {
         click_line(fe, t, owner);
     } else if let Some(&(i, _)) = o.message_rects.iter().find(|l| l.1.contains(x, y)) {
         click_message(fe, i);
+    }
+    true
+}
+
+/// A left release: the hyperspace button jumps when it was pressed and the pointer is still
+/// on it. Whether the release was the button's.
+pub fn modern_release(fe: &mut Fe, x: i32, y: i32) -> bool {
+    if !std::mem::take(&mut fe.game.ig.overlay.modern_objectives.pressed) {
+        return false;
+    }
+    layout(fe);
+    if let Some((i, r)) = fe.game.ig.overlay.objectives_button {
+        if r.contains(x, y) {
+            click_objective(fe, i);
+        }
     }
     true
 }

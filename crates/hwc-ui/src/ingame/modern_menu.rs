@@ -734,12 +734,14 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
                 let keys = atom.name.as_deref() == Some("OP_KeyBindingsList");
                 // A save list shows each game's mission and date beside its name.
                 let saves = match atom.name.as_deref() {
-                    Some("FE_GameWindowInit") => {
-                        Some(crate::cataclysm::save_entries(fe, crate::cataclysm::list_folder(fe, false)))
-                    }
-                    Some("FE_TutorialGameWindowInit") => {
-                        Some(crate::cataclysm::save_entries(fe, crate::saves::SaveFolder::Training))
-                    }
+                    Some("FE_GameWindowInit") => Some(crate::cataclysm::save_entries(
+                        fe,
+                        crate::cataclysm::list_folder(fe, false),
+                    )),
+                    Some("FE_TutorialGameWindowInit") => Some(crate::cataclysm::save_entries(
+                        fe,
+                        crate::saves::SaveFolder::Training,
+                    )),
                     _ => None,
                 };
                 let (rows, top, total, page) = match fe.list(a) {
@@ -1020,15 +1022,36 @@ impl Layout {
         let c = p.control;
         let h = c.height().max(1);
         let gap = self.px(4.0);
-        let down = c.y1 + gap + h * n as i32 <= canvas_h - self.px(6.0);
-        (0..n as i32)
+        let margin = self.px(6.0);
+        let n = n as i32;
+        let down = c.y1 + gap + h * n <= canvas_h - margin;
+        let up = c.y0 - gap - h * n >= margin;
+        if down || up {
+            return (0..n)
+                .map(|k| {
+                    let y = if down {
+                        c.y1 + gap + k * h
+                    } else {
+                        c.y0 - gap - (n - k) * h
+                    };
+                    Rect::new(c.x0, y, c.x1, y + h)
+                })
+                .collect();
+        }
+        // A long list (the resolutions) fits neither way: as many columns as it needs, ending
+        // at the box's right edge, from the top of the canvas.
+        let per = ((canvas_h - 2 * margin) / h).max(1);
+        let cols = (n + per - 1) / per;
+        let rows = (n + cols - 1) / cols;
+        let top = (c.y0 + c.y1 - rows * h) / 2;
+        let top = top.clamp(margin, (canvas_h - margin - rows * h).max(margin));
+        let w = c.width();
+        (0..n)
             .map(|k| {
-                let y = if down {
-                    c.y1 + gap + k * h
-                } else {
-                    c.y0 - gap - (n as i32 - k) * h
-                };
-                Rect::new(c.x0, y, c.x1, y + h)
+                let (col, row) = (k / rows, k % rows);
+                let x = (c.x1 - (cols - col) * w).max(0);
+                let y = top + row * h;
+                Rect::new(x, y, x + w, y + h)
             })
             .collect()
     }
@@ -1822,6 +1845,10 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool) {
         if p == at {
             mo::release(fe, &m, at);
         }
+        // A choice made in one of the modern options' drop-downs closes it.
+        if matches!(p, Hit::Choice(..)) {
+            fe.game.ig.mmenu.dropdown = None;
+        }
     }
 }
 
@@ -2551,14 +2578,7 @@ fn draw_list(
                         room -= dw + f.px(16.0);
                     }
                 }
-                let t = fit(
-                    pen,
-                    Face::Semibold,
-                    npx,
-                    0.0,
-                    &r.text,
-                    room as f32,
-                );
+                let t = fit(pen, Face::Semibold, npx, 0.0, &r.text, room as f32);
                 write(
                     canvas,
                     pen,

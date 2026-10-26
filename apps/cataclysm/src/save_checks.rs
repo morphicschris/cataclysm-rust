@@ -41,7 +41,9 @@ struct Rig {
 
 /// A fresh save folder under the build directory.
 fn save_dir(name: &str) -> Rc<SaveDir> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/save-checks").join(name);
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/save-checks")
+        .join(name);
     let _ = std::fs::remove_dir_all(&root);
     Rc::new(SaveDir::new(root))
 }
@@ -72,7 +74,14 @@ fn rig(name: &str) -> Option<Rig> {
     session.resize(SIZE.0 as u32, SIZE.1 as u32);
     let saves = save_dir(name);
     session.fe.game.saves = Some(saves.clone());
-    Some(Rig { data, session, renderer, audio: None, saves, seen: Vec::new() })
+    Some(Rig {
+        data,
+        session,
+        renderer,
+        audio: None,
+        saves,
+        seen: Vec::new(),
+    })
 }
 
 impl Rig {
@@ -96,13 +105,17 @@ impl Rig {
     }
 
     fn load(&mut self, path: &std::path::Path) -> Box<Game> {
-        let l = Loading::from_save(self.data.clone(), &self.session, path, SIZE).expect("loading the save");
+        let l = Loading::from_save(self.data.clone(), &self.session, path, SIZE)
+            .expect("loading the save");
         self.finish(l)
     }
 
     fn frame(&mut self, g: &mut Game) -> Vec<Outcome> {
         let out = g.update(DT, &mut self.audio);
-        assert!(!out.contains(&Outcome::NextMission), "mission 1 ended: {out:?}");
+        assert!(
+            !out.contains(&Outcome::NextMission),
+            "mission 1 ended: {out:?}"
+        );
         self.seen.extend(out.iter().cloned());
         out
     }
@@ -128,7 +141,9 @@ impl Rig {
         let m = menu::model(&g.ui.fe).expect("a modern menu");
         let l = menu::layout(&m, SIZE.0, SIZE.1);
         let labels: Vec<String> = m.items.iter().map(|i| i.label.clone()).collect();
-        let i = m.find(label).unwrap_or_else(|| panic!("no {label} on {} ({labels:?})", m.name));
+        let i = m
+            .find(label)
+            .unwrap_or_else(|| panic!("no {label} on {} ({labels:?})", m.name));
         let r = match m.items[i].kind {
             Kind::Toggle { .. } => l.placed[i].row,
             _ => l.placed[i].control,
@@ -152,7 +167,10 @@ impl Rig {
             .unwrap_or_else(|| panic!("no row {name}"));
         let (x, y) = centre(l.placed[i].parts[k]);
         self.click(g, x, y);
-        assert!(list_rows_selected(g).as_deref() == Some(name), "{name} selected");
+        assert!(
+            list_rows_selected(g).as_deref() == Some(name),
+            "{name} selected"
+        );
     }
 
     fn key(&mut self, g: &mut Game, code: u16) {
@@ -167,7 +185,11 @@ impl Rig {
         let m = menu::model(&g.ui.fe).expect("a modern menu");
 
         let l = menu::layout(&m, SIZE.0, SIZE.1);
-        if let Some(i) = m.items.iter().position(|it| matches!(it.kind, Kind::Entry { .. })) {
+        if let Some(i) = m
+            .items
+            .iter()
+            .position(|it| matches!(it.kind, Kind::Entry { .. }))
+        {
             let (x, y) = centre(l.placed[i].control);
             self.click(g, x, y);
         }
@@ -219,7 +241,11 @@ fn list_rows(g: &Game) -> Vec<(String, Option<String>)> {
     m.items
         .iter()
         .find_map(|it| match &it.kind {
-            Kind::List { rows, .. } => Some(rows.iter().map(|r| (r.text.clone(), r.detail.clone())).collect()),
+            Kind::List { rows, .. } => Some(
+                rows.iter()
+                    .map(|r| (r.text.clone(), r.detail.clone()))
+                    .collect(),
+            ),
             _ => None,
         })
         .unwrap_or_default()
@@ -237,7 +263,11 @@ fn list_rows_selected(g: &Game) -> Option<String> {
 /// Mission 1 until the fleet is in and the intro is over.
 fn into_mission(rig: &mut Rig, g: &mut Game) {
     let mut frames = 0;
-    while !(g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE && !g.letterbox.fully && g.nis.is_none()) {
+    while !(g.world.run().game.ships_have_arrived
+        && g.world.run().game.sp_state == sp_state::NONE
+        && !g.letterbox.fully
+        && g.nis.is_none())
+    {
         rig.frame(g);
         frames += 1;
         assert!(frames < 16 * 600, "mission 1 never left its intro");
@@ -266,7 +296,10 @@ fn mission_one_saves_and_loads_through_the_menus() {
     };
     let mut game = rig.mission_one();
     let g = &mut *game;
-    assert!(g.saves.is_some(), "the loading screen hands the save folder over");
+    assert!(
+        g.saves.is_some(),
+        "the loading screen hands the save folder over"
+    );
     into_mission(&mut rig, g);
     // A selection and a hot-key group to come back.
     let mine: Vec<hwc_sim::ShipId> = g
@@ -275,7 +308,10 @@ fn mission_one_saves_and_loads_through_the_menus() {
         .ship_list
         .iter()
         .copied()
-        .filter(|&id| crate::host::selectable(g.world.universe(), id) && g.world.universe().ships.ship(id).player == crate::host::PLAYER)
+        .filter(|&id| {
+            crate::host::selectable(g.world.universe(), id)
+                && g.world.universe().ships.ship(id).player == crate::host::PLAYER
+        })
         .take(3)
         .collect();
     assert!(!mine.is_empty());
@@ -291,7 +327,10 @@ fn mission_one_saves_and_loads_through_the_menus() {
     let path = rig.saves.path_for(SaveFolder::SinglePlayer, "Test Save");
     assert!(path.is_file(), "{} written", path.display());
     let h = hwc_sim::save::read_header(&path).unwrap();
-    assert_eq!((h.description.as_str(), h.mission, h.autosave), ("Test Save", 1, false));
+    assert_eq!(
+        (h.description.as_str(), h.mission, h.autosave),
+        ("Test Save", 1, false)
+    );
     // The save was made from the menu's request, before this frame's update.
     let saved_counter = h.frame;
     assert!(g.world.universe().update_counter - saved_counter <= 1);
@@ -326,7 +365,11 @@ fn mission_one_saves_and_loads_through_the_menus() {
     rig.save_from_menu(l, "Test Save");
     assert_eq!(screen(l), hwc_ui::ingame::escmenu::OVERWRITE_POPUP);
     rig.press(l, "NO");
-    assert_eq!(hwc_sim::save::read_header(&path).unwrap().frame, saved_counter, "kept");
+    assert_eq!(
+        hwc_sim::save::read_header(&path).unwrap().frame,
+        saved_counter,
+        "kept"
+    );
     rig.key(l, 27);
     rig.key(l, 27);
     rig.save_from_menu(l, "Test Save");
@@ -345,15 +388,29 @@ fn mission_one_saves_and_loads_through_the_menus() {
     // Mission 1's own SaveLevel ("01 - Hiigara") is in the list too.
     let names: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
     assert!(names.ends_with(&["Another One", "Test Save"]), "{names:?}");
-    assert!(rows.iter().all(|r| r.1.as_deref().is_some_and(|d| d.starts_with("MISSION 01 - "))), "{rows:?}");
+    assert!(
+        rows.iter().all(|r| r
+            .1
+            .as_deref()
+            .is_some_and(|d| d.starts_with("MISSION 01 - "))),
+        "{rows:?}"
+    );
     let before = rows.len();
     rig.select_row(l, "Another One");
     rig.press(l, "DELETE GAME");
     assert!(screen(l).starts_with("DeleteGamePopup"), "asks first");
-    assert!(rig.saves.path_for(SaveFolder::SinglePlayer, "Another One").exists());
+    assert!(rig
+        .saves
+        .path_for(SaveFolder::SinglePlayer, "Another One")
+        .exists());
     rig.press(l, "YES");
     assert_eq!(screen(l), "In_game_load");
-    assert!(!rig.saves.path_for(SaveFolder::SinglePlayer, "Another One").exists(), "deleted");
+    assert!(
+        !rig.saves
+            .path_for(SaveFolder::SinglePlayer, "Another One")
+            .exists(),
+        "deleted"
+    );
     assert!(path.exists(), "the other one stays");
     // Loading from the load screen.
     if screen(l) != "In_game_load" {
@@ -365,24 +422,48 @@ fn mission_one_saves_and_loads_through_the_menus() {
     rig.seen.clear();
     rig.press(l, "LOAD GAME");
     let out = &rig.seen;
-    assert!(out.iter().any(|o| matches!(o, Outcome::LoadGame(p) if *p == path)), "{out:?}");
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Outcome::LoadGame(p) if *p == path)),
+        "{out:?}"
+    );
 
     // The main menu's Load Game screen reads the same folder.
     let fe = &mut rig.session.fe;
-    let list = fe.game.saves.as_ref().unwrap().list(SaveFolder::SinglePlayer);
+    let list = fe
+        .game
+        .saves
+        .as_ref()
+        .unwrap()
+        .list(SaveFolder::SinglePlayer);
     let names: Vec<&str> = list.iter().map(|e| e.name.as_str()).collect();
-    assert!(names.contains(&"Test Save") && !names.contains(&"Another One"), "{names:?}");
+    assert!(
+        names.contains(&"Test Save") && !names.contains(&"Another One"),
+        "{names:?}"
+    );
     // Its screen: the list comes from the folder, and loading asks the game to load the file.
     fe.all_screens_delete();
     fe.screen_start("Load_game");
     let atom = fe.find_atom("FE_GameWindowInit").expect("the list");
-    let rows: Vec<String> = fe.list(atom).expect("a list").items.iter().map(|i| i.text.clone()).collect();
+    let rows: Vec<String> = fe
+        .list(atom)
+        .expect("a list")
+        .items
+        .iter()
+        .map(|i| i.text.clone())
+        .collect();
     assert_eq!(rows, names);
     let at = rows.iter().position(|r| r == "Test Save").unwrap();
     fe.list_mut(atom).unwrap().select(at);
     fe.function_execute("LoadMultiSinglePlayerGameFromMain", None, false);
     let key = path.to_string_lossy().into_owned();
-    assert!(fe.game.requests.contains(&hwc_ui::cataclysm::Request::LoadGame(key)), "{:?}", fe.game.requests);
+    assert!(
+        fe.game
+            .requests
+            .contains(&hwc_ui::cataclysm::Request::LoadGame(key)),
+        "{:?}",
+        fe.game.requests
+    );
 }
 
 #[test]
@@ -394,7 +475,9 @@ fn quick_save_and_autosave() {
     let mut game = rig.mission_one();
     let g = &mut *game;
     into_mission(&mut rig, g);
-    let quick = rig.saves.path_for(SaveFolder::SinglePlayer, crate::saves::QUICK_SAVE);
+    let quick = rig
+        .saves
+        .path_for(SaveFolder::SinglePlayer, crate::saves::QUICK_SAVE);
     // Off by default: Shift+F5 is not a save.
     let shift = hwc_ui::consts::key::SHIFT;
     let quick_key = |rig: &mut Rig, g: &mut Game, code: u16| {
@@ -413,7 +496,11 @@ fn quick_save_and_autosave() {
     quick_key(&mut rig, g, crate::game::QUICK_LOAD_KEY);
     rig.frame(g);
     let out = &rig.seen;
-    assert!(out.iter().any(|o| matches!(o, Outcome::LoadGame(p) if *p == quick)), "Shift+F9 loads: {out:?}");
+    assert!(
+        out.iter()
+            .any(|o| matches!(o, Outcome::LoadGame(p) if *p == quick)),
+        "Shift+F9 loads: {out:?}"
+    );
 
     // A mission's SaveLevel: written at the end of its update, as `NN - name`, and what
     // restart loads; loading it counts the load (`G_TimesGameLoaded`) and rewrites it.
@@ -421,24 +508,45 @@ fn quick_save_and_autosave() {
     for _ in 0..32 {
         rig.frame(g);
     }
-    assert!(rig.saves.path_for(SaveFolder::SinglePlayer, "01 - Hiigara").is_file(), "mission 1 saves itself");
+    assert!(
+        rig.saves
+            .path_for(SaveFolder::SinglePlayer, "01 - Hiigara")
+            .is_file(),
+        "mission 1 saves itself"
+    );
     g.world.run_mut().game.pending_save = Some((2, "Test Autosave".into()));
     let at = g.world.universe().update_counter;
     while g.world.universe().update_counter == at {
         rig.frame(g);
     }
 
-    let auto = rig.saves.path_for(SaveFolder::SinglePlayer, "02 - Test Autosave");
+    let auto = rig
+        .saves
+        .path_for(SaveFolder::SinglePlayer, "02 - Test Autosave");
 
     assert!(auto.is_file(), "{} written", auto.display());
     assert_eq!(g.level_save.as_deref(), Some(auto.as_path()));
     assert!(hwc_sim::save::read_header(&auto).unwrap().autosave);
-    assert_eq!(g.world.run().var(None, hwc_sim::mission::AUTO_SAVE), None, "G_AutoSave only in the file");
+    assert_eq!(
+        g.world.run().var(None, hwc_sim::mission::AUTO_SAVE),
+        None,
+        "G_AutoSave only in the file"
+    );
     let mut l = rig.load(&auto);
-    assert_eq!(l.world.run().var(None, hwc_sim::mission::TIMES_GAME_LOADED), Some(1));
+    assert_eq!(
+        l.world.run().var(None, hwc_sim::mission::TIMES_GAME_LOADED),
+        Some(1)
+    );
     assert_eq!(l.world.run().var(None, hwc_sim::mission::AUTO_SAVE), None);
     assert_eq!(l.level_save.as_deref(), Some(auto.as_path()));
     let again = rig.load(&auto);
-    assert_eq!(again.world.run().var(None, hwc_sim::mission::TIMES_GAME_LOADED), Some(2), "the file was rewritten");
+    assert_eq!(
+        again
+            .world
+            .run()
+            .var(None, hwc_sim::mission::TIMES_GAME_LOADED),
+        Some(2),
+        "the file was rewritten"
+    );
     rig.frame(&mut l);
 }

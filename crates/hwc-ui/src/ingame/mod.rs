@@ -288,6 +288,17 @@ impl InGameUi {
         locked.push((key.to_string(), value));
     }
 
+    /// The monitor the window is on and the display in use (the modern options' screen mode
+    /// and resolution follow them).
+    pub fn set_display(
+        &mut self,
+        monitor: Option<crate::display::Monitor>,
+        in_use: crate::display::Setting,
+    ) {
+        self.fe.game.monitor = monitor;
+        self.fe.game.display = in_use;
+    }
+
     pub fn set_rollcall_offset(&mut self, dy: i32) {
         self.fe.set_screen_offset(rollcall::SCREEN, 0, dy);
     }
@@ -471,7 +482,13 @@ impl InGameUi {
     fn panel_click(&mut self, left: bool, down: bool) -> bool {
         let slot = usize::from(!left);
         if !down {
-            return std::mem::take(&mut self.panel_press[slot]);
+            let used = std::mem::take(&mut self.panel_press[slot]);
+            if used && left {
+                // The objectives panel's hyperspace button acts on the release.
+                let (x, y) = self.mouse;
+                overlay::modern_release(&mut self.fe, x, y);
+            }
+            return used;
         }
         if !full_screen_manager(self.fe.game.ig.manager) || self.fe.game.ig.overlay.cutscene {
             return false;

@@ -20,6 +20,7 @@ mod host;
 mod hotkeys;
 #[cfg(test)]
 mod hud_shots;
+mod intel_trace;
 mod intro;
 mod loading;
 #[cfg(test)]
@@ -38,12 +39,14 @@ mod play;
 mod preview;
 mod profile;
 #[cfg(test)]
-mod save_checks;
-mod saves;
-#[cfg(test)]
 mod quality_shots;
 #[cfg(test)]
 mod resui_shots;
+#[cfg(test)]
+mod save_checks;
+mod saves;
+#[cfg(test)]
+mod screen_shots;
 mod sensors;
 mod ship_preview;
 #[cfg(test)]
@@ -63,6 +66,7 @@ use std::rc::Rc;
 
 use hwc_formats::gamedata::Layout;
 use hwc_formats::GameData;
+use hwc_ui::display::Mode;
 use hwc_ui::scale::ScaleMode;
 use hwc_ui::session::{Session, Setup};
 use hwc_ui::AssetSource;
@@ -73,9 +77,17 @@ data: the data directory made by hwc-import (default: $HWC_DATA_DIR, then $HWC_G
       for development also an original install directory or a cataclysm.big file
 
 options:
-  --fullscreen          full screen in the configured display mode (default, like the
-                        original's /fullscreen; the intro runs in 640x480)
-  --window              in a window of the configured size (the original's /window)
+  --display-mode <m>    borderless (default, a user-requested change: a borderless window
+                        covering the monitor at its own resolution), windowed (a resizable
+                        window of the configured size, centred) or fullscreen (exclusive
+                        full screen at the configured resolution and refresh rate; the
+                        intro runs in 640x480, as the original's); for this run, the options
+                        file's hwcDisplayMode = 0 window / 1 borderless / 2 full screen
+                        otherwise. Alt+Enter (or F11) switches between the window and the
+                        last full-screen mode
+  --borderless          --display-mode borderless
+  --window              --display-mode windowed (the original's /window)
+  --fullscreen          --display-mode fullscreen (the original's /fullscreen)
   --skip-intro          start at the main menu (the original's hidden /disableAVI)
   --scale <mode>        original (default: 1:1 and centred, like the engine), fit
                         (aspect-correct scaling), integer (whole-number scaling), stretch;
@@ -83,7 +95,9 @@ options:
                         the window (a user-requested change: the original shows them
                         unscaled)
   --filter <f>          nearest (default) or linear, when the picture is scaled
-  --size <WxH>          window size (default: the configured resolution)
+  --size <WxH>          window or full-screen size for this run (default: the configured
+                        resolution, screenWidth x screenHeight; the menus list 640x480 to
+                        5120x1440 and the monitor's own full-screen modes)
   --config <file>       options file (default: <data>/config/hwc-options.cfg, or
                         ./hwc-options.cfg when running from an install or archive)
   --no-sound            do not open an audio device
@@ -189,8 +203,8 @@ docs/render-quality.md for the measured costs):
   -h, --help            this text
 
 The original's switches /window, /fullscreen and /disableAVI are accepted too.
-keys: Escape (released) stops the movie playing; F11 toggles borderless full screen;
-      F10 cycles the scaling mode; in a mission the game's key bindings (keys.cfg)";
+keys: Escape (released) stops the movie playing; Alt+Enter or F11 switches between a
+      window and the last full-screen mode; F10 cycles the scaling mode; in a mission the game's key bindings (keys.cfg)";
 
 pub struct Args {
     pub data: Option<PathBuf>,
@@ -202,7 +216,8 @@ pub struct Args {
     pub config: Option<PathBuf>,
     pub tour: Option<PathBuf>,
     pub exit_after: Option<f32>,
-    pub fullscreen: bool,
+    /// `--display-mode`, `--window`, `--borderless`, `--fullscreen` (None: the options file).
+    pub display_mode: Option<hwc_ui::display::Mode>,
     pub intro: bool,
     pub sound: bool,
     pub ingame_preview: bool,
@@ -235,6 +250,10 @@ pub struct Args {
 }
 
 fn parse_args() -> Result<Args, String> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
     let mut a = Args {
         data: None,
         scale: ScaleMode::Original,
@@ -244,7 +263,7 @@ fn parse_args() -> Result<Args, String> {
         config: None,
         tour: None,
         exit_after: None,
-        fullscreen: true,
+        display_mode: None,
         intro: true,
         sound: true,
         ingame_preview: false,
@@ -266,17 +285,17 @@ fn parse_args() -> Result<Args, String> {
         no_vsync: false,
         frame_times: false,
     };
-    let mut it = std::env::args().skip(1);
+    let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
         // The original's command-line switches (matched without regard to case).
         match arg.to_ascii_lowercase().as_str() {
             "/window" => {
-                a.fullscreen = false;
+                a.display_mode = Some(Mode::Windowed);
                 continue;
             }
             "/fullscreen" => {
-                a.fullscreen = true;
+                a.display_mode = Some(Mode::Fullscreen);
                 continue;
             }
             "/disableavi" => {
@@ -287,8 +306,14 @@ fn parse_args() -> Result<Args, String> {
         }
         match arg.as_str() {
             "-h" | "--help" => return Err(String::new()),
-            "--window" => a.fullscreen = false,
-            "--fullscreen" => a.fullscreen = true,
+            "--window" | "--windowed" => a.display_mode = Some(Mode::Windowed),
+            "--borderless" => a.display_mode = Some(Mode::Borderless),
+            "--fullscreen" => a.display_mode = Some(Mode::Fullscreen),
+            "--display-mode" => {
+                let v = value("--display-mode")?;
+                a.display_mode =
+                    Some(Mode::parse(&v).ok_or_else(|| format!("unknown --display-mode {v}"))?);
+            }
             "--skip-intro" => a.intro = false,
             "--no-sound" => a.sound = false,
             "--ingame-preview" => a.ingame_preview = true,
@@ -421,11 +446,8 @@ fn parse_args() -> Result<Args, String> {
             "--filter" => a.linear = value("--filter")?.eq_ignore_ascii_case("linear"),
             "--size" => {
                 let v = value("--size")?;
-                let (w, h) = v.split_once('x').ok_or("--size wants WxH")?;
-                a.size = Some((
-                    w.parse().map_err(|_| "bad width")?,
-                    h.parse().map_err(|_| "bad height")?,
-                ));
+                let (w, h) = hwc_ui::display::parse_size(&v).ok_or("--size wants WxH")?;
+                a.size = Some((w as u32, h as u32));
             }
             "--config" => a.config = Some(PathBuf::from(value("--config")?)),
             "--tour" => a.tour = Some(PathBuf::from(value("--tour")?)),
@@ -521,5 +543,51 @@ fn main() -> ExitCode {
             crash::log(&format!("the game stopped: {e}"));
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Args, String> {
+        parse_args_from(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn screen_mode_switches() {
+        // None: the options file decides (borderless by default).
+        assert_eq!(parse(&[]).unwrap().display_mode, None);
+        for (args, want) in [
+            (&["--window"][..], Mode::Windowed),
+            (&["--windowed"], Mode::Windowed),
+            (&["/WINDOW"], Mode::Windowed),
+            (&["--borderless"], Mode::Borderless),
+            (&["--fullscreen"], Mode::Fullscreen),
+            (&["/fullscreen"], Mode::Fullscreen),
+            (&["--display-mode", "windowed"], Mode::Windowed),
+            (&["--display-mode", "Borderless"], Mode::Borderless),
+            (&["--display-mode", "fullscreen"], Mode::Fullscreen),
+            // The last one wins.
+            (&["--fullscreen", "--window"], Mode::Windowed),
+        ] {
+            assert_eq!(parse(args).unwrap().display_mode, Some(want), "{args:?}");
+        }
+        assert!(parse(&["--display-mode", "tv"]).is_err());
+        assert!(parse(&["--display-mode"]).is_err());
+    }
+
+    #[test]
+    fn size_switch() {
+        assert_eq!(
+            parse(&["--size", "5120x1440"]).unwrap().size,
+            Some((5120, 1440))
+        );
+        assert_eq!(
+            parse(&["--size", "3440X1440"]).unwrap().size,
+            Some((3440, 1440))
+        );
+        assert!(parse(&["--size", "wide"]).is_err());
+        assert!(parse(&["--size", "0x0"]).is_err());
     }
 }

@@ -52,7 +52,11 @@ pub fn sort_entries(v: &mut [SaveEntry]) {
     v.sort_by(|a, b| {
         let qa = !a.name.eq_ignore_ascii_case("Quick Save");
         let qb = !b.name.eq_ignore_ascii_case("Quick Save");
-        qa.cmp(&qb).then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+        qa.cmp(&qb).then_with(|| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+        })
     });
 }
 
@@ -87,7 +91,9 @@ pub fn fill_list<G>(fe: &mut FrontEnd<G>, atom: AtomRef, entries: &[SaveEntry]) 
 pub fn selected_index<G>(fe: &FrontEnd<G>, name: &str) -> Option<usize> {
     let a = fe.find_atom(name)?;
     let l = fe.list(a)?;
-    l.selected.and_then(|i| l.items.get(i)).map(|item| item.data as usize)
+    l.selected
+        .and_then(|i| l.items.get(i))
+        .map(|item| item.data as usize)
 }
 
 #[cfg(test)]
@@ -95,7 +101,11 @@ mod tests {
     use super::*;
 
     fn e(name: &str) -> SaveEntry {
-        SaveEntry { key: name.into(), name: name.into(), ..Default::default() }
+        SaveEntry {
+            key: name.into(),
+            name: name.into(),
+            ..Default::default()
+        }
     }
 
     #[test]

@@ -480,7 +480,11 @@ impl<G> FrontEnd<G> {
         self.load_fib_data(data)?;
         let mut i = first;
         while i < self.screens.len() {
-            if keep.contains(&self.screens[i].name.as_str()) && self.screens[..i].iter().all(|s| s.name != self.screens[i].name) {
+            if keep.contains(&self.screens[i].name.as_str())
+                && self.screens[..i]
+                    .iter()
+                    .all(|s| s.name != self.screens[i].name)
+            {
                 i += 1;
             } else {
                 self.screens.remove(i);
@@ -2904,8 +2908,12 @@ fn default_item_draw(fer: &mut Fer, font: Option<&str>, row: Rect, item: &ListIt
     let Some(font) = font.and_then(|f| fer.res.font(f)) else {
         return;
     };
+    // A row that cannot be picked is greyed (the game's lists all draw their own; only the
+    // resolution list of a borderless window has one).
     let colour = if item.selected {
         colour::LIST_ITEM_SELECTED
+    } else if !item.can_select {
+        colour::LIST_ITEM_INACTIVE
     } else {
         colour::LIST_ITEM_STANDARD
     };

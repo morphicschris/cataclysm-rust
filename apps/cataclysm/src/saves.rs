@@ -66,7 +66,12 @@ pub struct Payload {
 }
 
 /// Writes a game.
-pub fn write(path: &Path, header: &SaveHeader, run: &MissionRun, ui: &UiState) -> Result<(), SaveError> {
+pub fn write(
+    path: &Path,
+    header: &SaveHeader,
+    run: &MissionRun,
+    ui: &UiState,
+) -> Result<(), SaveError> {
     save::write(path, header, &PayloadRef { run, ui })
 }
 
@@ -83,7 +88,8 @@ pub fn relink(assets: &Assets, statics: Arc<StaticWorld>, mission: u32) -> Resul
     if !fx.is_empty() {
         r.effects = Some(fx);
     }
-    let script = load_kas_mission(assets.data(), &mission_script_name(mission)).map_err(|e| e.to_string())?;
+    let script = load_kas_mission(assets.data(), &mission_script_name(mission))
+        .map_err(|e| e.to_string())?;
     r.mission = Some(Arc::new(script));
     Ok(r)
 }
@@ -94,7 +100,12 @@ pub fn read_description(path: &Path) -> Option<String> {
 }
 
 /// The header of a game being saved.
-pub fn header(run: &MissionRun, description: &str, autosave: bool, thumbnail: Option<save::Thumbnail>) -> SaveHeader {
+pub fn header(
+    run: &MissionRun,
+    description: &str,
+    autosave: bool,
+    thumbnail: Option<save::Thumbnail>,
+) -> SaveHeader {
     let mission = run.game.config.mission;
     SaveHeader {
         description: description.to_string(),
@@ -122,7 +133,11 @@ pub fn mission_name(mission: u32) -> String {
 
 /// The list's second line: the mission and when it was saved (UTC).
 pub fn detail(h: &SaveHeader) -> String {
-    format!("{} - {}", h.mission_name.to_ascii_uppercase(), date_text(h.saved_at))
+    format!(
+        "{} - {}",
+        h.mission_name.to_ascii_uppercase(),
+        date_text(h.saved_at)
+    )
 }
 
 /// `secs` since 1970 as `26 OCT 2026 14:03 UTC`.
@@ -139,8 +154,15 @@ pub fn date_text(secs: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    const MONTHS: [&str; 12] = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-    format!("{d} {} {y} {:02}:{:02} UTC", MONTHS[(m - 1) as usize], rem / 3600, rem % 3600 / 60)
+    const MONTHS: [&str; 12] = [
+        "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    ];
+    format!(
+        "{d} {} {y} {:02}:{:02} UTC",
+        MONTHS[(m - 1) as usize],
+        rem / 3600,
+        rem % 3600 / 60
+    )
 }
 
 /// A file name for a description: characters a file name cannot hold become `_`.
@@ -149,7 +171,13 @@ pub fn file_stem(name: &str) -> String {
         .trim()
         .chars()
         .take(hwc_ui::saves::MAX_NAME.max(64))
-        .map(|c| if hwc_ui::saves::name_char_allowed(c) { c } else { '_' })
+        .map(|c| {
+            if hwc_ui::saves::name_char_allowed(c) {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     while s.ends_with('.') || s.ends_with(' ') {
         s.pop();
@@ -160,7 +188,9 @@ pub fn file_stem(name: &str) -> String {
     let upper = s.to_ascii_uppercase();
     let base = upper.split('.').next().unwrap_or("");
     let reserved = matches!(base, "CON" | "PRN" | "AUX" | "NUL")
-        || (base.len() == 4 && (base.starts_with("COM") || base.starts_with("LPT")) && base.as_bytes()[3].is_ascii_digit());
+        || (base.len() == 4
+            && (base.starts_with("COM") || base.starts_with("LPT"))
+            && base.as_bytes()[3].is_ascii_digit());
     if reserved {
         s.insert(0, '_');
     }
@@ -203,7 +233,9 @@ impl SaveDir {
                 }
             }
         }
-        let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        let base = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
         SaveDir::new(base.join("hwc-cataclysm").join("saves"))
     }
 
@@ -221,7 +253,9 @@ impl SaveDir {
     /// The saved games of a folder with their headers (files that are not saved games of this
     /// version are listed with what can be said about them, so they can still be deleted).
     pub fn entries(&self, f: SaveFolder) -> Vec<(PathBuf, Result<SaveHeader, SaveError>)> {
-        let Ok(rd) = std::fs::read_dir(self.folder(f)) else { return Vec::new() };
+        let Ok(rd) = std::fs::read_dir(self.folder(f)) else {
+            return Vec::new();
+        };
         let mut v: Vec<(PathBuf, Result<SaveHeader, SaveError>)> = rd
             .filter_map(|e| e.ok())
             .map(|e| e.path())
@@ -242,19 +276,34 @@ impl SaveStore for SaveDir {
             .entries(folder)
             .into_iter()
             .map(|(p, h)| {
-                let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let stem = p
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 match h {
                     Ok(h) => SaveEntry {
                         key: p.to_string_lossy().into_owned(),
-                        name: if h.description.is_empty() { stem } else { h.description.clone() },
+                        name: if h.description.is_empty() {
+                            stem
+                        } else {
+                            h.description.clone()
+                        },
                         detail: detail(&h),
-                        thumbnail: h.thumbnail.map(|t| Rc::new(Thumbnail { width: t.width, height: t.height, rgb: t.rgb })),
+                        thumbnail: h.thumbnail.map(|t| {
+                            Rc::new(Thumbnail {
+                                width: t.width,
+                                height: t.height,
+                                rgb: t.rgb,
+                            })
+                        }),
                     },
                     Err(e) => SaveEntry {
                         key: p.to_string_lossy().into_owned(),
                         name: stem,
                         detail: match e {
-                            SaveError::Version { found, .. } => format!("FORMAT {found}: CANNOT BE LOADED"),
+                            SaveError::Version { found, .. } => {
+                                format!("FORMAT {found}: CANNOT BE LOADED")
+                            }
                             _ => "DAMAGED".into(),
                         },
                         thumbnail: None,
@@ -298,7 +347,11 @@ pub fn thumbnail(canvas: &hwc_ui::Canvas, w: u32) -> Option<save::Thumbnail> {
             rgb.extend_from_slice(&p[..3]);
         }
     }
-    Some(save::Thumbnail { width: w, height: h, rgb })
+    Some(save::Thumbnail {
+        width: w,
+        height: h,
+        rgb,
+    })
 }
 
 #[cfg(test)]
@@ -314,7 +367,10 @@ mod tests {
 
     #[test]
     fn file_names() {
-        assert_eq!(file_stem("02 - Outskirts of Hiigaran System"), "02 - Outskirts of Hiigaran System");
+        assert_eq!(
+            file_stem("02 - Outskirts of Hiigaran System"),
+            "02 - Outskirts of Hiigaran System"
+        );
         assert_eq!(file_stem("a/b:c?"), "a_b_c_");
         assert_eq!(file_stem("  "), "Saved Game");
         assert_eq!(file_stem("con"), "_con");
@@ -324,8 +380,14 @@ mod tests {
     #[test]
     fn folders_and_keys() {
         let d = SaveDir::new("X:\\saves");
-        assert_eq!(d.path_for(SaveFolder::SinglePlayer, QUICK_SAVE), Path::new("X:\\saves\\SinglePlayer\\Quick Save.hwcsave"));
-        assert_eq!(d.path_for(SaveFolder::Training, "LESSON 01"), Path::new("X:\\saves\\Training\\LESSON 01.hwcsave"));
+        assert_eq!(
+            d.path_for(SaveFolder::SinglePlayer, QUICK_SAVE),
+            Path::new("X:\\saves\\SinglePlayer\\Quick Save.hwcsave")
+        );
+        assert_eq!(
+            d.path_for(SaveFolder::Training, "LESSON 01"),
+            Path::new("X:\\saves\\Training\\LESSON 01.hwcsave")
+        );
         assert!(!d.delete("C:\\Windows\\win.ini"));
     }
 }

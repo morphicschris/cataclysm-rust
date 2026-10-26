@@ -1,6 +1,7 @@
 //! The modern HUD on the real game files with the mock host: the objectives panel's header
 //! toggles it (and the choice is kept in the options), its lines are hit-tested like the
-//! original's list (an objective opens fleet intelligence, the hyperspace entry jumps), it
+//! original's list (an objective opens fleet intelligence), the hyperspace entry is a button
+//! that jumps on the release over it (and a compact one by the folded header), it
 //! moves below a speech portrait, completed and destroyed objectives stay listed greyed out;
 //! the resources panel folds from its header; both panels stay up over the build manager,
 //! clear of its frame, and take the clicks on them. Screenshots go to `screenshots/hud/`
@@ -62,6 +63,10 @@ fn click_at(ui: &mut InGameUi, host: &mut MockHost, x: i32, y: i32) -> Vec<GameR
     out
 }
 
+fn hyperspace(out: &[GameRequest]) -> bool {
+    out.iter().any(|r| format!("{r:?}").contains("Hyperspace"))
+}
+
 fn host() -> MockHost {
     let mut host = MockHost::somtaaw();
     host.objectives.push(Objective {
@@ -116,8 +121,12 @@ fn run(size: (i32, i32), tag: &str) {
     let view = ui.state().view.clone();
     let p = modern_objectives::panel(&ui.fe, size.0, size.1, &view).expect("panel");
     assert!(p.expanded, "expanded by default");
-    assert_eq!(p.items.len(), 4);
+    assert_eq!(p.items.len(), 3, "the hyperspace entry is the button");
     assert!(p.items[2].lines.len() >= 2, "the long objective wraps");
+    let b = p.button.clone().expect("hyperspace button");
+    assert!(!b.compact && b.label == "HYPERSPACE");
+    assert!(b.rect.y0 >= p.header.y1 && b.rect.y1 <= p.items[0].rect.y0);
+    assert!(b.rect.width() > p.panel.width() * 9 / 10, "full width");
     shot(&mut ui, size, &format!("objectives_expanded_{tag}"));
 
     // A line opens fleet intelligence on that objective, paused.
@@ -131,14 +140,58 @@ fn run(size: (i32, i32), tag: &str) {
     frame(&mut ui, &mut host);
     assert_eq!(ui.manager(), None);
 
-    // The hyperspace entry jumps instead.
-    let r = p.items[3].rect;
-    let out = click_at(&mut ui, &mut host, r.x0 + 40, (r.y0 + r.y1) / 2);
+    // The hyperspace button: brighter under the pointer, pressed while held, and it jumps on
+    // the release over it.
+    let (bx, by) = ((b.rect.x0 + b.rect.x1) / 2, (b.rect.y0 + b.rect.y1) / 2);
+    let idle = shot(&mut ui, size, &format!("objectives_button_{tag}"));
+    for _ in 0..20 {
+        frame(&mut ui, &mut host);
+    }
+    ui.handle_input(&host, InputEvent::MouseMove { x: bx, y: by });
+    frame(&mut ui, &mut host);
+    let hover = shot(&mut ui, size, &format!("objectives_button_hover_{tag}"));
+    let lum = |c: &Canvas, r: hwc_ui::canvas::Rect| {
+        let mut t = 0u64;
+        for y in r.y0..r.y1 {
+            for x in r.x0..r.x1 {
+                let p = c.get(x, y);
+                t += p[0] as u64 + p[1] as u64 + p[2] as u64;
+            }
+        }
+        t
+    };
+    assert!(lum(&hover, b.rect) > lum(&idle, b.rect), "hover brightens");
+    let button = |down| InputEvent::MouseButton { left: true, down };
+    ui.handle_input(&host, button(true));
+    let out = frame(&mut ui, &mut host);
+    assert!(!hyperspace(&out), "jumped on the press: {out:?}");
+    shot(&mut ui, size, &format!("objectives_button_pressed_{tag}"));
+    ui.handle_input(&host, button(false));
+    let out = frame(&mut ui, &mut host);
     assert_eq!(ui.manager(), None);
-    assert!(
-        out.iter().any(|r| format!("{r:?}").contains("Hyperspace")),
-        "no hyperspace request: {out:?}"
+    assert!(hyperspace(&out), "no hyperspace request: {out:?}");
+    // Pressed, then let go off the button: nothing.
+    for _ in 0..20 {
+        frame(&mut ui, &mut host);
+    }
+    ui.handle_input(&host, button(true));
+    frame(&mut ui, &mut host);
+    ui.handle_input(
+        &host,
+        InputEvent::MouseMove {
+            x: size.0 / 2,
+            y: size.1 / 2,
+        },
     );
+    ui.handle_input(&host, button(false));
+    let out = frame(&mut ui, &mut host);
+    assert!(!hyperspace(&out), "jumped off the button: {out:?}");
+    // Paused, the click does nothing, as the original.
+    host.player.paused = true;
+    let out = click_at(&mut ui, &mut host, bx, by);
+    assert!(!hyperspace(&out), "jumped while paused: {out:?}");
+    shot(&mut ui, size, &format!("objectives_button_paused_{tag}"));
+    host.player.paused = false;
 
     // The header collapses the panel; the lines are no longer there to click.
     let h = p.header;
@@ -151,7 +204,24 @@ fn run(size: (i32, i32), tag: &str) {
     let c = modern_objectives::panel(&ui.fe, size.0, size.1, &view).unwrap();
     assert!(c.items.is_empty());
     assert!(c.header.x0 == h.x0 && c.header.y0 == h.y0 && c.header.x1 < h.x1);
+    ui.handle_input(
+        &host,
+        InputEvent::MouseMove {
+            x: size.0 / 2,
+            y: size.1 / 2,
+        },
+    );
     shot(&mut ui, size, &format!("objectives_collapsed_{tag}"));
+    // The compact button by the folded header still jumps, and leaves the panel folded.
+    let cb = c.button.clone().expect("compact button");
+    assert!(cb.compact && cb.rect.x0 >= c.header.x1);
+    let (cx, cy) = ((cb.rect.x0 + cb.rect.x1) / 2, (cb.rect.y0 + cb.rect.y1) / 2);
+    ui.handle_input(&host, InputEvent::MouseMove { x: cx, y: cy });
+    frame(&mut ui, &mut host);
+    shot(&mut ui, size, &format!("objectives_collapsed_hover_{tag}"));
+    let out = click_at(&mut ui, &mut host, cx, cy);
+    assert!(hyperspace(&out), "the compact button: {out:?}");
+    assert!(!ui.fe.game.options.get_bool(EXPANDED_KEY));
     let r = p.items[0].rect;
     click_at(&mut ui, &mut host, r.x0 + 40, (r.y0 + r.y1) / 2);
     assert_eq!(ui.manager(), None, "a hidden line was clicked");
@@ -203,7 +273,7 @@ fn run(size: (i32, i32), tag: &str) {
     frame(&mut ui, &mut host);
     let view = ui.state().view.clone();
     let p = modern_objectives::panel(&ui.fe, size.0, size.1, &view).unwrap();
-    assert_eq!(p.items.len(), 5);
+    assert_eq!(p.items.len(), 4);
     assert_eq!(p.items[0].lines[0].text, destroyed.text);
     assert!(p.items[0].complete && p.items[0].live.is_none());
     assert!(
@@ -211,8 +281,8 @@ fn run(size: (i32, i32), tag: &str) {
         "the mock's harvest objective is complete"
     );
     assert!(p.items[2].complete && p.items[2].live == Some(1));
-    assert!(!p.items[3].complete, "the hyperspace entry");
-    assert!(!p.items[4].complete);
+    assert!(p.button.is_some(), "the hyperspace entry");
+    assert!(!p.items[3].complete);
     let mouse = (size.0 / 2, size.1 / 2);
     ui.handle_input(
         &host,
@@ -233,9 +303,9 @@ fn run(size: (i32, i32), tag: &str) {
         None,
         "a destroyed objective opened the objectives screen"
     );
-    let r = p.items[3].rect;
+    let r = p.button.as_ref().unwrap().rect;
     let out = click_at(&mut ui, &mut host, r.x0 + 40, (r.y0 + r.y1) / 2);
-    assert!(out.iter().any(|r| format!("{r:?}").contains("Hyperspace")));
+    assert!(hyperspace(&out));
 
     // The resources panel folds from its header and remembers it.
     let view = ui.state().view.clone();
@@ -362,6 +432,22 @@ fn over_build_manager(size: (i32, i32), tag: &str) {
             .unwrap()
             .expanded
     );
+
+    // The hyperspace button takes its click over the manager too, on the release.
+    ui.open(&host, Manager::Construction);
+    frame(&mut ui, &mut host);
+    let view = ui.state().view.clone();
+    let b = modern_objectives::panel(&ui.fe, size.0, size.1, &view)
+        .unwrap()
+        .button
+        .expect("button over the manager");
+    let out = click_at(
+        &mut ui,
+        &mut host,
+        (b.rect.x0 + b.rect.x1) / 2,
+        (b.rect.y0 + b.rect.y1) / 2,
+    );
+    assert!(hyperspace(&out), "over the manager: {out:?}");
 
     // In a cutscene (the letterbox, fleet intel) the panels hide over the manager too.
     ui.open(&host, Manager::Construction);

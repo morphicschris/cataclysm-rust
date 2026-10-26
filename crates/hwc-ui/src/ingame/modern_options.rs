@@ -10,6 +10,7 @@
 //! once, in the mission being played.
 
 use crate::consts::*;
+use crate::display::{self, Mode, Setting, VideoMode};
 use crate::ingame::modern_hud;
 
 use crate::ingame::modern_menu::{
@@ -37,6 +38,9 @@ pub enum Control {
         step: i32,
         unit: &'static str,
     },
+    /// The resolution of the screen mode chosen above it (its value is the row of that
+    /// mode's list, [`display::choices`]).
+    Resolution,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -66,8 +70,19 @@ const fn entry(key: &'static str, label: &'static str, section: usize, control: 
 
 pub const SECTIONS: [&str; 4] = ["DISPLAY", "CAMERA", "CONTROLS", "INTERFACE"];
 
+/// The resolution entry's key (not an options key: it stands for `screenWidth`,
+/// `screenHeight` and [`display::REFRESH_KEY`]).
+pub const RESOLUTION_KEY: &str = "hwcResolution";
+
 /// Every modern option, in the screen's order.
 pub const ENTRIES: &[Entry] = &[
+    entry(
+        display::MODE_KEY,
+        "SCREEN MODE",
+        0,
+        Control::Choice(&[("WINDOW", 0), ("BORDERLESS", 1), ("FULL SCREEN", 2)]),
+    ),
+    entry(RESOLUTION_KEY, "RESOLUTION", 0, Control::Resolution),
     entry(
         "hwcRenderScale",
         "RENDER SCALE",
@@ -172,6 +187,34 @@ const FOOTER: [(Extra, &str, &str); 3] = [
 pub struct Page {
     pub values: Vec<i32>,
     pub focus: usize,
+    /// The screen mode and resolution being edited (the mode and resolution entries show it).
+    pub display: Setting,
+}
+
+fn index_of(key: &str) -> usize {
+    ENTRIES
+        .iter()
+        .position(|e| e.key == key)
+        .expect("a modern option")
+}
+
+/// The resolutions offered for a mode on the monitor in use.
+pub fn resolutions(fe: &Fe, mode: Mode) -> Vec<VideoMode> {
+    display::choices(mode, fe.game.monitor.as_ref())
+}
+
+/// The resolution row of a setting (the nearest size that fits when its own is not listed).
+fn resolution_row(fe: &Fe, s: &Setting) -> i32 {
+    let list = resolutions(fe, s.mode);
+    s.index_in(&list)
+        .or_else(|| {
+            list.iter()
+                .enumerate()
+                .filter(|(_, v)| display::fits(v.size(), s.size()))
+                .max_by_key(|(_, v)| (v.width * v.height, v.refresh_mhz))
+                .map(|(i, _)| i)
+        })
+        .unwrap_or(0) as i32
 }
 
 /// The value the command line set for this run, if it did.
@@ -193,15 +236,24 @@ pub fn locked(fe: &Fe, key: &str) -> Option<i32> {
     })
 }
 
-/// The value in effect now.
+/// The value in effect now (the screen mode and resolution: the display in use).
 pub fn current(fe: &Fe, e: &Entry) -> i32 {
-    locked(fe, e.key).unwrap_or_else(|| fe.game.options.get(e.key))
+    match e.key {
+        display::MODE_KEY => fe.game.display.mode.option_value(),
+        RESOLUTION_KEY => resolution_row(fe, &fe.game.display),
+        _ => locked(fe, e.key).unwrap_or_else(|| fe.game.options.get(e.key)),
+    }
 }
 
 /// Opens the modern options over the hub.
 pub fn open(fe: &mut Fe) {
     let values = ENTRIES.iter().map(|e| current(fe, e)).collect();
-    fe.game.ig.mmenu.page = Some(Page { values, focus: 0 });
+    let display = fe.game.display;
+    fe.game.ig.mmenu.page = Some(Page {
+        values,
+        focus: 0,
+        display,
+    });
     fe.game.ig.mmenu.dropdown = None;
 }
 
@@ -227,11 +279,34 @@ pub fn model(fe: &Fe, page: &Page) -> Model {
                 lo: format!("{min}{unit}"),
                 hi: format!("{max}{unit}"),
             },
+            Control::Resolution => {
+                let list = resolutions(fe, page.display.mode);
+                let labels: Vec<String> = if page.display.mode == Mode::Borderless {
+                    vec![list
+                        .first()
+                        .map_or("DESKTOP".into(), |m| format!("{} x {}", m.width, m.height))]
+                } else {
+                    list.iter().map(VideoMode::label).collect()
+                };
+                Kind::Choice {
+                    sources: vec![Source::Option(k); labels.len()],
+                    current: if page.display.mode == Mode::Borderless {
+                        Some(0)
+                    } else {
+                        (v >= 0 && (v as usize) < labels.len()).then_some(v as usize)
+                    },
+                    labels,
+                }
+            }
         };
         let mut it = item(kind, e.label, Source::Option(k), k);
         it.section = e.section;
         it.focused = page.focus == k;
-        if locked(fe, e.key).is_some() {
+        if e.control == Control::Resolution && page.display.mode == Mode::Borderless {
+            // The desktop's own resolution; the 3D view's is the render scale's.
+            it.disabled = true;
+            it.note = Some("THE DESKTOP'S OWN".into());
+        } else if locked(fe, e.key).is_some() {
             it.disabled = true;
             it.note = Some("SET ON THE COMMAND LINE".into());
         } else if e.restart {
@@ -293,13 +368,60 @@ fn entry_of(m: &Model, i: usize) -> Option<usize> {
     }
 }
 
-/// Sets an entry's value (unless the command line set it).
+/// Sets an entry's value (unless the command line set it). The screen mode and resolution
+/// edit the page's display too: a new mode keeps the size when it has it (else the nearest
+/// smaller), a resolution row is picked from the mode's list.
 fn set(fe: &mut Fe, k: usize, v: i32) {
     if locked(fe, ENTRIES[k].key).is_some() {
         return;
     }
+    let Some(mut s) = fe.game.ig.mmenu.page.as_ref().map(|p| p.display) else {
+        return;
+    };
+    let res = index_of(RESOLUTION_KEY);
+    let mut row = None;
+    match ENTRIES[k].key {
+        display::MODE_KEY => {
+            s.mode = Mode::from_option(v);
+            let r = resolution_row(fe, &s);
+            if s.mode != Mode::Borderless {
+                if let Some(&m) = resolutions(fe, s.mode).get(r as usize) {
+                    s.pick(m);
+                }
+            }
+            row = Some(r);
+        }
+        RESOLUTION_KEY => {
+            let list = resolutions(fe, s.mode);
+            let Some(&m) = list.get(v.max(0) as usize) else {
+                return;
+            };
+            s.pick(m);
+        }
+        _ => {}
+    }
     if let Some(p) = page_mut(fe) {
         p.values[k] = v;
+        p.display = s;
+        if let Some(r) = row {
+            p.values[res] = r;
+        }
+    }
+}
+
+/// The number of rows of a choice or of the resolution list.
+fn choice_len(fe: &Fe, k: usize) -> usize {
+    match ENTRIES[k].control {
+        Control::Choice(opts) => opts.len(),
+        Control::Resolution => fe
+            .game
+            .ig
+            .mmenu
+            .page
+            .as_ref()
+            .filter(|p| p.display.mode != Mode::Borderless)
+            .map_or(0, |p| resolutions(fe, p.display.mode).len()),
+        _ => 0,
     }
 }
 
@@ -337,6 +459,17 @@ fn step(fe: &mut Fe, k: usize, delta: i32) {
         }
         Control::Slider { min, max, step, .. } => {
             set(fe, k, (v + delta * step).clamp(min, max));
+        }
+        Control::Resolution => {
+            let n = choice_len(fe, k) as i32;
+            if n == 0 {
+                return;
+            }
+            let next = (v + delta).clamp(0, n - 1);
+            if next != v {
+                fe.ui_sound(sound::RADIO);
+            }
+            set(fe, k, next);
         }
     }
 }
@@ -385,10 +518,14 @@ pub fn release(fe: &mut Fe, m: &Model, at: Hit) {
         },
         Hit::Part(i, n) | Hit::Choice(i, n) => {
             if let Some(k) = entry_of(m, i) {
-                if let Control::Choice(opts) = ENTRIES[k].control {
-                    if let Some(o) = opts.get(n) {
-                        set(fe, k, o.1);
+                match ENTRIES[k].control {
+                    Control::Choice(opts) => {
+                        if let Some(o) = opts.get(n) {
+                            set(fe, k, o.1);
+                        }
                     }
+                    Control::Resolution if n < choice_len(fe, k) => set(fe, k, n as i32),
+                    _ => {}
                 }
             }
         }
@@ -447,11 +584,21 @@ pub fn key(fe: &mut Fe, code: u16) {
                 step(fe, focus, 1);
             } else {
                 // A choice steps on, round to its first.
-                if let Control::Choice(opts) = ENTRIES[focus].control {
-                    let v = value(fe, focus);
-                    let cur = opts.iter().position(|o| o.1 == v).unwrap_or(0);
-                    fe.ui_sound(sound::RADIO);
-                    set(fe, focus, opts[(cur + 1) % opts.len()].1);
+                match ENTRIES[focus].control {
+                    Control::Choice(opts) => {
+                        let v = value(fe, focus);
+                        let cur = opts.iter().position(|o| o.1 == v).unwrap_or(0);
+                        fe.ui_sound(sound::RADIO);
+                        set(fe, focus, opts[(cur + 1) % opts.len()].1);
+                    }
+                    Control::Resolution => {
+                        let n = choice_len(fe, focus) as i32;
+                        if n > 0 {
+                            fe.ui_sound(sound::RADIO);
+                            set(fe, focus, (value(fe, focus) + 1) % n);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -488,10 +635,20 @@ pub fn accept(fe: &mut Fe) {
     };
     let mut changed = false;
     for (k, e) in ENTRIES.iter().enumerate() {
+        if matches!(e.key, display::MODE_KEY | RESOLUTION_KEY) {
+            continue;
+        }
         if locked(fe, e.key).is_none() && fe.game.options.get(e.key) != page.values[k] {
             fe.game.options.set(e.key, page.values[k]);
             changed = true;
         }
+    }
+    // The screen mode and resolution: kept when they differ from the display in use or the
+    // options (the game switches to them).
+    let stored = Setting::from_options(&fe.game.options);
+    if page.display != stored || !page.display.same_display(&fe.game.display) {
+        page.display.store(&mut fe.game.options);
+        changed = true;
     }
     if changed {
         fe.game.options_commit();
@@ -504,11 +661,14 @@ pub fn cancel(fe: &mut Fe) {
     fe.game.ig.mmenu.page = None;
 }
 
-/// DEFAULTS: every option (not set on the command line) back to its default.
+/// DEFAULTS: every option (not set on the command line) back to its default (the screen
+/// mode: a borderless window).
 pub fn defaults(fe: &mut Fe) {
     let d = Options::default();
     for (k, e) in ENTRIES.iter().enumerate() {
-        set(fe, k, d.get(e.key));
+        if e.key != RESOLUTION_KEY {
+            set(fe, k, d.get(e.key));
+        }
     }
 }
 
@@ -529,6 +689,7 @@ mod tests {
         for e in ENTRIES {
             let v = d.get(e.key);
             match e.control {
+                Control::Resolution => assert_eq!(e.key, RESOLUTION_KEY),
                 Control::Toggle => assert!(v == 0 || v == 1, "{}", e.key),
                 Control::Choice(opts) => {
                     assert!(opts.iter().any(|o| o.1 == v), "{} = {v}", e.key)
@@ -549,6 +710,7 @@ mod tests {
                 .map(|e| Options::default().get(e.key))
                 .collect(),
             focus: 0,
+            display: Setting::default(),
         };
         // Without a front end: build the items as the model does.
         let items: Vec<Item> = ENTRIES
@@ -570,6 +732,14 @@ mod tests {
                             readout: "100%".into(),
                             lo: String::new(),
                             hi: String::new(),
+                        },
+                        Control::Resolution => Kind::Choice {
+                            labels: display::choices(Mode::Windowed, None)
+                                .iter()
+                                .map(VideoMode::label)
+                                .collect(),
+                            sources: vec![Source::Option(k); 19],
+                            current: Some(0),
                         },
                     },
                     e.label,
@@ -595,9 +765,26 @@ mod tests {
             let xs: std::collections::BTreeSet<i32> = l.placed.iter().map(|p| p.row.x0).collect();
             assert_eq!(xs.len(), 2, "two columns at {w}x{h}");
             for (i, p) in l.placed.iter().enumerate() {
-                if let Control::Choice(o) = ENTRIES[i].control {
-                    assert!(!p.dropdown, "{} fits as segments", ENTRIES[i].label);
-                    assert_eq!(p.parts.len(), o.len());
+                match ENTRIES[i].control {
+                    // The screen mode's three long names make a drop-down.
+                    Control::Choice(_) if ENTRIES[i].key == display::MODE_KEY => {
+                        assert!(p.dropdown);
+                    }
+                    Control::Choice(o) => {
+                        assert!(!p.dropdown, "{} fits as segments", ENTRIES[i].label);
+                        assert_eq!(p.parts.len(), o.len());
+                    }
+                    // The resolutions are a drop-down, every row of it on the canvas.
+                    Control::Resolution => {
+                        assert!(p.dropdown);
+                        for r in l.dropdown_rows(i, 19, h) {
+                            assert!(
+                                r.y0 >= 0 && r.y1 <= h && r.x0 >= 0 && r.x1 <= w,
+                                "{r:?} at {w}x{h}"
+                            );
+                        }
+                    }
+                    _ => {}
                 }
             }
         }

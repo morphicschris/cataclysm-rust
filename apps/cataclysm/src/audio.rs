@@ -242,6 +242,11 @@ impl Audio {
         }
     }
 
+    /// Whether the mission speech stream is silent.
+    pub fn mission_speech_over(&self) -> bool {
+        self.system.speech_over(0)
+    }
+
     /// Stops the mission speech (`speechEventActorStop` when fleet intel is skipped).
     pub fn stop_mission_speech(&mut self, fade: f32) {
         self.system.stop_speech(0, fade);

@@ -104,7 +104,7 @@ impl Session {
             }
         }
         game.ig.keys_path = setup.keys_path.clone();
-        game.display = options_mode(&game.options);
+        game.display = crate::display::Setting::from_options(&game.options);
         let cursor = res.image(CURSOR_BITMAP);
         let mut fe = FrontEnd::new(game, res);
         cataclysm::register(&mut fe);
@@ -133,6 +133,17 @@ impl Session {
         let (cw, ch) = self.placement.canvas;
         self.canvas.resize(cw, ch);
         self.fe.set_screen_size(cw, ch);
+    }
+
+    /// The monitor the window is on and the display in use (the menus' mode and resolution
+    /// lists follow them).
+    pub fn set_display(
+        &mut self,
+        monitor: Option<crate::display::Monitor>,
+        in_use: crate::display::Setting,
+    ) {
+        self.fe.game.monitor = monitor;
+        self.fe.game.display = in_use;
     }
 
     pub fn set_scale(&mut self, scale: ScaleMode) {

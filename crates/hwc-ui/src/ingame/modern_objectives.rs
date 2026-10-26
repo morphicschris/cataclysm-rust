@@ -5,9 +5,18 @@
 //! options file as `hwcObjectivesExpanded`). Expanded, a translucent dark panel with a gold
 //! accent strip lists every objective with a diamond marker: hollow and white while
 //! incomplete, filled and greyed out once done. Long text wraps. Lines are clickable as in
-//! the original: the hyperspace / end-mission entry jumps, the others open the objectives
-//! screen; the line under the pointer is highlighted. A newly added objective flashes the
-//! header (the original draws no attention to it, so the panel does not expand by itself).
+//! the original: the others open the objectives screen; the line under the pointer is
+//! highlighted. A newly added objective flashes the header (the original draws no attention
+//! to it, so the panel does not expand by itself).
+//!
+//! The hyperspace / end-mission entry (`moObjectiveAddFirst` puts it first) is drawn as a
+//! button at the top of the list instead of a line, so it reads as something to press: full
+//! width, gold-outlined with a soft glow, its label in bold caps after a hyperspace glyph. It
+//! brightens under the pointer, shows pressed while held, and jumps on the release over it
+//! (as the managers' buttons do; the original's line acts on the press). It pulses gently
+//! when it appears and breathes slowly while it waits. Collapsed, a compact copy sits next to
+//! the header so the jump stays a click away. While the game is paused it is dimmed and the
+//! click does nothing, as the original ignores it then.
 //!
 //! The mission scripts mostly complete an objective by destroying it (`ObjectiveDestroy`),
 //! which takes it off the original's list; only a few are marked complete
@@ -24,6 +33,7 @@
 use crate::canvas::{Canvas, Color, Rect, WHITE};
 use crate::ingame::host::{HostView, Objective};
 use crate::ingame::modern_hud::{self, Face, Pen};
+use crate::ingame::modern_manager as mm;
 use crate::ingame::Fe;
 
 /// The options-file key: 1 (default) expanded, 0 collapsed.
@@ -66,6 +76,30 @@ const LINE_H: f32 = 19.0;
 const FIRST_BASELINE: f32 = 14.0;
 const ITEM_GAP: f32 = 6.0;
 const ITEMS_TOP: f32 = 2.0;
+/// The hyperspace button: inset from the panel's sides, its height (a row is 23), the gap
+/// under it, its label and glyph.
+const BUTTON_X0: f32 = 12.0;
+const BUTTON_X1: f32 = 10.0;
+const BUTTON_TOP: f32 = 6.0;
+const BUTTON_H: f32 = 32.0;
+const BUTTON_GAP: f32 = 8.0;
+pub(crate) const BUTTON_PX: f32 = 13.0;
+pub(crate) const BUTTON_SPACING: f32 = 2.0;
+const GLYPH_R: f32 = 5.0;
+const GLYPH_GAP: f32 = 8.0;
+/// Collapsed: the compact button after the header.
+const COMPACT_GAP: f32 = 6.0;
+const COMPACT_H: f32 = 22.0;
+const COMPACT_PAD: f32 = 10.0;
+pub(crate) const COMPACT_PX: f32 = 11.0;
+pub(crate) const COMPACT_SPACING: f32 = 1.5;
+const COMPACT_GLYPH_R: f32 = 3.5;
+const COMPACT_GLYPH_GAP: f32 = 6.0;
+/// The pulse: brisker for a few seconds after the button appears, then a slow breath.
+pub const INTRO_SECONDS: f32 = 3.0;
+const INTRO_PERIOD: f32 = 1.0;
+const BREATH_PERIOD: f32 = 2.6;
+const BREATH: f32 = 0.35;
 const PAD_BOTTOM: f32 = 8.0;
 /// Room left under the panel before the original's top-left columns start.
 const BELOW_GAP: f32 = 8.0;
@@ -77,6 +111,9 @@ pub enum Text {
     /// The header's label and count.
     Header,
     Count,
+    /// The hyperspace button's label, full size and compact.
+    Button,
+    Compact,
 }
 
 /// One objective as the panel lists it.
@@ -161,6 +198,19 @@ pub struct Item {
     pub lines: Vec<Line>,
 }
 
+/// The hyperspace / end-mission button.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Button {
+    /// Its index in the listing and in the game's list.
+    pub index: usize,
+    pub live: usize,
+    pub rect: Rect,
+    /// The label in caps ("HYPERSPACE", "END MISSION").
+    pub label: String,
+    /// The small copy next to the collapsed header.
+    pub compact: bool,
+}
+
 /// The panel's layout.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Panel {
@@ -170,7 +220,10 @@ pub struct Panel {
     pub header: Rect,
     /// The background (expanded only; the header collapsed).
     pub panel: Rect,
+    /// The objectives other than the hyperspace entry.
     pub items: Vec<Item>,
+    /// The hyperspace entry, while the game lists one.
+    pub button: Option<Button>,
     /// The first line under the panel for the original's top-left columns.
     pub below: i32,
 }
@@ -232,12 +285,47 @@ pub fn layout(
         let right = x0 + px(LABEL_X) + lw + px(COLLAPSED_GAP) + cw + px(COUNT_RIGHT);
         Rect::new(x0, y0, right.min(x1), y0 + px(HEADER_H))
     };
+    let hyper = objectives
+        .iter()
+        .enumerate()
+        .find(|(_, o)| o.objective.hyperspace)
+        .and_then(|(i, o)| o.live.map(|l| (i, l, o)));
+    let button = hyper.map(|(index, live, o)| {
+        let label = o.objective.text.to_uppercase();
+        let rect = if expanded {
+            let y = header.y1 + px(BUTTON_TOP);
+            Rect::new(x0 + px(BUTTON_X0), y, x1 - px(BUTTON_X1), y + px(BUTTON_H))
+        } else {
+            let lw = width(Text::Compact, &label).ceil() as i32;
+            let w = 2 * px(COMPACT_PAD)
+                + (2.2 * COMPACT_GLYPH_R * s).ceil() as i32
+                + px(COMPACT_GLYPH_GAP)
+                + lw;
+            let bx = header.x1 + px(COMPACT_GAP);
+            let cy = (header.y0 + header.y1) / 2;
+            let h = px(COMPACT_H);
+            Rect::new(bx, cy - h / 2, bx + w, cy - h / 2 + h)
+        };
+        Button {
+            index,
+            live,
+            rect,
+            label,
+            compact: !expanded,
+        }
+    });
     let mut items = Vec::new();
-    let mut y = header.y1 + px(ITEMS_TOP);
+    let mut y = match &button {
+        Some(b) if expanded => b.rect.y1 + px(BUTTON_GAP),
+        _ => header.y1 + px(ITEMS_TOP),
+    };
     if expanded {
         let text_x = x0 + px(TEXT_X);
         let avail = (x1 - px(TEXT_RIGHT) - text_x) as f32;
         for (index, o) in objectives.iter().enumerate() {
+            if o.objective.hyperspace {
+                continue;
+            }
             let wrapped = wrap(&o.objective.text, avail, avail, &|t| width(Text::Item, t));
             let first = y + px(FIRST_BASELINE);
             let lines: Vec<Line> = wrapped
@@ -260,13 +348,18 @@ pub fn layout(
             });
             y += h + px(ITEM_GAP);
         }
-        y = y - px(ITEM_GAP) + px(PAD_BOTTOM);
+        y = if items.is_empty() {
+            y - px(BUTTON_GAP) + px(PAD_BOTTOM)
+        } else {
+            y - px(ITEM_GAP) + px(PAD_BOTTOM)
+        };
     }
-    let bottom = if expanded && !items.is_empty() {
+    let bottom = if expanded && (!items.is_empty() || button.is_some()) {
         y
     } else {
         header.y1
     };
+
     Panel {
         scale: s,
         expanded,
@@ -277,6 +370,7 @@ pub fn layout(
             header
         },
         items,
+        button,
         below: bottom + px(BELOW_GAP),
     }
 }
@@ -292,6 +386,10 @@ pub struct PanelState {
     known: Option<usize>,
     flash_start: Option<f32>,
     last_clock: f32,
+    /// When the hyperspace button appeared (its pulse).
+    button_since: Option<f32>,
+    /// The left button went down on the hyperspace button and is still held.
+    pub pressed: bool,
     /// Expanded (true) or collapsed by a header click while a full-screen manager is open;
     /// None follows [`modern_hud::fold`]'s rule. Cleared when the manager closes.
     pub over_manager: Option<bool>,
@@ -332,6 +430,38 @@ impl PanelState {
             }
         }
         self.known = Some(count);
+    }
+
+    /// Notes whether the hyperspace button is up at `clock`: its pulse starts when it
+    /// appears (again after a clock that went back).
+    pub fn note_button(&mut self, clock: f32, present: bool) {
+        if !present {
+            self.button_since = None;
+            self.pressed = false;
+        } else if self.button_since.is_none_or(|t| clock < t) {
+            self.button_since = Some(clock);
+        }
+    }
+
+    /// The button's pulse now, 0..1: a few brisk beats as it appears, fading into a slow,
+    /// faint breath while it waits.
+    pub fn pulse(&self, clock: f32) -> f32 {
+        let Some(start) = self.button_since else {
+            return 0.0;
+        };
+        let t = clock - start;
+        if t < 0.0 {
+            return 0.0;
+        }
+        let tau = std::f32::consts::TAU;
+        if t < INTRO_SECONDS {
+            let wave = 0.5 - 0.5 * (t * tau / INTRO_PERIOD).cos();
+            let fade = 1.0 - (1.0 - BREATH) * t / INTRO_SECONDS;
+            wave * fade
+        } else {
+            let u = t - INTRO_SECONDS;
+            BREATH * (0.5 - 0.5 * (u * tau / BREATH_PERIOD).cos())
+        }
     }
 
     /// The flash's strength now, 0..1.
@@ -376,6 +506,8 @@ fn measurer(pen: Option<Pen>, s: f32) -> Measure {
             Text::Item => p.measure(Face::Semibold, ITEM_PX * s, 0.0, t),
             Text::Header => p.measure(Face::Bold, HEADER_PX * s, HEADER_SPACING * s, t),
             Text::Count => p.measure(Face::Bold, COUNT_PX * s, 0.0, t),
+            Text::Button => p.measure(Face::Bold, BUTTON_PX * s, BUTTON_SPACING * s, t),
+            Text::Compact => p.measure(Face::Bold, COMPACT_PX * s, COMPACT_SPACING * s, t),
         }
     })
 }
@@ -476,21 +608,149 @@ pub(crate) fn chevron(canvas: &mut Canvas, cx: f32, cy: f32, r: f32, down: bool,
     }
 }
 
+/// What the hyperspace button shows this frame.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ButtonState {
+    /// The pointer is on it.
+    pub hover: bool,
+    /// The left button went down on it and is held.
+    pub pressed: bool,
+    /// The game is paused: the click does nothing (dimmed, no pulse).
+    pub paused: bool,
+    /// [`PanelState::pulse`].
+    pub pulse: f32,
+}
+
+/// A soft gold glow around `r`: rings fading outwards.
+fn glow(canvas: &mut Canvas, r: Rect, radius: f32, spread: i32, strength: f32) {
+    if strength <= 0.0 {
+        return;
+    }
+    for i in 1..=spread {
+        let t = 1.0 - i as f32 / (spread + 1) as f32;
+        let ring = Rect::new(r.x0 - i, r.y0 - i, r.x1 + i, r.y1 + i);
+        mm::rounded_outline(
+            canvas,
+            ring,
+            radius + i as f32,
+            1.0,
+            mm::alpha(GOLD, strength * 0.45 * t * t),
+        );
+    }
+}
+
+/// The hyperspace glyph: two arrowheads pointing right, `2.2 r` wide from `x`.
+fn hyper_glyph(canvas: &mut Canvas, x: f32, cy: f32, r: f32, c: Color) {
+    chevron(canvas, x + 0.5 * r, cy, r, false, c);
+    chevron(canvas, x + 1.6 * r, cy, r, false, mm::alpha(c, 0.7));
+}
+
+/// Draws the hyperspace / end-mission button.
+fn draw_button(canvas: &mut Canvas, pen: &Pen, s: f32, b: &Button, st: &ButtonState) {
+    let r = b.rect;
+    let px = |v: f32| (v * s).round() as i32;
+    let radius = 3.0 * s;
+    let live = !st.paused;
+    let hover = live && st.hover;
+    let down = live && st.pressed && st.hover;
+    let pulse = if live { st.pulse } else { 0.0 };
+    // The glow: the pulse's, brighter under the pointer.
+    let spread = px(if b.compact { 5.0 } else { 8.0 }).max(2);
+    let strength = if !live {
+        0.0
+    } else if hover {
+        0.75
+    } else {
+        0.3 + 0.55 * pulse
+    };
+    glow(canvas, r, radius, spread, strength);
+    let bg = if down {
+        [255, 200, 0, 170]
+    } else if !live {
+        [255, 255, 255, 14]
+    } else if hover {
+        [255, 200, 0, 70]
+    } else {
+        mm::lerp([255, 200, 0, 34], [255, 200, 0, 58], pulse)
+    };
+    mm::rounded(canvas, r, radius, [8, 10, 14, 150]);
+    mm::rounded(canvas, r, radius, bg);
+    let border = if !live {
+        [255, 255, 255, 60]
+    } else if hover || down {
+        GOLD
+    } else {
+        mm::lerp(mm::alpha(GOLD, 0.75), GOLD, pulse)
+    };
+    let line = (1.5 * s).max(1.0);
+    mm::rounded_outline(canvas, r, radius, line, border);
+    // A light along the top edge.
+    if live && !down {
+        mm::hline(
+            canvas,
+            r.x0 + px(6.0),
+            r.x1 - px(6.0),
+            r.y0 + line.ceil() as i32,
+            [255, 255, 255, if hover { 50 } else { 22 }],
+        );
+    }
+    let (tpx, sp, gr, gap) = if b.compact {
+        (
+            COMPACT_PX * s,
+            COMPACT_SPACING * s,
+            COMPACT_GLYPH_R * s,
+            px(COMPACT_GLYPH_GAP),
+        )
+    } else {
+        (
+            BUTTON_PX * s,
+            BUTTON_SPACING * s,
+            GLYPH_R * s,
+            px(GLYPH_GAP),
+        )
+    };
+    let col = if down {
+        mm::ON_GOLD
+    } else if !live {
+        mm::MUTED
+    } else if hover {
+        WHITE
+    } else {
+        modern_hud::LABEL
+    };
+    let lw = pen.advance(Face::Bold, tpx, sp, &b.label);
+    let gw = (2.2 * gr).ceil() as i32;
+    let total = gw + gap + lw;
+    let shift = i32::from(down);
+    let x = r.x0 + (r.width() - total) / 2 + shift;
+    let baseline = mm::mid_baseline(r, tpx) + shift;
+    let cy = (r.y0 + r.y1) as f32 / 2.0 + shift as f32;
+    hyper_glyph(canvas, x as f32, cy, gr, col);
+    let halo = (hover && !down).then_some((mm::alpha(GOLD, 0.6), 2.0 * s));
+    pen.write(
+        canvas,
+        Face::Bold,
+        tpx,
+        sp,
+        x + gw + gap,
+        baseline,
+        col,
+        halo,
+        &b.label,
+    );
+}
+
 /// Draws the panel (the overlay calls this in place of the original list, and over the
 /// full-screen managers). `clock` is the overlay's real-time clock (the flash), `mouse` the
 /// pointer (the highlight).
 pub fn draw(fe: &mut Fe, canvas: &mut Canvas, view: &HostView, clock: f32, mouse: (i32, i32)) {
-    let objectives = fe
-        .game
-        .ig
-        .overlay
-        .modern_objectives
-        .listed(&view.objectives);
-    fe.game
-        .ig
-        .overlay
-        .modern_objectives
-        .note(clock, objectives.len());
+    let st = &mut fe.game.ig.overlay.modern_objectives;
+    let objectives = st.listed(&view.objectives);
+    st.note(clock, objectives.len());
+    let hyper = objectives
+        .iter()
+        .any(|o| o.objective.hyperspace && o.live.is_some());
+    st.note_button(clock, hyper);
     let Some(p) = panel(fe, canvas.width, canvas.height, view) else {
         return;
     };
@@ -554,20 +814,24 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas, view: &HostView, clock: f32, mouse
         None,
         &open,
     );
-    for item in &p.items {
-        let Some(o) = objectives.get(item.index) else {
-            continue;
+    if let Some(b) = &p.button {
+        let st = &fe.game.ig.overlay.modern_objectives;
+        let look = ButtonState {
+            hover: b.rect.contains(mouse.0, mouse.1),
+            pressed: st.pressed,
+            paused: view.player.paused,
+            pulse: st.pulse(clock),
         };
-        let hyperspace = o.objective.hyperspace;
+        draw_button(canvas, &pen, s, b, &look);
+    }
+    for item in &p.items {
         // Destroyed objectives are not the game's any more: no highlight, no click.
         let hover = item.live.is_some() && item.rect.contains(mouse.0, mouse.1);
-        let col = match (item.complete, hyperspace, hover) {
-            (_, true, false) => GOLD,
-            (_, true, true) => WHITE,
-            (true, _, false) => DONE,
-            (true, _, true) => DONE_HOVER,
-            (false, _, true) => GOLD,
-            (false, _, false) => WHITE,
+        let col = match (item.complete, hover) {
+            (true, false) => DONE,
+            (true, true) => DONE_HOVER,
+            (false, true) => GOLD,
+            (false, false) => WHITE,
         };
         let (mx, my) = item.marker;
         if item.complete {
@@ -638,18 +902,24 @@ mod tests {
         let p = layout(1080, 0, &live(&objs), true, &mono);
         assert_eq!(p.scale, 1.0);
         assert_eq!(p.header, Rect::new(16, 16, 376, 46));
-        assert_eq!(p.items.len(), 3);
+        // The hyperspace entry is the button at the top, whatever its place in the list.
+        let b = p.button.as_ref().expect("button");
+        assert_eq!((b.index, b.live, b.compact), (2, 2, false));
+        assert_eq!(b.label, "HYPERSPACE");
+        assert_eq!(b.rect, Rect::new(28, 52, 366, 84));
+        assert!(b.rect.height() > 23, "taller than a row");
+        assert_eq!(p.items.len(), 2);
         let a = &p.items[0];
-        assert_eq!(a.rect, Rect::new(16, 48, 376, 48 + 23));
+        assert_eq!(a.rect, Rect::new(16, 92, 376, 92 + 23));
         assert_eq!(
             a.lines,
             vec![Line {
                 text: "Defend the Kuun-Lan".into(),
                 x: 48,
-                baseline: 62
+                baseline: 106
             }]
         );
-        assert_eq!(a.marker, (33.0, 57.0));
+        assert_eq!(a.marker, (33.0, 101.0));
         assert!(!a.complete);
         assert_eq!(a.live, Some(0));
         // The complete one: no tag, its text at the usual place, wrapped to the panel.
@@ -664,10 +934,66 @@ mod tests {
             assert_eq!(l.baseline, b.lines[0].baseline + i as i32 * 19);
         }
         assert_eq!(b.rect.height(), b.lines.len() as i32 * 19 + 4);
-        let c = &p.items[2];
-        assert!(!c.complete, "the hyperspace entry is never complete");
-        assert_eq!(p.panel, Rect::new(16, 16, 376, c.rect.y1 + 8));
+        assert_eq!(p.panel, Rect::new(16, 16, 376, b.rect.y1 + 8));
         assert_eq!(p.below, p.panel.y1 + 8);
+        // No hyperspace entry: no button, the list starts under the header.
+        let q = layout(1080, 0, &live(&objs[..2]), true, &mono);
+        assert!(q.button.is_none());
+        assert_eq!(q.items[0].rect.y0, 48);
+    }
+
+    #[test]
+    fn button_alone_and_end_mission_label() {
+        let objs = [obj("End Mission", false, true)];
+        let p = layout(1080, 0, &live(&objs), true, &mono);
+        assert!(p.items.is_empty());
+        let b = p.button.as_ref().unwrap();
+        assert_eq!(b.label, "END MISSION");
+        assert_eq!(
+            p.panel.y1,
+            b.rect.y1 + 8,
+            "the panel closes under the button"
+        );
+        // Collapsed: a compact copy right of the header, inside its height, not over it.
+        let c = layout(1080, 0, &live(&objs), false, &mono);
+        let cb = c.button.as_ref().unwrap();
+        assert!(cb.compact);
+        assert_eq!(c.header, Rect::new(16, 16, 16 + 28 + 70 + 10 + 7 + 12, 46));
+        assert_eq!(cb.rect.x0, c.header.x1 + 6);
+        assert!(cb.rect.y0 > c.header.y0 && cb.rect.y1 < c.header.y1);
+        assert_eq!(cb.rect.height(), 22);
+        // Pad, glyph (2.2 x 3.5 = 7.7 -> 8), gap, label (11 x 7), pad.
+        assert_eq!(cb.rect.width(), 10 + 8 + 6 + 77 + 10);
+        assert!(!modern_hud::overlaps(cb.rect, c.header));
+        assert_eq!(c.below, c.header.y1 + 8);
+        // A destroyed hyperspace entry is never listed, so never a button.
+        let gone = listed(&objs, &[]);
+        assert!(layout(1080, 0, &gone, true, &mono).button.is_none());
+    }
+
+    #[test]
+    fn the_button_pulses_then_breathes() {
+        let mut st = PanelState::default();
+        st.note_button(1.0, false);
+        assert_eq!(st.pulse(1.5), 0.0, "no button, no pulse");
+        st.note_button(2.0, true);
+        st.note_button(2.5, true);
+        assert!(st.pulse(2.0) < 0.01, "starts from rest");
+        assert!(st.pulse(2.5) > 0.85, "the first beat is near full");
+        assert!(st.pulse(2.0 + INTRO_SECONDS - 0.5) < 0.7, "the beats fade");
+        let breath = (0..200)
+            .map(|i| st.pulse(2.0 + INTRO_SECONDS + i as f32 * 0.05))
+            .fold(0.0f32, f32::max);
+        assert!(breath > 0.3 && breath <= BREATH + 1e-4, "{breath}");
+        st.pressed = true;
+        st.note_button(20.0, false);
+        assert!(!st.pressed, "gone: the press is dropped");
+        assert_eq!(st.pulse(20.5), 0.0);
+        st.note_button(21.0, true);
+        assert!(st.pulse(21.5) > 0.85, "back: it pulses again");
+        // A clock that went back (a restart) starts it over.
+        st.note_button(0.5, true);
+        assert!(st.pulse(1.0) > 0.85);
     }
 
     #[test]

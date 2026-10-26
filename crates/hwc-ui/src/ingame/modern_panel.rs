@@ -216,6 +216,14 @@ impl Arrangement {
     pub fn rects(&self) -> Vec<Rect> {
         let mut v = Vec::new();
         v.extend(self.objectives.as_ref().map(|p| p.panel));
+        // Collapsed, the hyperspace button sits outside the header.
+        v.extend(
+            self.objectives
+                .as_ref()
+                .and_then(|p| p.button.as_ref())
+                .filter(|b| b.compact)
+                .map(|b| b.rect),
+        );
         v.extend(self.resources.as_ref().map(|p| p.panel));
         v.extend(self.build.as_ref().map(|p| p.panel));
         v.extend(self.research.as_ref().map(|p| p.panel));

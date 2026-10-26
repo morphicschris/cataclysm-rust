@@ -12,6 +12,7 @@ use crate::canvas::{BlitMode, Color, Image, Rect, BLACK, WHITE};
 use crate::colpick::ColorPicker;
 use crate::consts::*;
 use crate::credits::Credits;
+use crate::display::{self, Mode, Monitor, Setting, VideoMode};
 use crate::fe::{Call, FrontEnd};
 use crate::fer::Fer;
 use crate::options::Options;
@@ -39,8 +40,8 @@ pub enum Request {
     /// An audio option changed (volume, channel, quality or equaliser control, or a cancel
     /// that restored them): apply the audio options now.
     AudioSettings,
-    /// Switch the display to this resolution (accepting a new mode, or reverting it).
-    DisplayMode { width: i32, height: i32 },
+    /// Switch the display to this mode and resolution (accepting a new one, or reverting it).
+    DisplayMode(Setting),
     /// Options were accepted: apply audio/video settings, save the config.
     ApplyOptions,
 }
@@ -54,7 +55,7 @@ pub const COUNTDOWN_SECONDS: f32 = 22.0;
 pub struct Countdown {
     pub elapsed: f32,
     /// The mode to go back to.
-    pub previous: (i32, i32),
+    pub previous: Setting,
 }
 
 /// Front-end state of the game.
@@ -76,7 +77,10 @@ pub struct Cataclysm {
     /// Font of the version number (`selFontName2`).
     pub version_font: String,
     pub renderers: Vec<String>,
-    pub resolutions: Vec<(i32, i32)>,
+    /// The rows of the resolution list as last filled (for the mode picked in the mode list).
+    pub resolutions: Vec<VideoMode>,
+    /// The monitor the window is on (set by the application; `None`: every listed size).
+    pub monitor: Option<Monitor>,
     pub key_bindings: Vec<(String, String)>,
     /// The single-player and training save lists as last filled from [`Self::saves`].
     pub saved_games: Vec<SaveEntry>,
@@ -87,8 +91,8 @@ pub struct Cataclysm {
     pub credits: Option<Credits>,
     /// Where the options are saved on accept.
     pub config_path: Option<PathBuf>,
-    /// Display mode in use (what `screenWidth`/`screenHeight` were when last applied).
-    pub display: (i32, i32),
+    /// The display in use (set by the application when it applies one).
+    pub display: Setting,
     pub countdown: Option<Countdown>,
     /// `strOPCountdown0..2`: the confirmation box's three lines.
     pub countdown_text: [String; 3],
@@ -110,13 +114,8 @@ impl Cataclysm {
             version: "Version CataclysmV1.00".into(),
             version_font: "TO_2.hff".into(),
             renderers: vec!["Direct3D: wgpu".into(), "OpenGL: wgpu".into()],
-            resolutions: vec![
-                (640, 480),
-                (800, 600),
-                (1024, 768),
-                (1280, 960),
-                (1600, 1200),
-            ],
+            resolutions: Vec::new(),
+            monitor: None,
             key_bindings: Vec::new(),
             saved_games: Vec::new(),
             training_games: Vec::new(),
@@ -124,7 +123,7 @@ impl Cataclysm {
             colors,
             credits: None,
             config_path: None,
-            display: (0, 0),
+            display: Setting::default(),
             countdown: None,
             countdown_text: [
                 "Mode switch successful.".into(),
@@ -318,7 +317,10 @@ pub fn register(fe: &mut Fe) {
         }
         delete_selected_game(fe);
         // The confirmation closes over the rebuilt list.
-        if fe.current_screen_name().is_some_and(|n| n.starts_with("DeleteGamePopup")) {
+        if fe
+            .current_screen_name()
+            .is_some_and(|n| n.starts_with("DeleteGamePopup"))
+        {
             fe.current_screen_delete();
         }
     });
@@ -555,20 +557,17 @@ fn options_accept(fe: &mut Fe, call: &Call) {
     }
     fe.current_screen_delete();
     fe.screen_start("Main_game_screen");
+    // Only a mode the player changed in the screens is switched to (not one the command line
+    // overrode for this run).
+    let before = Setting::from_options(&fe.game.saved);
     fe.game.saved = fe.game.options.clone();
     fe.game.save_options();
     fe.game.requests.push(Request::ApplyOptions);
-    let mode = (
-        fe.game.options.get("screenWidth"),
-        fe.game.options.get("screenHeight"),
-    );
-    if mode != fe.game.display && fe.game.resolutions.contains(&mode) {
+    let mode = Setting::from_options(&fe.game.options);
+    if !mode.same_display(&before) && !mode.same_display(&fe.game.display) {
         let previous = fe.game.display;
         fe.game.display = mode;
-        fe.game.requests.push(Request::DisplayMode {
-            width: mode.0,
-            height: mode.1,
-        });
+        fe.game.requests.push(Request::DisplayMode(mode));
         fe.game.countdown = Some(Countdown {
             elapsed: 0.0,
             previous,
@@ -578,16 +577,12 @@ fn options_accept(fe: &mut Fe, call: &Call) {
 }
 
 /// `opCountdownNo` / `opTimerExpired`: restore the previous display mode.
-fn revert_display_mode(fe: &mut Fe, previous: (i32, i32)) {
+fn revert_display_mode(fe: &mut Fe, previous: Setting) {
     fe.game.display = previous;
-    fe.game.options.set("screenWidth", previous.0);
-    fe.game.options.set("screenHeight", previous.1);
+    previous.store(&mut fe.game.options);
     fe.game.saved = fe.game.options.clone();
     fe.game.save_options();
-    fe.game.requests.push(Request::DisplayMode {
-        width: previous.0,
-        height: previous.1,
-    });
+    fe.game.requests.push(Request::DisplayMode(previous));
 }
 
 /// Per-frame work of the game's front-end callbacks: the display-mode countdown
@@ -688,7 +683,12 @@ pub fn list_folder(fe: &Fe, training: bool) -> SaveFolder {
 
 /// The saved games of `folder` read again from the store.
 pub fn refresh_saves(fe: &mut Fe, folder: SaveFolder) -> Vec<SaveEntry> {
-    let games = fe.game.saves.as_ref().map(|s| s.list(folder)).unwrap_or_default();
+    let games = fe
+        .game
+        .saves
+        .as_ref()
+        .map(|s| s.list(folder))
+        .unwrap_or_default();
     match folder {
         SaveFolder::Training => fe.game.training_games = games.clone(),
         SaveFolder::SinglePlayer => fe.game.saved_games = games.clone(),
@@ -705,7 +705,10 @@ pub fn save_entries(fe: &Fe, folder: SaveFolder) -> &[SaveEntry] {
 }
 
 /// The save list atoms and the folder each shows.
-const LISTS: [(&str, bool); 2] = [("FE_GameWindowInit", false), ("FE_TutorialGameWindowInit", true)];
+const LISTS: [(&str, bool); 2] = [
+    ("FE_GameWindowInit", false),
+    ("FE_TutorialGameWindowInit", true),
+];
 
 /// The saved game selected in whichever save list is up.
 pub fn selected_save(fe: &Fe) -> Option<SaveEntry> {
@@ -730,10 +733,16 @@ fn game_list(fe: &mut Fe, call: &Call, training: bool) {
 /// selection moves up when it was the last row).
 pub fn delete_selected_game(fe: &mut Fe) {
     for (name, training) in LISTS {
-        let Some(a) = fe.find_atom(name) else { continue };
-        let Some(i) = crate::saves::selected_index(fe, name) else { continue };
+        let Some(a) = fe.find_atom(name) else {
+            continue;
+        };
+        let Some(i) = crate::saves::selected_index(fe, name) else {
+            continue;
+        };
         let folder = list_folder(fe, training);
-        let Some(entry) = save_entries(fe, folder).get(i).cloned() else { continue };
+        let Some(entry) = save_entries(fe, folder).get(i).cloned() else {
+            continue;
+        };
         let deleted = fe.game.saves.as_ref().is_some_and(|s| s.delete(&entry.key));
         if !deleted {
             fe.log_once(format!("could not delete saved game {}", entry.key));
@@ -1457,54 +1466,112 @@ fn restore(g: &mut Cataclysm, keys: &[&str]) {
     }
 }
 
-/// `opRender`: rendering systems.
+/// `opRender`: the rendering systems, each with its own list of resolutions. Here (a modern
+/// change: there is one renderer) the screen modes take their place, a window, a borderless
+/// window and full screen; picking one fills the resolution list with that mode's sizes, as
+/// picking a renderer did.
 fn render_list(fe: &mut Fe, call: &Call) {
     let Some(a) = call.atom else { return };
-    if !fe.first_call(call) {
+    if fe.last_call(call) {
         return;
     }
-    let height = list_row_height(fe, "Arial_12.hff");
-    fe.list_init(a, "Arial_12.hff", height);
-    let renderers = fe.game.renderers.clone();
-    if let Some(l) = fe.list_mut(a) {
-        for (i, r) in renderers.iter().enumerate() {
-            l.add(r.clone(), i as u32, i == 0);
-        }
-    }
-    if let Some(id) = fe.atom(a).region {
-        fe.list_scroll_adjust(id);
-    }
-}
-
-/// `opResolution`: display modes; picking one stores it.
-fn resolution_list(fe: &mut Fe, call: &Call) {
-    let Some(a) = call.atom else { return };
     if fe.first_call(call) {
         let height = list_row_height(fe, "Arial_12.hff");
         fe.list_init(a, "Arial_12.hff", height);
-        let cur = (
-            fe.game.options.get("screenWidth"),
-            fe.game.options.get("screenHeight"),
-        );
-        let modes = fe.game.resolutions.clone();
+        let cur = Mode::from_option(fe.game.options.get(display::MODE_KEY));
         if let Some(l) = fe.list_mut(a) {
-            for (i, &(w, h)) in modes.iter().enumerate() {
-                l.add(format!("{w} x {h}"), i as u32, (w, h) == cur);
+            for (i, m) in Mode::ALL.iter().enumerate() {
+                l.add(m.label(), i as u32, *m == cur);
             }
-            l.view_selection();
         }
         if let Some(id) = fe.atom(a).region {
             fe.list_scroll_adjust(id);
         }
         return;
     }
+    let picked = fe
+        .list(a)
+        .and_then(|l| l.selected)
+        .and_then(|i| Mode::ALL.get(i).copied());
+    let Some(mode) = picked else { return };
+    if fe.game.options.get(display::MODE_KEY) == mode.option_value() {
+        return;
+    }
+    fe.game.options.set(display::MODE_KEY, mode.option_value());
+    // A size the new mode lacks: the same size at another rate, else the nearest smaller.
+    let list = display::choices(mode, fe.game.monitor.as_ref());
+    let mut s = Setting::from_options(&fe.game.options);
+    if mode != Mode::Borderless && s.index_in(&list).is_none() {
+        let near = list
+            .iter()
+            .filter(|v| display::fits(v.size(), s.size()))
+            .max_by_key(|v| (v.width * v.height, v.refresh_mhz))
+            .or(list.first());
+        if let Some(&v) = near {
+            s.pick(v);
+            s.store(&mut fe.game.options);
+        }
+    }
+    if let Some(r) = fe.find_atom("OP_Resolution") {
+        fill_resolutions(fe, r);
+    }
+}
+
+/// The resolution list for the mode picked: a borderless window shows the desktop's own
+/// resolution, greyed (it cannot be picked).
+fn fill_resolutions(fe: &mut Fe, a: AtomRef) {
+    let s = Setting::from_options(&fe.game.options);
+    let modes = display::choices(s.mode, fe.game.monitor.as_ref());
+    let cur = s.index_in(&modes);
+    fe.game.resolutions = modes.clone();
+    let greyed = |text: String| crate::controls::ListItem {
+        text,
+        data: 0,
+        can_select: false,
+        selected: false,
+    };
+    if let Some(l) = fe.list_mut(a) {
+        l.clear();
+        if s.mode == Mode::Borderless {
+            match modes.first() {
+                Some(m) => l
+                    .items
+                    .push(greyed(format!("{}x{} desktop", m.width, m.height))),
+                None => l.items.push(greyed("Desktop resolution".into())),
+            }
+        } else {
+            for (i, m) in modes.iter().enumerate() {
+                l.add(m.short_label(), i as u32, Some(i) == cur);
+            }
+        }
+        l.view_selection();
+    }
+    if let Some(id) = fe.atom(a).region {
+        fe.list_scroll_adjust(id);
+    }
+}
+
+/// `opResolution`: the resolutions of the mode picked in the mode list; picking one stores it
+/// (with its refresh rate, in full screen).
+fn resolution_list(fe: &mut Fe, call: &Call) {
+    let Some(a) = call.atom else { return };
+    if fe.first_call(call) {
+        let height = list_row_height(fe, "Arial_12.hff");
+        fe.list_init(a, "Arial_12.hff", height);
+        fill_resolutions(fe, a);
+        return;
+    }
+    if fe.last_call(call) {
+        return;
+    }
     let sel = fe
         .list(a)
         .and_then(|l| l.selected)
-        .map(|i| fe.game.resolutions[i]);
-    if let Some((w, h)) = sel {
-        fe.game.options.set("screenWidth", w);
-        fe.game.options.set("screenHeight", h);
+        .and_then(|i| fe.game.resolutions.get(i).copied());
+    if let Some(v) = sel {
+        let mut s = Setting::from_options(&fe.game.options);
+        s.pick(v);
+        s.store(&mut fe.game.options);
     }
 }
 

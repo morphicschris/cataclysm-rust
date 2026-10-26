@@ -400,6 +400,14 @@ pub struct Game {
     pub intel_stamp: f32,
     /// When the current speech event ends ([`MissionConfig::speech_seconds`]).
     pub speech_end: Option<f32>,
+    /// The front end has subtitle cards on screen (`subAnyCardsOnScreen`): the intel safety
+    /// timeout waits for them. Refreshed by the front end every frame, so not saved.
+    #[serde(skip, default)]
+    pub subtitles_on_screen: bool,
+    /// Every `IntelEventEnded` that answered yes, with why (a trace for the front end and
+    /// tests; drained by whoever reads it, not saved).
+    #[serde(skip, default)]
+    pub intel_ends: Vec<IntelEnd>,
     /// Single-player state machine.
     pub sp_state: u32,
     /// The player's fleet in hyperspace.
@@ -1030,6 +1038,8 @@ pub(crate) fn empty_game(config: MissionConfig) -> Game {
         intel_ended: false,
         intel_stamp: 0.0,
         speech_end: None,
+        subtitles_on_screen: false,
+        intel_ends: Vec::new(),
         sp_state: sp_state::NONE,
         fleet: Vec::new(),
         arriving: Vec::new(),
@@ -1500,6 +1510,25 @@ pub struct WideScreenEvent {
     pub kind: WideScreenKind,
     pub frames: i32,
     pub time: f32,
+}
+
+/// Why an intel event ended (`kasfIntelEventEnded` answered yes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntelEndReason {
+    /// The front end reported the end (`subMessageEnded`): the last letterbox subtitle
+    /// expired, or the player skipped the event, or the script forced it.
+    Reported,
+    /// The headless speech stand-in ran out ([`MissionConfig::speech_seconds`]).
+    SpeechTimer,
+    /// `SUBMESSAGE_SAFETY_TIMEOUT` passed with no subtitle on screen.
+    Timeout,
+}
+
+/// One intel event end, at game time `time`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IntelEnd {
+    pub time: f32,
+    pub reason: IntelEndReason,
 }
 
 impl Game {

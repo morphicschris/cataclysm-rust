@@ -38,6 +38,15 @@ pub struct Rig {
 
 /// Mission 1 at `size` without its opening NIS; `nislets` plays the NISlets it asks for.
 pub fn mission_one(size: (i32, i32), nislets: bool) -> Option<(Box<Game>, Rig)> {
+    mission_one_with(size, nislets, false)
+}
+
+/// Mission 1 at `size`; `opening` plays the opening NIS first, `nislets` the NISlets.
+pub fn mission_one_with(
+    size: (i32, i32),
+    nislets: bool,
+    opening: bool,
+) -> Option<(Box<Game>, Rig)> {
     let dir = PathBuf::from(std::env::var_os("HWC_GAME_DIR")?);
     let data = Rc::new(GameData::open(&dir).ok()?);
     let (device, queue) = crate::test_gpu::device()?;
@@ -65,26 +74,43 @@ pub fn mission_one(size: (i32, i32), nislets: bool) -> Option<(Box<Game>, Rig)> 
         .map_err(|e| e.to_string())
         .and_then(|g| crate::audio::Audio::open(g, false))
         .ok();
-    let mut loading = Loading::new(data, &session, 1, 2, size).ok()?;
-    loading.opening_nis = false;
+    let mut loading = Loading::new(data.clone(), &session, 1, 2, size).ok()?;
+    loading.opening_nis = opening;
     loading.loader.play_nislets = nislets;
-    for _ in 0..40 {
-        match loading.advance(&session, Some(&mut renderer), DT) {
-            Progress::Working => {}
-            Progress::Ready(g) => {
-                return Some((
-                    g,
-                    Rig {
-                        renderer,
-                        audio,
-                        size,
-                    },
-                ))
+    let load = |mut loading: Loading, renderer: &mut Renderer| {
+        for _ in 0..40 {
+            match loading.advance(&session, Some(&mut *renderer), DT) {
+                Progress::Working => {}
+                Progress::Ready(g) => return g,
+                Progress::Abandon(e) => panic!("mission 1 did not start: {e}"),
             }
-            Progress::Abandon(e) => panic!("mission 1 did not start: {e}"),
         }
+        panic!("loading never finished");
+    };
+    let mut game = load(loading, &mut renderer);
+    let mut rig = Rig {
+        renderer,
+        audio,
+        size,
+    };
+    if game.world.nis_level().is_some() {
+        // The opening NIS plays in its own level, drawn every frame; then the mission's own
+        // level loads with the fleet it held.
+        let mut frames = 0;
+        while !game.update(DT, &mut rig.audio).contains(&Outcome::NisLevelDone) {
+            rig.render(&mut game);
+            frames += 1;
+            assert!(frames < 16 * 600, "the opening NIS did not end");
+        }
+        let skill = game.world.skill();
+        let crate::world::Sim::NisLevel(nis) = game.world.into_sim() else {
+            panic!("not an NIS level");
+        };
+        let mut l = Loading::after_nis_level(data, &session, *nis, skill, size).ok()?;
+        l.loader.play_nislets = nislets;
+        game = load(l, &mut rig.renderer);
     }
-    panic!("loading never finished");
+    Some((game, rig))
 }
 
 impl Rig {
@@ -484,4 +510,27 @@ fn kuun_lan_arrival_nav_lights() {
         return;
     }
     panic!("the Kuun-Lan never came half out of its hyperspace window");
+}
+
+/// Prints the fleet-intel trace of Mission 1 played as in a game: the opening NIS, the
+/// NISlets, speech and subtitles drawn every frame. `--ignored --nocapture`, release.
+#[test]
+#[ignore]
+fn intel_trace_dump() {
+    let Some((mut game, mut rig)) = mission_one_with((640, 480), true, true) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let g = &mut *game;
+    let minutes: usize = std::env::var("HWC_TRACE_MINUTES")
+        .ok()
+        .and_then(|m| m.parse().ok())
+        .unwrap_or(12);
+    for _ in 0..16 * 60 * minutes {
+        rig.frame(g);
+        rig.render(g);
+    }
+    for e in &g.intel_trace.entries {
+        eprintln!("{:8.2}s {:?}", e.time, e.kind);
+    }
 }

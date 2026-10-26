@@ -69,6 +69,8 @@ const STEPS: &[Step] = &[
     Shot("08_video_options"),
     ClickValue("OP_Effects", 1),
     Shot("09_video_low_effects"),
+    // The screen modes stand in the rendering systems' list: a window lists the sizes.
+    ClickItem("OP_Render", 0),
     ClickItem("OP_Resolution", 1),
     Shot("09b_video_800x600_selected"),
     Click("OP_Options_Accept"),

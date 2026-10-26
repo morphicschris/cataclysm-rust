@@ -137,7 +137,6 @@ impl Loading {
         Ok(l)
     }
 
-
     /// The next mission of the campaign: the fleet that jumped out of the mission before
     /// arrives in it (`singlePlayerLoadNewLevel`).
     /// `centre` is the mission before's `G_NisCentreDerelict` and `G_NisCentreInstance`, which
@@ -334,7 +333,8 @@ impl Loading {
         let path = self.saved.clone().expect("saved game");
         let statics = self.loader.statics.clone().expect("statics");
         let relink = crate::saves::relink(&self.assets, statics, self.mission)?;
-        let (_, payload) = crate::saves::read(&path, &relink).map_err(|e| format!("{}: {e}", path.display()))?;
+        let (_, payload) =
+            crate::saves::read(&path, &relink).map_err(|e| format!("{}: {e}", path.display()))?;
         self.saved_ui = Some(payload.ui);
         Ok(payload.run)
     }

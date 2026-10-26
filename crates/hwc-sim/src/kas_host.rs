@@ -1009,27 +1009,35 @@ impl KasRuntime for SimHost<'_> {
         self.g.intel_ended = false;
     }
 
+    /// `kasfIntelEventEnded`: the end the front end reported (`subMessageEnded`, cleared by
+    /// asking), else `SUBMESSAGE_SAFETY_TIMEOUT` after the first ask once no subtitle is on
+    /// screen.
     fn intel_event_ended(&mut self, _cx: &Cx) -> i32 {
+        use crate::mission::{IntelEnd, IntelEndReason};
         let now = self.u.total_time_elapsed;
+        let mut reason = IntelEndReason::Reported;
         if let Some(end) = self.g.speech_end {
             if end < now {
                 self.g.speech_end = None;
                 self.g.intel_ended = true;
+                reason = IntelEndReason::SpeechTimer;
             }
         }
-        let ended = self.g.intel_ended;
-        self.g.intel_ended = false;
+        let ended = std::mem::take(&mut self.g.intel_ended);
         if ended {
             self.g.intel_stamp = 0.0;
+            self.g.intel_ends.push(IntelEnd { time: now, reason });
             return 1;
         }
-        // No subtitle reported the end: wait out SUBMESSAGE_SAFETY_TIMEOUT from the first ask.
         if self.g.intel_stamp == 0.0 {
             self.g.intel_stamp = now;
             return 0;
         }
-        if ld(self.g.sp_tweaks.submessage_safety_timeout) < ld(now) - ld(self.g.intel_stamp) {
+        if ld(self.g.sp_tweaks.submessage_safety_timeout) < ld(now) - ld(self.g.intel_stamp)
+            && !self.g.subtitles_on_screen
+        {
             self.g.intel_stamp = 0.0;
+            self.g.intel_ends.push(IntelEnd { time: now, reason: IntelEndReason::Timeout });
             return 1;
         }
         0

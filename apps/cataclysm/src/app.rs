@@ -8,15 +8,17 @@ use std::time::Instant;
 use hwc_formats::GameData;
 use hwc_ui::cataclysm::Request;
 use hwc_ui::consts::key;
+use hwc_ui::display::{self, Mode, Monitor, Setting};
 use hwc_ui::present::{Filter, Presenter};
 use hwc_ui::scale::ScaleMode;
-use hwc_ui::session::{options_mode, Session};
+use hwc_ui::session::Session;
 use hwc_ui::Canvas;
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalSize;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::monitor::MonitorHandle;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::audio::{self, Audio};
@@ -77,9 +79,19 @@ struct App {
     gpu: Option<Gpu>,
     error: Option<String>,
     last: Instant,
-    /// Window size asked for when not full screen.
-    size: (u32, u32),
-    fullscreen: bool,
+    /// The display asked for (a modern addition: window, borderless window or exclusive full
+    /// screen); once applied, the one in use.
+    display: Setting,
+    /// The full-screen mode Alt+Enter goes back to from a window.
+    last_full: Mode,
+    /// The display the options asked for when last looked at (a change there, from the
+    /// in-game options, is switched to).
+    options_display: Setting,
+    /// The monitor the window is on.
+    monitor: Option<Monitor>,
+    monitor_handle: Option<MonitorHandle>,
+    /// Modifier keys held (Alt+Enter).
+    modifiers: ModifiersState,
     linear: bool,
     started: Instant,
     exit_after: Option<f32>,
@@ -167,10 +179,16 @@ impl FrameTimes {
 }
 
 pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), String> {
-    let mode = options_mode(&session.fe.game.options);
-    let size = args
-        .size
-        .unwrap_or((mode.0.max(320) as u32, mode.1.max(240) as u32));
+    // The options' display, with the command line's mode and size for this run.
+    let options_display = Setting::from_options(&session.fe.game.options);
+    let mut wanted = options_display;
+    if let Some(m) = args.display_mode {
+        wanted.mode = m;
+    }
+    if let Some((w, h)) = args.size {
+        wanted.width = w as i32;
+        wanted.height = h as i32;
+    }
     // The sound system starts before the movies (`soundEventInit`), with the saved volumes.
     let audio = match crate::open_game_data(args).and_then(|g| Audio::open(g, args.sound)) {
         Ok(mut a) => {
@@ -207,8 +225,16 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         gpu: None,
         error: None,
         last: Instant::now(),
-        size,
-        fullscreen: args.fullscreen,
+        display: wanted,
+        last_full: if wanted.mode.is_full() {
+            wanted.mode
+        } else {
+            Mode::Borderless
+        },
+        options_display,
+        monitor: None,
+        monitor_handle: None,
+        modifiers: ModifiersState::empty(),
         linear: args.linear,
         started: Instant::now(),
         exit_after: args.exit_after,
@@ -403,23 +429,80 @@ the last frames drawn:
     }
 }
 
-/// An exclusive full-screen mode of `size` on the window's monitor: 32 bits preferred (then
-/// 16, like `hwSetRes`), at the monitor's current refresh rate when it offers it.
-fn exclusive_mode(window: &Window, size: (u32, u32)) -> Option<Fullscreen> {
-    let monitor = window.current_monitor()?;
-    let refresh = monitor.refresh_rate_millihertz();
+/// An exclusive full-screen mode of `size` on a monitor: at the refresh rate asked for
+/// (millihertz, 0: any), 32 bits preferred (then 16, like `hwSetRes`), then the monitor's
+/// current refresh rate, then the highest.
+fn exclusive_mode(monitor: &MonitorHandle, size: (u32, u32), refresh: u32) -> Option<Fullscreen> {
+    let current = monitor.refresh_rate_millihertz();
     monitor
         .video_modes()
         .filter(|m| (m.size().width, m.size().height) == size)
         .max_by_key(|m| {
+            let r = m.refresh_rate_millihertz();
             (
+                refresh > 0 && r.abs_diff(refresh) <= 500,
                 m.bit_depth() == 32,
                 m.bit_depth(),
-                Some(m.refresh_rate_millihertz()) == refresh,
-                m.refresh_rate_millihertz(),
+                current.is_some_and(|c| r.abs_diff(c) <= 500),
+                r,
             )
         })
         .map(Fullscreen::Exclusive)
+}
+
+/// What the menus need to know of a monitor: its desktop size and rate and its full-screen
+/// modes.
+fn monitor_info(m: &MonitorHandle) -> Monitor {
+    let size = m.size();
+    Monitor {
+        size: (size.width as i32, size.height as i32),
+        refresh_mhz: m.refresh_rate_millihertz().map_or(0, |r| r as i32),
+        modes: m
+            .video_modes()
+            .map(|v| {
+                display::VideoMode::new(
+                    v.size().width as i32,
+                    v.size().height as i32,
+                    v.refresh_rate_millihertz() as i32,
+                )
+            })
+            .collect(),
+    }
+}
+
+/// The window's monitor (the primary one before it is known).
+fn window_monitor(w: &Window) -> Option<MonitorHandle> {
+    w.current_monitor().or_else(|| w.primary_monitor())
+}
+
+/// Where a window of `size` (its inner area) goes to be centred on a monitor, given the size
+/// of its frame (outer less inner).
+fn centred(monitor: &MonitorHandle, size: (u32, u32), frame: (u32, u32)) -> PhysicalPosition<i32> {
+    let (mp, ms) = (monitor.position(), monitor.size());
+    let outer = (size.0 + frame.0, size.1 + frame.1);
+    let x = mp.x + (ms.width as i32 - outer.0 as i32).max(0) / 2;
+    let y = mp.y + (ms.height as i32 - outer.1 as i32).max(0) / 2;
+    PhysicalPosition::new(x, y)
+}
+
+/// The movies' place in the window. Stretching (the default, a user-requested change) widens a
+/// 4:3 movie at most to 16:9: on wider screens (21:9, 32:9) it is pillarboxed there, not
+/// stretched further.
+fn movie_viewport(
+    placement: hwc_ui::scale::Placement,
+    mode: ScaleMode,
+    window: (u32, u32),
+) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = placement.viewport;
+    if mode != ScaleMode::Stretch {
+        return (x, y, w, h);
+    }
+    let widest = h * 16.0 / 9.0;
+    if w <= widest {
+        return (x, y, w, h);
+    }
+    let x = ((window.0 as f32 - widest) / 2.0).floor();
+    (x, y, widest, h)
 }
 
 /// Engine key code (a Windows virtual-key code, as the original reads) for a key event. The
@@ -618,8 +701,7 @@ impl App {
     /// After the movies (`mainCleanupAfterVideo`): back to the configured display mode, then
     /// the front end and its music.
     fn front_end_start(&mut self) {
-        let (w, h) = options_mode(&self.session.fe.game.options);
-        self.set_display_mode(w, h);
+        self.apply_display(self.display);
         if let Some(a) = &mut self.audio {
             a.play_music(audio::FRONT_END_TRACK);
         }
@@ -825,6 +907,7 @@ impl App {
                         game.autoplay = Some(hwc_sim::autoplay::Autoplay::new(16 * 60 * 30));
                     }
                     game.rollcall_below_band = self.rollcall_below_band;
+                    game.ui.set_display(self.monitor.clone(), self.display);
                     let ov = self.overrides();
                     ov.apply(&mut game);
                     ov.lock(&mut game);
@@ -874,6 +957,7 @@ impl App {
         let mut animatic = None;
         let mut next = false;
         let mut nis_level_done = false;
+        let mut display_options = None;
         crate::profile::frame_start();
         let span = crate::profile::span("update");
         let outcomes = g.update(dt, &mut self.audio);
@@ -890,11 +974,20 @@ impl App {
                     let options = g.ui.fe.game.options.clone();
                     g.apply_modern_options(&options);
                     ov.apply(g);
+                    display_options = Some(Setting::from_options(&options));
                 }
                 game::Outcome::Animatic(n) => animatic = Some(n),
                 game::Outcome::NextMission => next = true,
                 game::Outcome::NisLevelDone => nis_level_done = true,
                 game::Outcome::LoadGame(p) => load = Some(p),
+            }
+        }
+        // A screen mode or resolution accepted in the modern options: switched to, and kept
+        // in the options file.
+        if let Some(s) = display_options {
+            if s != self.options_display {
+                self.remember_display(s);
+                self.apply_display(s);
             }
         }
         if let Some(p) = load {
@@ -976,24 +1069,127 @@ impl App {
         Ok(true)
     }
 
-    /// Full screen: the exclusive mode of that size if the monitor has it (else borderless);
-    /// in a window: the window size.
-    fn set_display_mode(&mut self, w: i32, h: i32) {
-        let size = (w.max(320) as u32, h.max(240) as u32);
+    /// Switches the window to a display (a modern addition): a window of its size, centred on
+    /// the monitor, with its frame and resizable; a borderless window over the monitor at its
+    /// own resolution; exclusive full screen at its size and refresh rate (a borderless window,
+    /// with a note, when the monitor has no such mode). What cannot be used on this monitor
+    /// falls back safely ([`Setting::validated`]). The canvas, the interface's layout and the
+    /// camera's aspect follow with the resize that comes after.
+    fn apply_display(&mut self, wanted: Setting) {
         let Some(gpu) = &self.gpu else {
+            self.display = wanted;
             return;
         };
-        if self.fullscreen {
-            let fs = exclusive_mode(&gpu.window, size).or(Some(Fullscreen::Borderless(None)));
-            gpu.window.set_fullscreen(fs);
-        } else {
-            self.size = size;
-            if gpu.window.fullscreen().is_none() {
-                let _ = gpu
-                    .window
-                    .request_inner_size(PhysicalSize::new(size.0, size.1));
+        let w = gpu.window.clone();
+        let handle = window_monitor(&w);
+        self.monitor = handle.as_ref().map(monitor_info);
+        self.monitor_handle = handle.clone();
+        let (mut s, note) = wanted.validated(self.monitor.as_ref());
+        if let Some(n) = note {
+            eprintln!("cataclysm: display: {n}");
+        }
+        let size = (s.width as u32, s.height as u32);
+        match s.mode {
+            Mode::Windowed => {
+                // The frame's size, from the window as it is (a guess while full screen).
+                let frame = if w.fullscreen().is_none() && w.is_decorated() {
+                    let (o, i) = (w.outer_size(), w.inner_size());
+                    (
+                        o.width.saturating_sub(i.width),
+                        o.height.saturating_sub(i.height),
+                    )
+                } else {
+                    (16, 39)
+                };
+                w.set_fullscreen(None);
+                w.set_decorations(true);
+                w.set_resizable(true);
+                let _ = w.request_inner_size(PhysicalSize::new(size.0, size.1));
+                if let Some(m) = &handle {
+                    w.set_outer_position(centred(m, size, frame));
+                }
+            }
+            Mode::Borderless => w.set_fullscreen(Some(Fullscreen::Borderless(handle.clone()))),
+            Mode::Fullscreen => {
+                match handle
+                    .as_ref()
+                    .and_then(|m| exclusive_mode(m, size, s.refresh_mhz.max(0) as u32))
+                {
+                    Some(fs) => w.set_fullscreen(Some(fs)),
+                    None => {
+                        eprintln!(
+                            "cataclysm: display: no exclusive {}x{} full-screen mode here; a borderless window instead",
+                            s.width, s.height
+                        );
+                        s.mode = Mode::Borderless;
+                        w.set_fullscreen(Some(Fullscreen::Borderless(handle.clone())));
+                    }
+                }
             }
         }
+        if s.mode.is_full() {
+            self.last_full = s.mode;
+        }
+        self.display = s;
+        self.session.set_display(self.monitor.clone(), s);
+        if let Some(g) = self.game.as_mut() {
+            g.ui.set_display(self.monitor.clone(), s);
+        }
+        if let Some(p) = self.preview.as_mut() {
+            p.ui.set_display(self.monitor.clone(), s);
+        }
+        let mode = match s.mode {
+            Mode::Windowed => format!("a {}x{} window", s.width, s.height),
+            Mode::Borderless => match &self.monitor {
+                Some(m) => format!("a borderless {}x{} window", m.size.0, m.size.1),
+                None => "a borderless window".into(),
+            },
+            Mode::Fullscreen => format!(
+                "full screen {}x{}{}",
+                s.width,
+                s.height,
+                if s.refresh_mhz > 0 {
+                    format!(" at {} Hz", (s.refresh_mhz + 500) / 1000)
+                } else {
+                    String::new()
+                }
+            ),
+        };
+        eprintln!("cataclysm: display: {mode}");
+        w.request_redraw();
+    }
+
+    /// Keeps a display in the options file (the front end's options, and the game's).
+    fn remember_display(&mut self, s: Setting) {
+        self.options_display = s;
+        let mut o = hwc_ui::options::Options::default();
+        s.store(&mut o);
+        for key in [
+            display::MODE_KEY,
+            "screenWidth",
+            "screenHeight",
+            display::REFRESH_KEY,
+        ] {
+            let v = o.get(key);
+            self.session.fe.game.set_option_now(key, v);
+            if let Some(g) = self.game.as_mut() {
+                g.ui.fe.game.options.set(key, v);
+            }
+        }
+    }
+
+    /// Alt+Enter (and F11): from a window to the last full-screen mode, from full screen to a
+    /// window (a modern addition). The choice is kept in the options file.
+    fn toggle_window(&mut self) {
+        let mut s = self.display;
+        if s.mode == Mode::Windowed {
+            s.mode = self.last_full;
+        } else {
+            self.last_full = s.mode;
+            s.mode = Mode::Windowed;
+        }
+        self.remember_display(s);
+        self.apply_display(s);
     }
 
     fn cues(&mut self, cues: Vec<Cue>) {
@@ -1143,7 +1339,8 @@ impl App {
                         draw_movie_subtitles(subs, &mut self.movie_canvas, t);
                     }
                 }
-                gpu.present(&self.movie_canvas, placement.viewport);
+                let viewport = movie_viewport(placement, self.movie_scale, (s.width, s.height));
+                gpu.present(&self.movie_canvas, viewport);
             }
             None => {
                 let viewport = self.session.placement.viewport;
@@ -1190,7 +1387,10 @@ impl App {
                     a.apply_options(&self.session.fe.game.options);
                 }
             }
-            Request::DisplayMode { width, height } => self.set_display_mode(width, height),
+            Request::DisplayMode(s) => {
+                self.options_display = Setting::from_options(&self.session.fe.game.options);
+                self.apply_display(s);
+            }
             Request::StartGame {
                 tutorial,
                 difficulty,
@@ -1219,9 +1419,23 @@ impl ApplicationHandler for App {
         if self.gpu.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
+        // The window starts at its size, centred on the primary monitor; full screen comes
+        // right after (a borderless one at once, so nothing shows in a window first).
+        let primary = event_loop.primary_monitor();
+        let size = (
+            self.display.width.max(display::MIN_SIZE.0) as u32,
+            self.display.height.max(display::MIN_SIZE.1) as u32,
+        );
+        let mut attrs = Window::default_attributes()
             .with_title("Homeworld: Cataclysm")
-            .with_inner_size(PhysicalSize::new(self.size.0, self.size.1));
+            .with_inner_size(PhysicalSize::new(size.0, size.1))
+            .with_resizable(true);
+        if let Some(m) = &primary {
+            attrs = attrs.with_position(centred(m, size, (16, 39)));
+            if self.display.mode == Mode::Borderless {
+                attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(Some(m.clone()))));
+            }
+        }
         let result = event_loop
             .create_window(attrs)
             .map_err(|e| e.to_string())
@@ -1230,22 +1444,29 @@ impl ApplicationHandler for App {
             Ok(gpu) => {
                 // The engine draws its own pointer.
                 gpu.window.set_cursor_visible(false);
-                if self.fullscreen {
-                    // The intro runs in 640x480; without it, the configured mode right away.
-                    let size = if self.intro.is_some() {
-                        INTRO_MODE
-                    } else {
-                        let (w, h) = options_mode(&self.session.fe.game.options);
-                        (w.max(320) as u32, h.max(240) as u32)
-                    };
-                    let fs =
-                        exclusive_mode(&gpu.window, size).or(Some(Fullscreen::Borderless(None)));
-                    gpu.window.set_fullscreen(fs);
-                }
-                let s = gpu.window.inner_size();
-                self.session.resize(s.width, s.height);
-                gpu.window.request_redraw();
+                let w = gpu.window.clone();
                 self.gpu = Some(gpu);
+                let fullscreen_intro =
+                    self.intro.is_some() && self.display.mode == Mode::Fullscreen;
+                if fullscreen_intro {
+                    // Full screen: the intro runs in 640x480 (`hwSetRes`), the configured mode
+                    // comes after it.
+                    let handle = window_monitor(&w);
+                    self.monitor = handle.as_ref().map(monitor_info);
+                    self.monitor_handle = handle.clone();
+                    let fs = handle
+                        .as_ref()
+                        .and_then(|m| exclusive_mode(m, INTRO_MODE, 0))
+                        .unwrap_or(Fullscreen::Borderless(handle.clone()));
+                    w.set_fullscreen(Some(fs));
+                    let (s, _) = self.display.validated(self.monitor.as_ref());
+                    self.session.set_display(self.monitor.clone(), s);
+                } else {
+                    self.apply_display(self.display);
+                }
+                let s = w.inner_size();
+                self.session.resize(s.width, s.height);
+                w.request_redraw();
             }
             Err(e) => {
                 self.error = Some(e);
@@ -1254,9 +1475,34 @@ impl ApplicationHandler for App {
         }
     }
 
+    /// Leaving: out of exclusive full screen first, so the desktop gets its own mode back
+    /// at once.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(gpu) = &self.gpu {
+            if matches!(gpu.window.fullscreen(), Some(Fullscreen::Exclusive(_))) {
+                gpu.window.set_fullscreen(None);
+            }
+        }
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
+            WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Moved(_) => {
+                // Another monitor: its modes for the menus.
+                if let Some(gpu) = &self.gpu {
+                    let handle = window_monitor(&gpu.window);
+                    if handle != self.monitor_handle {
+                        self.monitor = handle.as_ref().map(monitor_info);
+                        self.monitor_handle = handle;
+                        self.session.set_display(self.monitor.clone(), self.display);
+                        if let Some(g) = self.game.as_mut() {
+                            g.ui.set_display(self.monitor.clone(), self.display);
+                        }
+                    }
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size.width, size.height);
@@ -1271,34 +1517,26 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let down = event.state == ElementState::Pressed;
-                if down {
-                    match &event.logical_key {
-                        Key::Named(NamedKey::F11) => {
-                            if let Some(gpu) = &self.gpu {
-                                let fs = gpu
-                                    .window
-                                    .fullscreen()
-                                    .is_none()
-                                    .then_some(Fullscreen::Borderless(None));
-                                self.fullscreen = fs.is_some();
-                                gpu.window.set_fullscreen(fs);
-                            }
-                            return;
-                        }
-                        Key::Named(NamedKey::F10) => {
-                            let next = match self.session.scale {
-                                ScaleMode::Original => ScaleMode::Fit,
-                                ScaleMode::Fit => ScaleMode::Integer,
-                                ScaleMode::Integer => ScaleMode::Stretch,
-                                ScaleMode::Stretch => ScaleMode::Original,
-                            };
-                            self.session.set_scale(next);
-                            self.movie_scale = next;
-                            eprintln!("cataclysm: scaling {next:?}");
-                            return;
-                        }
-                        _ => {}
+                let alt_enter =
+                    event.logical_key == Key::Named(NamedKey::Enter) && self.modifiers.alt_key();
+                if alt_enter || event.logical_key == Key::Named(NamedKey::F11) {
+                    // Not passed on: the menus would take the Return.
+                    if down && !event.repeat {
+                        self.toggle_window();
                     }
+                    return;
+                }
+                if down && event.logical_key == Key::Named(NamedKey::F10) {
+                    let next = match self.session.scale {
+                        ScaleMode::Original => ScaleMode::Fit,
+                        ScaleMode::Fit => ScaleMode::Integer,
+                        ScaleMode::Integer => ScaleMode::Stretch,
+                        ScaleMode::Stretch => ScaleMode::Original,
+                    };
+                    self.session.set_scale(next);
+                    self.movie_scale = next;
+                    eprintln!("cataclysm: scaling {next:?}");
+                    return;
                 }
                 if let Some(intro) = &mut self.intro {
                     // Only releasing Escape does anything during the movies (`binkStop`).
@@ -1462,4 +1700,33 @@ pub fn draw_movie_subtitles(
     };
     subs.resize(canvas.width, canvas.height);
     subs.draw(canvas, clock, None, state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hwc_ui::scale::Placement;
+
+    #[test]
+    fn movies_stretch_at_most_to_16_9() {
+        let at = |mode, w: u32, h: u32| movie_viewport(Placement::new(mode, (w, h)), mode, (w, h));
+        // Up to 16:9 the movie fills the window (a user-requested change).
+        assert_eq!(
+            at(ScaleMode::Stretch, 1920, 1080),
+            (0.0, 0.0, 1920.0, 1080.0)
+        );
+        assert_eq!(at(ScaleMode::Stretch, 1024, 768), (0.0, 0.0, 1024.0, 768.0));
+        // Wider: pillarboxed at 16:9, centred.
+        assert_eq!(
+            at(ScaleMode::Stretch, 5120, 1440),
+            (1280.0, 0.0, 2560.0, 1440.0)
+        );
+        let (x, _, w, h) = at(ScaleMode::Stretch, 3440, 1440);
+        assert!((w / h - 16.0 / 9.0).abs() < 1e-3 && (x * 2.0 + w - 3440.0).abs() < 1.0);
+        // The other modes are as they were.
+        assert_eq!(
+            at(ScaleMode::Fit, 5120, 1440),
+            Placement::new(ScaleMode::Fit, (5120, 1440)).viewport
+        );
+    }
 }

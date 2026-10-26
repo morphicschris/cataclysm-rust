@@ -33,3 +33,8 @@ __pycache__/
 # Exported music from the player's install (never commit)
 /music/
 /docs/ui-mockups/
+
+# Stray screenshot output when HWC_SCREENSHOTS=1 is relative
+/crates/*/1/
+*.png
+!crates/**/tests/data/**/*.png

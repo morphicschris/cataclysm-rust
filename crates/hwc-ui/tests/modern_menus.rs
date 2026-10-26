@@ -808,10 +808,12 @@ fn modern_options_wait_for_accept() {
     assert!(ui.state().mmenu.page.is_none());
     assert_eq!(screen(&ui), "Game_options");
     assert_eq!(option(&ui, "hwcFxaa"), 0);
-    // Again with the keyboard: Down to MSAA, Right to 2x, Down to FXAA, Space; Return
-    // accepts.
+    // Again with the keyboard: Down past the screen mode, the resolution and the render
+    // scale to MSAA, Right to 2x, Down to FXAA, Space; Return accepts.
     key(&mut ui, &mut host, u16::from(b'E'));
-    key(&mut ui, &mut host, key::DOWN);
+    for _ in 0..k("hwcMsaa") {
+        key(&mut ui, &mut host, key::DOWN);
+    }
     key(&mut ui, &mut host, key::RIGHT);
     key(&mut ui, &mut host, key::DOWN);
     key(&mut ui, &mut host, key::SPACE);
@@ -841,6 +843,104 @@ fn modern_options_wait_for_accept() {
     click(&mut ui, &mut host, SIZE, "ACCEPT");
     assert!(!menu::active(&ui.fe));
     assert_eq!(screen(&ui), "Game_options");
+}
+
+/// The screen mode and resolution in the modern options: a borderless window shows the
+/// desktop's resolution, greyed; full screen lists the monitor's modes in a drop-down; ACCEPT
+/// keeps them and asks the game to switch.
+#[test]
+fn enhancements_screen_mode_and_resolution() {
+    use hwc_ui::display::{Mode, Monitor, Setting, VideoMode};
+    let Some((mut ui, mut host)) = opened(Options::default()) else {
+        return;
+    };
+    let monitor = Monitor {
+        size: (5120, 1440),
+        refresh_mhz: 120_000,
+        modes: vec![
+            VideoMode::new(5120, 1440, 120_000),
+            VideoMode::new(5120, 1440, 60_000),
+            VideoMode::new(3840, 1080, 60_000),
+            VideoMode::new(1920, 1080, 60_000),
+        ],
+    };
+    ui.set_display(Some(monitor), Setting::default());
+    click(&mut ui, &mut host, SIZE, "OPTIONS");
+    key(&mut ui, &mut host, u16::from(b'E'));
+    let (r, m, _) = item(&ui, SIZE, "RESOLUTION");
+    assert!(m.items[r].disabled, "borderless: the desktop's");
+    match &m.items[r].kind {
+        Kind::Choice { labels, .. } => assert_eq!(labels, &["5120 x 1440"]),
+        k => panic!("{k:?}"),
+    }
+    shot(&mut ui, SIZE, "mock_enhancements_borderless");
+    // FULL SCREEN from the mode's drop-down.
+    let (i, _, l) = item(&ui, SIZE, "SCREEN MODE");
+    assert!(l.placed[i].dropdown);
+    let (x, y) = centre(l.placed[i].control);
+    click_at(&mut ui, &mut host, x, y);
+    let rows = l.dropdown_rows(i, 3, SIZE.1);
+    let (x, y) = centre(rows[2]);
+    click_at(&mut ui, &mut host, x, y);
+    let page = ui.state().mmenu.page.clone().unwrap();
+    assert_eq!(page.display.mode, Mode::Fullscreen);
+    // 640x480 (the default) is not a mode of this monitor: its first.
+    assert_eq!(page.display.size(), (1920, 1080));
+    let (r, m, l) = item(&ui, SIZE, "RESOLUTION");
+    assert!(!m.items[r].disabled);
+    let labels = match &m.items[r].kind {
+        Kind::Choice { labels, .. } => labels.clone(),
+        k => panic!("{k:?}"),
+    };
+    assert_eq!(
+        labels,
+        [
+            "1920 x 1080 @ 60 Hz",
+            "3840 x 1080 @ 60 Hz",
+            "5120 x 1440 @ 60 Hz",
+            "5120 x 1440 @ 120 Hz"
+        ]
+    );
+    // 5120 x 1440 at 120 Hz.
+    let (x, y) = centre(l.placed[r].control);
+    click_at(&mut ui, &mut host, x, y);
+    let rows = l.dropdown_rows(r, labels.len(), SIZE.1);
+    for row in &rows {
+        assert!(row.y0 >= 0 && row.y1 <= SIZE.1);
+    }
+    let (x, y) = centre(rows[3]);
+    click_at(&mut ui, &mut host, x, y);
+    shot(&mut ui, SIZE, "mock_enhancements_fullscreen");
+    let out = click(&mut ui, &mut host, SIZE, "ACCEPT");
+    assert!(out.contains(&GameRequest::ApplyOptions));
+    assert_eq!(option(&ui, "hwcDisplayMode"), 2);
+    assert_eq!(
+        (option(&ui, "screenWidth"), option(&ui, "screenHeight")),
+        (5120, 1440)
+    );
+    assert_eq!(option(&ui, "hwcRefreshRate"), 120_000);
+    // The keyboard: a window, then the next size down.
+    ui.set_display(
+        ui.fe.game.monitor.clone(),
+        Setting::from_options(&ui.fe.game.options),
+    );
+    click(&mut ui, &mut host, SIZE, mo::HUB_LABEL);
+    key(&mut ui, &mut host, key::LEFT);
+    key(&mut ui, &mut host, key::LEFT);
+    let page = ui.state().mmenu.page.clone().unwrap();
+    assert_eq!(page.display.mode, Mode::Windowed);
+    assert_eq!(page.display.size(), (5120, 1440), "the size is kept");
+    key(&mut ui, &mut host, key::DOWN);
+    key(&mut ui, &mut host, key::LEFT);
+    let page = ui.state().mmenu.page.clone().unwrap();
+    // 3840 x 1600 is too tall for this desktop.
+    assert_eq!(page.display.size(), (3840, 1080));
+    key(&mut ui, &mut host, key::ESCAPE);
+    assert_eq!(
+        option(&ui, "hwcDisplayMode"),
+        2,
+        "nothing kept without ACCEPT"
+    );
 }
 
 #[test]

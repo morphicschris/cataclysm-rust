@@ -14,6 +14,7 @@ pub mod colpick;
 pub mod consts;
 pub mod controls;
 pub mod credits;
+pub mod display;
 pub mod fe;
 pub mod fer;
 pub mod ingame;

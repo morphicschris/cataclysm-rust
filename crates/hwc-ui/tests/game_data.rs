@@ -6,6 +6,7 @@ use std::rc::Rc;
 use hwc_formats::fib::Fib;
 use hwc_formats::GameData;
 use hwc_ui::cataclysm::Request;
+use hwc_ui::display::{Mode, Monitor, Setting, VideoMode};
 use hwc_ui::scale::ScaleMode;
 use hwc_ui::session::{Session, Setup};
 use hwc_ui::{AssetSource, Canvas, FrontEnd, Resources};
@@ -288,7 +289,32 @@ fn labels_in_every_language() {
 
 /// Clicks item `n` of the resolution list.
 fn pick_resolution(s: &mut Session, n: usize) {
-    let a = s.fe.find_atom("OP_Resolution").expect("resolution list");
+    pick_row(s, "OP_Resolution", n);
+}
+
+/// Clicks a screen mode in the mode list (the rendering systems' list).
+fn pick_mode(s: &mut Session, m: Mode) {
+    pick_row(
+        s,
+        "OP_Render",
+        Mode::ALL.iter().position(|&x| x == m).unwrap(),
+    );
+}
+
+/// The rows of a list.
+fn rows(s: &Session, name: &str) -> Vec<(String, bool, bool)> {
+    let a = s.fe.find_atom(name).expect("list");
+    s.fe.list(a)
+        .expect("list")
+        .items
+        .iter()
+        .map(|i| (i.text.clone(), i.selected, i.can_select))
+        .collect()
+}
+
+/// Clicks item `n` of a list.
+fn pick_row(s: &mut Session, name: &str, n: usize) {
+    let a = s.fe.find_atom(name).expect("list");
     let rect = s.fe.atom(a).rect();
     let l = s.fe.list(a).expect("list");
     let y = (rect.y0..rect.y1)
@@ -308,12 +334,37 @@ fn new_display_mode_is_confirmed_or_restored() {
     let mut s = session(src, None);
     click(&mut s, "OP_Options_Start");
     click(&mut s, "Audio_Options-TO-Video_Options");
+    // A borderless window (the default) has the desktop's resolution only, greyed.
+    let r = rows(&s, "OP_Resolution");
+    assert_eq!(r.len(), 1);
+    assert!(!r[0].2, "{r:?}");
+    assert_eq!(
+        rows(&s, "OP_Render")
+            .iter()
+            .map(|r| (r.0.as_str(), r.1))
+            .collect::<Vec<_>>(),
+        [
+            ("Window", false),
+            ("Borderless window", true),
+            ("Full screen", false)
+        ]
+    );
+    // A window: every listed size (no monitor here).
+    pick_mode(&mut s, Mode::Windowed);
+    assert_eq!(rows(&s, "OP_Resolution").len(), 19);
+    assert_eq!(rows(&s, "OP_Resolution")[18].0, "5120 x 1440");
     pick_resolution(&mut s, 1);
     let out = click(&mut s, "OP_Options_Accept");
-    assert!(out.contains(&Request::DisplayMode {
-        width: 800,
-        height: 600
-    }));
+    let window = |w, h| Setting {
+        mode: Mode::Windowed,
+        width: w,
+        height: h,
+        refresh_mhz: 0,
+    };
+    assert!(
+        out.contains(&Request::DisplayMode(window(800, 600))),
+        "{out:?}"
+    );
     assert_eq!(
         s.fe.stack_names(),
         ["Main_game_screen", "Countdown_Message_Box"]
@@ -323,21 +374,70 @@ fn new_display_mode_is_confirmed_or_restored() {
     for _ in 0..23 {
         out.extend(s.update(1.0));
     }
-    assert!(out.contains(&Request::DisplayMode {
-        width: 640,
-        height: 480
-    }));
+    let borderless = Setting {
+        mode: Mode::Borderless,
+        ..window(640, 480)
+    };
+    assert!(out.contains(&Request::DisplayMode(borderless)), "{out:?}");
     assert_eq!(s.fe.stack_names(), ["Main_game_screen"]);
     assert_eq!(s.fe.game.options.get("screenWidth"), 640);
+    assert_eq!(s.fe.game.options.get("hwcDisplayMode"), 1);
     // "Yes" keeps the new mode.
     click(&mut s, "OP_Options_Start");
     click(&mut s, "Audio_Options-TO-Video_Options");
+    pick_mode(&mut s, Mode::Windowed);
     pick_resolution(&mut s, 2);
     click(&mut s, "OP_Options_Accept");
     let out = click(&mut s, "OP_Countdown_Yes");
     assert!(!out.iter().any(|r| matches!(r, Request::DisplayMode { .. })));
     assert_eq!(s.fe.stack_names(), ["Main_game_screen"]);
-    assert_eq!(s.fe.game.display, (1024, 768));
+    assert_eq!(s.fe.game.display, window(1024, 768));
+    // Full screen on a monitor: its modes, with their refresh rates.
+    s.set_display(
+        Some(Monitor {
+            size: (3440, 1440),
+            refresh_mhz: 100_000,
+            modes: vec![
+                VideoMode::new(3440, 1440, 100_000),
+                VideoMode::new(3440, 1440, 60_000),
+                VideoMode::new(1024, 768, 60_000),
+                VideoMode::new(2560, 1080, 60_000),
+            ],
+        }),
+        window(1024, 768),
+    );
+    click(&mut s, "OP_Options_Start");
+    click(&mut s, "Audio_Options-TO-Video_Options");
+    // A window on this desktop: the sizes that fit (not 3840 wide, nor 1600 tall).
+    let r = rows(&s, "OP_Resolution");
+    assert!(r.iter().any(|r| r.0 == "3440 x 1440"));
+    assert!(!r
+        .iter()
+        .any(|r| r.0.starts_with("3840") || r.0.ends_with("1600")));
+    pick_mode(&mut s, Mode::Fullscreen);
+    let r = rows(&s, "OP_Resolution");
+    assert_eq!(
+        r.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+        [
+            "1024x768 @ 60Hz",
+            "2560x1080 @ 60Hz",
+            "3440x1440 @ 60Hz",
+            "3440x1440 @ 100Hz"
+        ]
+    );
+    // The size in use is kept.
+    assert!(r[0].1, "{r:?}");
+    pick_resolution(&mut s, 3);
+    let out = click(&mut s, "OP_Options_Accept");
+    let full = Setting {
+        mode: Mode::Fullscreen,
+        width: 3440,
+        height: 1440,
+        refresh_mhz: 100_000,
+    };
+    assert!(out.contains(&Request::DisplayMode(full)), "{out:?}");
+    click(&mut s, "OP_Countdown_Yes");
+    assert_eq!(s.fe.game.options.get("hwcRefreshRate"), 100_000);
     // The audio test buttons.
     click(&mut s, "OP_Options_Start");
     let out = click(&mut s, "OP_SoundFX_Test");

@@ -20,9 +20,10 @@ pub const SOUND_IN: u32 = 0x123;
 pub const SOUND_OUT: u32 = 0x124;
 
 /// Height of each bar at a screen size (`NIS_LetterHeight`): what is left of a 1.85:1
-/// picture the full width of the screen.
+/// picture the full width of the screen (none on a screen wider than that, 21:9 and 32:9,
+/// where the original's sum goes negative).
 pub fn bar_height(width: i32, height: i32) -> i32 {
-    (height - width * 20 / 37) / 2
+    ((height - width * 20 / 37) / 2).max(0)
 }
 
 /// Height of each bar with [`Letterbox::tall`]: never less than on a 4:3 screen of the same
@@ -192,6 +193,10 @@ mod tests {
         // 16:9: the original's bars are thin; the tall ones keep the 4:3 share.
         assert_eq!(bar_height(1600, 900), 18);
         assert_eq!(bar_height(1920, 1080), 21);
+        // Wider than 1.85:1: no bars (not a negative height).
+        assert_eq!(bar_height(2560, 1080), 0);
+        assert_eq!(bar_height(5120, 1440), 0);
+        assert_eq!(tall_bar_height(5120, 1440), 201);
         assert_eq!(tall_bar_height(1600, 900), 126);
         assert_eq!(tall_bar_height(1920, 1080), 151);
         assert_eq!(tall_bar_height(640, 480), 67);
