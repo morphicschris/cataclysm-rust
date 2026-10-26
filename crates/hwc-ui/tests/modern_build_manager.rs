@@ -1,4 +1,4 @@
-//! The modern build manager preview (`hwcModernBuildManager = 1`) on the real game files with
+//! The modern build manager (`hwcModernBuildManager = 1`, the default) on the real game files with
 //! the mock host: it replaces the original's look (the screen stays open underneath for its
 //! keys), its rows, - / + controls, tabs and buttons act like the original's regions (double
 //! clicks included), one Escape closes it, and the modern HUD's panels keep clear of it.
@@ -402,19 +402,29 @@ fn outside_clicks_and_default() {
     let out = click_at(&mut ui, &mut host, 900, 1070);
     assert_eq!(ui.manager(), Some(Manager::Construction));
     assert!(out.iter().all(|r| !matches!(r, GameRequest::Build { .. })));
-    // The original by default.
-    let mut ui = InGameUi::new(
-        src,
-        Setup {
-            options: Options::default(),
-            default_keys: Some(KEYS.into()),
-            keys: None,
-            keys_path: None,
-        },
-    )
-    .unwrap();
-    ui.resize(size.0, size.1);
-    frame(&mut ui, &mut host);
-    ui.open(&host, Manager::Construction);
-    assert!(!mbm::active(&ui.fe));
+    // The modern one by default; the options key, or the original HUD, bring the original
+    // back.
+    let open = |options: Options, host: &mut MockHost| {
+        let mut ui = InGameUi::new(
+            src.clone(),
+            Setup {
+                options,
+                default_keys: Some(KEYS.into()),
+                keys: None,
+                keys_path: None,
+            },
+        )
+        .unwrap();
+        ui.resize(size.0, size.1);
+        frame(&mut ui, host);
+        ui.open(host, Manager::Construction);
+        mbm::active(&ui.fe)
+    };
+    assert!(open(Options::default(), &mut host));
+    let mut off = Options::default();
+    off.set_bool(mbm::OPTION_KEY, false);
+    assert!(!open(off, &mut host));
+    let mut old_hud = Options::default();
+    old_hud.set_bool(modern_hud::OPTION_KEY, false);
+    assert!(!open(old_hud, &mut host));
 }

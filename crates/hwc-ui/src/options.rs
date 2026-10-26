@@ -164,9 +164,12 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // The modern selected-ships panel (top right, under the resources): 1 expanded, 0
     // collapsed.
     ("hwcSelectedExpanded", 1),
-    // 1: the build manager in the modern HUD's style (a preview, `--build-ui modern`); 0:
-    // the original screen.
-    ("hwcModernBuildManager", 0),
+    // 1: the build manager in the modern HUD's style (`--build-ui`); 0: the original screen.
+    // The original HUD (`hwcModernHud = 0`, `--hud original`) brings back the original too.
+    ("hwcModernBuildManager", 1),
+    // 1: the research manager in the modern HUD's style (`--research-ui`); 0: the original
+    // screen. The original HUD brings back the original too.
+    ("hwcModernResearchManager", 1),
     // Registry values.
     ("deviceIndex", -1),
     ("screenWidth", 640),
@@ -259,6 +262,7 @@ impl Options {
     pub fn from_text(text: &str) -> (Options, Vec<String>) {
         let mut opts = Options::default();
         let mut errors = Vec::new();
+        let mut keys = std::collections::BTreeSet::new();
         for (n, line) in text.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -273,6 +277,7 @@ impl Options {
                 errors.push(format!("line {}: bad key", n + 1));
                 continue;
             }
+            keys.insert(k.to_string());
             if let Some(body) = v.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
                 let mut s = String::new();
                 let mut it = body.chars();
@@ -291,6 +296,16 @@ impl Options {
             } else {
                 errors.push(format!("line {}: bad value for {k}", n + 1));
             }
+        }
+        // A file saved before the modern managers became the default (it has every key of
+        // its day, the HUD's among them, but not the research manager's) holds the build
+        // manager's old default, 0, which nobody chose: the new default applies.
+        if keys.contains("hwcModernHud")
+            && keys.contains("hwcModernBuildManager")
+            && !keys.contains("hwcModernResearchManager")
+        {
+            opts.values
+                .insert("hwcModernBuildManager".to_string(), Value::Int(1));
         }
         (opts, errors)
     }
@@ -442,5 +457,29 @@ hwcSmoothZoom = 0
         assert_eq!(o.get("MusicVolume"), 40);
         assert_eq!(o.get("bogus"), 0);
         assert_eq!(o.get_str("PlayerName"), "Bob");
+    }
+
+    #[test]
+    fn modern_managers_default_on_even_in_older_saved_files() {
+        let d = Options::default();
+        assert!(d.get_bool("hwcModernBuildManager"));
+        assert!(d.get_bool("hwcModernResearchManager"));
+        // A file saved before the research manager's key existed: its 0 was the old default.
+        let (old, _) =
+            Options::from_text("hwcModernHud = 1\nhwcModernBuildManager = 0\nMusicVolume = 50\n");
+        assert!(old.get_bool("hwcModernBuildManager"));
+        assert!(old.get_bool("hwcModernResearchManager"));
+        // Saved since then: the choice stands.
+        let (new, _) = Options::from_text(
+            "hwcModernHud = 1\nhwcModernBuildManager = 0\nhwcModernResearchManager = 0\n",
+        );
+        assert!(!new.get_bool("hwcModernBuildManager"));
+        assert!(!new.get_bool("hwcModernResearchManager"));
+        // A hand-written line alone is taken as it is.
+        let (hand, _) = Options::from_text("hwcModernBuildManager = 0\n");
+        assert!(!hand.get_bool("hwcModernBuildManager"));
+        // Round trip.
+        let (back, _) = Options::from_text(&new.to_text());
+        assert!(!back.get_bool("hwcModernBuildManager"));
     }
 }

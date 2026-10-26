@@ -258,6 +258,15 @@ fn research_panel_640() {
 fn over_manager(size: (i32, i32)) {
     let Some(src) = source() else { return };
     let mut ui = ui(src, size);
+    // The original manager's frame (the modern managers have their own tests).
+    ui.fe
+        .game
+        .options
+        .set_bool(hwc_ui::ingame::modern_build_manager::OPTION_KEY, false);
+    ui.fe
+        .game
+        .options
+        .set_bool(hwc_ui::ingame::modern_research_manager::OPTION_KEY, false);
     let mut host = host();
     frame(&mut ui, &mut host);
     ui.open(&host, Manager::Research);

@@ -1,6 +1,7 @@
-//! A preview of the build manager (`construction_manager.fib`, [`consmgr`]) restyled in the
-//! modern HUD's look: a user-requested change, **off by default** (`--build-ui modern` or
-//! `hwcModernBuildManager = 1` turn it on).
+//! The build manager (`construction_manager.fib`, [`consmgr`]) restyled in the modern HUD's
+//! look: a user-requested change, on by default; `--build-ui original`,
+//! `hwcModernBuildManager = 0` or the original HUD (`--hud original`) bring back the
+//! original screen. The shared look is [`super::modern_manager`].
 //!
 //! Only the look and the mouse handling are new. The original screen stays open underneath
 //! (not drawn, and not given the mouse), so its hot keys (B, P, L, C, I, R, S, Return,
@@ -23,49 +24,34 @@
 //! panels stay up, folding or hiding where they would cover it.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU8, Ordering};
 
-use crate::canvas::{BlitMode, Canvas, Color, Rect, WHITE};
+use crate::canvas::{BlitMode, Canvas, Rect, WHITE};
 use crate::consts::*;
 use crate::ingame::consmgr::{self, Row};
 use crate::ingame::host::{BuildOption, ShipType};
 use crate::ingame::modern_hud::{self, Face, Pen};
-use crate::ingame::modern_objectives as obj;
 use crate::ingame::{Fe, Manager};
 use crate::options::Options;
 
-/// The options-file key: 0 (default) the original build manager, 1 this one.
+/// The options-file key: 1 (default) this build manager, 0 the original's.
 pub const OPTION_KEY: &str = "hwcModernBuildManager";
 
-/// `--build-ui`: 0 the options file decides, 1 modern, 2 original.
-static MODE_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+/// `--build-ui`, the options file and the HUD's choice.
+static SWITCH: Switch = Switch::new(OPTION_KEY);
 
-/// Sets the command line's (or the build's) choice; `None`: the options file decides.
+/// Sets the command line's choice; `None`: the options file decides.
 pub fn set_override(modern: Option<bool>) {
-    let v = match modern {
-        None => 0,
-        Some(true) => 1,
-        Some(false) => 2,
-    };
-    MODE_OVERRIDE.store(v, Ordering::Relaxed);
+    SWITCH.set_override(modern);
 }
 
 /// Whether the modern build manager replaces the original's look.
 pub fn enabled(options: &Options) -> bool {
-    match MODE_OVERRIDE.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => options.get_bool(OPTION_KEY),
-    }
+    SWITCH.enabled(options)
 }
 
 /// Parses `--build-ui`'s value.
 pub fn parse_mode(s: &str) -> Option<bool> {
-    match s.to_ascii_lowercase().as_str() {
-        "modern" => Some(true),
-        "original" => Some(false),
-        _ => None,
-    }
+    mm::parse_mode(s)
 }
 
 /// Whether the modern build manager is up now (enabled, and the build manager open).
@@ -73,51 +59,14 @@ pub fn active(fe: &Fe) -> bool {
     fe.game.ig.manager == Some(Manager::Construction) && enabled(&fe.game.options)
 }
 
-// ---- colours ----
+use crate::ingame::modern_manager::{self as mm, *};
 
-const PANEL: Color = [8, 10, 14, 191];
-const SECTION: Color = [255, 255, 255, 9];
-const LINE: Color = [255, 255, 255, 24];
-const GOLD: Color = obj::GOLD;
-const LABEL: Color = modern_hud::LABEL;
-const TEXT: Color = [236, 239, 243, 255];
-const MUTED: Color = [255, 255, 255, 150];
-const DIM: Color = [255, 255, 255, 95];
-const GREYED: Color = [255, 255, 255, 70];
-const PAUSED: Color = [170, 182, 196, 255];
-const REFUSED: Color = [0xFF, 0x4A, 0x1E, 0xFF];
-/// Over the 3D view around the panel.
-const SCENE_DIM: Color = [0, 0, 0, 92];
-const SHADOW: Color = [0, 0, 0, 255];
-
-/// Hover easing, per second.
-const HOVER_RATE: f32 = 14.0;
 /// How long a fired - / + stays lit.
 const FIRED_SECONDS: f64 = 0.18;
-/// The second press of a double click: within this time and distance of the first
-/// (as [`crate::fe::FrontEnd::mouse_button`]).
-const DOUBLE_SECONDS: f64 = 0.5;
-const DOUBLE_PIXELS: i32 = 4;
 
-// ---- layout ----
+// ---- layout (at 1080 lines; the panel, header and footer are [`mm::Frame`]'s) ----
 
-/// The panel at 1080 lines.
-pub const REF_W: f32 = 960.0;
-pub const REF_H: f32 = 760.0;
-const REF_LINES: f32 = 1080.0;
-/// Never smaller than this scale unless the window is (then it fits the window).
-const MIN_SCALE: f32 = 0.8;
-/// Space kept around the panel when it has to fit the window.
-const FIT_MARGIN: f32 = 8.0;
-
-const PAD: f32 = 24.0;
-const HEADER_H: f32 = 56.0;
-const TITLE_BASELINE: f32 = 35.0;
-const TITLE_PX: f32 = 16.0;
-const TITLE_SPACING: f32 = 3.0;
-const TOP_BUTTON_W: f32 = 132.0;
-const TOP_BUTTON_H: f32 = 30.0;
-const TOP_BUTTON_Y: f32 = 13.0;
+pub use crate::ingame::modern_manager::{REF_H, REF_W};
 const TABS_Y: f32 = 68.0;
 const TAB_H: f32 = 36.0;
 const TAB_W: f32 = 200.0;
@@ -134,24 +83,8 @@ const LIST_ROWS: f32 = 17.0;
 const TOTALS_Y: f32 = 612.0;
 const TOTALS_H: f32 = 30.0;
 const PREVIEW_H: f32 = 300.0;
-const FOOTER_LINE: f32 = 680.0;
-const BUTTON_Y: f32 = 698.0;
-const BUTTON_H: f32 = 38.0;
-const BUTTON_W: f32 = 168.0;
-const BUTTON_GAP: f32 = 12.0;
 const STEP_BOX: f32 = 20.0;
-
-/// Text sizes at 1080 lines, and the smallest a label may get.
-const NAME_PX: f32 = 15.0;
-const VALUE_PX: f32 = 15.0;
-const BIG_VALUE_PX: f32 = 18.0;
-const SMALL_PX: f32 = 11.0;
-const SMALL_SPACING: f32 = 2.0;
-const BUTTON_PX: f32 = 12.0;
-const BUTTON_SPACING: f32 = 1.5;
-const SHIP_TITLE_PX: f32 = 21.0;
-const BODY_PX: f32 = 13.0;
-const MIN_TEXT: f32 = 8.5;
+const SHIP_TITLE_PX: f32 = mm::TITLE_BIG_PX;
 
 /// The buttons of the original screen, by their atom (and callback) names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -220,6 +153,8 @@ impl Button {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Layout {
     pub scale: f32,
+    /// The panel, header and footer line (shared with the other modern managers).
+    pub frame: Frame,
     pub panel: Rect,
     pub header: Rect,
     pub title_x: i32,
@@ -250,38 +185,23 @@ pub struct Layout {
     pub buttons: BTreeMap<Button, Rect>,
 }
 
-/// The panel's scale for a `width` x `height` canvas: the height over 1080, at least
-/// [`MIN_SCALE`], and never larger than fits the window.
+/// The panel's scale for a `width` x `height` canvas (see [`mm::scale_for`]).
 pub fn scale_for(width: i32, height: i32) -> f32 {
-    let (w, h) = (width.max(1) as f32, height.max(1) as f32);
-    let band = top_band(height) as f32;
-    let fit = ((h - band - FIT_MARGIN) / REF_H).min((w - 2.0 * FIT_MARGIN) / REF_W);
-    (h / REF_LINES).max(MIN_SCALE).min(fit).max(0.2)
+    mm::scale_for(width, height)
 }
 
-/// The band along the top kept for the modern HUD's panel headers (objectives, resources),
-/// which stay up over the manager: its corner margin and header height, and a little air.
+/// The band along the top kept for the modern HUD's panel headers (see [`mm::top_band`]).
 pub fn top_band(height: i32) -> i32 {
-    let s = modern_hud::scale_for(height);
-    ((obj_margin() + obj::HEADER_H) * s).round() as i32 + 4
-}
-
-fn obj_margin() -> f32 {
-    crate::ingame::modern_panel::MARGIN
+    mm::top_band(height)
 }
 
 /// The layout for a `width` x `height` canvas.
 pub fn layout(width: i32, height: i32) -> Layout {
-    let s = scale_for(width, height);
-    let px = |v: f32| (v * s).round() as i32;
-    let (pw, ph) = (px(REF_W), px(REF_H));
-    let x0 = (width - pw) / 2;
-    let y0 = ((height - ph) / 2).max(top_band(height));
-    let panel = Rect::new(x0, y0, x0 + pw, y0 + ph);
-    let at = |x: f32, y: f32, w: f32, h: f32| {
-        Rect::new(x0 + px(x), y0 + px(y), x0 + px(x + w), y0 + px(y + h))
-    };
-    let right_edge = REF_W - PAD;
+    let f = Frame::new(width, height);
+    let s = f.scale;
+    let px = |v: f32| f.px(v);
+    let (x0, y0) = (f.panel.x0, f.panel.y0);
+    let at = |x: f32, y: f32, w: f32, h: f32| f.at(x, y, w, h);
     let tabs = [0.0, 1.0, 2.0].map(|i| at(PAD + i * (TAB_W + TAB_GAP), TABS_Y, TAB_W, TAB_H));
     let half = (LEFT_W - STAT_GAP) / 2.0;
     let ru = at(PAD, BODY_Y, half, STATS_H);
@@ -303,7 +223,7 @@ pub fn layout(width: i32, height: i32) -> Layout {
     let plus_cx = cost_right - px(70.0);
     let count_cx = plus_cx - px(30.0);
     let minus_cx = count_cx - px(30.0);
-    let preview = at(RIGHT_X, BODY_Y, right_edge - RIGHT_X, PREVIEW_H);
+    let preview = at(RIGHT_X, BODY_Y, REF_W - PAD - RIGHT_X, PREVIEW_H);
     let details = Rect::new(
         preview.x0,
         preview.y1 + px(10.0),
@@ -315,31 +235,11 @@ pub fn layout(width: i32, height: i32) -> Layout {
         .into_iter()
         .enumerate()
     {
-        let x = PAD + i as f32 * (BUTTON_W + BUTTON_GAP);
-        buttons.insert(b, at(x, BUTTON_Y, BUTTON_W, BUTTON_H));
+        buttons.insert(b, f.footer_button(i));
     }
-    buttons.insert(
-        Button::Close,
-        at(right_edge - BUTTON_W, BUTTON_Y, BUTTON_W, BUTTON_H),
-    );
-    buttons.insert(
-        Button::Systems,
-        at(
-            right_edge - TOP_BUTTON_W,
-            TOP_BUTTON_Y,
-            TOP_BUTTON_W,
-            TOP_BUTTON_H,
-        ),
-    );
-    buttons.insert(
-        Button::Research,
-        at(
-            right_edge - 2.0 * TOP_BUTTON_W - 10.0,
-            TOP_BUTTON_Y,
-            TOP_BUTTON_W,
-            TOP_BUTTON_H,
-        ),
-    );
+    buttons.insert(Button::Close, f.footer_right());
+    buttons.insert(Button::Systems, f.top_button(0));
+    buttons.insert(Button::Research, f.top_button(1));
     buttons.insert(
         Button::Info,
         Rect::new(
@@ -351,10 +251,11 @@ pub fn layout(width: i32, height: i32) -> Layout {
     );
     Layout {
         scale: s,
-        panel,
-        header: Rect::new(panel.x0, panel.y0, panel.x1, y0 + px(HEADER_H)),
-        title_x: x0 + px(PAD),
-        title_baseline: y0 + px(TITLE_BASELINE),
+        frame: f,
+        panel: f.panel,
+        header: f.header,
+        title_x: f.title_x,
+        title_baseline: f.title_baseline,
         tabs,
         ru,
         su,
@@ -378,19 +279,18 @@ pub fn layout(width: i32, height: i32) -> Layout {
         ),
         preview,
         details,
-        footer_line: y0 + px(FOOTER_LINE),
+        footer_line: f.footer_line,
         buttons,
     }
 }
 
 impl Layout {
     fn px(&self, v: f32) -> i32 {
-        (v * self.scale).round() as i32
+        self.frame.px(v)
     }
 
-    /// A text size: `v` at 1080 lines, never under [`MIN_TEXT`].
     fn text(&self, v: f32) -> f32 {
-        (v * self.scale).max(MIN_TEXT.min(v))
+        self.frame.text(v)
     }
 
     /// The rectangle of the `i`-th row on screen.
@@ -418,30 +318,12 @@ impl Layout {
 
     /// The scroll bar's thumb for `total` rows from `top`; None when every row fits.
     pub fn thumb(&self, total: usize, top: usize) -> Option<Rect> {
-        if total <= self.page {
-            return None;
-        }
-        let t = self.scroll_track;
-        let h = t.height() as f32;
-        let len = (h * self.page as f32 / total as f32).max(self.px(24.0) as f32);
-        let max_top = (total - self.page) as f32;
-        let y = t.y0 as f32 + (h - len) * (top as f32 / max_top).clamp(0.0, 1.0);
-        Some(Rect::new(
-            t.x0 - 2,
-            y.round() as i32,
-            t.x1 + 2,
-            (y + len).round() as i32,
-        ))
+        mm::thumb(self.scroll_track, self.page, total, top, self.px(24.0))
     }
 
     /// The first row for the thumb's top at `y` (dragging).
     pub fn top_for_thumb(&self, total: usize, y: i32) -> usize {
-        let Some(th) = self.thumb(total, 0) else {
-            return 0;
-        };
-        let free = (self.scroll_track.height() - th.height()).max(1) as f32;
-        let f = ((y - self.scroll_track.y0) as f32 / free).clamp(0.0, 1.0);
-        (f * (total - self.page) as f32).round() as usize
+        mm::top_for_thumb(self.scroll_track, self.page, total, y, self.px(24.0))
     }
 }
 
@@ -527,16 +409,14 @@ pub struct State {
     mouse: (i32, i32),
     /// Left press taken by a button, a - / + or the thumb.
     pressed: Option<Hit>,
-    /// The first press of a possible double click, and whether the second is held.
-    last_press: Option<(f64, i32, i32)>,
-    double_held: bool,
+    /// The double-click rule.
+    clicks: DoubleClick,
     /// A held - / +: (right, next repeat time).
     hold: Option<(bool, f64)>,
     /// Dragging the thumb: the pointer's offset from its top.
     drag: Option<i32>,
-    /// Eased highlights, 0..1, and the time they were last stepped.
-    hover: BTreeMap<Key, f32>,
-    last_time: Option<f64>,
+    /// Eased highlights.
+    hover: Hover<Key>,
     /// The - / + that last fired, and when.
     fired: Option<(ShipType, bool, f64)>,
 }
@@ -602,7 +482,7 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool) {
         return;
     }
     if !down {
-        fe.game.ig.mbm.double_held = false;
+        fe.game.ig.mbm.clicks.release();
         let pressed = fe.game.ig.mbm.pressed.take();
         fe.game.ig.mbm.hold = None;
         fe.game.ig.mbm.drag = None;
@@ -616,17 +496,10 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool) {
     // The second press of a double click (`WM_LBUTTONDBLCLK`): only the list sees it.
     let now = fe.time;
     let st = &mut fe.game.ig.mbm;
-    if st.double_held || st.pressed.is_some() {
+    if st.clicks.held() || st.pressed.is_some() {
         return;
     }
-    let double = st.last_press.is_some_and(|(t, px, py)| {
-        now - t < DOUBLE_SECONDS
-            && (px - x).abs() <= DOUBLE_PIXELS
-            && (py - y).abs() <= DOUBLE_PIXELS
-    });
-    if double {
-        st.double_held = true;
-        st.last_press = None;
+    if st.clicks.press(now, x, y) {
         if let Hit::Row(i) = at {
             if let Some(o) = ship_of(&rows, i) {
                 consmgr::list_event(fe, &o, RPE_DOUBLE_LEFT);
@@ -635,7 +508,6 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool) {
         }
         return;
     }
-    st.last_press = Some((now, x, y));
     match at {
         Hit::Button(_) => {
             fe.game.ig.mbm.pressed = Some(at);
@@ -768,169 +640,9 @@ pub fn ship_view(fe: &Fe) -> Option<(Rect, ShipType)> {
     Some((Rect::new(p.x0 + 1, p.y0 + 1, p.x1 - 1, p.y1 - 1), t))
 }
 
-// ---- drawing helpers ----
-
-fn lerp(a: Color, b: Color, t: f32) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    let m = |i: usize| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8;
-    [m(0), m(1), m(2), m(3)]
-}
-
-fn alpha(c: Color, a: f32) -> Color {
-    modern_hud::with_alpha(c, c[3] as f32 / 255.0 * a)
-}
-
-/// Coverage of a rounded rectangle at a pixel centre.
-fn rounded_cov(r: Rect, radius: f32, px: f32, py: f32) -> f32 {
-    let (x0, y0, x1, y1) = (r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32);
-    let rad = radius.min((x1 - x0) / 2.0).min((y1 - y0) / 2.0).max(0.0);
-    let cx = px.clamp(x0 + rad, x1 - rad);
-    let cy = py.clamp(y0 + rad, y1 - rad);
-    let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt() - rad;
-    // Inside the straight parts the distance to the edge counts.
-    let inside = (px - x0).min(x1 - px).min(py - y0).min(y1 - py);
-    let cov = if d > 0.0 { 0.5 - d } else { inside + 0.5 };
-    cov.clamp(0.0, 1.0)
-}
-
-/// A filled rounded rectangle, blended.
-fn rounded(canvas: &mut Canvas, r: Rect, radius: f32, c: Color) {
-    if c[3] == 0 {
-        return;
-    }
-    for y in r.y0..r.y1 {
-        for x in r.x0..r.x1 {
-            let v = rounded_cov(r, radius, x as f32 + 0.5, y as f32 + 0.5);
-            if v > 0.0 {
-                canvas.blend(x, y, alpha(c, v));
-            }
-        }
-    }
-}
-
-/// A rounded rectangle's outline, `w` pixels wide inside its edge.
-fn rounded_outline(canvas: &mut Canvas, r: Rect, radius: f32, w: f32, c: Color) {
-    if c[3] == 0 {
-        return;
-    }
-    let wi = w.ceil() as i32;
-    let inner = Rect::new(r.x0 + wi, r.y0 + wi, r.x1 - wi, r.y1 - wi);
-    for y in r.y0..r.y1 {
-        for x in r.x0..r.x1 {
-            if inner.contains(x, y) && x > inner.x0 + radius as i32 && x < inner.x1 - radius as i32
-            {
-                continue;
-            }
-            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-            let outer = rounded_cov(r, radius, px, py);
-            let inn = if inner.width() > 0 && inner.height() > 0 {
-                rounded_cov(inner, (radius - w).max(0.0), px, py)
-            } else {
-                0.0
-            };
-            let v = (outer - inn).max(0.0);
-            if v > 0.0 {
-                canvas.blend(x, y, alpha(c, v));
-            }
-        }
-    }
-}
-
-/// A soft shadow around `r`: rings fading outwards (only the border band is touched).
-fn shadow(canvas: &mut Canvas, r: Rect, spread: i32) {
-    for i in 1..=spread {
-        let t = 1.0 - i as f32 / (spread + 1) as f32;
-        let c = alpha(SHADOW, 0.22 * t * t);
-        let o = Rect::new(r.x0 - i, r.y0 - i + 2, r.x1 + i, r.y1 + i + 2);
-        canvas.blend_rect(Rect::new(o.x0, o.y0, o.x1, o.y0 + 1), c);
-        canvas.blend_rect(Rect::new(o.x0, o.y1 - 1, o.x1, o.y1), c);
-        canvas.blend_rect(Rect::new(o.x0, o.y0 + 1, o.x0 + 1, o.y1 - 1), c);
-        canvas.blend_rect(Rect::new(o.x1 - 1, o.y0 + 1, o.x1, o.y1 - 1), c);
-    }
-}
-
-fn hline(canvas: &mut Canvas, x0: i32, x1: i32, y: i32, c: Color) {
-    canvas.blend_rect(Rect::new(x0, y, x1, y + 1), c);
-}
-
-/// Dims everything but `keep`.
-fn dim_around(canvas: &mut Canvas, keep: Rect) {
-    let (w, h) = (canvas.width, canvas.height);
-    canvas.blend_rect(Rect::new(0, 0, w, keep.y0), SCENE_DIM);
-    canvas.blend_rect(Rect::new(0, keep.y1, w, h), SCENE_DIM);
-    canvas.blend_rect(Rect::new(0, keep.y0, keep.x0, keep.y1), SCENE_DIM);
-    canvas.blend_rect(Rect::new(keep.x1, keep.y0, w, keep.y1), SCENE_DIM);
-}
-
-/// Writes with the pen: left-aligned at `x` (Bold).
-#[allow(clippy::too_many_arguments)]
-fn write(
-    canvas: &mut Canvas,
-    pen: &Pen,
-    face: Face,
-    px: f32,
-    spacing: f32,
-    x: i32,
-    baseline: i32,
-    col: Color,
-    glow: Option<(Color, f32)>,
-    s: &str,
-) -> i32 {
-    pen.write(canvas, face, px, spacing, x, baseline, col, glow, s)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_right(
-    canvas: &mut Canvas,
-    pen: &Pen,
-    face: Face,
-    px: f32,
-    spacing: f32,
-    right: i32,
-    baseline: i32,
-    col: Color,
-    glow: Option<(Color, f32)>,
-    s: &str,
-) {
-    let w = pen.advance(face, px, spacing, s);
-    pen.write(canvas, face, px, spacing, right - w, baseline, col, glow, s);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_centred(
-    canvas: &mut Canvas,
-    pen: &Pen,
-    face: Face,
-    px: f32,
-    spacing: f32,
-    cx: i32,
-    baseline: i32,
-    col: Color,
-    glow: Option<(Color, f32)>,
-    s: &str,
-) {
-    let w = pen.advance(face, px, spacing, s);
-    pen.write(
-        canvas,
-        face,
-        px,
-        spacing,
-        cx - w / 2,
-        baseline,
-        col,
-        glow,
-        s,
-    );
-}
-
-/// The baseline that centres caps of `px` in `r` vertically.
-fn mid_baseline(r: Rect, px: f32) -> i32 {
-    ((r.y0 + r.y1) as f32 / 2.0 + px * 0.36).round() as i32
-}
-
 /// A thin glowing bar (track, glow, gradient fill).
 fn bar(canvas: &mut Canvas, l: &Layout, r: Rect, fraction: f32, glow: f32) {
-    modern_hud::draw_bar(canvas, r, fraction, 3.0 * l.scale, glow);
+    mm::bar(canvas, &l.frame, r, fraction, glow);
 }
 
 // ---- drawing ----
@@ -982,38 +694,16 @@ fn ship_row(fe: &Fe, o: &BuildOption) -> ShipRow {
 /// Steps the eased highlights towards what is under the pointer (and pressed) now.
 fn step_hover(fe: &mut Fe, targets: &[(Key, f32)]) {
     let now = fe.time;
-    let st = &mut fe.game.ig.mbm;
-    let dt = st.last_time.map_or(1.0, |t| (now - t).max(0.0) as f32);
-    st.last_time = Some(now);
-    let k = 1.0 - (-dt * HOVER_RATE).exp();
-    let mut keys: Vec<Key> = st.hover.keys().copied().collect();
-    for (key, _) in targets {
-        if !keys.contains(key) {
-            keys.push(*key);
-        }
-    }
-    for key in keys {
-        let target = targets
-            .iter()
-            .find(|(t, _)| *t == key)
-            .map_or(0.0, |(_, v)| *v);
-        let cur = st.hover.get(&key).copied().unwrap_or(0.0);
-        let v = cur + (target - cur) * k;
-        if v < 0.01 && target == 0.0 {
-            st.hover.remove(&key);
-        } else {
-            st.hover.insert(key, v);
-        }
-    }
+    fe.game.ig.mbm.hover.step(now, targets);
 }
 
 fn eased(fe: &Fe, key: Key) -> f32 {
-    fe.game.ig.mbm.hover.get(&key).copied().unwrap_or(0.0)
+    fe.game.ig.mbm.hover.get(key)
 }
 
 /// Whether the screen's keyboard focus (Tab / arrows) is on a button's atom.
-fn focused(fe: &Fe, b: Button) -> bool {
-    fe.find_atom(b.atom())
+pub(crate) fn focused(fe: &Fe, atom: &str) -> bool {
+    fe.find_atom(atom)
         .and_then(|a| fe.atom(a).region)
         .and_then(|id| fe.region(id))
         .is_some_and(|r| r.status & RSF_CURRENT_SELECTED != 0)
@@ -1060,31 +750,7 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
     step_hover(fe, &targets);
 
     // The scene around, the frame.
-    dim_around(canvas, l.panel);
-    shadow(canvas, l.panel, l.px(18.0).max(6));
-    canvas.blend_rect(l.panel, PANEL);
-    let accent = Rect::new(
-        l.panel.x0,
-        l.panel.y0,
-        l.panel.x0 + l.px(obj::ACCENT_W).max(1),
-        l.panel.y1,
-    );
-    canvas.fill_rect(accent, obj::ACCENT);
-    // A faint gold wash along the top.
-    for (i, y) in (l.panel.y0..l.header.y1).enumerate() {
-        let t = 1.0 - i as f32 / l.header.height().max(1) as f32;
-        hline(
-            canvas,
-            accent.x1,
-            l.panel.x1,
-            y,
-            [255, 200, 0, (14.0 * t) as u8],
-        );
-    }
-    let inner_x0 = l.title_x;
-    let inner_x1 = l.panel.x1 - l.px(PAD);
-    hline(canvas, inner_x0, inner_x1, l.header.y1, LINE);
-    hline(canvas, inner_x0, inner_x1, l.footer_line, LINE);
+    mm::draw_frame(canvas, &l.frame);
 
     draw_header(fe, canvas, &pen, &l);
     draw_tabs(fe, canvas, &pen, &l);
@@ -1099,18 +765,6 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
 }
 
 fn draw_header(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout) {
-    let x = write(
-        canvas,
-        pen,
-        Face::Bold,
-        l.text(TITLE_PX),
-        TITLE_SPACING * l.scale,
-        l.title_x,
-        l.title_baseline,
-        GOLD,
-        Some((modern_hud::VALUE_GLOW, 3.0 * l.scale)),
-        "BUILD MANAGER",
-    );
     // The current factory after a thin divider.
     let view = &fe.game.ig.view;
     let name = fe
@@ -1120,31 +774,7 @@ fn draw_header(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout) {
         .factory
         .and_then(|s| view.factories.iter().find(|f| f.ship == s))
         .map(|f| f.name.to_uppercase());
-    if let Some(name) = name {
-        let dx = l.title_x + x + l.px(16.0);
-        let h = l.px(14.0);
-        canvas.blend_rect(
-            Rect::new(
-                dx,
-                l.title_baseline - h,
-                dx + 1,
-                l.title_baseline + l.px(2.0),
-            ),
-            LINE,
-        );
-        write(
-            canvas,
-            pen,
-            Face::Bold,
-            l.text(SMALL_PX + 1.0),
-            SMALL_SPACING * l.scale,
-            dx + l.px(16.0),
-            l.title_baseline - l.px(1.0),
-            MUTED,
-            None,
-            &name,
-        );
-    }
+    mm::draw_title(canvas, pen, &l.frame, "BUILD MANAGER", name.as_deref());
 }
 
 /// The factory tabs: mothership and two carriers, each with its queue count and the ship
@@ -1154,17 +784,6 @@ fn draw_tabs(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout) {
     for (slot, &r) in l.tabs.iter().enumerate() {
         let f = consmgr::factory_in_slot(view, slot);
         let current = f.is_some_and(|f| Some(f.ship) == fe.game.ig.cm.factory);
-        let hover = if f.is_some() {
-            eased(fe, Key::Tab(slot))
-        } else {
-            0.0
-        };
-        let bg = if current {
-            [255, 200, 0, 30]
-        } else {
-            lerp([255, 255, 255, 6], [255, 255, 255, 20], hover)
-        };
-        rounded(canvas, r, 3.0 * l.scale, bg);
         let jobs: Vec<_> = f
             .map(|f| view.jobs.iter().filter(|j| j.factory == f.ship).collect())
             .unwrap_or_default();
@@ -1173,139 +792,47 @@ fn draw_tabs(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout) {
             .iter()
             .find(|j| j.count > 0 && !j.paused)
             .map(|j| j.progress.clamp(0.0, 1.0));
-        let u = Rect::new(r.x0, r.y1 - l.px(2.0).max(2), r.x1, r.y1);
-        let done = |p: f32| Rect::new(u.x0, u.y0, u.x0 + (u.width() as f32 * p) as i32, u.y1);
-        if current {
-            canvas.blend_rect(u, alpha(GOLD, 0.55));
-            canvas.blend_rect(done(progress.unwrap_or(1.0)), GOLD);
-            // Soft glow over the underline.
-            for i in 1..=l.px(6.0).max(2) {
-                let a = 0.22 * (1.0 - i as f32 / (l.px(6.0).max(2) + 1) as f32);
-                hline(canvas, r.x0 + 2, r.x1 - 2, u.y0 - i, alpha(GOLD, a));
-            }
-        }
-        let (label, col) = match f {
-            Some(f) => (
-                f.name.to_uppercase(),
-                if current {
-                    LABEL
-                } else {
-                    lerp(MUTED, WHITE, hover)
-                },
-            ),
-            None if slot == 0 => ("NO COMMAND SHIP".to_string(), GREYED),
-            None => (format!("CARRIER {slot} \u{2014} NONE"), GREYED),
+        let label = match f {
+            Some(f) => f.name.to_uppercase(),
+            None if slot == 0 => "NO COMMAND SHIP".to_string(),
+            None => format!("CARRIER {slot} \u{2014} NONE"),
         };
-        let px = l.text(BUTTON_PX);
-        let base = mid_baseline(r, px) - l.px(1.0);
         let count: i32 = jobs.iter().map(|j| j.count).sum();
-        let count_s = (count > 0).then(|| count.to_string());
-        let right = r.x1 - l.px(12.0);
-        let mut avail = (right - r.x0 - l.px(14.0)) as f32;
-        if let Some(c) = &count_s {
-            avail -= pen.advance(Face::Bold, l.text(VALUE_PX), 0.0, c) as f32 + l.px(10.0) as f32;
-        }
-        let m = |t: &str| pen.measure(Face::Bold, px, BUTTON_SPACING * l.scale, t);
-        let label = crate::ingame::modern_panel::ellipsize(&m, &label, avail);
-        write(
-            canvas,
-            pen,
-            Face::Bold,
-            px,
-            BUTTON_SPACING * l.scale,
-            r.x0 + l.px(14.0),
-            base,
-            col,
-            None,
-            &label,
-        );
-        if let Some(c) = count_s {
-            write_right(
-                canvas,
-                pen,
-                Face::Bold,
-                l.text(VALUE_PX),
-                0.0,
-                right,
-                base + l.px(1.0),
-                WHITE,
-                Some((modern_hud::VALUE_GLOW, 3.0 * l.scale)),
-                &c,
-            );
-        }
-        if !current {
-            if let Some(p) = progress {
-                canvas.blend_rect(u, modern_hud::TRACK);
-                canvas.blend_rect(done(p), alpha(GOLD, 0.8));
-            }
-        }
+        let look = TabLook {
+            label,
+            enabled: f.is_some(),
+            current,
+            hover: eased(fe, Key::Tab(slot)),
+            count: (count > 0).then(|| count.to_string()),
+            progress,
+            paused: false,
+            detail: None,
+        };
+        mm::draw_tab(canvas, pen, &l.frame, r, &look);
     }
 }
 
 /// Current RUs and the support units (used, plus what is queued and picked).
 fn draw_stats(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout) {
     let p = &fe.game.ig.view.player;
-    let lpx = l.text(SMALL_PX);
-    let lsp = SMALL_SPACING * l.scale;
-    let vpx = l.text(BIG_VALUE_PX);
-    let glow = Some((modern_hud::VALUE_GLOW, 3.0 * l.scale));
-    let bar_h = l.px(4.0).max(2);
-    for r in [l.ru, l.su] {
-        rounded(canvas, r, 3.0 * l.scale, SECTION);
-    }
-    let base = |r: Rect| r.y0 + l.px(19.0);
-    let bar_r = |r: Rect| {
-        let y = r.y1 - l.px(10.0);
-        Rect::new(r.x0 + l.px(12.0), y, r.x1 - l.px(12.0), y + bar_h)
-    };
+    let f = &l.frame;
+    let glow = value_glow(f);
     // RUs.
-    write(
+    let br = mm::readout(
         canvas,
         pen,
-        Face::Bold,
-        lpx,
-        lsp,
-        l.ru.x0 + l.px(12.0),
-        base(l.ru),
-        LABEL,
-        None,
+        f,
+        l.ru,
         "CURRENT RUS",
-    );
-    write_right(
-        canvas,
-        pen,
-        Face::Bold,
-        vpx,
-        0.0,
-        l.ru.x1 - l.px(12.0),
-        base(l.ru) + l.px(1.0),
+        &modern_hud::thousands(p.resource_units),
         WHITE,
         glow,
-        &modern_hud::thousands(p.resource_units),
     );
-    bar(
-        canvas,
-        l,
-        bar_r(l.ru),
-        modern_hud::ru_fill(p.resource_units),
-        1.0,
-    );
+    bar(canvas, l, br, modern_hud::ru_fill(p.resource_units), 1.0);
     // Support units: used (gold), then what the queues and picked counts need (paler).
     let pending = p.support_pending + consmgr::gui_support_units(fe);
     let cap = p.support_capacity;
     let at_cap = p.support_used + pending >= cap && cap > 0 && pending + p.support_used > 0;
-    write(
-        canvas,
-        pen,
-        Face::Bold,
-        lpx,
-        lsp,
-        l.su.x0 + l.px(12.0),
-        base(l.su),
-        LABEL,
-        None,
-        "SUPPORT UNITS",
-    );
     let value = format!("{} / {}", p.support_used + pending, cap);
     let (vcol, vglow) = if at_cap {
         (
@@ -1315,19 +842,7 @@ fn draw_stats(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout) {
     } else {
         (WHITE, glow)
     };
-    write_right(
-        canvas,
-        pen,
-        Face::Bold,
-        vpx,
-        0.0,
-        l.su.x1 - l.px(12.0),
-        base(l.su) + l.px(1.0),
-        vcol,
-        vglow,
-        &value,
-    );
-    let br = bar_r(l.su);
+    let br = mm::readout(canvas, pen, f, l.su, "SUPPORT UNITS", &value, vcol, vglow);
     let used = modern_hud::su_fill(p.support_used, cap);
     bar(canvas, l, br, used, 1.0);
     let both = modern_hud::su_fill(p.support_used + pending, cap);
@@ -1363,7 +878,7 @@ fn draw_list(
         l.scroll_track.x1 + l.px(6.0),
         l.totals.y1 + l.px(4.0),
     );
-    rounded(canvas, well, 4.0 * l.scale, [0, 0, 0, 56]);
+    mm::well(canvas, &l.frame, well);
     write(
         canvas,
         pen,
@@ -1408,68 +923,14 @@ fn draw_list(
         let r = l.row(i);
         match row {
             Row::Heading(h) => {
-                let base = r.y1 - l.px(6.0);
-                let w = write(
-                    canvas,
-                    pen,
-                    Face::Bold,
-                    l.text(SMALL_PX),
-                    lsp,
-                    l.heading_x,
-                    base,
-                    GOLD,
-                    None,
-                    &h.to_uppercase(),
-                );
-                let x0 = l.heading_x + w + l.px(10.0);
-                if x0 < l.cost_right {
-                    hline(
-                        canvas,
-                        x0,
-                        l.cost_right,
-                        base - l.px(4.0),
-                        alpha(GOLD, 0.25),
-                    );
-                }
+                mm::list_heading(canvas, pen, &l.frame, l.heading_x, r, l.cost_right, h);
             }
             Row::Ship(o) => {
                 let sr = ship_row(fe, o);
                 let t = o.ship_type;
                 let hover = eased(fe, Key::Row(t));
                 let greyed = o.status == crate::ingame::host::BuildStatus::Greyed;
-                let band = Rect::new(r.x0, r.y0 + 1, r.x1, r.y1 - 1);
-                if sr.selected {
-                    rounded(
-                        canvas,
-                        band,
-                        2.0 * l.scale,
-                        lerp([255, 200, 0, 26], [255, 200, 0, 40], hover),
-                    );
-                    canvas.fill_rect(
-                        Rect::new(
-                            band.x0,
-                            band.y0 + 2,
-                            band.x0 + l.px(2.0).max(2),
-                            band.y1 - 2,
-                        ),
-                        GOLD,
-                    );
-                } else if hover > 0.0 {
-                    rounded(
-                        canvas,
-                        band,
-                        2.0 * l.scale,
-                        alpha([255, 255, 255, 18], hover / 0.6),
-                    );
-                }
-                if sr.refused > 0.0 {
-                    rounded(
-                        canvas,
-                        band,
-                        2.0 * l.scale,
-                        alpha([255, 74, 30, 90], sr.refused),
-                    );
-                }
+                mm::row_band(canvas, &l.frame, r, sr.selected, hover, sr.refused);
                 let name_col = if sr.refused > 0.5 {
                     REFUSED
                 } else if greyed {
@@ -1514,12 +975,7 @@ fn draw_list(
                     let x1 = l.minus_cx - l.step_box / 2 - l.px(18.0);
                     let br = Rect::new(l.name_x, y, x1, y + l.px(3.0).max(2));
                     if sr.paused {
-                        canvas.blend_rect(br, modern_hud::TRACK);
-                        let w = (br.width() as f32 * sr.progress) as i32;
-                        canvas.blend_rect(
-                            Rect::new(br.x0, br.y0, br.x0 + w, br.y1),
-                            [170, 182, 196, 160],
-                        );
+                        mm::paused_bar(canvas, br, sr.progress);
                     } else {
                         bar(canvas, l, br, sr.progress, 0.9);
                     }
@@ -1612,11 +1068,7 @@ fn draw_list(
     }
     // The scroll bar, when the list is longer than the page.
     if let Some(th) = l.thumb(total, top) {
-        let tr = l.scroll_track;
-        rounded(canvas, tr, 1.5, [255, 255, 255, 16]);
-        let hv = eased(fe, Key::Thumb);
-        let inner = Rect::new(tr.x0, th.y0, tr.x1, th.y1);
-        rounded(canvas, inner, 1.5, lerp([255, 200, 0, 140], GOLD, hv));
+        mm::draw_scroll(canvas, l.scroll_track, th, eased(fe, Key::Thumb));
     }
 }
 
@@ -1682,19 +1134,8 @@ fn draw_totals(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout) {
 /// description over it while Info is on.
 fn draw_preview(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout) {
     let r = l.preview;
-    rounded(canvas, r, 4.0 * l.scale, [0, 0, 0, 70]);
     // A soft light behind the ship.
-    let (cx, cy) = ((r.x0 + r.x1) as f32 / 2.0, (r.y0 + r.y1) as f32 / 2.0);
-    let rad = r.width().min(r.height()) as f32 * 0.6;
-    for y in r.y0..r.y1 {
-        for x in r.x0..r.x1 {
-            let d = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt() / rad;
-            if d < 1.0 {
-                let a = (1.0 - d).powi(2) * 0.09;
-                canvas.blend(x, y, modern_hud::with_alpha([255, 190, 80, 255], a));
-            }
-        }
-    }
+    mm::picture_box(canvas, &l.frame, r);
     let cm = &fe.game.ig.cm;
     if let (Some(img), Some(_)) = (&cm.ship_view_image, cm.ship_view) {
         let x = r.x0 + (r.width() - img.width) / 2;
@@ -1716,116 +1157,16 @@ fn draw_preview(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout) {
             "SELECT A SHIP",
         );
     }
-    // Corner brackets.
-    let len = l.px(14.0);
-    let c = alpha(GOLD, 0.8);
-    let t = 1.max(l.px(1.5));
-    for (x, y, dx, dy) in [
-        (r.x0, r.y0, 1, 1),
-        (r.x1 - 1, r.y0, -1, 1),
-        (r.x0, r.y1 - 1, 1, -1),
-        (r.x1 - 1, r.y1 - 1, -1, -1),
-    ] {
-        let hx = if dx > 0 {
-            Rect::new(x, y, x + len, y + t)
-        } else {
-            Rect::new(x - len + 1, y, x + 1, y + t)
-        };
-        let hx = if dy > 0 { hx } else { hx.offset(0, -t + 1) };
-        let vy = if dy > 0 {
-            Rect::new(x, y, x + t, y + len)
-        } else {
-            Rect::new(x, y - len + 1, x + t, y + 1)
-        };
-        let vy = if dx > 0 { vy } else { vy.offset(-t + 1, 0) };
-        canvas.blend_rect(hx, c);
-        canvas.blend_rect(vy, c);
-    }
+    mm::brackets(canvas, &l.frame, r);
     // Extended info: the description over the picture.
     if cm.extended_info {
         if let Some(o) = viewed(fe) {
-            let inner = Rect::new(
-                r.x0 + l.px(6.0),
-                r.y0 + l.px(6.0),
-                r.x1 - l.px(6.0),
-                r.y1 - l.px(6.0),
-            );
-            rounded(canvas, inner, 3.0 * l.scale, [6, 8, 12, 200]);
-            let bpx = l.text(BODY_PX);
-            let m = |t: &str| pen.measure(Face::Semibold, bpx, 0.0, t);
-            let width = (inner.width() - l.px(28.0)) as f32;
-            let mut y = inner.y0 + l.px(26.0);
-            write(
-                canvas,
-                pen,
-                Face::Bold,
-                l.text(SMALL_PX),
-                SMALL_SPACING * l.scale,
-                inner.x0 + l.px(14.0),
-                y,
-                LABEL,
-                None,
-                "SHIP INFORMATION",
-            );
-            y += l.px(24.0);
             let text = if o.description.trim().is_empty() {
                 "No information."
             } else {
                 o.description.as_str()
             };
-            let paras: Vec<Vec<String>> = text
-                .split(['\n', '\r'])
-                .filter(|p| !p.trim().is_empty())
-                .map(|p| obj::wrap(p.trim(), width, width, &m))
-                .collect();
-            let lines: usize = paras.iter().map(Vec::len).sum();
-            let room = inner.y1 - l.px(10.0) - y;
-            // Roomy when it fits, tighter (no gaps between paragraphs) when not.
-            let roomy = (bpx * 1.45).round() as i32;
-            let (line_h, gap) =
-                if lines as i32 * roomy + paras.len() as i32 * roomy / 3 <= room + roomy {
-                    (roomy, roomy / 3)
-                } else {
-                    ((bpx * 1.2).round() as i32, 0)
-                };
-            let fits = (room / line_h.max(1) + 1).max(1) as usize;
-            let mut shown = 0;
-            'out: for para in &paras {
-                for line in para {
-                    if shown + 1 == fits && shown + 1 < lines {
-                        let cut = format!("{}...", line.trim_end_matches(['.', ',', ' ']));
-                        let cut = crate::ingame::modern_panel::ellipsize(&m, &cut, width);
-                        write(
-                            canvas,
-                            pen,
-                            Face::Semibold,
-                            bpx,
-                            0.0,
-                            inner.x0 + l.px(14.0),
-                            y,
-                            TEXT,
-                            None,
-                            &cut,
-                        );
-                        break 'out;
-                    }
-                    write(
-                        canvas,
-                        pen,
-                        Face::Semibold,
-                        bpx,
-                        0.0,
-                        inner.x0 + l.px(14.0),
-                        y,
-                        TEXT,
-                        None,
-                        line,
-                    );
-                    y += line_h;
-                    shown += 1;
-                }
-                y += gap;
-            }
+            mm::text_pane(canvas, pen, &l.frame, r, "SHIP INFORMATION", text);
         }
     }
 }
@@ -1861,7 +1202,6 @@ fn draw_details(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout) {
     let lsp = SMALL_SPACING * l.scale;
     let x = d.x0 + l.px(2.0);
     let mut y = d.y0 + l.px(24.0);
-    let glow = Some((modern_hud::VALUE_GLOW, 3.0 * l.scale));
     if let Some(o) = viewed(fe) {
         let title_px = l.text(SHIP_TITLE_PX);
         let info = l.buttons[&Button::Info];
@@ -1916,38 +1256,7 @@ fn draw_details(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout) {
             ("IN QUEUE", (sr.pending + sr.queued).to_string()),
             ("BUILDING", status),
         ];
-        let colw = (d.width() - l.px(16.0)) / 2;
-        for (k, (label, value)) in cells.iter().enumerate() {
-            let cx0 = x + (k as i32 % 2) * (colw + l.px(16.0));
-            let cy = y + (k as i32 / 2) * l.px(26.0);
-            let cell = Rect::new(cx0 - l.px(2.0), cy, cx0 + colw - l.px(2.0), cy + l.px(22.0));
-            rounded(canvas, cell, 2.0 * l.scale, SECTION);
-            let b = mid_baseline(cell, lpx);
-            write(
-                canvas,
-                pen,
-                Face::Bold,
-                l.text(SMALL_PX - 1.0),
-                lsp,
-                cell.x0 + l.px(8.0),
-                b,
-                LABEL,
-                None,
-                label,
-            );
-            write_right(
-                canvas,
-                pen,
-                Face::Bold,
-                l.text(VALUE_PX - 1.0),
-                0.0,
-                cell.x1 - l.px(8.0),
-                b + l.px(1.0),
-                WHITE,
-                glow,
-                value,
-            );
-        }
+        mm::cell_grid(canvas, pen, &l.frame, x, y, d.width(), &cells);
         y += 2 * l.px(26.0) + l.px(8.0);
     } else {
         write(
@@ -1975,25 +1284,7 @@ fn draw_details(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout) {
         None => Vec::new(),
     };
     y += l.px(12.0);
-    write(
-        canvas,
-        pen,
-        Face::Bold,
-        lpx,
-        lsp,
-        x,
-        y,
-        LABEL,
-        None,
-        "IN PRODUCTION",
-    );
-    hline(
-        canvas,
-        x + pen.advance(Face::Bold, lpx, lsp, "IN PRODUCTION") + l.px(10.0),
-        d.x1,
-        y - l.px(4.0),
-        alpha(GOLD, 0.25),
-    );
+    mm::section_heading(canvas, pen, &l.frame, x, y, d.x1, "IN PRODUCTION");
     y += l.px(8.0);
     let line = l.px(22.0);
     let room = ((d.y1 - y) / line).max(0) as usize;
@@ -2059,12 +1350,7 @@ fn draw_details(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout) {
             base - l.px(5.0) + l.px(3.0).max(2),
         );
         if j.paused {
-            canvas.blend_rect(br, modern_hud::TRACK);
-            let w = (br.width() as f32 * j.progress.clamp(0.0, 1.0)) as i32;
-            canvas.blend_rect(
-                Rect::new(br.x0, br.y0, br.x0 + w, br.y1),
-                [170, 182, 196, 160],
-            );
+            mm::paused_bar(canvas, br, j.progress);
         } else {
             bar(canvas, l, br, j.progress, 0.8);
         }
@@ -2089,101 +1375,25 @@ fn draw_details(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout) {
 
 fn draw_button(fe: &Fe, canvas: &mut Canvas, pen: &Pen, l: &Layout, b: Button) {
     let r = l.buttons[&b];
-    let hv = eased(fe, Key::Button(b));
     let pressed = fe.game.ig.mbm.pressed == Some(Hit::Button(b))
         && hit_now(fe, l, fe.game.ig.mbm.mouse.0, fe.game.ig.mbm.mouse.1).0 == Hit::Button(b);
-    let primary = b == Button::Build;
-    let toggled = b == Button::Info && fe.game.ig.cm.extended_info;
     // Pause and Cancel act on the selected rows; Build on the picked counts.
     let idle = match b {
         Button::Build => fe.game.ig.cm.pending.values().all(|&n| n <= 0),
         Button::Pause | Button::Cancel => fe.game.ig.cm.selected.is_empty(),
         _ => false,
     };
-    let radius = 3.0 * l.scale;
-    let (bg0, bg1) = if primary && !idle {
-        ([255, 200, 0, 48], [255, 200, 0, 96])
-    } else if toggled {
-        ([255, 200, 0, 40], [255, 200, 0, 80])
-    } else {
-        ([255, 255, 255, 12], [255, 200, 0, 50])
+    let look = ButtonLook {
+        label: b.label(),
+        key: b.key(),
+        hover: eased(fe, Key::Button(b)),
+        pressed,
+        primary: b == Button::Build,
+        toggled: b == Button::Info && fe.game.ig.cm.extended_info,
+        idle,
+        focused: focused(fe, b.atom()),
     };
-    let mut bg = lerp(bg0, bg1, hv / 0.6);
-    if pressed {
-        bg = [255, 200, 0, 130];
-    }
-    if focused(fe, b) {
-        let ring = Rect::new(r.x0 - 3, r.y0 - 3, r.x1 + 3, r.y1 + 3);
-        rounded_outline(canvas, ring, radius + 3.0, 1.0, alpha(GOLD, 0.7));
-    }
-    rounded(canvas, r, radius, bg);
-    let border = if primary && !idle || toggled {
-        lerp(alpha(GOLD, 0.75), GOLD, hv / 0.6)
-    } else if idle {
-        lerp([255, 255, 255, 30], alpha(GOLD, 0.6), hv / 0.6)
-    } else {
-        lerp([255, 255, 255, 60], GOLD, hv / 0.6)
-    };
-    rounded_outline(canvas, r, radius, 1.0, border);
-    // A light along the top edge.
-    hline(
-        canvas,
-        r.x0 + l.px(6.0),
-        r.x1 - l.px(6.0),
-        r.y0 + 1,
-        [255, 255, 255, (12.0 + 30.0 * hv) as u8],
-    );
-    let px = l.text(BUTTON_PX);
-    let sp = BUTTON_SPACING * l.scale;
-    let col = if pressed {
-        [20, 16, 6, 255]
-    } else if primary && !idle || toggled {
-        lerp(LABEL, WHITE, hv / 0.6)
-    } else if idle {
-        lerp(MUTED, WHITE, hv / 0.6)
-    } else {
-        lerp(TEXT, WHITE, hv / 0.6)
-    };
-    // The hot key in a small cap on the right.
-    let kpx = l.text(SMALL_PX - 1.0);
-    let kw = pen.advance(Face::Bold, kpx, 0.0, b.key()).max(l.px(7.0));
-    let cap_w = kw + l.px(10.0);
-    let cap_h = l.px(16.0).min(r.height() - 6);
-    let cap = Rect::new(
-        r.x1 - l.px(8.0) - cap_w,
-        (r.y0 + r.y1) / 2 - cap_h / 2,
-        r.x1 - l.px(8.0),
-        (r.y0 + r.y1) / 2 - cap_h / 2 + cap_h,
-    );
-    let shift = i32::from(pressed);
-    let label_room = cap.x0 - r.x0;
-    let w = pen.advance(Face::Bold, px, sp, b.label());
-    let lx = r.x0 + (label_room - w) / 2 + l.px(4.0);
-    write(
-        canvas,
-        pen,
-        Face::Bold,
-        px,
-        sp,
-        lx.max(r.x0 + l.px(8.0)),
-        mid_baseline(r, px) + shift,
-        col,
-        None,
-        b.label(),
-    );
-    rounded_outline(canvas, cap, 2.0 * l.scale, 1.0, alpha(col, 0.45));
-    write_centred(
-        canvas,
-        pen,
-        Face::Bold,
-        kpx,
-        0.0,
-        (cap.x0 + cap.x1) / 2,
-        mid_baseline(cap, kpx) + shift,
-        alpha(col, 0.8),
-        None,
-        b.key(),
-    );
+    mm::draw_button(canvas, pen, &l.frame, r, &look);
 }
 
 #[cfg(test)]
@@ -2372,37 +1582,19 @@ mod tests {
     }
 
     #[test]
-    fn rounded_rect_coverage() {
-        let r = Rect::new(0, 0, 20, 10);
-        assert_eq!(rounded_cov(r, 3.0, 10.5, 5.5), 1.0);
-        assert!(rounded_cov(r, 3.0, 0.5, 0.5) < 0.3, "corners are cut");
-        assert_eq!(rounded_cov(r, 3.0, 25.0, 5.0), 0.0);
-        let mut c = Canvas::new(30, 20);
-        rounded(&mut c, Rect::new(2, 2, 28, 18), 4.0, [255, 255, 255, 255]);
-        assert_eq!(c.get(15, 10), [255, 255, 255, 255]);
-        assert_ne!(c.get(2, 2), [255, 255, 255, 255]);
-        let mut c = Canvas::new(30, 20);
-        rounded_outline(
-            &mut c,
-            Rect::new(2, 2, 28, 18),
-            4.0,
-            1.0,
-            [255, 255, 255, 255],
-        );
-        assert_eq!(c.get(15, 10)[0], 0, "an outline leaves the inside");
-        assert!(c.get(15, 2)[0] > 200);
-    }
-
-    #[test]
     fn mode_switch() {
         assert_eq!(parse_mode("Modern"), Some(true));
         assert_eq!(parse_mode("original"), Some(false));
         assert_eq!(parse_mode("x"), None);
         let o = Options::default();
-        assert!(!o.get_bool(OPTION_KEY), "off by default");
-        let (on, errors) = Options::from_text("hwcModernBuildManager = 1\n");
+        assert!(o.get_bool(OPTION_KEY), "on by default");
+        assert!(enabled(&o));
+        let (off, errors) = Options::from_text("hwcModernBuildManager = 0\n");
         assert!(errors.is_empty());
-        assert!(on.get_bool(OPTION_KEY));
+        assert!(!enabled(&off));
+        // The original HUD brings the original screen back.
+        let (old_hud, _) = Options::from_text("hwcModernHud = 0\n");
+        assert!(!enabled(&old_hud));
     }
 
     #[test]

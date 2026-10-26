@@ -1,9 +1,9 @@
-//! Game-data screenshots of the modern build manager preview
-//! (`hwc_ui::ingame::modern_build_manager`, `--build-ui modern`) in mission 1: acolytes and
-//! recons in production at the Kuun-Lan, more picked in the manager, a ship in the view, at
-//! 1920x1080, 1024x768 and 640x480 (and with Info on). Screenshots go to
-//! `screenshots/buildui/`. Needs the game install (`HWC_GAME_DIR`) and a GPU adapter; skips
-//! otherwise. Slow in a debug build: run with `--release`.
+//! Game-data screenshots of the modern build manager (`hwc_ui::ingame::modern_build_manager`,
+//! `--build-ui modern`, the default) in mission 1: acolytes and recons in production at the
+//! Kuun-Lan, more picked in the manager, a ship in the view, at 1920x1080, 1024x768 and
+//! 640x480 (and with Info on). Screenshots go to `screenshots/buildui/`. Needs the game install
+//! (`HWC_GAME_DIR`) and a GPU adapter; skips otherwise. Slow in a debug build: run with
+//! `--release`.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -162,7 +162,7 @@ fn in_mission(size: (i32, i32), tag: &str) {
     };
     let mut game = rig.mission_one();
     let g = &mut *game;
-    g.ui.fe.game.options.set_bool(mbm::OPTION_KEY, true);
+    assert!(mbm::enabled(&g.ui.fe.game.options), "on by default");
     let mut frames = 0;
     while !(g.world.run().game.ships_have_arrived
         && g.world.run().game.sp_state == sp_state::NONE

@@ -37,6 +37,8 @@ mod preview;
 mod profile;
 #[cfg(test)]
 mod quality_shots;
+#[cfg(test)]
+mod resui_shots;
 mod sensors;
 mod ship_preview;
 #[cfg(test)]
@@ -122,11 +124,15 @@ options:
   --hud <mode>          modern (default, a user-requested change: RU and SU bars in the
                         top-right corner, in the style of the later Homeworld games) or
                         original (the SU / RU / time box, bottom right); options file:
-                        hwcModernHud = 1/0
-  --build-ui <mode>     original (default) or modern: a preview of the build manager
-                        restyled in the modern HUD's look (same controls, keys and
-                        actions); options file: hwcModernBuildManager = 0/1. The
-                        cataclysm-buildui build starts with modern.
+                        hwcModernHud = 1/0. The original HUD also brings back the
+                        original build and research managers (unless --build-ui or
+                        --research-ui says otherwise)
+  --build-ui <mode>     modern (default, a user-requested change: the build manager in the
+                        modern HUD's look, same controls, keys and actions) or original
+                        (the original screen); options file: hwcModernBuildManager = 1/0
+  --research-ui <mode>  modern (default, a user-requested change: the research manager in
+                        the modern HUD's look, same controls, keys and actions) or original
+                        (the original screen); options file: hwcModernResearchManager = 1/0
   --letterbox <mode>    tall (default, a user-requested change: the cutscene and fleet-intel
                         bars are never thinner than on a 4:3 screen of the same height, 14%
                         of it each) or original (bars around a 1.85:1 picture: on a 16:9
@@ -212,11 +218,6 @@ pub struct Args {
 }
 
 fn parse_args() -> Result<Args, String> {
-    // The `buildui` build (cataclysm-buildui.exe) starts with the modern build manager;
-    // `--build-ui original` still turns it off.
-    if cfg!(feature = "buildui") {
-        hwc_ui::ingame::modern_build_manager::set_override(Some(true));
-    }
     let mut a = Args {
         data: None,
         scale: ScaleMode::Original,
@@ -339,6 +340,12 @@ fn parse_args() -> Result<Args, String> {
                 let modern = hwc_ui::ingame::modern_build_manager::parse_mode(&v)
                     .ok_or_else(|| format!("unknown --build-ui mode {v}"))?;
                 hwc_ui::ingame::modern_build_manager::set_override(Some(modern));
+            }
+            "--research-ui" => {
+                let v = value("--research-ui")?;
+                let modern = hwc_ui::ingame::modern_research_manager::parse_mode(&v)
+                    .ok_or_else(|| format!("unknown --research-ui mode {v}"))?;
+                hwc_ui::ingame::modern_research_manager::set_override(Some(modern));
             }
             "--profile" => crate::profile::enable(),
             "--hud" => {

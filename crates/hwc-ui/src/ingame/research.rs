@@ -307,7 +307,13 @@ fn tech_list(fe: &mut Fe, call: &Call) {
     }
 }
 
-fn selected_tech(fe: &Fe) -> Option<&Tech> {
+/// The screen's technology list (`RM_TechListWindow`), while the screen is up.
+pub(crate) fn list_atom(fe: &Fe) -> Option<AtomRef> {
+    fe.game.ig.rm.list
+}
+
+/// The technology selected in the list (what Research acts on).
+pub(crate) fn selected_tech(fe: &Fe) -> Option<&Tech> {
     let a = fe.game.ig.rm.list?;
     let l = fe.list(a)?;
     let item = l.selected.and_then(|i| l.items.get(i))?;
@@ -318,7 +324,7 @@ fn selected_tech(fe: &Fe) -> Option<&Tech> {
 }
 
 /// Progress (0..1) of a tech being researched.
-fn progress_of(view: &HostView, tech: TechId) -> f32 {
+pub(crate) fn progress_of(view: &HostView, tech: TechId) -> f32 {
     view.labs
         .iter()
         .find(|l| l.topic == Some(tech))
@@ -481,7 +487,7 @@ pub fn clear_lab(fe: &mut Fe) {
     }
 }
 
-fn select_lab(fe: &mut Fe, ev: u32, lab: usize) {
+pub(crate) fn select_lab(fe: &mut Fe, ev: u32, lab: usize) {
     if ev != RPE_PRESS_LEFT {
         return;
     }

@@ -283,6 +283,15 @@ fn run(size: (i32, i32), tag: &str) {
 fn over_build_manager(size: (i32, i32), tag: &str) {
     let Some(src) = source() else { return };
     let mut ui = ui(src, size);
+    // The original manager's frame (the modern managers have their own tests).
+    ui.fe
+        .game
+        .options
+        .set_bool(hwc_ui::ingame::modern_build_manager::OPTION_KEY, false);
+    ui.fe
+        .game
+        .options
+        .set_bool(hwc_ui::ingame::modern_research_manager::OPTION_KEY, false);
     let mut host = host();
     frame(&mut ui, &mut host);
     ui.open(&host, Manager::Construction);

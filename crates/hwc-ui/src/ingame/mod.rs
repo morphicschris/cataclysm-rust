@@ -21,9 +21,11 @@ pub mod modern_build;
 pub mod modern_build_manager;
 pub mod modern_hud;
 pub mod modern_log;
+pub mod modern_manager;
 pub mod modern_objectives;
 pub mod modern_panel;
 pub mod modern_research;
+pub mod modern_research_manager;
 pub mod modern_selected;
 pub mod overlay;
 pub mod popup;
@@ -95,8 +97,10 @@ pub struct IgState {
     pub binding: Option<Action>,
     pub manager: Option<Manager>,
     pub cm: consmgr::State,
-    /// The modern build manager's own state (preview, `--build-ui modern`).
+    /// The modern build manager's own state (`--build-ui`).
     pub mbm: modern_build_manager::State,
+    /// The modern research manager's own state (`--research-ui`).
+    pub mrm: modern_research_manager::State,
     pub lm: launchmgr::State,
     pub rm: research::State,
     pub tm: trader::State,
@@ -321,6 +325,9 @@ impl InGameUi {
                 if modern_build_manager::active(&self.fe) {
                     modern_build_manager::mouse_move(&mut self.fe, x, y);
                 }
+                if modern_research_manager::active(&self.fe) {
+                    modern_research_manager::mouse_move(&mut self.fe, x, y);
+                }
                 popup::mouse_move(&mut self.fe, x, y);
                 shipprint::mouse_move(&mut self.fe, x, y);
                 self.fe.game.ig.overlay.set_mouse(x, y);
@@ -333,6 +340,10 @@ impl InGameUi {
                     }
                     if modern_build_manager::active(&self.fe) {
                         modern_build_manager::mouse_button(&mut self.fe, left, down);
+                        return true;
+                    }
+                    if modern_research_manager::active(&self.fe) {
+                        modern_research_manager::mouse_button(&mut self.fe, left, down);
                         return true;
                     }
                     self.fe.mouse_button(left, down);
@@ -351,6 +362,10 @@ impl InGameUi {
             InputEvent::Wheel { up } => {
                 if modern_build_manager::active(&self.fe) {
                     modern_build_manager::wheel(&mut self.fe, up);
+                    return true;
+                }
+                if modern_research_manager::active(&self.fe) {
+                    modern_research_manager::wheel(&mut self.fe, up);
                     return true;
                 }
                 if self.fe.game.ig.manager.is_some() {
@@ -505,6 +520,7 @@ impl InGameUi {
             modern_build_manager::tick(&mut self.fe);
             launchmgr::tick(&mut self.fe);
             research::tick(&mut self.fe);
+            modern_research_manager::tick(&mut self.fe);
         } else {
             self.fe.time += f64::from(dt);
         }
@@ -551,6 +567,8 @@ impl InGameUi {
         }
         if modern_build_manager::active(&self.fe) {
             modern_build_manager::draw(&mut self.fe, canvas);
+        } else if modern_research_manager::active(&self.fe) {
+            modern_research_manager::draw(&mut self.fe, canvas);
         } else if self.fe.game.ig.manager.is_some() {
             self.fe.render_over(canvas);
         }
@@ -621,7 +639,10 @@ pub fn open_manager(fe: &mut Fe, m: Manager) {
             modern_build_manager::reset(fe);
         }
         Manager::Launch => launchmgr::begin(fe),
-        Manager::Research => research::begin(fe),
+        Manager::Research => {
+            research::begin(fe);
+            modern_research_manager::reset(fe);
+        }
         Manager::EscMenu => fe.game.ig.request(GameRequest::Sound(0x108)),
         _ => {}
     }

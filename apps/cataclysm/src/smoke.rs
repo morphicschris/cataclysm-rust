@@ -193,6 +193,10 @@ fn mission_one_plays_through_the_game_path() {
         }
     };
     let g = &mut *game;
+    // This path clicks the original managers' regions (the modern ones have their own tests).
+    let options = &mut g.ui.fe.game.options;
+    options.set_bool(hwc_ui::ingame::modern_build_manager::OPTION_KEY, false);
+    options.set_bool(hwc_ui::ingame::modern_research_manager::OPTION_KEY, false);
     // The fleet arrives from hyperspace (update 220 in mission 1).
     rig.frames(g, 120);
     rig.render(g, "03_hyperspace_arrival");

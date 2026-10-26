@@ -204,6 +204,15 @@ The managers are the `.fib` screens of `FEMan\` on the same front-end manager as
 | Escape menu (`In_game_esc_menu*`, `SP_Game_Over`, `Quit_game2`, save / load, `Game_options` and its option screens) | Variant by mode (tutorial, campaign, skirmish, multiplayer); pauses except in multiplayer; option Accept / Cancel return to `Game_options`. |
 | Fleet intelligence (`Single_Player_Objective`) | The clicked objective's text (`Arial_b12`, (0,200,200)); pauses. |
 
+The build and research managers are shown in the modern HUD's style by default (a
+user-requested change; the original screens stay open underneath for their keys, callbacks and
+rules, and the new panels act through the same functions as the original's regions). The
+switches are `--build-ui original|modern` and `--research-ui original|modern`, options-file
+keys `hwcModernBuildManager` and `hwcModernResearchManager` (default 1); the original HUD
+(`--hud original`, `hwcModernHud = 0`) brings back both original screens too. See
+[modern-managers.md](modern-managers.md) for the layout, what each control calls and what is
+not 1:1.
+
 Drawn directly over the 3D view:
 
 * **Main overlay**, from `MainOverlay.script` ("shown,backdrop" per panel, per single / multi
