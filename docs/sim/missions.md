@@ -282,10 +282,28 @@ Single-player research gating (`rmUpdateTechList`): `research::available_topics`
 research manager offers: not known, not being researched, its lab present, and allowed by the
 mission (`TechSetResearch` = `AllowPlayerToResearch`; the flags carry over between missions and
 in the carry-over file). Formations ordered to attack close on the target in formation until it is
-within 10 km and the leader's gun range (`attack_in_range`, +0x27a); neutral and aggressive leaders
-then share their target with the wingmen (`processAttackToDoInFormation`'s target rules; the
-per-class `delegateCommand` attack is the ships' own attack here); the formation is kept when the
-attack ends.
+within 10 km and the leader's gun range (`attack_in_range`, +0x27a). A leader whose tactics hold the
+formation during battle (`holdFormationDuringBattle`: neutral and aggressive, not evasive) then
+attacks in formation, as `processAttackToDoInFormation` (0x43ea80) does: every ship gets a target
+(the wingmen are put on the leader's when it is not itself under a command, or, with aggressive
+tactics, take it when they have none; sphere wingmen re-pick the closest target every 32 updates
+when theirs is out of gun range), and `formGroups` splits the formation into fighters, heavy
+defenders, corvettes and the rest, each attacking through `delegateCommand` (0x43e270) on a copy
+of the command whose selection is the group. The group leader makes its own attack runs
+(`CustShipAttack`); for fighters, its flip turns and barrel rolls (`tacticsTalk`) lock the
+formation's axes (`lockFormation`, the heading reversed for a turn) and are flown by the wingmen
+too, and when the turn ends the formation unlocks with its slots mirrored left to right (and
+`flipState` toggled); the wingmen fire passively only at targets ahead of the group leader,
+holding their heading on them, and fly their slots (tight; loose while a wingman is still in the
+leader's manoeuvre). Heavy defenders and capital ships hold loose slots and fire passively;
+corvettes are tight while their leader turns or comes back in, and a minelayer never leads its
+group and breaks formation to lay its mines. Spheres hold their own shape (`enders`). When the
+targets are gone, strike craft fly the holding pattern (`processHoldingPattern`: legs of
+`TW_HOLDING_PATTERN_PATHTIME` seconds, turning right, the wingmen in their slots) and other ships
+stop; the formation is kept. Evasive leaders attack as loose ships (`processAttackToDo`) and the
+formation re-forms when the attack ends. Not modelled: kamikaze attacks, the guard checks during
+the attack, and the attack routines' range argument; sphere formations are not flown by this
+slice.
 
 Status with the scripted player (headless, `--speech 3`): missions 1 (fresh start), 4 and 6 (from
 the `warp.script` fleet) complete for real. Mission 3 from the warp fleet now usually fails: the

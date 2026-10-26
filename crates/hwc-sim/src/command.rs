@@ -92,6 +92,12 @@ pub struct CommandToDo {
     pub protect_flags: u32,
     /// +0x2c0: the military parade of a [`order::MILITARY_PARADE`] command.
     pub parade: Option<crate::parade::MilitaryParade>,
+    /// Holding pattern after an attack (`holdingStartTime` +0x30c, `turnAroundTimes` +0x318,
+    /// `holdingPatternVec` +0x31c): the start of the current leg, the turns made so far and
+    /// the offset each ship flies to from its `holdingPatternPos`.
+    pub holding_start_time: f32,
+    pub turn_around_times: i32,
+    pub holding_pattern_vec: Vector,
 }
 
 /// The dock part of a command.
@@ -201,6 +207,9 @@ fn new_command(selection: Vec<ShipId>) -> CommandToDo {
         protect: Vec::new(),
         protect_flags: 0,
         parade: None,
+        holding_start_time: 0.0,
+        turn_around_times: 0,
+        holding_pattern_vec: Vector::ZERO,
     }
 }
 
@@ -846,23 +855,387 @@ fn formation_attack_approach(u: &mut Universe, cid: CommandId) -> bool {
     false
 }
 
-/// The target rules of `processAttackToDoInFormation`: the leader picks its own target; a
-/// wingman takes the leader's when it has none and the leader's target is not in a formation
-/// (or the leader is aggressive: focus fire), and is put on it whenever the leader's target is
-/// not in a formation.
-fn share_leader_target(u: &mut Universe, cid: CommandId) {
-    let Some(cmd) = u.commands.get(cid).cloned() else { return };
-    let leader = cmd.selection[0];
-    let focus = u.ships.ship(leader).tactics == crate::object::tactics::AGGRESSIVE;
-    let Some(lt) = u.ships.ship(leader).attack.target.filter(|t| u.ships.get(*t).is_some()) else { return };
-    let lt_loose = u.ships.ship(lt).command.and_then(|c| u.commands.get(c)).is_none_or(|c| c.attributes & attr::FORMATION == 0);
-    for &id in &cmd.selection[1..] {
-        let s = u.ships.ship(id);
-        let none = s.attack.target.is_none_or(|t| u.ships.get(t).is_none());
-        if (none && (lt_loose || focus)) || (lt_loose && s.attack.target != Some(lt)) {
-            u.ships.ship_mut(id).attack.target = Some(lt);
+/// `SPHERE_CHECK_TARGET_MASK` / `_FRAME` (0x8a228c, 0x8a2290): how often a sphere's wingmen
+/// check that their target is still within gun range.
+const SPHERE_CHECK_TARGET_MASK: u32 = 31;
+const SPHERE_CHECK_TARGET_FRAME: u32 = 21;
+
+/// The class groups of `formGroups` / `delegateCommand`.
+pub mod attack_group {
+    pub const DEFENDERS: u32 = 10;
+    pub const INTERCEPTORS: u32 = 11;
+    pub const CAPITALS: u32 = 12;
+    pub const CORVETTES: u32 = 13;
+}
+
+/// A formation's ships by how they attack (`formGroups` 0x43e150), each list in selection
+/// order: heavy defenders, corvettes, capital and other ships, and the other fighters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FormGroups {
+    pub defenders: Vec<ShipId>,
+    pub corvettes: Vec<ShipId>,
+    pub capitals: Vec<ShipId>,
+    pub interceptors: Vec<ShipId>,
+}
+
+/// `formGroups` (0x43e150).
+pub fn form_groups(u: &Universe, selection: &[ShipId]) -> FormGroups {
+    use crate::statics::{ShipClass, ShipType};
+    let mut g = FormGroups::default();
+    for &id in selection {
+        let t = u.ships.ship(id).ship_type;
+        match u.statics.ship(t).and_then(|s| s.ship_class) {
+            Some(ShipClass::Fighter) if matches!(t, ShipType::kHeavyDefender | ShipType::tHeavyDefender) => g.defenders.push(id),
+            Some(ShipClass::Fighter) => g.interceptors.push(id),
+            Some(ShipClass::Corvette) => g.corvettes.push(id),
+            _ => g.capitals.push(id),
         }
     }
+    g
+}
+
+fn alive(u: &Universe, t: Option<ShipId>) -> Option<ShipId> {
+    t.filter(|t| u.ships.get(*t).is_some())
+}
+
+/// Whether a wingman may be put on the leader's target: it is not itself under a command
+/// (`formationcommand`, which is the ship's command in Cataclysm).
+fn shareable(u: &Universe, leader_target: Option<ShipId>) -> bool {
+    leader_target.is_some_and(|t| u.ships.ship(t).command.is_none())
+}
+
+/// `processAttackToDoInFormation` (0x43ea80): a formation whose leader's tactics hold the
+/// formation during battle attacks without breaking it. Every ship gets a target (the
+/// wingmen share the leader's when it is not itself under a command, or always with
+/// aggressive tactics), then each class group attacks through [`delegate_command`]: the group
+/// leader makes its full attack runs and the others hold their slots on it, firing only at
+/// targets ahead of it. True when the attack is over.
+pub fn process_attack_to_do_in_formation(u: &mut Universe, cid: CommandId) -> bool {
+    use crate::statics::ShipClass;
+    let cmd = u.commands.get(cid).expect("command").clone();
+    let sel = cmd.selection.clone();
+    if sel.is_empty() {
+        return true;
+    }
+    let leader = sel[0];
+    let focus_fire = u.ships.ship(leader).tactics == crate::object::tactics::AGGRESSIVE;
+    if cmd.attack_targets.is_empty() {
+        let strike_craft = sel.iter().all(|&id| {
+            let c = u.statics.ship(u.ships.ship(id).ship_type).and_then(|s| s.ship_class);
+            matches!(c, Some(ShipClass::Fighter) | Some(ShipClass::Corvette))
+        });
+        for &id in &sel {
+            let s = u.ships.ship_mut(id);
+            s.holding_pattern_pos = s.posinfo.position;
+        }
+        if strike_craft {
+            // Strike craft fly a holding pattern, starting along the leader's heading.
+            let now = u.total_time_elapsed;
+            let dist = u.tweaks.combat.holding_pattern_path_distance;
+            let h = u.ships.ship(leader).heading();
+            let c = u.commands.get_mut(cid).expect("command");
+            c.holding_start_time = now;
+            c.turn_around_times = 0;
+            c.holding_pattern_vec = Vector::new(st(ld(dist) * ld(h.x)), st(ld(dist) * ld(h.y)), st(ld(dist) * ld(h.z)));
+            c.attributes |= attr::HOLDING_PATTERN;
+            return true;
+        }
+        if cmd.attributes != 0 {
+            return true;
+        }
+        let statics = u.statics.clone();
+        let tw = u.tweaks.clone();
+        let dt = u.phys_time_elapsed;
+        let mut all = true;
+        for &id in &sel {
+            let s = u.ships.ship_mut(id);
+            all &= aitrack::steady_ship(s, statics.ship(s.ship_type).expect("statics"), &tw, dt);
+        }
+        return all;
+    }
+    // (Guard conditions during the attack are not modelled.)
+    let counter = u.update_counter;
+    let rate = u.tweaks.combat.multipletargets_retarget_rate;
+    let sphere = matches!(cmd.formation.formation_type, formation::kind::SPHERE | formation::kind::SENTINEL_SPHERE);
+    let mut leader_target = None;
+    for (i, &id) in sel.iter().enumerate() {
+        u.ships.ship_mut(id).ship_idle = false;
+        let target = alive(u, u.ships.ship(id).attack.target);
+        if i == 0 {
+            leader_target = target;
+        }
+        if target.is_none() {
+            if i == 0 {
+                let t = attack_closest_opponent(u, id, &cmd.attack_targets);
+                set_target(u, id, t);
+                leader_target = t;
+            } else {
+                let pick = if leader_target.is_some() && (shareable(u, leader_target) || focus_fire) {
+                    leader_target
+                } else {
+                    attack_closest_opponent(u, id, &cmd.attack_targets)
+                };
+                set_target(u, id, pick);
+            }
+        }
+        if i >= 1 {
+            if shareable(u, leader_target) {
+                u.ships.ship_mut(id).attack.target = leader_target;
+            }
+            if sphere && counter & SPHERE_CHECK_TARGET_MASK == SPHERE_CHECK_TARGET_FRAME {
+                if let Some(t) = alive(u, u.ships.ship(id).attack.target) {
+                    let (s, ts) = (u.ships.ship(id), u.ships.ship(t));
+                    let p = s.posinfo.position;
+                    let q = ts.posinfo.position;
+                    let (dx, dy, dz) = (ld(q.x) - ld(p.x), ld(q.y) - ld(p.y), ld(q.z) - ld(p.z));
+                    let dist = fsqrt((dz * dz + dy * dy) + dx * dx);
+                    let range = u.statics.ship(s.ship_type).map_or(0.0, |ss| ss.bullet_range[s.tactics.min(2)]);
+                    if ld(range) < dist {
+                        let pick = attack_closest_opponent(u, id, &cmd.attack_targets);
+                        set_target(u, id, pick);
+                    }
+                }
+            }
+        }
+        if u.ships.ship(id).attack.multiple_targets.is_some() && counter & rate == u32::from(id.0) & rate {
+            pick_multiple_attack_targets(u, id, &cmd.attack_targets);
+        }
+    }
+    let groups = form_groups(u, &sel);
+    let doform = if sphere {
+        if u.commands.get(cid).is_some_and(|c| c.formation.enders != 1) {
+            u.commands.get_mut(cid).expect("command").formation.enders = 1;
+            content_has_changed(u, cid);
+        }
+        formation::process(u, cid, false, true);
+        false
+    } else {
+        true
+    };
+    let snapshot = u.commands.get(cid).expect("command").clone();
+    if snapshot.attack_targets.is_empty() {
+        return true;
+    }
+    let mut done = false;
+    for (group, ships) in [
+        (attack_group::INTERCEPTORS, &groups.interceptors),
+        (attack_group::DEFENDERS, &groups.defenders),
+        (attack_group::CORVETTES, &groups.corvettes),
+        (attack_group::CAPITALS, &groups.capitals),
+    ] {
+        if !ships.is_empty() {
+            let mut fake = snapshot.clone();
+            fake.selection = ships.clone();
+            done |= delegate_command(u, cid, &mut fake, group, doform);
+        }
+    }
+    done
+}
+
+/// `formationContentHasChanged` for the types this slice lays out.
+fn content_has_changed(u: &mut Universe, cid: CommandId) {
+    let t = u.commands.get(cid).map_or(0, |c| c.formation.formation_type);
+    if t != formation::kind::WALL && t != formation::kind::SPHERE && t != formation::kind::SENTINEL_SPHERE {
+        formation::calculate_offsets(u, cid);
+    }
+}
+
+/// `delegateCommand` (0x43e270): one class group of a formation attack. `fake` is the
+/// formation command with the group as its selection (the group's first ship leads it), as
+/// it was before any group attacked this frame; `doform` keeps the group in formation (false
+/// for spheres, which hold their own shape). Always false (the attack goes on).
+pub fn delegate_command(u: &mut Universe, cid: CommandId, fake: &mut CommandToDo, group: u32, doform: bool) -> bool {
+    use crate::statics::ShipType;
+    let moving = fake.attributes & attr::ATTACKING_AND_MOVING != 0;
+    if moving {
+        process_move_to_do(u, cid, true, 0, true);
+    }
+    // The group leader attacks for real (`CustShipAttack`) when the group holds its formation;
+    // otherwise, or while attacking on the move, it only fires (`CustShipAttackPassive`).
+    let full = doform && !moving;
+    let lead_attack = |u: &mut Universe, id: ShipId| {
+        let Some(t) = alive(u, u.ships.ship(id).attack.target) else { return };
+        if full {
+            crate::attack::ship_attack(u, id, t);
+        } else {
+            crate::attack::ship_attack_passive(u, id, t, true);
+        }
+    };
+    let passive = |u: &mut Universe, id: ShipId| {
+        if let Some(t) = alive(u, u.ships.ship(id).attack.target) {
+            crate::attack::ship_attack_passive(u, id, t, true);
+        }
+    };
+    match group {
+        attack_group::INTERCEPTORS => {
+            let sel = fake.selection.clone();
+            let leader = sel[0];
+            lead_attack(u, leader);
+            // The leader's manoeuvres (`tacticsTalk`): a flip turn or barrel roll locks the
+            // formation's axes and hands the same manoeuvre to the wingmen; when it is over the
+            // formation unlocks and, after a flip turn, its slots are mirrored.
+            if let Some(lc) = u.ships.ship(leader).command.filter(|c| u.commands.get(*c).is_some()) {
+                let talk = u.ships.ship(leader).tactics_talk;
+                let f = u.commands.get(lc).expect("command").formation.clone();
+                if talk == 0 {
+                    if f.flip_selection_fixed {
+                        formation::unlock(u, lc);
+                        if f.need_fix {
+                            for &w in &sel[1..] {
+                                let s = u.ships.ship_mut(w);
+                                s.formation_offset.y = -s.formation_offset.y;
+                            }
+                            let c = u.commands.get_mut(lc).expect("command");
+                            c.formation.need_fix = false;
+                            c.formation.flip_state = u32::from(c.formation.flip_state == 0);
+                        }
+                    }
+                    u.commands.get_mut(lc).expect("command").formation.flip_selection_fixed = false;
+                } else if !f.flip_selection_fixed {
+                    let flip = talk & crate::flightman::tactalk::BARRELROLL == 0;
+                    u.commands.get_mut(lc).expect("command").formation.need_fix = flip;
+                    formation::lock(u, lc, flip);
+                    u.commands.get_mut(lc).expect("command").formation.flip_selection_fixed = true;
+                    let fm = u.ships.ship(leader).flightman;
+                    for &w in &sel[1..] {
+                        crate::flightman::init(u, w, fm, 0, None);
+                        u.ships.ship_mut(w).tactics_need_to_flightman = 1;
+                    }
+                }
+            }
+            let sphere = matches!(fake.formation.formation_type, formation::kind::SPHERE | formation::kind::SENTINEL_SPHERE);
+            let mut loose = false;
+            for &w in &sel[1..] {
+                u.ships.ship_mut(w).attack.events = 0;
+                if u.ships.ship(w).tactics_need_to_flightman != 0 {
+                    if crate::flightman::execute(u, w) {
+                        u.ships.ship_mut(w).tactics_need_to_flightman = 0;
+                    } else {
+                        loose = true;
+                    }
+                    continue;
+                }
+                if !crate::attack::can_attack_passive(u, w) {
+                    continue;
+                }
+                let Some(t) = alive(u, u.ships.ship(w).attack.target) else { continue };
+                // A wingman fires only at a target ahead of the group leader, and then keeps
+                // its heading on it while it flies its slot.
+                let h = u.ships.ship(leader).heading();
+                let (p, q) = (u.ships.ship(w).posinfo.position, u.ships.ship(t).posinfo.position);
+                let ahead = (ld(p.x) - ld(q.x)) * ld(h.x) + (ld(p.y) - ld(q.y)) * ld(h.y) + (ld(p.z) - ld(q.z)) * ld(h.z) < 0.0;
+                if sphere || ahead {
+                    crate::attack::ship_attack_passive(u, w, t, true);
+                    u.ships.ship_mut(w).dont_rotate_formation_fire = true;
+                } else {
+                    u.ships.ship_mut(w).dont_rotate_formation_fire = false;
+                }
+            }
+            if doform {
+                formation::process_command(u, fake, false, loose);
+            }
+            for &id in &sel {
+                u.ships.ship_mut(id).dont_rotate_formation_fire = false;
+            }
+        }
+        attack_group::DEFENDERS | attack_group::CAPITALS => {
+            let sel = fake.selection.clone();
+            let leader = sel[0];
+            if alive(u, u.ships.ship(leader).attack.target).is_none() {
+                let t = attack_closest_opponent(u, leader, &fake.attack_targets);
+                set_target(u, leader, t);
+            }
+            let rate = u.tweaks.combat.multipletargets_retarget_rate;
+            if u.ships.ship(leader).attack.multiple_targets.is_some() && u.update_counter & rate == u32::from(leader.0) & rate {
+                pick_multiple_attack_targets(u, leader, &fake.attack_targets);
+            }
+            // (The attack's `tacticsMaxDistToTarget` range argument is not used by the attack
+            // routines of this slice.)
+            lead_attack(u, leader);
+            for &w in &sel[1..] {
+                passive(u, w);
+                let s = u.ships.ship_mut(w);
+                if group == attack_group::CAPITALS {
+                    s.ship_idle = false;
+                }
+                s.attack.events = 0;
+            }
+            if doform {
+                formation::process_command(u, fake, false, true);
+            }
+        }
+        attack_group::CORVETTES => {
+            // A minelayer does not lead a corvette group (the original's swap loop, as is).
+            let is_minelayer = |u: &Universe, id: ShipId| u.ships.ship(id).ship_type == ShipType::tMinelayerCorvette;
+            if is_minelayer(u, fake.selection[0]) {
+                for k in 1..fake.selection.len() {
+                    if !is_minelayer(u, fake.selection[k]) {
+                        fake.selection.swap(0, k);
+                    }
+                }
+            }
+            let sel = fake.selection.clone();
+            let leader = sel[0];
+            lead_attack(u, leader);
+            for &w in &sel[1..] {
+                if crate::attack::can_attack_passive(u, w) {
+                    passive(u, w);
+                } else if is_minelayer(u, w) {
+                    // Minelayers leave their slots to lay their mines.
+                    u.ships.ship_mut(w).special_flags |= special::BROKEN_FORMATION;
+                    if let Some(t) = alive(u, u.ships.ship(w).attack.target) {
+                        crate::attack::ship_attack(u, w, t);
+                    }
+                }
+                u.ships.ship_mut(w).attack.events = 0;
+            }
+            if doform {
+                // A tight formation while the leader turns round or comes back in, loose
+                // otherwise.
+                let turning = matches!(u.ships.ship(leader).ai_state_attack, 3 | 4);
+                formation::process_command(u, fake, false, !turning);
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+/// `processHoldingPattern` (0x447230): strike craft that have run out of targets fly legs of
+/// `TW_HOLDING_PATTERN_PATHTIME` seconds, turning right after each, until they have made
+/// `TW_HOLDING_PATTERN_NUM_TURNS` turns (true: done). A formation flies only its leader; the
+/// wingmen keep their slots.
+fn process_holding_pattern(u: &mut Universe, cid: CommandId) -> bool {
+    let Some(cmd) = u.commands.get(cid).cloned() else { return true };
+    if cmd.selection.is_empty() {
+        return true;
+    }
+    let tw = u.tweaks.combat.clone();
+    let now = u.total_time_elapsed;
+    if ld(tw.holding_pattern_pathtime) < ld(now) - ld(cmd.holding_start_time) {
+        let l = u.ships.ship(cmd.selection[0]);
+        let (r, h) = (l.rotinfo.coordsys.col(1), l.heading());
+        let leg = |hv: f32, rv: f32| {
+            let dir = st(ld(tw.holding_pattern_heading_coefficient) * ld(hv) + ld(rv) * ld(tw.holding_pattern_right_coefficient));
+            st(ld(dir) * ld(tw.holding_pattern_path_distance))
+        };
+        let v = Vector::new(leg(h.x, r.x), leg(h.y, r.y), leg(h.z, r.z));
+        let c = u.commands.get_mut(cid).expect("command");
+        c.holding_start_time = now;
+        c.holding_pattern_vec = v;
+        c.turn_around_times += 1;
+        if ld(tw.holding_pattern_num_turns) < hwc_math::fpu::fild_i32(c.turn_around_times) {
+            return true;
+        }
+    }
+    let v = u.commands.get(cid).expect("command").holding_pattern_vec;
+    let count = if cmd.attributes & attr::FORMATION != 0 { 1 } else { cmd.selection.len() };
+    for &id in &cmd.selection[..count] {
+        let p = u.ships.ship(id).holding_pattern_pos;
+        let dest = Vector::new(st(ld(p.x) + ld(v.x)), st(ld(p.y) + ld(v.y)), st(ld(p.z) + ld(v.z)));
+        aiship::fly_to_point_avoiding_objs(u, id, Some(dest), fly::POINT_IN_DIRECTION_FLYING | fly::FAST_AS_POSSIBLE, tw.holding_pattern_path_max_speed, None);
+    }
+    false
 }
 
 /// `clProcess` (0x447400) for the orders of this slice.
@@ -898,10 +1271,13 @@ pub fn cl_process(u: &mut Universe) {
                             } else {
                                 aitrack::steady_ship(u.ships.ship_mut(leader), stat, &tw, dt);
                             }
+                        } else if process_holding_pattern(u, cid) {
+                            u.commands.get_mut(cid).expect("command").attributes &= !attr::HOLDING_PATTERN;
                         }
                         if passive {
                             formation::process(u, cid, false, true);
                         } else {
+                            let attrs = u.commands.get(cid).map_or(0, |c| c.attributes);
                             formation::process(u, cid, attrs & attr::HOLDING_PATTERN == 0, false);
                         }
                     } else {
@@ -921,23 +1297,16 @@ pub fn cl_process(u: &mut Universe) {
                     if formation_attack_approach(u, cid) {
                         continue;
                     }
-                    // `processAttackToDo` (evasive leader or a lone ship) or
-                    // `processAttackToDoInFormation` (neutral and aggressive leaders hold the
-                    // formation: `holdFormationDuringBattle`). The in-formation attack is
-                    // modelled by its target rules (the wingmen take the leader's target when
-                    // it is not itself in a formation, or always when aggressive) on top of the
-                    // ships' own attack; sphere and claw formations keep their shape.
+                    // `processAttackToDo` (a leader whose tactics do not hold the formation
+                    // during battle, `holdFormationDuringBattle`: evasive, or a lone ship) or
+                    // `processAttackToDoInFormation` (neutral and aggressive leaders).
                     let cmd = u.commands.get(cid).expect("command").clone();
                     let leader = cmd.selection[0];
                     let t = u.ships.ship(leader).tactics.min(2);
                     let hold = u.tweaks.combat.hold_formation_during_battle[t] != 0 && cmd.selection.len() > 1;
-                    if hold {
-                        share_leader_target(u, cid);
-                    }
-                    if process_attack_to_do(u, cid) {
+                    let done = if hold { process_attack_to_do_in_formation(u, cid) } else { process_attack_to_do(u, cid) };
+                    if done {
                         finish_attack(u, cid);
-                    } else if hold && matches!(cmd.formation.formation_type, formation::kind::SPHERE | formation::kind::CLAW) {
-                        formation::process(u, cid, false, true);
                     }
                 }
                 order::DOCK => {
@@ -1236,8 +1605,11 @@ fn free_last_order(u: &mut Universe, cid: CommandId) {
         }
         _ => {}
     }
-    if let Some(c) = u.commands.get_mut(cid) {
-        c.attributes &= !attr::HOLDING_PATTERN;
+    // Every order but an attack ends the holding pattern (the attack's end starts it).
+    if cmd.order != order::ATTACK {
+        if let Some(c) = u.commands.get_mut(cid) {
+            c.attributes &= !attr::HOLDING_PATTERN;
+        }
     }
 }
 
@@ -2678,5 +3050,272 @@ mod tests {
             }
         }
     }
-}
 
+    mod formation_attack {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        use super::super::*;
+        use crate::flightman::{kind as fm, tactalk};
+        use crate::object::tactics;
+        use crate::statics::{ShipClass, ShipRace, ShipStaticInfo, ShipType, StaticWorld, Tweaks};
+        use crate::tunables::SimTweaks;
+
+        /// A universe with one statics entry per `(type, class)` (no guns or combat data), the
+        /// first player Somtaaw and the second Taiidan.
+        fn world(types: &[(ShipType, ShipClass)]) -> Universe {
+            let mut ships: Vec<Option<ShipStaticInfo>> = vec![None; ShipType::COUNT];
+            for &(t, class) in types {
+                let mut s = ShipStaticInfo::new(t, String::new());
+                s.ship_race = ShipRace::Somtaaw;
+                s.ship_class = Some(class);
+                s.header.coll.coll_sphere_size = 20.0;
+                s.formation_padding_modifier = 1.0;
+                s.health.max_health = 100.0;
+                s.bullet_range = [1000.0; 3];
+                ships[t.index()] = Some(s);
+            }
+            let statics = StaticWorld {
+                options: Default::default(),
+                tweaks: Tweaks::default(),
+                ships,
+                missiles: Vec::new(),
+                mines: Vec::new(),
+                mine_max_diameter: 0.0,
+                asteroids: Vec::new(),
+                dust_clouds: Vec::new(),
+                nebulae: Vec::new(),
+                derelicts: Vec::new(),
+                research: Default::default(),
+                unit_caps: Default::default(),
+                unit_cap_presets: BTreeMap::new(),
+                team_colors: Default::default(),
+                default_lod: None,
+                default_mex: None,
+                warnings: Vec::new(),
+            };
+            let mut tw = SimTweaks::compiled();
+            tw.formation_padding = [1.0, 2.0];
+            Universe::new(Arc::new(statics), tw, &[ShipRace::Somtaaw, ShipRace::Taiidan])
+        }
+
+        /// An attack-ordered formation of `types` (in that selection order) on `targets`.
+        fn formation(u: &mut Universe, ships: &[(ShipType, Vector)], formation_type: u32, targets: &[ShipId]) -> (CommandId, Vec<ShipId>) {
+            let ids: Vec<ShipId> = ships.iter().map(|&(t, p)| u.add_ship(t, 0, p, None).unwrap()).collect();
+            let mut cmd = new_command(ids.clone());
+            cmd.attributes = attr::FORMATION;
+            cmd.order = order::ATTACK;
+            cmd.formation.formation_type = formation_type;
+            cmd.attack_targets = targets.to_vec();
+            cmd.attack_in_range = true;
+            let cid = u.commands.insert_for_test(cmd);
+            for &id in &ids {
+                u.ships.ship_mut(id).command = Some(cid);
+            }
+            formation::calculate_offsets(u, cid);
+            (cid, ids)
+        }
+
+        fn at(x: f32) -> Vector {
+            Vector::new(x, 0.0, 0.0)
+        }
+
+        #[test]
+        fn form_groups_split_by_class() {
+            let mut u = world(&[
+                (ShipType::sAcolyte, ShipClass::Fighter),
+                (ShipType::kHeavyDefender, ShipClass::Fighter),
+                (ShipType::tHeavyDefender, ShipClass::Fighter),
+                (ShipType::tMinelayerCorvette, ShipClass::Corvette),
+                (ShipType::sMimic, ShipClass::Corvette),
+                (ShipType::tResourceCollector, ShipClass::Resource),
+            ]);
+            let types = [
+                ShipType::tResourceCollector,
+                ShipType::sAcolyte,
+                ShipType::kHeavyDefender,
+                ShipType::sMimic,
+                ShipType::tHeavyDefender,
+                ShipType::sAcolyte,
+                ShipType::tMinelayerCorvette,
+            ];
+            let ids: Vec<ShipId> = types.iter().enumerate().map(|(i, &t)| u.add_ship(t, 0, at(i as f32 * 100.0), None).unwrap()).collect();
+            let g = form_groups(&u, &ids);
+            assert_eq!(g.interceptors, vec![ids[1], ids[5]]);
+            assert_eq!(g.defenders, vec![ids[2], ids[4]]);
+            assert_eq!(g.corvettes, vec![ids[3], ids[6]]);
+            assert_eq!(g.capitals, vec![ids[0]]);
+        }
+
+        #[test]
+        fn wingmen_share_a_target_that_is_not_under_a_command() {
+            let mut u = world(&[(ShipType::sAcolyte, ShipClass::Fighter), (ShipType::tResourceCollector, ShipClass::Resource)]);
+            let near = u.add_ship(ShipType::tResourceCollector, 1, at(5000.0), None).unwrap();
+            let far = u.add_ship(ShipType::tResourceCollector, 1, at(9000.0), None).unwrap();
+            let ships: Vec<_> = (0..4).map(|i| (ShipType::sAcolyte, Vector::new(0.0, i as f32 * 100.0, 0.0))).collect();
+            let (cid, ids) = formation(&mut u, &ships, formation::kind::DELTA, &[near, far]);
+            // A wingman already on another target is put on the leader's (it is loose).
+            u.ships.ship_mut(ids[2]).attack.target = Some(far);
+            assert!(!process_attack_to_do_in_formation(&mut u, cid));
+            let leader = u.commands.get(cid).unwrap().selection[0];
+            let lt = u.ships.ship(leader).attack.target;
+            assert_eq!(lt, Some(near), "the leader takes the closest target");
+            for &id in &ids {
+                assert_eq!(u.ships.ship(id).attack.target, lt, "ship {}", id.0);
+            }
+        }
+
+        #[test]
+        fn wingmen_pick_their_own_when_the_leaders_target_has_a_command() {
+            for (tac, focus) in [(tactics::NEUTRAL, false), (tactics::AGGRESSIVE, true)] {
+                let mut u = world(&[(ShipType::sAcolyte, ShipClass::Fighter), (ShipType::tResourceCollector, ShipClass::Resource)]);
+                let a = u.add_ship(ShipType::tResourceCollector, 1, at(5000.0), None).unwrap();
+                let b = u.add_ship(ShipType::tResourceCollector, 1, Vector::new(0.0, 900.0, 0.0), None).unwrap();
+                // Both targets are flying a formation of their own.
+                let mut theirs = new_command(vec![a, b]);
+                theirs.attributes = attr::FORMATION;
+                let tc = u.commands.insert_for_test(theirs);
+                u.ships.ship_mut(a).command = Some(tc);
+                u.ships.ship_mut(b).command = Some(tc);
+                let ships = [(ShipType::sAcolyte, at(0.0)), (ShipType::sAcolyte, Vector::new(0.0, 800.0, 0.0))];
+                let (cid, ids) = formation(&mut u, &ships, formation::kind::DELTA, &[a, b]);
+                for &id in &ids {
+                    u.ships.ship_mut(id).tactics = tac;
+                }
+                let sel = u.commands.get(cid).unwrap().selection.clone();
+                u.ships.ship_mut(sel[0]).attack.target = Some(a);
+                process_attack_to_do_in_formation(&mut u, cid);
+                let want = if focus { a } else { attack_closest_opponent(&u, sel[1], &[a, b]).unwrap() };
+                assert_eq!(u.ships.ship(sel[1]).attack.target, Some(want), "tactics {tac}");
+            }
+        }
+
+        #[test]
+        fn strike_craft_fly_a_holding_pattern_when_the_targets_are_gone() {
+            let mut u = world(&[(ShipType::sAcolyte, ShipClass::Fighter), (ShipType::tResourceCollector, ShipClass::Resource)]);
+            u.tweaks.combat.holding_pattern_path_distance = 4000.0;
+            let ships = [(ShipType::sAcolyte, at(0.0)), (ShipType::sAcolyte, Vector::new(0.0, 300.0, 0.0))];
+            let (cid, _) = formation(&mut u, &ships, formation::kind::DELTA, &[]);
+            assert!(process_attack_to_do_in_formation(&mut u, cid));
+            let c = u.commands.get(cid).unwrap();
+            assert!(c.attributes & attr::HOLDING_PATTERN != 0);
+            let h = u.ships.ship(c.selection[0]).heading();
+            assert_eq!(c.holding_pattern_vec, Vector::new(h.x * 4000.0, h.y * 4000.0, h.z * 4000.0));
+            // Other ships just come to a stop.
+            let mut u = world(&[(ShipType::tResourceCollector, ShipClass::Resource)]);
+            let ships = [(ShipType::tResourceCollector, at(0.0)), (ShipType::tResourceCollector, Vector::new(0.0, 300.0, 0.0))];
+            let (cid, _) = formation(&mut u, &ships, formation::kind::BROAD, &[]);
+            u.commands.get_mut(cid).unwrap().attributes = 0;
+            assert!(process_attack_to_do_in_formation(&mut u, cid), "stationary ships are steady at once");
+            assert!(u.commands.get(cid).unwrap().attributes & attr::HOLDING_PATTERN == 0);
+        }
+
+        #[test]
+        fn a_flip_turn_locks_the_formation_and_mirrors_the_slots_after() {
+            let mut u = world(&[(ShipType::sAcolyte, ShipClass::Fighter), (ShipType::tResourceCollector, ShipClass::Resource)]);
+            let t = u.add_ship(ShipType::tResourceCollector, 1, at(5000.0), None).unwrap();
+            let ships: Vec<_> = (0..3).map(|i| (ShipType::sAcolyte, Vector::new(0.0, i as f32 * 100.0, 0.0))).collect();
+            let (cid, _) = formation(&mut u, &ships, formation::kind::DELTA, &[t]);
+            let sel = u.commands.get(cid).unwrap().selection.clone();
+            let offsets: Vec<Vector> = sel.iter().map(|&id| u.ships.ship(id).formation_offset).collect();
+            let leader = sel[0];
+            {
+                let l = u.ships.ship_mut(leader);
+                l.tactics_talk = tactalk::FLIPTURN;
+                l.flightman = fm::FLIPTURN;
+            }
+            let heading = u.ships.ship(leader).heading();
+            process_attack_to_do_in_formation(&mut u, cid);
+            let f = u.commands.get(cid).unwrap().formation.clone();
+            assert!(f.locked && f.flip_selection_fixed && f.need_fix);
+            assert_eq!(f.coordsys.col(2), Vector::new(-heading.x, -heading.y, -heading.z), "the heading is reversed");
+            for &w in &sel[1..] {
+                let s = u.ships.ship(w);
+                assert_eq!(s.flightman, fm::FLIPTURN, "wingman {} flies the leader's turn", w.0);
+            }
+            // The turn ends: unlocked, the slots mirrored left to right, the flip state toggled.
+            u.ships.ship_mut(leader).tactics_talk = 0;
+            process_attack_to_do_in_formation(&mut u, cid);
+            let f = u.commands.get(cid).unwrap().formation.clone();
+            assert!(!f.locked && !f.flip_selection_fixed && !f.need_fix);
+            assert_eq!(f.flip_state, 1);
+            for (k, &w) in sel.iter().enumerate().skip(1) {
+                let o = u.ships.ship(w).formation_offset;
+                assert_eq!(o, Vector::new(offsets[k].x, -offsets[k].y, offsets[k].z));
+            }
+        }
+
+        #[test]
+        fn a_barrel_roll_locks_without_reversing_or_mirroring() {
+            let mut u = world(&[(ShipType::sAcolyte, ShipClass::Fighter), (ShipType::tResourceCollector, ShipClass::Resource)]);
+            let t = u.add_ship(ShipType::tResourceCollector, 1, at(5000.0), None).unwrap();
+            let ships: Vec<_> = (0..3).map(|i| (ShipType::sAcolyte, Vector::new(0.0, i as f32 * 100.0, 0.0))).collect();
+            let (cid, _) = formation(&mut u, &ships, formation::kind::CLAW, &[t]);
+            let sel = u.commands.get(cid).unwrap().selection.clone();
+            let offsets: Vec<Vector> = sel.iter().map(|&id| u.ships.ship(id).formation_offset).collect();
+            let leader = sel[0];
+            u.ships.ship_mut(leader).tactics_talk = tactalk::BARRELROLL;
+            let m = u.ships.ship(leader).rotinfo.coordsys;
+            process_attack_to_do_in_formation(&mut u, cid);
+            let f = u.commands.get(cid).unwrap().formation.clone();
+            assert!(f.locked && !f.need_fix);
+            assert_eq!(f.coordsys, m);
+            u.ships.ship_mut(leader).tactics_talk = 0;
+            process_attack_to_do_in_formation(&mut u, cid);
+            let f = u.commands.get(cid).unwrap().formation.clone();
+            assert!(!f.locked && f.flip_state == 0);
+            for (k, &w) in sel.iter().enumerate() {
+                assert_eq!(u.ships.ship(w).formation_offset, offsets[k]);
+            }
+        }
+
+        #[test]
+        fn a_minelayer_does_not_lead_and_breaks_formation_to_lay_mines() {
+            let mut u = world(&[
+                (ShipType::tMinelayerCorvette, ShipClass::Corvette),
+                (ShipType::sMimic, ShipClass::Corvette),
+                (ShipType::tResourceCollector, ShipClass::Resource),
+            ]);
+            let t = u.add_ship(ShipType::tResourceCollector, 1, at(5000.0), None).unwrap();
+            let m = u.add_ship(ShipType::tMinelayerCorvette, 0, at(0.0), None).unwrap();
+            let c = u.add_ship(ShipType::sMimic, 0, at(-300.0), None).unwrap();
+            let mut cmd = new_command(vec![m, c]);
+            cmd.attributes = attr::FORMATION;
+            cmd.order = order::ATTACK;
+            cmd.attack_targets = vec![t];
+            let cid = u.commands.insert_for_test(cmd);
+            u.ships.ship_mut(m).command = Some(cid);
+            u.ships.ship_mut(c).command = Some(cid);
+            let mut fake = u.commands.get(cid).unwrap().clone();
+            u.ships.ship_mut(m).attack.target = Some(t);
+            delegate_command(&mut u, cid, &mut fake, attack_group::CORVETTES, true);
+            assert_eq!(fake.selection, vec![c, m], "the other corvette leads the group");
+            // The minelayer has no passive attack in this world, so it leaves its slot.
+            assert!(u.ships.ship(m).special_flags & special::BROKEN_FORMATION != 0);
+        }
+
+        #[test]
+        fn a_sphere_marks_enders_and_retargets_wingmen_out_of_range() {
+            let mut u = world(&[(ShipType::sAcolyte, ShipClass::Fighter), (ShipType::tResourceCollector, ShipClass::Resource)]);
+            let near = u.add_ship(ShipType::tResourceCollector, 1, Vector::new(0.0, 600.0, 0.0), None).unwrap();
+            let far = u.add_ship(ShipType::tResourceCollector, 1, at(20000.0), None).unwrap();
+            // Both targets are under a command, so the leader's is not forced on the wingmen.
+            let mut theirs = new_command(vec![near, far]);
+            theirs.attributes = attr::FORMATION;
+            let tc = u.commands.insert_for_test(theirs);
+            u.ships.ship_mut(near).command = Some(tc);
+            u.ships.ship_mut(far).command = Some(tc);
+            let ships = [(ShipType::sAcolyte, at(0.0)), (ShipType::sAcolyte, Vector::new(0.0, 300.0, 0.0))];
+            let (cid, _) = formation(&mut u, &ships, formation::kind::SPHERE, &[near, far]);
+            let sel = u.commands.get(cid).unwrap().selection.clone();
+            u.ships.ship_mut(sel[1]).attack.target = Some(far);
+            u.update_counter = SPHERE_CHECK_TARGET_FRAME + 1;
+            process_attack_to_do_in_formation(&mut u, cid);
+            assert_eq!(u.commands.get(cid).unwrap().formation.enders, 1);
+            assert_eq!(u.ships.ship(sel[1]).attack.target, Some(far), "only checked on the sphere frame");
+            u.update_counter = SPHERE_CHECK_TARGET_FRAME + 32;
+            process_attack_to_do_in_formation(&mut u, cid);
+            assert_eq!(u.ships.ship(sel[1]).attack.target, Some(near), "beyond gun range: the closest target");
+        }
+    }
+}

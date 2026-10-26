@@ -396,6 +396,9 @@ pub struct Ship {
     pub ai_state_command: u8,
     /// `dontrotateever` (+0x356) and `dontapplyforceever` (+0x357).
     pub dont_rotate_ever: bool,
+    /// Bit 4 of `dontrotateever`: a wingman of a formation attack is firing at a target ahead
+    /// (`delegateCommand`), so the formation keeps its heading on the target this frame.
+    pub dont_rotate_formation_fire: bool,
     /// Bit 0: never apply forces; bit 1: a right-of-way manoeuvre owns the thrusters.
     pub dont_apply_force_ever: u8,
     /// `aidescend` (+0x360): 0, or ±1/(height to descend) for the fancy capital-ship descent.
@@ -532,6 +535,7 @@ impl Ship {
             ai_state_attack: 0,
             ai_state_command: 0,
             dont_rotate_ever: false,
+            dont_rotate_formation_fire: false,
             dont_apply_force_ever: 0,
             ai_descend: 0.0,
             command: None,
@@ -582,6 +586,11 @@ impl Ship {
             death_time: 0.0,
             sensed_by: 0,
         }
+    }
+
+    /// Whether any `dontrotateever` bit is set (the ship's rotation is left alone).
+    pub fn rotation_frozen(&self) -> bool {
+        self.dont_rotate_ever || self.dont_rotate_formation_fire
     }
 
     /// Heading (third column of the coordinate system).

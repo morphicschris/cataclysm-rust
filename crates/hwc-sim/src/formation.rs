@@ -63,6 +63,12 @@ pub struct FormationInfo {
     pub percent_max_speed: f32,
     pub sort_order: u32,
     pub flip_state: u32,
+    /// `flipselectionfixed` (+0x264): the leader's flip turn or barrel roll has locked the
+    /// formation and handed the manoeuvre to the wingmen.
+    pub flip_selection_fixed: bool,
+    /// `needFix` (+0x268): the lock reversed the heading (a flip turn), so the slots are
+    /// mirrored when it ends.
+    pub need_fix: bool,
     /// Cataclysm's extra formation parameter (+0x288).
     pub variant: i32,
 }
@@ -79,6 +85,8 @@ impl Default for FormationInfo {
             percent_max_speed: 0.0,
             sort_order: 0,
             flip_state: 0,
+            flip_selection_fixed: false,
+            need_fix: false,
             variant: 0,
         }
     }
@@ -551,6 +559,13 @@ fn fly_to_slot_steady(u: &mut Universe, id: ShipId, leader_vel: Vector, slot: Ve
 /// `processFormationToDo` (0x47e100) for the slot-based formation types.
 pub fn process(u: &mut Universe, cid: CommandId, steady: bool, passive_attacked: bool) {
     let Some(cmd) = u.commands.get(cid).cloned() else { return };
+    process_command(u, &cmd, steady, passive_attacked);
+}
+
+/// `processFormationToDo` on a command value: the formation attack runs it on a copy of the
+/// command whose selection is one class group of the formation (`delegateCommand`).
+pub fn process_command(u: &mut Universe, cmd: &CommandToDo, steady: bool, passive_attacked: bool) {
+    let cid = cmd.id;
     let selection = cmd.selection.clone();
     let n = selection.len();
     if n == 0 {
@@ -651,6 +666,28 @@ pub fn process(u: &mut Universe, cid: CommandId, steady: bool, passive_attacked:
             c.formation.percent_max_speed = pct;
         }
         set_travel_velocity(u, leader_cmd);
+    }
+}
+
+/// `lockFormation` (0x481970): the formation keeps the leader's present axes (reversing the
+/// heading for a flip turn) until [`unlock`].
+pub fn lock(u: &mut Universe, cid: CommandId, reverse_heading: bool) {
+    let Some(leader) = u.commands.get(cid).and_then(|c| c.selection.first().copied()) else { return };
+    let mut m = u.ships.ship(leader).rotinfo.coordsys;
+    if reverse_heading {
+        for k in 6..9 {
+            m.m[k] = -m.m[k];
+        }
+    }
+    let c = u.commands.get_mut(cid).expect("command");
+    c.formation.coordsys = m;
+    c.formation.locked = true;
+}
+
+/// `unlockFormation` (0x481a10).
+pub fn unlock(u: &mut Universe, cid: CommandId) {
+    if let Some(c) = u.commands.get_mut(cid) {
+        c.formation.locked = false;
     }
 }
 

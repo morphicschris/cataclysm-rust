@@ -640,7 +640,7 @@ fn push_rotate(u: &mut Universe, tid: ShipId, heading: Vector, facing_ok: f32, m
     let statics = u.statics.clone();
     let inv_dt = 1.0 / ld(u.phys_time_elapsed);
     let Some(t) = u.ships.get_mut(tid) else { return false };
-    if t.dont_rotate_ever {
+    if t.rotation_frozen() {
         return true;
     }
     if crate::resource::is_worker(t.ship_type) {

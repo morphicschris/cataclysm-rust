@@ -46,7 +46,7 @@ pub fn heading(
     sinbank: f32,
     flags: u32,
 ) -> bool {
-    if ship.dont_rotate_ever {
+    if ship.rotation_frozen() {
         return true;
     }
     let z = |v: f32| eq_or_unordered(ld(v), 0.0);
@@ -163,7 +163,7 @@ pub fn heading_with_bank_pitch(
     pitch_turn: f32,
     flags: u32,
 ) -> bool {
-    if ship.dont_rotate_ever {
+    if ship.rotation_frozen() {
         return true;
     }
     let h = ship.heading();
@@ -446,7 +446,7 @@ pub fn zero_rotation_anywhere(ship: &mut Ship, stat: &ShipStaticInfo, tw: &SimTw
 /// `aitrackHeadingAndUp` (0x418a90): turn so the heading and up vectors match the desired
 /// ones. True when both are within `accuracy` (the rotation is then stopped).
 pub fn heading_and_up(ship: &mut Ship, stat: &ShipStaticInfo, dt: f32, desired_heading: Vector, desired_up: Vector, accuracy: f32) -> bool {
-    if ship.dont_rotate_ever {
+    if ship.rotation_frozen() {
         return true;
     }
     let h = ship.heading();
