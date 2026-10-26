@@ -44,6 +44,8 @@ use crate::world::World;
 /// Pixels the pointer may move between press and release and still count as a click
 /// (`selClickBoxWidth/Height`: a band box needs `|dx| + 1 > 5`).
 const CLICK_SLOP: i32 = 5;
+/// Seconds between two clicks on the same ship for a double click (as the front end's).
+const DOUBLE_CLICK_TIME: f32 = 0.5;
 /// Outline of the ships a band box gathers (`selSelectingDraw`, colour at 0x888970).
 const SELECTING_COLOR: Color = [192, 192, 0, 255];
 /// The tactical overlay's text colour (`TO_TextColor`, 0xffff4040).
@@ -234,6 +236,11 @@ pub struct Game {
     pub right_click_move: bool,
     /// The open move plate came from that right click: right confirms it, left cancels it.
     plate_from_right: bool,
+    /// A user-requested change, on by default (`hwcDoubleClickSelectType`): double-clicking
+    /// one of the player's ships selects all the player's ships of its type on screen.
+    pub double_click_type: bool,
+    /// The last plain click on one of the player's ships, for the double click.
+    last_ship_click: Option<(ShipId, std::time::Instant)>,
 }
 
 /// A factory job with ships still to build: (factory, job, ship type).
@@ -351,6 +358,8 @@ impl Game {
             plate_font: res.font(&plate::readout_font_name(tweak.as_ref())),
             pointer_warp: None,
             right_click_move: options.get("hwcRightClickMove") != 0,
+            double_click_type: options.get("hwcDoubleClickSelectType") != 0,
+            last_ship_click: None,
             plate_from_right: false,
             nis_notes: Vec::new(),
             queued_nis: None,
@@ -550,6 +559,8 @@ impl Game {
         match self.pick_ship(size, p) {
             Some(id) => self.object_click(id, audio),
             None => {
+                // Only two clicks in a row on the same ship make a double click.
+                self.last_ship_click = None;
                 if !self.ui.action_held(keys::MULTIPLE_SELECT) {
                     self.selection.clear();
                 }
@@ -580,6 +591,30 @@ impl Game {
         }
     }
 
+    /// The player's selectable ships of `id`'s type whose centre is on screen, `id` first.
+    pub(crate) fn same_type_on_screen(&self, id: ShipId) -> Vec<ShipId> {
+        let size = self.size();
+        let u = self.world.universe();
+        let Some(kind) = u.ship(id).map(|s| s.ship_type) else { return vec![id] };
+        let mut sel = vec![id];
+        for &other in &u.ship_list {
+            if other == id || !selectable(u, other) {
+                continue;
+            }
+            let Some(s) = u.ship(other) else { continue };
+            if s.player != PLAYER || s.ship_type != kind {
+                continue;
+            }
+            let on_screen = Self::screen_pos(&self.world, size, other).is_some_and(|(x, y, _)| {
+                x >= 0 && y >= 0 && x < size.0 as i32 && y < size.1 as i32
+            });
+            if on_screen {
+                sel.push(other);
+            }
+        }
+        sel
+    }
+
     /// `mrObjectClick`.
     fn object_click(&mut self, id: ShipId, audio: &mut Option<Audio>) {
         let u = self.world.universe();
@@ -606,6 +641,18 @@ impl Game {
                 self.selection.push(id);
             }
         } else {
+            let now = std::time::Instant::now();
+            let double = self.double_click_type
+                && self.last_ship_click.is_some_and(|(last, t)| {
+                    last == id && now.duration_since(t).as_secs_f32() <= DOUBLE_CLICK_TIME
+                });
+            if double {
+                self.last_ship_click = None;
+                self.selection = self.same_type_on_screen(id);
+                sound(audio, CLICK);
+                return;
+            }
+            self.last_ship_click = Some((id, now));
             // `mrFormationShips`: the clicked ship's formation comes with it.
             let mut sel = vec![id];
             if let Some(c) = s.command.and_then(|c| u.commands.get(c)) {

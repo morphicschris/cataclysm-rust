@@ -123,6 +123,9 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // 1: with ships selected, a right click on empty space opens the move plate and
     // Shift+right click the menu; 0: the original's right click (`--right-click`).
     ("hwcRightClickMove", 1),
+    // 1: double-clicking one of the player's ships selects every ship of that type the
+    // player owns on screen (a user-requested change); 0: the original's plain click.
+    ("hwcDoubleClickSelectType", 1),
     // 1: the mouse wheel eases the zoom to each notch's distance; 0: the original's
     // immediate step per notch (`--zoom`).
     ("hwcSmoothZoom", 1),

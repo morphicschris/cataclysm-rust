@@ -106,6 +106,9 @@ options:
                         right click on empty space opens the move plate, Shift+right click
                         the menu) or original (the menu, or the context-sensitive action);
                         options file: hwcRightClickMove = 1/0
+                        (double-clicking one of your ships selects all your ships of that
+                        type on screen, a user-requested change; options file:
+                        hwcDoubleClickSelectType = 1/0)
   --zoom <mode>         smooth (default, a user-requested change: each mouse-wheel notch
                         eases the camera to its distance) or original (the original's
                         immediate step); options file: hwcSmoothZoom = 1/0

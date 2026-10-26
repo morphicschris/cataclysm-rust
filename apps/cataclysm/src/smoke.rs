@@ -1126,3 +1126,84 @@ fn full_detail_and_the_move_plate_height() {
     });
     assert!(moving, "move order given");
 }
+
+/// Double-clicking one of the player's ships selects all the player's ships of its type on
+/// screen (`hwcDoubleClickSelectType`, a user-requested change); off, it is a plain click.
+#[test]
+fn double_click_selects_the_type_on_screen() {
+    let Some((data, mut rig)) = setup() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut loading = Loading::new(data.clone(), &rig.session, 1, 2, SIZE).expect("loading");
+    loading.opening_nis = false;
+    loading.loader.play_nislets = false;
+    let mut game = loop {
+        if let Progress::Ready(g) = loading.advance(&rig.session, Some(&mut rig.renderer), DT) {
+            break g;
+        }
+    };
+    let g = &mut *game;
+    rig.frames(g, 1600);
+    // Look at the most numerous of the player's ship types.
+    let u = g.world.universe();
+    let mut by_type: std::collections::BTreeMap<usize, Vec<hwc_sim::ShipId>> = Default::default();
+    for &id in &u.ship_list {
+        if let Some(s) = u.ship(id) {
+            if s.player == crate::host::PLAYER && crate::host::selectable(u, id) {
+                by_type.entry(s.ship_type.index()).or_default().push(id);
+            }
+        }
+    }
+    let Some(group) = by_type.into_values().max_by_key(|v| v.len()).filter(|v| v.len() >= 2) else {
+        eprintln!("skipped: no type with two ships");
+        return;
+    };
+    g.world.focus_on(group, false);
+    rig.frames(g, 80);
+    // A ship of the player's whose type has several ships on screen, under the pointer.
+    let u = g.world.universe();
+    let candidates: Vec<_> = u
+        .ship_list
+        .iter()
+        .copied()
+        .filter(|&id| u.ship(id).is_some_and(|s| s.player == crate::host::PLAYER))
+        .filter_map(|id| ship_px(g, id).map(|p| (id, p)))
+        .filter(|&(_, (x, y))| x > 0 && y > 0 && x < SIZE.0 && y < SIZE.1)
+        .collect();
+    // Click candidates until one selects a ship whose type has company on screen.
+    let mut pick = None;
+    for (_, (x, y)) in candidates {
+        rig.click(g, 3, SIZE.1 / 2, true);
+        rig.settle(g);
+        rig.click(g, x, y, true);
+        if let [h] = g.selection[..] {
+            if g.same_type_on_screen(h).len() >= 2 {
+                pick = Some((h, (x, y)));
+                break;
+            }
+        }
+    }
+    let Some((id, (x, y))) = pick else {
+        eprintln!("skipped: no type with two ships on screen under the pointer");
+        return;
+    };
+    // Start a fresh pair of clicks.
+    rig.click(g, 3, SIZE.1 / 2, true);
+    rig.settle(g);
+    let want = g.same_type_on_screen(id);
+    rig.click(g, x, y, true);
+    assert_eq!(g.selection.len(), 1, "a single click selects the one ship");
+    rig.click(g, x, y, true);
+    let mut got = g.selection.clone();
+    let mut w = want.clone();
+    got.sort();
+    w.sort();
+    assert_eq!(got, w, "a double click selects every ship of the type on screen");
+    // Off: the second click is a plain click again.
+    g.double_click_type = false;
+    rig.click(g, 3, SIZE.1 / 2, true);
+    rig.click(g, x, y, true);
+    rig.click(g, x, y, true);
+    assert_eq!(g.selection.len(), 1);
+}
