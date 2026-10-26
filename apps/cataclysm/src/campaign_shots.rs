@@ -632,3 +632,284 @@ fn intro_pings_show_in_the_fleet_intel_and_the_fog_hides_the_enemy() {
         .count();
     assert!(hidden > 0, "every enemy ship is shown through the fog");
 }
+
+fn save_cam(g: &Game, name: &str) {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/cam");
+    std::fs::create_dir_all(&dir).expect("screenshot dir");
+    g.canvas()
+        .save_png(&dir.join(format!("{name}.png")))
+        .expect("png");
+}
+
+/// Mission 1 from the opening NIS: the Kuun-Lan is never drawn before its window opens, and
+/// the ships that travelled inside it come out through its launch points after the arrival
+/// (`singlePlayerLoadNewLevel` docks them, `clAutoLaunch` at `G_ShipsHaveArrived` launches
+/// them). Screenshots go to `screenshots/cam/`.
+#[test]
+fn mission_one_arrival_from_the_opening() {
+    use hwc_sim::statics::ShipType;
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(1, true);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    assert!(g.world.nis_level().is_some(), "mission 1 did not start with its NIS level");
+    rig.frame(g);
+    let mut done = false;
+    let mut frames = 0;
+    for _ in 0..16 * 3 {
+        rig.frame(g);
+    }
+    while !done {
+        g.skip_nis();
+        done = rig.frame(g).contains(&Outcome::NisLevelDone);
+        if !done && frames < 6 {
+            g.render(&mut rig.renderer, SIZE).expect("render");
+            save_cam(g, &format!("m1_opening_skipped_{frames}"));
+        }
+        frames += 1;
+        assert!(frames < 16 * 30, "the opening NIS did not end");
+    }
+    eprintln!("opening NIS ended {frames} frames after the skip");
+    let mut game = rig.after_nis_level(game);
+    let g = &mut *game;
+    let mut log: Vec<String> = Vec::new();
+    let mut bad: Vec<u32> = Vec::new();
+    let mut frames = 0u32;
+    let mut shots = 0;
+    let mut was_drawn = false;
+    let mut docked = 0;
+    let mut before_shot = false;
+    let (mut flash_max, mut flash_shot) = (0f32, false);
+    loop {
+        let r = g.world.run();
+        if r.game.ships_have_arrived && r.game.sp_state == sp_state::NONE {
+            break;
+        }
+        rig.frame(g);
+        frames += 1;
+        assert!(frames < 16 * 400, "the fleet never arrived in mission 1:\n{}", log.join("\n"));
+        let u = g.world.universe();
+        let nis = g.nis.as_ref().map(|n| format!("{:?} {:.1}", n.kind, n.player.time));
+        let ms = u.ship_list.iter().copied().find(|&id| u.ship(id).is_some_and(|s| s.ship_type == ShipType::sMothership && s.player == 0));
+        let Some(ms) = ms else {
+            if frames.is_multiple_of(32) {
+                log.push(format!("{frames}: no mothership; nis {nis:?} sp {}", g.world.run().game.sp_state));
+            }
+            continue;
+        };
+        let drawn = hwc_sim::effects::ship_drawn(u, ms);
+        let flash = g.world.run().game.hyper.arrival_flash;
+        flash_max = flash_max.max(flash);
+        if !flash_shot && flash > 0.0 && flash < 0.6 {
+            flash_shot = true;
+            g.render(&mut rig.renderer, SIZE).expect("render");
+            save_cam(g, "m1_arrival_white_flash");
+        }
+        if !drawn && !before_shot {
+            // The view on the start point while the Kuun-Lan waits in hyperspace.
+            before_shot = true;
+            let u = g.world.universe();
+            let at = u.ship(ms).map_or([0.0; 3], |s| [s.posinfo.position.x, s.posinfo.position.y, s.posinfo.position.z]);
+            g.world.follow_focus = false;
+            g.world.camera.look_at = glam::Vec3::from_array(at);
+            g.world.camera.distance = 7000.0;
+            g.world.camera.declination = (-20f32).to_radians();
+            g.render(&mut rig.renderer, SIZE).expect("render");
+            save_cam(g, "m1_arrival_before_window");
+            g.world.follow_focus = true;
+        }
+        let u = g.world.universe();
+        docked = docked.max(u.ship(ms).and_then(|s| s.base.inside.as_ref()).map_or(0, |i| i.ships.len()));
+        if !drawn {
+            let others: Vec<String> = u.ship_list.iter().filter_map(|&id| u.ship(id)).filter(|s| s.player == 0 && s.ship_type.to_string().starts_with('s') && hwc_sim::effects::ship_drawn(u, s.id)).map(|s| s.ship_type.to_string()).collect();
+            if !others.is_empty() {
+                log.push(format!("{frames}: drawn before the Kuun-Lan: {others:?}"));
+                bad.push(frames);
+            }
+        }
+        let window = g.world.run().hyperspace_windows().iter().find(|w| w.0 == ms).map(|w| (w.1, w.2));
+        if drawn != was_drawn || frames.is_multiple_of(8) {
+            log.push(format!("{frames}: ms {} drawn {drawn} window {window:?} nis {nis:?} sp {}", ms.0, g.world.run().game.sp_state));
+        }
+        if drawn && !was_drawn {
+            g.render(&mut rig.renderer, SIZE).expect("render");
+            save_cam(g, &format!("m1_arrival_drawn_f{frames}"));
+            if window.is_none() {
+                bad.push(frames);
+            }
+        }
+        if drawn && window.is_some() && shots < 3 && frames.is_multiple_of(6) {
+            g.render(&mut rig.renderer, SIZE).expect("render");
+            save_cam(g, &format!("m1_arrival_window_{shots}"));
+            shots += 1;
+        }
+        was_drawn = drawn;
+    }
+    eprintln!("{}", log.join("\n"));
+    assert!(bad.is_empty(), "the Kuun-Lan was drawn without its window at frames {bad:?}");
+    assert!(flash_max > 0.99 && flash_shot, "no white flash after the NISlet ({flash_max})");
+    assert!(g.world.run().game.hyper.arrival_flash <= 0.0, "the flash outlasted the arrival");
+    // The ships that travelled docked come out through the Kuun-Lan's launch points.
+    let ms = g.world.universe().base.players[0].mothership.expect("mothership");
+    let inside = |g: &Game| {
+        g.world.universe().ship(ms).and_then(|s| s.base.inside.as_ref()).map_or(0, |i| i.ships.len())
+    };
+    eprintln!("ships inside the Kuun-Lan on the way in: {docked}; at the end of the arrival: {}", inside(g));
+    let mut launching_shot = false;
+    g.world.focus = vec![ms];
+    g.world.camera.distance = 5000.0;
+    for f in 0..16 * 40 {
+        rig.frame(g);
+        let u = g.world.universe();
+        let launching = u.ship_list.iter().any(|&id| {
+            u.ship(id).is_some_and(|s| s.player == 0 && s.command.is_some_and(|c| u.commands.get(c).is_some_and(|c| c.launch_from == Some(ms))))
+        });
+        if launching && !launching_shot && f > 8 {
+            g.render(&mut rig.renderer, SIZE).expect("render");
+            save_cam(g, "m1_arrival_launching");
+            launching_shot = true;
+            eprintln!("launching at frame {f} after the arrival");
+        }
+        if inside(g) == 0 && f > 16 * 10 {
+            break;
+        }
+    }
+    g.render(&mut rig.renderer, SIZE).expect("render");
+    save_cam(g, "m1_arrival_launched");
+    assert!(docked > 0, "nothing travelled inside the Kuun-Lan");
+    assert_eq!(inside(g), 0, "the docked ships did not launch");
+    assert!(launching_shot, "no ship came out through a launch point");
+}
+
+/// Mission 1 once the fleet is in: F on a worker focuses, F again eases in to frame it
+/// (`zoomInCloseAsPossible`); the wheel stops at the framing distance and, with the hull
+/// limit, before the near clip plane reaches the hull; a ship far off is drawn or not the
+/// same whether it lies at the centre of the picture or near its corner. Screenshots go to
+/// `screenshots/cam/` (prefix `cam_`).
+#[test]
+fn camera_focus_zoom_and_draw_distance() {
+    use hwc_sim::statics::ShipType;
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(1, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    rig.frames_until(g, 16 * 60, "the fleet arriving in mission 1", |g| {
+        g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE
+    });
+    for _ in 0..16 * 20 {
+        rig.frame(g);
+    }
+    let u = g.world.universe();
+    let worker = u
+        .ship_list
+        .iter()
+        .copied()
+        .find(|&id| u.ship(id).is_some_and(|s| s.player == 0 && s.ship_type == ShipType::sWorker))
+        .expect("a worker");
+    g.selection = vec![worker];
+    rig.key(g, 0x46);
+    for _ in 0..16 {
+        rig.frame(g);
+    }
+    assert_eq!(g.world.focus, vec![worker]);
+    rig.shot(g, "x");
+    save_cam(g, "cam_focus_once");
+    let once = g.world.camera.distance;
+    rig.key(g, 0x46);
+    for _ in 0..24 {
+        rig.frame(g);
+    }
+    rig.shot(g, "x");
+    save_cam(g, "cam_focus_twice");
+    let twice = g.world.camera.distance;
+    eprintln!("F: {once:.0}; F again: {twice:.0}");
+    let fit = g.world.focus_min_zoom(); // new
+    assert!(twice < once * 0.5, "the second F did not zoom in: {once} -> {twice}"); // new
+    assert!((twice - fit).abs() < fit * 0.02, "not at the framing distance {fit}: {twice}"); // new
+    // The wheel all the way in.
+    for _ in 0..30 {
+        g.input(InputEvent::Wheel { up: true }, &mut rig.audio);
+        rig.frame(g);
+    }
+    for _ in 0..16 {
+        rig.frame(g);
+    }
+    rig.shot(g, "x");
+    save_cam(g, "cam_zoom_closest");
+    let closest = g.world.camera.distance;
+    eprintln!("closest zoom on a worker: {closest:.1}");
+    let ships = g.world.focus_ships(); // new
+    assert!(closest >= g.world.camera.clear_distance(&ships) - 0.5, "the near plane cuts the hull at {closest}"); // new
+    g.world.zoom_clear = false; // new
+    for _ in 0..30 { // new
+        g.input(InputEvent::Wheel { up: true }, &mut rig.audio); // new
+        rig.frame(g); // new
+    } // new
+    rig.shot(g, "x"); // new
+    save_cam(g, "cam_zoom_closest_original_limit"); // new
+    eprintln!("closest with the original limit: {:.1}", g.world.camera.distance); // new
+    g.world.zoom_clear = true; // new
+
+    // Draw distance: the camera on the mothership at the farthest zoom, a Taiidan ship 21000
+    // beyond it; seen once head-on (straight past the mothership) and once with the camera
+    // turned 40 degrees about the mothership, which puts it near the top right corner.
+    let u = g.world.universe();
+    let ms = u.base.players[0].mothership.expect("mothership");
+    let centre = glam::Vec3::from_array(u.ship(ms).map(|s| [s.posinfo.position.x, s.posinfo.position.y, s.posinfo.position.z]).unwrap());
+    let far = u
+        .ship_list
+        .iter()
+        .copied()
+        .filter(|&id| u.ship(id).is_some_and(|s| s.player == 1))
+        .max_by(|a, b| {
+            let r = |id: hwc_sim::ShipId| u.ship(id).and_then(|s| u.statics.ship(s.ship_type)).map_or(0.0, |st| st.header.coll.coll_sphere_size);
+            r(*a).total_cmp(&r(*b))
+        })
+        .expect("an enemy ship");
+    eprintln!("far ship: {}", u.ship(far).unwrap().ship_type);
+    g.world.follow_focus = false;
+    g.world.focus.clear();
+    let along = glam::Vec3::new(-0.8, 0.5, -0.33).normalize();
+    let side = along.cross(glam::Vec3::Z).normalize();
+    let up = side.cross(along);
+    let target = centre + along * 21000.0;
+    {
+        let s = g.world.universe_mut().ships.ship_mut(far);
+        s.posinfo.position = hwc_math::Vector::new(target.x, target.y, target.z);
+    }
+    let turn = 40f32.to_radians();
+    let mut seen = Vec::new();
+    for (view, dir) in [
+        ("head_on", along),
+        ("corner", along * turn.cos() + (-side - up).normalize() * turn.sin()),
+    ] {
+        let eye = centre - dir * 14500.0;
+        g.world.camera.set_eye_look_up(eye, centre, None);
+        let drawn = g.world.frame((SIZE.0 as u32, SIZE.1 as u32)).ship_levels().iter().any(|&(id, _)| id == far);
+        let in_front = (target - eye).dot(dir);
+        rig.shot(g, "x");
+        save_cam(g, &format!("cam_draw_{view}"));
+        eprintln!("{view}: depth {in_front:.0}, from the eye {:.0}: drawn {drawn}", (target - eye).length());
+        seen.push(drawn);
+    }
+    assert_eq!(seen[0], seen[1], "drawn {seen:?} head-on / near the corner");
+    // `--draw-distance far`: drawn within the far clip distance of the eye, by radial distance.
+    g.world.render_list = false;
+    for dir in [along, along * turn.cos() + (-side - up).normalize() * turn.sin()] {
+        let eye = centre - dir * 14500.0;
+        g.world.camera.set_eye_look_up(eye, centre, None);
+        let drawn = g.world.frame((SIZE.0 as u32, SIZE.1 as u32)).ship_levels().iter().any(|&(id, _)| id == far);
+        let reach = (target - eye).length();
+        assert_eq!(drawn, reach < g.world.camera.tweaks.clip_far, "far mode at {reach}");
+    }
+    g.world.render_list = true;
+    let _ = std::fs::remove_file(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/game-campaign/x.png"));
+}

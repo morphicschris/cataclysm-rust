@@ -147,6 +147,13 @@ pub struct HyperState {
     pub to_hyperspace: Vec<ShipId>,
     /// 0x9101f0 `kasfHyperspaceDelay`: seconds added to the next mid-level jump.
     pub kas_delay: f32,
+    /// 0x91a624: the white flash over the view when mission 1's NISlet ends (1 when set,
+    /// held for three seconds of the arrival, then falling by a half per second; drawn
+    /// additively while above 0), and 0x91021c / 0x910220, the time of its last step and the
+    /// end of the hold.
+    pub arrival_flash: f32,
+    pub arrival_flash_last: f32,
+    pub arrival_flash_hold: f32,
 }
 
 impl Default for HyperState {
@@ -156,6 +163,9 @@ impl Default for HyperState {
             hyperspace_override: false,
             // singlePlayerInit.
             old_auto_launch: 0xf,
+            arrival_flash: 0.0,
+            arrival_flash_last: 0.0,
+            arrival_flash_hold: 0.0,
             rollcall_docked: 0,
             rollcall_remaining: 0,
             rollcall_screen: false,
@@ -1068,6 +1078,19 @@ pub(crate) fn create_carried_ship(u: &mut Universe, f: &FleetShip) -> Result<Shi
         }
     }
     Ok(id)
+}
+
+/// A ship of the fleet docked inside `host` (`dockPutShipInside`), with the ships that travel
+/// inside it.
+pub(crate) fn create_docked_inside(u: &mut Universe, f: &FleetShip, host: ShipId) -> Result<ShipId, crate::universe::CreateError> {
+    let inner = spawn(u, f, false)?;
+    crate::dock::put_ship_inside(u, inner, host);
+    for d in &f.docked {
+        if let Ok(x) = spawn(u, d, false) {
+            crate::dock::put_ship_inside(u, x, inner);
+        }
+    }
+    Ok(inner)
 }
 
 fn spawn(u: &mut Universe, f: &FleetShip, outside: bool) -> Result<ShipId, crate::universe::CreateError> {

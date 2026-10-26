@@ -176,6 +176,14 @@ impl Cataclysm {
         self.ig.binding = None;
     }
 
+    /// An option changed from the game itself (not the options screens), kept and saved at
+    /// once: the modern HUD's objectives panel remembers whether it is collapsed.
+    pub fn set_option_now(&mut self, key: &str, v: i32) {
+        self.options.set(key, v);
+        self.saved.set(key, v);
+        self.save_options();
+    }
+
     /// Accept: the current values become the restore point and are saved.
     pub fn options_commit(&mut self) {
         self.saved = self.options.clone();

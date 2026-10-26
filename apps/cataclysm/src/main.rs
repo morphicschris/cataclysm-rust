@@ -14,6 +14,8 @@ mod draw_check;
 mod game;
 mod host;
 mod hotkeys;
+#[cfg(test)]
+mod hud_shots;
 mod intro;
 mod loading;
 mod mission;
@@ -94,6 +96,22 @@ options:
   --zoom <mode>         smooth (default, a user-requested change: each mouse-wheel notch
                         eases the camera to its distance) or original (the original's
                         immediate step); options file: hwcSmoothZoom = 1/0
+  --focus-zoom <on|off> on (default, as the original): focusing again on the ships already
+                        in focus (F twice) eases the camera in to frame them; off: a
+                        repeated focus does nothing. Options file: hwcFocusZoom = 1/0
+  --zoom-limit <mode>   hull (default, a user-requested addition: the closest zoom on the
+                        focused ships also keeps the near clip plane outside their hulls) or
+                        original (the original's limit from their collision size and minimum
+                        zoom distance alone); options file: hwcZoomClear = 1/0
+  --draw-distance <m>   original (default: ships, effects and asteroids are drawn within a
+                        distance of the camera's look-at point by class, Tweak.script's
+                        render list) or far (everything within the far clip distance of the
+                        eye); both are radial, the same at any camera angle. Options file:
+                        hwcRenderList = 1/0
+  --hud <mode>          modern (default, a user-requested change: RU and SU bars in the
+                        top-right corner, in the style of the later Homeworld games) or
+                        original (the SU / RU / time box, bottom right); options file:
+                        hwcModernHud = 1/0
 
 3D view quality (modern options, all off by default: the original look; see
 docs/render-quality.md for the measured costs):
@@ -153,6 +171,11 @@ pub struct Args {
     pub right_click_move: Option<bool>,
     /// `--zoom`: Some(true) smooth, Some(false) the original's step, None the options file.
     pub smooth_zoom: Option<bool>,
+    /// `--focus-zoom`, `--zoom-limit` (Some(true): hull), `--draw-distance` (Some(true):
+    /// original); None: the options file.
+    pub focus_zoom: Option<bool>,
+    pub zoom_clear: Option<bool>,
+    pub render_list: Option<bool>,
     /// `--render-scale`, `--msaa`, `--fxaa`, `--scene-res` (None: the options file).
     pub render_scale: Option<f32>,
     pub msaa: Option<u32>,
@@ -183,6 +206,9 @@ fn parse_args() -> Result<Args, String> {
         full_detail: None,
         right_click_move: None,
         smooth_zoom: None,
+        focus_zoom: None,
+        zoom_clear: None,
+        render_list: None,
         render_scale: None,
         msaa: None,
         fxaa: None,
@@ -247,6 +273,33 @@ fn parse_args() -> Result<Args, String> {
                     "original" => false,
                     v => return Err(format!("unknown --zoom mode {v}")),
                 })
+            }
+            "--focus-zoom" => {
+                a.focus_zoom = Some(match value("--focus-zoom")?.to_ascii_lowercase().as_str() {
+                    "on" => true,
+                    "off" => false,
+                    v => return Err(format!("unknown --focus-zoom value {v}")),
+                })
+            }
+            "--zoom-limit" => {
+                a.zoom_clear = Some(match value("--zoom-limit")?.to_ascii_lowercase().as_str() {
+                    "hull" => true,
+                    "original" => false,
+                    v => return Err(format!("unknown --zoom-limit mode {v}")),
+                })
+            }
+            "--draw-distance" => {
+                a.render_list = Some(match value("--draw-distance")?.to_ascii_lowercase().as_str() {
+                    "original" => true,
+                    "far" => false,
+                    v => return Err(format!("unknown --draw-distance mode {v}")),
+                })
+            }
+            "--hud" => {
+                let v = value("--hud")?;
+                let modern = hwc_ui::ingame::modern_hud::parse_mode(&v)
+                    .ok_or_else(|| format!("unknown --hud mode {v}"))?;
+                hwc_ui::ingame::modern_hud::set_override(Some(modern));
             }
             "--render-scale" => {
                 let v: f32 = value("--render-scale")?

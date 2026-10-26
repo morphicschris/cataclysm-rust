@@ -30,7 +30,7 @@ pub mod trails;
 pub use anim::{MadClip, ShipAnimator, ANIM_LOOP, ANIM_STOP_AT_END};
 pub use assets::{AssetSource, DirSource, ShipDef, ShipModel, TeamColors, TeamScheme};
 pub use background::Background;
-pub use camera::{CameraTweaks, OrbitCamera};
+pub use camera::{CameraTweaks, FocusShip, OrbitCamera};
 pub use effects::{Blend, EffectBatch, EffectTexture};
 pub use fx::{EffectRenderer, FxOptions, FxView};
 pub use gpu::{

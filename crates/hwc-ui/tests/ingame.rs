@@ -28,10 +28,14 @@ fn source() -> Option<Rc<dyn AssetSource>> {
 }
 
 fn ui(src: Rc<dyn AssetSource>) -> InGameUi {
+    // These tests check the original's overlay layout: the modern HUD (the default) has its
+    // own tests in `modern_hud.rs`.
+    let mut options = Options::default();
+    options.set_bool(hwc_ui::ingame::modern_hud::OPTION_KEY, false);
     let mut ui = InGameUi::new(
         src,
         Setup {
-            options: Options::default(),
+            options,
             default_keys: Some(DEFAULT_KEYS.into()),
             keys: None,
             keys_path: None,

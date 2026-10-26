@@ -32,7 +32,7 @@ use hwc_render::trails::{
 };
 use hwc_render::{
     Background, Blend, CameraTweaks, EffectTexture, EngineEffectAssets, GpuBackground, GpuShip,
-    MadClip, OrbitCamera, Renderer, Scene, SceneExtras, SceneLighting, ShipAnimator, ShipDef,
+    FocusShip, MadClip, OrbitCamera, Renderer, Scene, SceneExtras, SceneLighting, ShipAnimator, ShipDef,
     ShipInstance, ShipModel, ShipRenderState, TeamColors, TeamPaint, ANIM_STOP_AT_END,
 };
 use hwc_sim::harness::group_centre;
@@ -40,7 +40,7 @@ use hwc_sim::level::LevelState;
 use hwc_sim::mission::{hs_effect, MissionRun};
 use hwc_sim::nis_level::NisLevelRun;
 use hwc_sim::resource::ResourceKind;
-use hwc_sim::statics::ShipType;
+use hwc_sim::statics::{ShipClass, ShipType};
 use hwc_sim::universe::SimEvent;
 use hwc_sim::{ShipId, Universe};
 
@@ -265,6 +265,21 @@ pub struct World {
     pub sensors_open: bool,
     /// Frames built so far (the draw-check history's numbering).
     frames_drawn: u64,
+    /// `Tweak.script`'s render list reach and edge fade.
+    pub render_limits: RenderLimits,
+    /// Ships, effects and asteroids are drawn by the original's render list: within a radial
+    /// distance of the look-at point ([`RenderLimits`]). Off (`hwcRenderList = 0`): everything
+    /// within the far clip distance of the eye, also measured radially.
+    pub render_list: bool,
+    /// `zoomInCloseAsPossible`: the camera is easing in to frame the focused ships, and keeps
+    /// framing them until the player zooms.
+    pub focus_close: bool,
+    /// Focusing again on the ships already in focus zooms in on them (the original's
+    /// "autozoom", on by default; `hwcFocusZoom = 0` turns it off).
+    pub focus_zoom: bool,
+    /// The closest zoom on focused ships also keeps the near clip plane outside their hulls (a
+    /// user-requested addition, on by default; `hwcZoomClear = 0` leaves the original's limit).
+    pub zoom_clear: bool,
 }
 
 /// Engine vector to render vector.
@@ -369,7 +384,15 @@ impl World {
             neb_renderer: None,
             sensors_open: false,
             frames_drawn: 0,
+            render_limits: RenderLimits::default(),
+            render_list: true,
+            focus_close: false,
+            focus_zoom: true,
+            zoom_clear: true,
         };
+        if let Ok(t) = read_script(&w.src, "tweak.script") {
+            w.render_limits = RenderLimits::from_script(&t);
+        }
         w.attach_effects();
         w.set_lighting(&lighting);
         w.load_art()?;
@@ -904,6 +927,134 @@ impl World {
         }
     }
 
+    /// The focused ships as the camera's zoom limits see them: collision centre and radius,
+    /// the minimum zoom distance (a disguised Mimic's apparent one), and the reach of the
+    /// drawn model about the collision centre.
+    pub fn focus_ships(&self) -> Vec<FocusShip> {
+        let u = self.universe();
+        self.focus
+            .iter()
+            .filter_map(|&id| {
+                let s = u.ship(id)?;
+                let st = u.statics.ship(s.ship_type)?;
+                let c = &st.header.coll;
+                let minimum_zoom = hwc_sim::ships::mimic::apparent_sizes(u, id)
+                    .map_or(st.minimum_zoom_distance, |a| a.2);
+                let offset = Vec3::new(c.coll_sphere_offset.x, c.coll_sphere_offset.y, c.coll_sphere_offset.z);
+                let drawn_radius = self
+                    .art
+                    .get(&s.ship_type)
+                    .and_then(|a| a.any_gpu())
+                    .map_or(0.0, |g| {
+                        let (centre, r) = g.bounds();
+                        (centre - offset).length() + r
+                    });
+                Some(FocusShip {
+                    centre: v3(s.coll.coll_position),
+                    radius: c.coll_sphere_size,
+                    minimum_zoom,
+                    drawn_radius,
+                })
+            })
+            .collect()
+    }
+
+    /// The closest the main camera may zoom: `NewSetFocusPoint`'s distance for the focus
+    /// (the camera's closest zoom when nothing is in focus), and with
+    /// [`zoom_clear`](Self::zoom_clear) far enough that no focused hull is cut by the near
+    /// clip plane.
+    pub fn focus_min_zoom(&self) -> f32 {
+        let ships = self.focus_ships();
+        let d = self.camera.focus_distance(&ships);
+        if self.zoom_clear {
+            d.max(self.camera.clear_distance(&ships))
+        } else {
+            d
+        }
+    }
+
+    /// `ccFocus` (`close` false) and `ccFocusClose` (`close` true, the Alt focus) on the main
+    /// camera. The same ships again ask for the close-up (`zoomInCloseAsPossible`); new ones
+    /// become the focus, with the camera kept at least as far as frames them.
+    pub fn focus_on(&mut self, ships: Vec<ShipId>, close: bool) {
+        if ships.is_empty() {
+            return;
+        }
+        let same = !self.focus.is_empty()
+            && ships.len() == self.focus.len()
+            && ships.iter().all(|id| self.focus.contains(id));
+        if same {
+            if close || self.focus_zoom {
+                self.focus_close = true;
+            }
+            return;
+        }
+        self.focus = ships;
+        self.focus_close = close;
+        self.update_focus();
+        let min = self.focus_min_zoom();
+        if self.camera.distance < min {
+            self.camera.zoom_target = Some(min);
+        }
+    }
+
+    /// The player zoomed: the close-up focus lets go (`CAM_USER_ZOOMED`).
+    pub fn user_zoomed(&mut self) {
+        self.focus_close = false;
+    }
+
+    /// One frame of the camera's zoom: the close-up focus keeps the target at the framing
+    /// distance (when `main` says the camera is the main view's), and the smooth zoom eases
+    /// towards its target within `min_zoom`.
+    pub fn ease_camera(&mut self, dt: f32, min_zoom: f32, main: bool) {
+        if self.focus.is_empty() {
+            self.focus_close = false;
+        }
+        if self.focus_close && main {
+            self.camera.zoom_target = Some(min_zoom);
+        }
+        self.camera.ease_zoom(dt, min_zoom);
+    }
+
+    /// Whether a ship is drawn by the render list (or, with it off, within the far clip
+    /// distance of the eye).
+    fn ship_in_view(&self, s: &hwc_sim::object::Ship, position: Vec3) -> bool {
+        // The sensors manager draws its ships its own way, from its own camera.
+        if self.sensors_open {
+            return true;
+        }
+        let eye = self.camera.eye();
+        if !self.render_list {
+            return (position - eye).length() < self.camera.tweaks.clip_far;
+        }
+        let Some(st) = self.universe().statics.ship(s.ship_type) else {
+            return true;
+        };
+        let to_look = (position - self.camera.look_at).length_squared();
+        let to_eye = (position - eye).length_squared();
+        self.render_limits.ship_drawn(
+            st.ship_class,
+            s.ship_type,
+            st.renderlist_fade,
+            st.renderlist_limit_sqr,
+            to_look,
+            to_look.min(to_eye),
+        )
+    }
+
+    /// Whether an effect, bullet or asteroid at `position` is drawn (see
+    /// [`ship_in_view`](Self::ship_in_view)).
+    fn object_in_view(&self, position: Vec3, big: bool) -> bool {
+        if self.sensors_open {
+            true
+        } else if self.render_list {
+            self.render_limits
+                .object_listed((position - self.camera.look_at).length_squared(), big)
+        } else {
+            (position - self.camera.eye()).length() < self.camera.tweaks.clip_far
+        }
+    }
+
     /// Keeps the camera on the focused ships.
     pub fn update_focus(&mut self) {
         if self.follow_focus && !self.focus.is_empty() {
@@ -985,6 +1136,9 @@ impl World {
         let u = self.sim.universe();
         for (id, t, transform, age) in transforms {
             let Some(s) = u.ship(id) else { continue };
+            if !self.ship_in_view(s, transform.w_axis.truncate()) {
+                continue;
+            }
             let Some(art) = self.art.get(&t) else {
                 continue;
             };
@@ -1105,7 +1259,7 @@ impl World {
             let ResourceKind::Asteroid(k) = r.kind else {
                 continue;
             };
-            if r.flags & hwc_sim::object::sof::HIDE != 0 {
+            if r.flags & hwc_sim::object::sof::HIDE != 0 || !self.object_in_view(v3(r.position), false) {
                 continue;
             }
             if !self
@@ -1130,6 +1284,24 @@ impl World {
         self.combat_effects(&mut frame.effects, glow_texture);
         if self.effects_on {
             hwc_sim::effects::draw(self.universe_mut(), &mut frame.fx_list);
+            // Effects are objects of the render list too.
+            let (sensors, render_list, limits, look_at, eye, far) = (
+                self.sensors_open,
+                self.render_list,
+                self.render_limits,
+                self.camera.look_at,
+                self.camera.eye(),
+                self.camera.tweaks.clip_far,
+            );
+            retain_fx_systems(&mut frame.fx_list, |p| {
+                if sensors {
+                    true
+                } else if render_list {
+                    limits.object_listed((p - look_at).length_squared(), false)
+                } else {
+                    (p - eye).length() < far
+                }
+            });
         }
         // Nothing unbounded goes to the GPU; the counts go to the crash log's history.
         let mut stats = crate::draw_check::Stats::default();
@@ -1186,7 +1358,7 @@ impl World {
     fn combat_effects(&self, out: &mut EffectBatch, glow: EffectTexture) {
         let u = self.universe();
         if self.effects_on {
-            original_bullets(u, out);
+            original_bullets(u, out, |p| self.object_in_view(p, false));
             return;
         }
         for &bid in &u.bullet_list {
@@ -1496,7 +1668,11 @@ impl World {
             .universe()
             .ships
             .iter()
-            .filter(|s| s.flags & hwc_sim::object::sof::HIDE == 0 && keep(s.id))
+            .filter(|s| {
+                s.flags & hwc_sim::object::sof::HIDE == 0
+                    && keep(s.id)
+                    && self.ship_in_view(s, v3(s.posinfo.position))
+            })
         {
             if let Some((lo, hi)) = self.screen_box(size, s) {
                 if px[0] >= lo[0] && px[0] <= hi[0] && px[1] >= lo[1] && px[1] <= hi[1] {
@@ -1584,7 +1760,194 @@ fn flare_occluded(u: &Universe, pos: Vec3, dir: Vec3, dist: f32) -> bool {
 /// The bullets the original draws itself (`rndRenderObject`): those without an effect, as a
 /// one-pixel line from the bullet along its length in the bullet colour. Ion beams are not
 /// drawn in their first update and Beast infection beams never.
-fn original_bullets(u: &Universe, out: &mut EffectBatch) {
+/// The render list's reach (`univUpdateRenderList`) and the edge fade (`rndFade`), from
+/// `Tweak.script`: per ship class, the distance from the camera's look-at point within which
+/// a ship is listed for drawing, and the band at the edge over which it fades out (measured
+/// from the nearer of the look-at point and the eye). Both are radial distances, so what is
+/// drawn does not depend on where in the picture a ship lies.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderLimits {
+    /// `RENDER_LIMIT_*` and `RENDER_FADE_*` by class: mothership, heavy cruiser, carrier,
+    /// destroyer, frigate, corvette, fighter, resource, non-combat.
+    pub limit: [f32; 9],
+    pub fade: [f32; 9],
+    /// `RENDER_VIEWABLE_DISTANCE_SQR` / `RENDER_MAXVIEWABLE_DISTANCE_SQR` (the script gives
+    /// the distances, squared on load; kept unsquared here) and `RENDER_VIEWABLE_FADE` /
+    /// `RENDER_MAXVIEWABLE_FADE`: the other objects (effects, bullets, asteroids), normal and
+    /// big.
+    pub viewable: f32,
+    pub max_viewable: f32,
+    pub viewable_fade: f32,
+    pub max_viewable_fade: f32,
+}
+
+/// `rndFade` stretches the limits by this much.
+const FADE_REACH: f32 = 1.3;
+
+impl Default for RenderLimits {
+    fn default() -> Self {
+        let mut limit = [16000.0; 9];
+        limit[0] = 18000.0;
+        RenderLimits {
+            limit,
+            fade: [5000.0; 9],
+            viewable: 16000.0,
+            max_viewable: 20000.0,
+            viewable_fade: 5000.0,
+            max_viewable_fade: 3500.0,
+        }
+    }
+}
+
+impl RenderLimits {
+    pub fn from_script(s: &hwc_formats::script::ScriptFile) -> Self {
+        let mut t = Self::default();
+        let names = [
+            "MOTHERSHIP",
+            "HEAVYCRUISER",
+            "CARRIER",
+            "DESTROYER",
+            "FRIGATE",
+            "CORVETTE",
+            "FIGHTER",
+            "RESOURCE",
+            "NONCOMBAT",
+        ];
+        let get = |k: &str| s.get(k).and_then(|e| e.f32());
+        for (i, n) in names.iter().enumerate() {
+            if let Some(v) = get(&format!("RENDER_LIMIT_{n}")) {
+                t.limit[i] = v;
+            }
+            if let Some(v) = get(&format!("RENDER_FADE_{n}")) {
+                t.fade[i] = v;
+            }
+        }
+        let slots: [(&str, &mut f32); 4] = [
+            ("RENDER_VIEWABLE_DISTANCE_SQR", &mut t.viewable),
+            ("RENDER_MAXVIEWABLE_DISTANCE_SQR", &mut t.max_viewable),
+            ("RENDER_VIEWABLE_FADE", &mut t.viewable_fade),
+            ("RENDER_MAXVIEWABLE_FADE", &mut t.max_viewable_fade),
+        ];
+        for (k, slot) in slots {
+            if let Some(v) = get(k) {
+                *slot = v;
+            }
+        }
+        t
+    }
+
+    /// The render list's class slot: monster ships and components take the mothership's
+    /// limit, micro ships the fighters'.
+    fn list_slot(class: Option<ShipClass>) -> usize {
+        match class {
+            Some(ShipClass::Mothership | ShipClass::MonsterShip | ShipClass::Component) | None => 0,
+            Some(ShipClass::HeavyCruiser) => 1,
+            Some(ShipClass::Carrier) => 2,
+            Some(ShipClass::Destroyer) => 3,
+            Some(ShipClass::Frigate) => 4,
+            Some(ShipClass::Corvette) => 5,
+            Some(ShipClass::Fighter | ShipClass::Micro) => 6,
+            Some(ShipClass::Resource) => 7,
+            Some(ShipClass::NonCombat) => 8,
+        }
+    }
+
+    /// The fade's class slot: components by their type (two of them take the carrier's and
+    /// the destroyer's values, the rest the mothership's), an unknown class the frigate's.
+    fn fade_slot(class: Option<ShipClass>, ship_type: ShipType) -> usize {
+        match class {
+            Some(ShipClass::Component) => match ship_type.index() {
+                13 => 2,
+                11 => 3,
+                _ => 0,
+            },
+            None => 4,
+            c => Self::list_slot(c),
+        }
+    }
+
+    /// Whether a ship is drawn: it is in the render list (within its limit of the look-at
+    /// point; `look_at_sq` is that distance squared) and not wholly faded out at the edge
+    /// (`nearest_sq`: the squared distance from the nearer of the look-at point and the eye).
+    /// `static_fade` / `static_limit_sq` are the ship's own `renderlistFade` /
+    /// `renderlistLimit` (squared), 0 when it has none.
+    pub fn ship_drawn(
+        &self,
+        class: Option<ShipClass>,
+        ship_type: ShipType,
+        static_fade: f32,
+        static_limit_sq: f32,
+        look_at_sq: f32,
+        nearest_sq: f32,
+    ) -> bool {
+        let list = if static_limit_sq != 0.0 {
+            static_limit_sq
+        } else {
+            let l = self.limit[Self::list_slot(class)];
+            l * l
+        };
+        if look_at_sq >= list {
+            return false;
+        }
+        let (fade, limit) = if static_fade != 0.0 {
+            (static_fade, static_limit_sq.max(0.0).sqrt())
+        } else {
+            let i = Self::fade_slot(class, ship_type);
+            (self.fade[i], self.limit[i])
+        };
+        let fade = fade * FADE_REACH;
+        let start = limit * FADE_REACH - fade;
+        nearest_sq < start * start + fade * fade
+    }
+
+    /// Whether another object (an effect, a bullet, an asteroid) at squared distance
+    /// `look_at_sq` from the look-at point is in the render list: within the viewable
+    /// distance, or within the longer one for a big object.
+    pub fn object_listed(&self, look_at_sq: f32, big: bool) -> bool {
+        let max = self.max_viewable * self.max_viewable;
+        let normal = self.viewable * self.viewable;
+        look_at_sq < max && (look_at_sq < normal || big)
+    }
+}
+
+/// Keeps the particle systems of an effect list whose first primitive `keep` accepts (whole
+/// systems, so a cut never splits one), in their draw order.
+fn retain_fx_systems(list: &mut hwc_fx::RenderList, keep: impl Fn(Vec3) -> bool) {
+    use hwc_fx::render::PrimKind;
+    let order = list.draw_order();
+    let old = std::mem::take(list);
+    let first = |k: PrimKind, i: usize| -> Option<Vec3> {
+        let p = match k {
+            PrimKind::Sprites => old.sprites.get(i).map(|x| x.position),
+            PrimKind::Lines => old.lines.get(i).map(|x| x.start),
+            PrimKind::Bolts => old.bolts.get(i).and_then(|x| x.points.first().copied()),
+            PrimKind::Points => old.points.get(i).map(|x| x.position),
+            PrimKind::Cubes => old.cubes.get(i).map(|x| x.position),
+            PrimKind::Meshes => old.meshes.get(i).map(|x| x.position),
+            PrimKind::Flares => old.flares.get(i).map(|x| x.position),
+        };
+        p.map(v3)
+    };
+    for span in order {
+        if span.count == 0 || !first(span.kind, span.start).is_none_or(&keep) {
+            continue;
+        }
+        let r = span.start..span.start + span.count;
+        let before = list.kind_len(span.kind);
+        match span.kind {
+            PrimKind::Sprites => list.sprites.extend_from_slice(&old.sprites[r]),
+            PrimKind::Lines => list.lines.extend_from_slice(&old.lines[r]),
+            PrimKind::Bolts => list.bolts.extend_from_slice(&old.bolts[r]),
+            PrimKind::Points => list.points.extend_from_slice(&old.points[r]),
+            PrimKind::Cubes => list.cubes.extend_from_slice(&old.cubes[r]),
+            PrimKind::Meshes => list.meshes.extend_from_slice(&old.meshes[r]),
+            PrimKind::Flares => list.flares.extend_from_slice(&old.flares[r]),
+        }
+        list.push_span(span.kind, before, span.lit, span.alpha);
+    }
+}
+
+fn original_bullets(u: &Universe, out: &mut EffectBatch, in_view: impl Fn(Vec3) -> bool) {
     use hwc_sim::bullet::weapon;
     let with_effect = u.effects.as_ref().map(|fx| &fx.bullet_effect);
     for &bid in &u.bullet_list {
@@ -1596,6 +1959,9 @@ fn original_bullets(u: &Universe, out: &mut EffectBatch) {
             continue;
         }
         let p = v3(b.posinfo.position);
+        if !in_view(p) {
+            continue;
+        }
         let c = b.color;
         let color = [
             (c & 0xff) as f32 / 255.0,
@@ -1617,6 +1983,60 @@ fn original_bullets(u: &Universe, out: &mut EffectBatch) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_list_reach_is_radial_and_follows_tweak_script() {
+        let l = RenderLimits::default();
+        let fighter = Some(ShipClass::Fighter);
+        let t = ShipType::sMothership;
+        let drawn = |class, d_look: f32, d_near: f32| l.ship_drawn(class, t, 0.0, 0.0, d_look * d_look, d_near * d_near);
+        // Listed within 16000 of the look-at point; faded out from the nearer point at
+        // sqrt((1.3 * 16000 - 1.3 * 5000)^2 + (1.3 * 5000)^2) = 15708.
+        assert!(drawn(fighter, 15000.0, 15000.0));
+        assert!(drawn(fighter, 15700.0, 15700.0));
+        assert!(!drawn(fighter, 15720.0, 15720.0));
+        assert!(drawn(fighter, 15900.0, 9000.0), "near the eye it is not faded");
+        assert!(!drawn(fighter, 16000.0, 100.0), "not in the render list");
+        // The mothership reaches 18000; micro ships go with the fighters, components with the
+        // mothership.
+        assert!(drawn(Some(ShipClass::Mothership), 17500.0, 9000.0));
+        assert!(!drawn(Some(ShipClass::Micro), 16500.0, 9000.0));
+        assert!(drawn(Some(ShipClass::Component), 17500.0, 9000.0));
+        // A ship's own renderlistLimit / renderlistFade replace the class's.
+        let own = l.ship_drawn(fighter, t, 1000.0, 30000.0 * 30000.0, 25000.0f32.powi(2), 9000.0f32.powi(2));
+        assert!(own);
+        // The script's values are read.
+        let s = hwc_formats::script::ScriptFile::parse("RENDER_LIMIT_FIGHTER 9000.0\nRENDER_FADE_FIGHTER 1000.0\nRENDER_VIEWABLE_DISTANCE_SQR 12000.0\n");
+        let r = RenderLimits::from_script(&s);
+        assert_eq!(r.limit[6], 9000.0);
+        assert_eq!(r.fade[6], 1000.0);
+        assert_eq!(r.viewable, 12000.0);
+        assert!(r.object_listed(11000.0f32.powi(2), false));
+        assert!(!r.object_listed(13000.0f32.powi(2), false));
+        assert!(r.object_listed(13000.0f32.powi(2), true));
+        assert!(!r.object_listed(21000.0f32.powi(2), true));
+    }
+
+    #[test]
+    fn effect_systems_are_kept_or_cut_whole() {
+        use hwc_fx::render::{Point, PrimKind, Span};
+        let p = |x: f32| Point { position: hwc_math::Vector::new(x, 0.0, 0.0), size: 1.0, color: [1.0; 4], blend: hwc_fx::render::Blend::Alpha };
+        let mut list = hwc_fx::RenderList {
+            points: vec![p(0.0), p(1.0), p(5000.0), p(5001.0), p(2.0)],
+            spans: vec![
+                Span { kind: PrimKind::Points, start: 0, count: 2, lit: false, alpha: true },
+                Span { kind: PrimKind::Points, start: 2, count: 2, lit: false, alpha: false },
+                Span { kind: PrimKind::Points, start: 4, count: 1, lit: true, alpha: false },
+            ],
+            ..Default::default()
+        };
+        retain_fx_systems(&mut list, |v| v.x < 1000.0);
+        let xs: Vec<f32> = list.points.iter().map(|q| q.position.x).collect();
+        assert_eq!(xs, vec![0.0, 1.0, 2.0]);
+        assert_eq!(list.spans.len(), 2);
+        assert_eq!((list.spans[1].start, list.spans[1].count, list.spans[1].lit), (2, 1, true));
+        assert_eq!(list.draw_order(), list.spans);
+    }
 
     #[test]
     fn full_detail_draws_the_top_level() {

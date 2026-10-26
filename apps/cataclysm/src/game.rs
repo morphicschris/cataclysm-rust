@@ -353,6 +353,9 @@ impl Game {
         g.keep_letterbox_after_nis = g.world.mission_run().is_some_and(|r| r.game.config.mission == 1);
         g.world.lens_flares = options.get("enableLensFlare") != 0;
         g.world.full_detail = options.get("hwcFullDetailShips") != 0;
+        g.world.focus_zoom = options.get("hwcFocusZoom") != 0;
+        g.world.zoom_clear = options.get("hwcZoomClear") != 0;
+        g.world.render_list = options.get("hwcRenderList") != 0;
         let mut subs = Subtitles::load(&res, true, &g.world.team_schemes());
         if let Some(s) = subs.as_mut() {
             s.language = options.get("language").max(0) as usize;
@@ -435,7 +438,10 @@ impl Game {
                     return;
                 }
                 let both = self.left_down.is_some();
-                let min = self.world.camera.closest_zoom;
+                let min = self.zoom_min();
+                if both {
+                    self.world.user_zoomed();
+                }
                 self.world
                     .camera
                     .mouse_drag(dx as f32, dy as f32, both, min);
@@ -491,7 +497,8 @@ impl Game {
                 }
             }
             InputEvent::Wheel { up } => {
-                let min = self.world.camera.closest_zoom;
+                let min = self.zoom_min();
+                self.world.user_zoomed();
                 if self.smooth_zoom {
                     self.world.camera.wheel_smooth(up, min);
                 } else {
@@ -564,7 +571,7 @@ impl Game {
         let Some(s) = u.ship(id) else { return };
         let own = s.player == PLAYER;
         if self.ui.action_held(keys::BANDBOX_FOCUS) {
-            self.focus_on(vec![id], audio);
+            self.focus_on(vec![id], true, audio);
             return;
         }
         let ctrl_shift = self.ui.action_held(keys::BANDBOX_FORCE_ATTACK);
@@ -821,14 +828,25 @@ impl Game {
         }
     }
 
-    /// Focus on ships: in the sensors manager, zoom back onto them.
-    fn focus_on(&mut self, ships: Vec<ShipId>, audio: &mut Option<Audio>) {
+    /// Focus on ships (`ccFocus`, or `ccFocusClose` with `close`: the Alt focus): in the
+    /// sensors manager, zoom back onto them.
+    fn focus_on(&mut self, ships: Vec<ShipId>, close: bool, audio: &mut Option<Audio>) {
         if self.sensors.is_open() {
             if let Some(e) = self.sensors.close_on(&self.world, &ships) {
                 sound(audio, e);
             }
         } else {
-            self.world.focus = ships;
+            self.world.focus_on(ships, close);
+        }
+    }
+
+    /// The closest the camera may zoom: the sensors camera's own limit while the sensors
+    /// manager has it, else the focus's (`cameraMinimumZoom` / `NewSetFocusPoint`).
+    fn zoom_min(&self) -> f32 {
+        if self.sensors.is_open() || self.sensors.zooming() || self.nis.is_some() {
+            self.world.camera.closest_zoom
+        } else {
+            self.world.focus_min_zoom()
         }
     }
 
@@ -930,7 +948,7 @@ impl Game {
             }
             Mode::Focus => {
                 if !selecting.is_empty() {
-                    self.focus_on(selecting, audio);
+                    self.focus_on(selecting, true, audio);
                 }
             }
             Mode::MultipleSelect => {
@@ -1142,7 +1160,7 @@ impl Game {
                 if selectable(self.world.universe(), id) {
                     self.selection = vec![id];
                 }
-                self.world.focus = vec![id];
+                self.world.focus_on(vec![id], false);
             }
             GameRequest::Action { action, down } => self.action(action, down, audio),
             GameRequest::SetPaused(p) => self.paused = p,
@@ -1337,7 +1355,7 @@ impl Game {
         if r.focus {
             // In the main view `ccFocus`; in the sensors manager `smCullAndFocusSelecting`.
             let sel = self.selection.clone();
-            self.focus_on(sel, audio);
+            self.focus_on(sel, false, audio);
         }
     }
 
@@ -1393,13 +1411,13 @@ impl Game {
             keys::FOCUS => {
                 if !self.selection.is_empty() {
                     let sel = self.selection.clone();
-                    self.focus_on(sel, audio);
+                    self.focus_on(sel, false, audio);
                 }
             }
             keys::TOGGLE_SENSORS_MANAGER => self.toggle_sensors(audio),
             keys::FOCUS_ON_MOTHERSHIP => {
                 if let Some(ms) = self.world.universe().base.players[PLAYER].mothership {
-                    self.world.focus = vec![ms];
+                    self.world.focus_on(vec![ms], false);
                 }
             }
             keys::CANCEL_FOCUS => self.world.focus.clear(),
@@ -1480,14 +1498,18 @@ impl Game {
             self.special_targets.clear();
         }
         // Polled keys: zoom (the sensors camera's while the sensors manager is up).
-        let min = self.world.camera.closest_zoom;
-        // The smooth wheel zoom eases towards its target (on the real frame time).
-        self.world.camera.ease_zoom(dt, min);
+        let min = self.zoom_min();
+        // The smooth wheel zoom and the close-up focus ease towards their target (on the real
+        // frame time).
+        let main = !(self.sensors.is_open() || self.sensors.zooming() || self.nis.is_some());
+        self.world.ease_camera(dt, min, main);
         if !self.sensors.zooming() {
             if self.ui.action_held(keys::ZOOM_IN) {
+                self.world.user_zoomed();
                 self.world.camera.key_zoom(true, min);
             }
             if self.ui.action_held(keys::ZOOM_OUT) {
+                self.world.user_zoomed();
                 self.world.camera.key_zoom(false, min);
             }
         }
@@ -2240,6 +2262,11 @@ impl Game {
         if h.fade > 0.0 && self.nis.is_none() {
             let a = (h.fade.min(1.0) * 255.0) as u8;
             self.canvas.blend_rect(full, [0, 0, 0, a]);
+        }
+        // The white flash after mission 1's NISlet, added over the view.
+        if h.arrival_flash > 0.0 {
+            let a = (h.arrival_flash.min(1.0) * 255.0) as u8;
+            self.canvas.add_rect(full, [255, 255, 255, a]);
         }
         if h.whiteout {
             match whiteout_colour(h.whiteout_t) {

@@ -775,6 +775,11 @@ impl MissionRun {
             NisRequest::Nis(n) => format!("G_Nis{n}Complete"),
             NisRequest::Nislet(n) => format!("G_Nislet{n}Complete"),
         };
+        // `singlePlayerNisStoppedCB`: a NISlet of mission 1 ends in a white flash that fades
+        // during the arrival.
+        if matches!(req, NisRequest::Nislet(_)) && self.game.config.mission == 1 {
+            self.game.hyper.arrival_flash = 1.0;
+        }
         self.kas.set_var(None, var_hash(&name), 1);
         self.game.log(LogKind::Flow, format!("{req:?} finished: {name} = 1"));
         if roll_call_requested {
@@ -1057,6 +1062,9 @@ pub(crate) fn begin_arrival(game: &mut Game) {
 fn arrival_update(u: &mut Universe, kas: &mut Interpreter, game: &mut Game) {
     let sp = start_point(game);
     let carried = game.arriving.iter().any(|a| a.entry.is_some());
+    if !crate::campaign::fades_in(game.config.mission) {
+        arrival_flash_step(&mut game.hyper, u.total_time_elapsed);
+    }
     let all = if carried && crate::campaign::fades_in(game.config.mission) {
         crate::campaign::fade_in_arrival(u, game, sp)
     } else {
@@ -1074,19 +1082,28 @@ fn arrival_update(u: &mut Universe, kas: &mut Interpreter, game: &mut Game) {
     game.ships_have_arrived = true;
     game.sp_state = sp_state::NONE;
     game.log(LogKind::Flow, "all ships arrived: G_ShipsHaveArrived = 1 (state 0)");
-    let arrived = std::mem::take(&mut game.arriving);
-    if carried {
-        crate::campaign::arrival_complete(u, game);
+    game.arriving.clear();
+    // The labs and `clAutoLaunch` with the saved auto-launch bits (0xf at the start of the
+    // campaign: the ships that travelled inside the mothership come out through its launch
+    // points).
+    crate::campaign::arrival_complete(u, game);
+}
+
+/// One single-player update of the white flash after mission 1's NISlet (state 9): the first
+/// step starts a three-second hold, after which it falls by half the time since the last step.
+pub(crate) fn arrival_flash_step(h: &mut crate::campaign::HyperState, now: f32) {
+    if 0.0 >= h.arrival_flash {
         return;
     }
-    // clAutoLaunch / LaunchAllInternalShipsOfPlayerThatMustBeLaunched: the ships that
-    // travelled docked come out.
-    for a in &arrived {
-        let Some(host) = a.ship else { continue };
-        for (k, d) in a.docked.iter().enumerate() {
-            launch_new_ship(u, game, d.ship_type, host, k);
-        }
+    if h.arrival_flash == 1.0 {
+        h.arrival_flash = st(ld(h.arrival_flash) - 0.0001);
+        h.arrival_flash_last = now;
+        h.arrival_flash_hold = st(ld(now) + 3.0);
     }
+    if h.arrival_flash_hold < now {
+        h.arrival_flash = st(ld(h.arrival_flash) - (ld(now) - ld(h.arrival_flash_last)) * 0.5);
+    }
+    h.arrival_flash_last = now;
 }
 
 /// The ship of arriving entry `i`, created when it re-enters the universe (in the original it
@@ -1105,6 +1122,16 @@ pub(crate) fn create_arriving_ship(u: &mut Universe, game: &mut Game, i: usize) 
     match made {
         Ok(id) => {
             game.arriving[i].ship = Some(id);
+            // `singlePlayerLoadNewLevel` (mission 1 after its opening): the player's small ships
+            // travel docked inside the mothership (`dockPutShipInside`) and come out through its
+            // launch points when the fleet is in.
+            if game.arriving[i].entry.is_none() {
+                for d in game.arriving[i].docked.clone() {
+                    if let Err(e) = crate::campaign::create_docked_inside(u, &d, id) {
+                        game.log(LogKind::Warning, format!("{}: {e}", d.ship_type));
+                    }
+                }
+            }
             if game.arriving[i].mothership {
                 if game.level.motherships.is_empty() {
                     game.level.motherships.push(None);
@@ -1122,26 +1149,6 @@ pub(crate) fn create_arriving_ship(u: &mut Universe, game: &mut Game, i: usize) 
             game.arriving[i].state = 0;
             None
         }
-    }
-}
-
-/// Puts a ship that travelled docked next to its host (the launch manoeuvre itself is not
-/// modelled).
-fn launch_new_ship(u: &mut Universe, game: &mut Game, t: ShipType, host: ShipId, k: usize) {
-    let Some(h) = u.ships.get(host) else { return };
-    let (pos, coordsys) = (h.posinfo.position, h.rotinfo.coordsys);
-    let r = u.statics.ship(h.ship_type).map_or(0.0, |s| s.header.coll.coll_sphere_size);
-    let side = if k.is_multiple_of(2) { 1.0 } else { -1.0 };
-    let along = (k / 2) as f32 * 200.0;
-    let offset = coordsys.col(1).scale(side * r) + coordsys.col(2).scale(along);
-    match u.add_ship(t, HUMAN_PLAYER, pos + offset, None) {
-        Ok(id) => {
-            if let Some(s) = u.ships.get_mut(id) {
-                s.rotinfo.coordsys = coordsys;
-            }
-            game.log(LogKind::Flow, format!("{t} launched from {} as ship {}", u.ships.ship(host).ship_type, id.0));
-        }
-        Err(e) => game.log(LogKind::Warning, format!("{t}: {e}")),
     }
 }
 
@@ -1177,6 +1184,14 @@ fn update_arriving_ship(u: &mut Universe, game: &mut Game, i: usize, sp: [f32; 4
                 s.flags &= !sof::HYPERSPACE;
                 s.flags |= sof::HIDE;
             }
+            // The modules the mothership was created with went to hyperspace with it (class
+            // Component ships are put in the hyperspace list too) and wait as long as it does:
+            // they stay hidden until its window opens.
+            for m in riders(u, game, id) {
+                if let Some(s) = u.ships.get_mut(m) {
+                    s.flags |= sof::HIDE;
+                }
+            }
             crate::effects::hyperspace::note_state(u, id, ship_hs::WAITING, game.arriving[i].hs_state);
             false
         }
@@ -1187,6 +1202,11 @@ fn update_arriving_ship(u: &mut Universe, game: &mut Game, i: usize, sp: [f32; 4
             if let Some(s) = u.ships.get_mut(id) {
                 s.posinfo.velocity = Vector::ZERO;
                 s.flags &= !sof::HIDE;
+            }
+            for m in riders(u, game, id) {
+                if let Some(s) = u.ships.get_mut(m) {
+                    s.flags &= !sof::HIDE;
+                }
             }
             let a = &mut game.arriving[i];
             a.state = ship_hs::DECELERATING;
@@ -1239,6 +1259,24 @@ fn update_arriving_ship(u: &mut Universe, game: &mut Game, i: usize, sp: [f32; 4
         }
         _ => false,
     }
+}
+
+/// The ships clamped to an arriving ship (and to those, ...) that are not arriving entries of
+/// their own: the modules created with the mothership. They come in with it.
+fn riders(u: &Universe, game: &Game, host: ShipId) -> Vec<ShipId> {
+    let own: Vec<ShipId> = game.arriving.iter().filter_map(|a| a.ship).collect();
+    let mut out = Vec::new();
+    let mut todo = crate::clamp::slaves_of(u, host);
+    while let Some(m) = todo.pop() {
+        if out.contains(&m) || m == host {
+            continue;
+        }
+        todo.extend(crate::clamp::slaves_of(u, m));
+        if !own.contains(&m) {
+            out.push(m);
+        }
+    }
+    out
 }
 
 /// `PutShipOutsideAt` for the campaign's fade-in arrival.
@@ -1434,6 +1472,29 @@ pub fn mission_script_name(mission: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arrival_flash_holds_three_seconds_then_falls_by_half_a_second() {
+        let mut h = crate::campaign::HyperState { arrival_flash: 1.0, ..Default::default() };
+        let mut t = 10.0f32;
+        arrival_flash_step(&mut h, t);
+        assert!((h.arrival_flash - 0.9999).abs() < 1e-6);
+        // Held while the three seconds run.
+        while t < 12.9 {
+            t += 0.0625;
+            arrival_flash_step(&mut h, t);
+        }
+        assert!((h.arrival_flash - 0.9999).abs() < 1e-6);
+        // Then two seconds down to nothing.
+        while t < 13.0 + 2.1 {
+            t += 0.0625;
+            arrival_flash_step(&mut h, t);
+        }
+        assert!(h.arrival_flash <= 0.0, "{}", h.arrival_flash);
+        let left = h.arrival_flash;
+        arrival_flash_step(&mut h, t + 1.0);
+        assert_eq!(h.arrival_flash, left, "it stops once spent");
+    }
 
     #[test]
     fn hs_effect_runs_popup_slice_collapse() {

@@ -1034,6 +1034,10 @@ fn full_detail_and_the_move_plate_height() {
     assert!(g.world.full_detail, "full detail is the default");
     let distance = g.world.camera.distance;
     g.world.camera.distance = 60_000.0;
+    // Beyond any draw distance: drawn here only with the reach opened up.
+    let far = g.world.camera.tweaks.clip_far;
+    g.world.render_list = false;
+    g.world.camera.tweaks.clip_far = 1.0e6;
     g.world.full_detail = false;
     for _ in 0..3 {
         let _ = g.world.frame(px);
@@ -1045,9 +1049,13 @@ fn full_detail_and_the_move_plate_height() {
     assert!(!full.is_empty() && full.iter().all(|&(_, l)| l == 0), "{full:?}");
     assert!(full.iter().any(|&(id, _)| g.world.ship_lod(id).unwrap_or(0) > 0));
     g.world.camera.distance = distance;
+    g.world.camera.tweaks.clip_far = far;
+    g.world.render_list = true;
     rig.frames(g, 4);
 
-    // The plate: select the movable ships and press M.
+    // The plate: select the movable ships and press M (once the ships that travelled inside
+    // the Kuun-Lan have launched and come to rest).
+    rig.frames(g, 16 * 25);
     rig.drag(g, (2, 2), (SIZE.0 - 3, SIZE.1 - 3));
     let ms = g.world.universe().base.players[0].mothership;
     g.selection.retain(|&id| Some(id) != ms);
@@ -1074,7 +1082,7 @@ fn full_detail_and_the_move_plate_height() {
     rig.render(g, "32_plate_height");
     let plate = *g.plate().unwrap();
     assert!(plate.spec_z > 100.0, "height {}", plate.spec_z);
-    assert!(plate.height.truncate().distance(foot.truncate()) < 1.0);
+    assert!(plate.height.truncate().distance(foot.truncate()) < 1.0, "{:?} {:?} cam {} {:?}", plate.height, foot, g.world.camera.distance, g.world.camera.zoom_target);
     assert!(g.take_pointer_warp().is_some(), "the pointer is held on the vertical");
     // Higher on the screen is higher in space.
     rig.input(g, InputEvent::MouseMove { x: start.0, y: start.1 - 150 });

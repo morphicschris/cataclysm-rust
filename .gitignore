@@ -32,3 +32,4 @@ __pycache__/
 
 # Exported music from the player's install (never commit)
 /music/
+/docs/ui-mockups/

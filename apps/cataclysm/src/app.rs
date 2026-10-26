@@ -119,6 +119,10 @@ struct App {
     fxaa: Option<bool>,
     scene_at_window: Option<bool>,
     smooth_zoom: Option<bool>,
+    /// `--focus-zoom`, `--zoom-limit`, `--draw-distance` (None: the options file).
+    focus_zoom: Option<bool>,
+    zoom_clear: Option<bool>,
+    render_list: Option<bool>,
     /// `--no-vsync`.
     no_vsync: bool,
     /// `--frame-times`: the 3D frame's draw times, printed every few seconds.
@@ -225,6 +229,9 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         fxaa: args.fxaa,
         scene_at_window: args.scene_at_window,
         smooth_zoom: args.smooth_zoom,
+        focus_zoom: args.focus_zoom,
+        zoom_clear: args.zoom_clear,
+        render_list: args.render_list,
         no_vsync: args.no_vsync,
         frame_times: args.frame_times.then(FrameTimes::default),
     };
@@ -660,6 +667,15 @@ impl App {
                     }
                     if let Some(v) = self.smooth_zoom {
                         game.smooth_zoom = v;
+                    }
+                    if let Some(v) = self.focus_zoom {
+                        game.world.focus_zoom = v;
+                    }
+                    if let Some(v) = self.zoom_clear {
+                        game.world.zoom_clear = v;
+                    }
+                    if let Some(v) = self.render_list {
+                        game.world.render_list = v;
                     }
                     if let Some(r) = &self.renderer {
                         let q = game.quality;

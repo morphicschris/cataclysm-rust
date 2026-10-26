@@ -13,3 +13,5 @@ bytemuck = { version = "1", features = ["derive"] }
 png = "0.18"
 jpeg-decoder = { version = "0.3", default-features = false }
 pollster = "0.4"
+# Rasterises the modern HUD's system font (Segoe UI, read at run time; no font is shipped).
+ab_glyph = "0.2.32"

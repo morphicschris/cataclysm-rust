@@ -124,6 +124,16 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // 1: the mouse wheel eases the zoom to each notch's distance; 0: the original's
     // immediate step per notch (`--zoom`).
     ("hwcSmoothZoom", 1),
+    // 1: focusing again on the ships already in focus zooms in to frame them (the
+    // original's autozoom); 0: a repeated focus does nothing (`--focus-zoom`).
+    ("hwcFocusZoom", 1),
+    // 1: the closest zoom on focused ships also keeps the near clip plane outside their
+    // hulls; 0: the original's limit alone (`--zoom-limit`).
+    ("hwcZoomClear", 1),
+    // 1: ships, effects and asteroids are drawn by the original's render list (within a
+    // radial distance of the look-at point); 0: everything within the far clip distance
+    // of the eye (`--draw-distance`).
+    ("hwcRenderList", 1),
     // The 3D view's internal render scale in percent, 50..200 (100: the original, drawn at
     // the screen's pixels; above 100 supersampled; `--render-scale`).
     ("hwcRenderScale", 100),
@@ -135,6 +145,11 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // the window's pixels under the scaled interface; 0: at the 640x480 layout's pixels
     // (`--scene-res`).
     ("hwcSceneAtWindow", 1),
+    // 1: the modern HUD (RU / SU bars top right, objectives panel top left); 0: the
+    // original's SU / RU / time box and objectives list, bottom (`--hud`).
+    ("hwcModernHud", 1),
+    // The modern objectives panel: 1 expanded, 0 collapsed (its header toggles it).
+    ("hwcObjectivesExpanded", 1),
     // Registry values.
     ("deviceIndex", -1),
     ("screenWidth", 640),
@@ -347,6 +362,19 @@ hwcSmoothZoom = 0
         assert_eq!(back.get("hwcMsaa"), 4);
         assert!(back.get_bool("hwcFxaa"));
         assert!(!back.get_bool("hwcSmoothZoom"));
+    }
+
+    #[test]
+    fn camera_options_default_on() {
+        let o = Options::default();
+        for k in ["hwcFocusZoom", "hwcZoomClear", "hwcRenderList"] {
+            assert!(o.get_bool(k), "{k}");
+        }
+        let (back, errors) = Options::from_text("hwcFocusZoom = 0\nhwcZoomClear = 0\nhwcRenderList = 0\n");
+        assert!(errors.is_empty());
+        for k in ["hwcFocusZoom", "hwcZoomClear", "hwcRenderList"] {
+            assert!(!back.get_bool(k), "{k}");
+        }
     }
 
     #[test]

@@ -132,6 +132,37 @@ pub struct OrbitCamera {
 /// three of them (0.24 s).
 pub const ZOOM_EASE_TIME: f32 = 0.08;
 
+/// One ship the camera is focused on, for the distance that frames it (`NewSetFocusPoint`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocusShip {
+    /// Its collision centre.
+    pub centre: Vec3,
+    /// Its collision sphere radius.
+    pub radius: f32,
+    /// Its static `minimumZoomDistance` (0 when it has none).
+    pub minimum_zoom: f32,
+    /// The radius of everything drawn of it (at least the collision radius), for
+    /// [`OrbitCamera::clear_distance`].
+    pub drawn_radius: f32,
+}
+
+/// `NewSetFocusPoint`'s fit constants: the cotangent of half the 75 degree field of view, and
+/// its inverse.
+const FIT_COT: f64 = 1.303225;
+const FIT_TAN: f64 = 0.767327207;
+
+/// Where `ship` lies seen from the look-at point: its distance along the line to the eye
+/// (positive towards the eye) and its distance from that line.
+fn along_and_across(look_at: Vec3, toward_eye: Vec3, centre: Vec3) -> (f64, f64) {
+    let rel = (centre - look_at).as_dvec3();
+    let len = rel.length();
+    if len <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let cos = (rel / len).dot(toward_eye.as_dvec3());
+    (cos * len, (1.0 - cos * cos).max(0.0).sqrt() * len)
+}
+
 impl OrbitCamera {
     /// A camera at `distance` looking at the origin with zero angle and declination.
     pub fn new(tweaks: CameraTweaks, distance: f32) -> Self {
@@ -317,6 +348,58 @@ impl OrbitCamera {
         }
     }
 
+    /// The unit direction from the look-at point to the eye.
+    fn toward_eye(&self) -> Vec3 {
+        let (sd, cd) = self.declination.sin_cos();
+        let (sa, ca) = self.angle.sin_cos();
+        Vec3::new(cd * ca, cd * sa, -sd)
+    }
+
+    /// `NewSetFocusPoint`'s target distance: the closest the camera may come to the focused
+    /// ships (after the player zooms, `ccControl` keeps it at least this far) and where a
+    /// close-up focus (`zoomInCloseAsPossible`: Alt-focus, or focusing again on what is
+    /// already in focus) takes it. Each ship is framed by its collision radius (or by its
+    /// minimum zoom distance where it has one) with the field of view the constants assume,
+    /// plus how far it lies towards the eye; never nearer than [`closest_zoom`](Self::closest_zoom).
+    pub fn focus_distance(&self, ships: &[FocusShip]) -> f32 {
+        let close = f64::from(self.closest_zoom);
+        if ships.is_empty() {
+            return self.closest_zoom;
+        }
+        let toward = self.toward_eye();
+        let mut far = 0.0f64;
+        for s in ships {
+            let (along, across) = along_and_across(self.look_at, toward, s.centre);
+            let reach = if s.minimum_zoom < 0.1 {
+                across + f64::from(s.radius)
+            } else {
+                across + f64::from(s.minimum_zoom) * FIT_TAN
+            };
+            let d = (reach * FIT_COT).max(close) + along;
+            far = far.max(d);
+        }
+        far as f32
+    }
+
+    /// A modern addition to [`focus_distance`](Self::focus_distance): the distance at which the
+    /// near clip plane stays outside every focused ship's drawn sphere (with room for the near
+    /// plane's corners), so zooming in never cuts into a hull.
+    pub fn clear_distance(&self, ships: &[FocusShip]) -> f32 {
+        let toward = self.toward_eye();
+        let half = (self.tweaks.field_of_view.to_radians() * 0.5).tan();
+        // The near plane's corner, for any picture up to twice as wide as it is high.
+        let margin = self.tweaks.clip_near * (1.0 + half * half * 5.0).sqrt();
+        let mut far = 0.0f64;
+        for s in ships {
+            let (along, across) = along_and_across(self.look_at, toward, s.centre);
+            let r = f64::from(s.drawn_radius.max(s.radius) + margin);
+            if across < r {
+                far = far.max(along + (r * r - across * across).sqrt());
+            }
+        }
+        far as f32
+    }
+
     /// World-to-eye matrix (right-handed, Z up).
     pub fn view(&self) -> Mat4 {
         Mat4::look_at_rh(self.eye(), self.look_at, self.up())
@@ -400,6 +483,54 @@ mod tests {
         e.key_zoom(true, e.closest_zoom);
         assert_eq!(e.zoom_target, None);
         assert!((e.distance - at * 0.94).abs() < 0.01);
+    }
+
+    fn ship(centre: Vec3, radius: f32, minimum_zoom: f32) -> FocusShip {
+        FocusShip { centre, radius, minimum_zoom, drawn_radius: radius }
+    }
+
+    #[test]
+    fn focus_distance_frames_the_ships() {
+        let mut c = OrbitCamera::new(CameraTweaks::default(), 5000.0);
+        c.look_at = Vec3::new(100.0, 200.0, 0.0);
+        c.declination = (-30f32).to_radians();
+        // Nothing in focus: the camera's own limit.
+        assert_eq!(c.focus_distance(&[]), 50.0);
+        // One ship at the look-at point: its radius over tan(37.5 degrees).
+        let one = [ship(c.look_at, 300.0, 0.0)];
+        assert!((c.focus_distance(&one) - 300.0 * 1.303225).abs() < 0.01);
+        // A minimum zoom distance replaces the radius, and is the distance itself.
+        let mzd = [ship(c.look_at, 300.0, 2000.0)];
+        assert!((c.focus_distance(&mzd) - 2000.0).abs() < 0.5);
+        // A small ship is held at the closest zoom.
+        assert_eq!(c.focus_distance(&[ship(c.look_at, 10.0, 0.0)]), 50.0);
+        // A ship off to the side widens the frame; one towards the eye pushes it back by as
+        // much as it is nearer.
+        let side = c.look_at + Vec3::new(0.0, 0.0, 1.0).cross(c.eye() - c.look_at).normalize() * 400.0;
+        assert!((c.focus_distance(&[ship(side, 100.0, 0.0)]) - 500.0 * 1.303225).abs() < 0.05);
+        let toward = c.look_at + (c.eye() - c.look_at).normalize() * 400.0;
+        let d = c.focus_distance(&[ship(toward, 100.0, 0.0)]);
+        assert!((d - (100.0 * 1.303225 + 400.0)).abs() < 0.5, "{d}");
+        // The farthest requirement of a group wins.
+        let both = [one[0], ship(side, 100.0, 0.0)];
+        assert!((c.focus_distance(&both) - 500.0 * 1.303225).abs() < 0.05);
+    }
+
+    #[test]
+    fn clear_distance_keeps_the_near_plane_outside_the_hull() {
+        let mut c = OrbitCamera::new(CameraTweaks::default(), 5000.0);
+        let s = FocusShip { centre: Vec3::ZERO, radius: 40.0, minimum_zoom: 0.0, drawn_radius: 45.0 };
+        let d = c.clear_distance(&[s]);
+        // Beyond the drawn radius by more than the near plane's distance.
+        assert!(d > 45.0 + c.tweaks.clip_near, "{d}");
+        assert!(d < 45.0 + c.tweaks.clip_near * 2.0, "{d}");
+        // The original's limit for this ship (the closest zoom of 50) would put the near plane
+        // inside it.
+        assert!(c.focus_distance(&[s]) < d);
+        // A ship well off the line of sight sets no limit.
+        let off = FocusShip { centre: Vec3::new(0.0, 500.0, 0.0), ..s };
+        c.angle = 0.0;
+        assert_eq!(c.clear_distance(&[off]), 0.0);
     }
 
     #[test]

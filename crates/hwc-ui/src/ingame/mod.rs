@@ -17,6 +17,8 @@ pub mod keylist;
 pub mod keys;
 pub mod launchmgr;
 pub mod mock;
+pub mod modern_hud;
+pub mod modern_objectives;
 pub mod overlay;
 pub mod popup;
 pub mod research;

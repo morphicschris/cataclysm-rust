@@ -110,6 +110,11 @@ pub struct State {
     pub top: i32,
     /// When the subtitles last drew (the slide back up starts from here).
     top_stamp: f32,
+    /// The modern RU / SU readout's eased bar fills.
+    pub modern_hud: crate::ingame::modern_hud::Tween,
+    /// The modern objectives panel's flash, and its header (the collapse toggle) as laid out.
+    pub modern_objectives: crate::ingame::modern_objectives::PanelState,
+    objectives_header: Option<Rect>,
 }
 
 impl State {
@@ -239,10 +244,11 @@ pub fn tick(fe: &mut Fe, dt: f32) {
     layout(fe);
 }
 
-/// Top of the bottom-of-screen area: objectives and player info push it up.
-fn bar_top(st: &State, view: &HostView, h: i32, th: i32) -> i32 {
+/// Top of the bottom-of-screen area: objectives and player info push it up (the objectives
+/// only in the original layout: the modern HUD has them top left).
+fn bar_top(st: &State, view: &HostView, h: i32, th: i32, modern: bool) -> i32 {
     let mut bar = h;
-    if st.shown(view, OBJECTIVES) && !view.objectives.is_empty() {
+    if st.shown(view, OBJECTIVES) && !view.objectives.is_empty() && !modern {
         bar = h - (view.objectives.len() as i32 * th + th + 24);
     }
     if st.shown(view, PLAYERINFO) {
@@ -262,16 +268,25 @@ pub fn layout(fe: &mut Fe) {
     };
     let th = crate::text::height(&tf);
     let lh = crate::text::height(&lf);
-    let bar = bar_top(st, view, h, th);
+    let modern = crate::ingame::modern_hud::enabled(&fe.game.options);
+    let bar = bar_top(st, view, h, th, modern);
     let mut lines = Vec::new();
     if st.shown(view, SELECTED) {
+        // The modern readout takes the top-right corner: the list starts under it.
+        let list_top = crate::ingame::modern_hud::top_reserve(fe, w, h);
         for (i, (t, owner, _, _)) in groups(&view.selection).into_iter().enumerate() {
-            let y = 10 + i as i32 * lh;
+            let y = list_top + 10 + i as i32 * lh;
             lines.push((t, owner, Rect::new(w - 150, y, w, y + lh)));
         }
     }
     let mut objective_rects = Vec::new();
-    if st.shown(view, OBJECTIVES) && !view.objectives.is_empty() {
+    let mut objectives_header = None;
+    if st.shown(view, OBJECTIVES) && modern {
+        if let Some(p) = crate::ingame::modern_objectives::panel(fe, w, h, view) {
+            objectives_header = Some(p.header);
+            objective_rects = p.items.iter().map(|i| (i.index, i.rect)).collect();
+        }
+    } else if st.shown(view, OBJECTIVES) && !view.objectives.is_empty() {
         let mut y = bar + th + 4;
         for (i, o) in view.objectives.iter().enumerate() {
             let s = objective_text(o);
@@ -300,6 +315,7 @@ pub fn layout(fe: &mut Fe) {
     let o = &mut fe.game.ig.overlay;
     o.lines = lines;
     o.objective_rects = objective_rects;
+    o.objectives_header = objectives_header;
     o.message_rects = message_rects;
     o.view_buttons = view_buttons;
 }
@@ -360,6 +376,12 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool, x: i32, y: i32) -> bool
         return false;
     }
     let o = &fe.game.ig.overlay;
+    // The modern objectives panel's header collapses or expands it.
+    if o.objectives_header.is_some_and(|r| r.contains(x, y)) {
+        crate::ingame::modern_objectives::toggle(fe);
+        layout(fe);
+        return true;
+    }
     if let Some(&(t, owner, _)) = o.lines.iter().find(|l| l.2.contains(x, y)) {
         let multi = fe.input.down.iter().any(|k| {
             fe.game
@@ -480,7 +502,8 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
         return;
     };
     let th = crate::text::height(&tf);
-    let bar = bar_top(st, &view, h, th);
+    let modern = crate::ingame::modern_hud::enabled(&fe.game.options);
+    let bar = bar_top(st, &view, h, th, modern);
     let options = fe.game.options.clone();
     if options.get_bool("ShowTaskbarBackdrop") && !view.player.tutorial {
         canvas.blend_rect(Rect::new(0, bar, w, h), BACKDROP);
@@ -497,7 +520,10 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
     let _ = lines;
     let st = &fe.game.ig.overlay;
     let mut objective_rects = Vec::new();
-    if st.shown(&view, OBJECTIVES) && !view.objectives.is_empty() {
+    if st.shown(&view, OBJECTIVES) && modern {
+        let (clock, mouse) = (st.clock, st.mouse);
+        crate::ingame::modern_objectives::draw(fe, canvas, &view, clock, mouse);
+    } else if st.shown(&view, OBJECTIVES) && !view.objectives.is_empty() {
         let mut y = bar;
         let mut widest = 0;
         let (mx, my) = st.mouse;
@@ -540,9 +566,12 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
         draw_messages(fe, canvas, &view, bar.min(h));
     }
     let st = &fe.game.ig.overlay;
-    let mut left_y = st.top + 20;
+    // The modern objectives panel takes the top-left corner: these columns go under it.
+    let left_top =
+        crate::ingame::modern_objectives::left_top(fe, w, h, &view, st.shown(&view, OBJECTIVES));
+    let mut left_y = left_top + 20;
     if st.shown(&view, PLAYERNAMES) && !view.player_names.is_empty() {
-        left_y = draw_player_names(fe, canvas, &view);
+        left_y = draw_player_names(fe, canvas, &view, left_top);
     }
     let st = &fe.game.ig.overlay;
     let bottom = bar + 5 * th + 10;
@@ -558,8 +587,13 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
     }
     let st = &fe.game.ig.overlay;
     if st.shown(&view, PLAYERINFO) {
-        let bd = !options.get_bool("ShowTaskbarBackdrop");
-        draw_player_info(fe, canvas, &view, bar, bd);
+        if crate::ingame::modern_hud::enabled(&options) {
+            let clock = st.clock;
+            crate::ingame::modern_hud::draw(fe, canvas, &view, clock);
+        } else {
+            let bd = !options.get_bool("ShowTaskbarBackdrop");
+            draw_player_info(fe, canvas, &view, bar, bd);
+        }
     }
     draw_view_buttons(fe, canvas, bar);
     if view.player.in_sensors {
@@ -592,7 +626,8 @@ fn draw_ship_list(
     let h = crate::text::height(&f);
     let st = &fe.game.ig.overlay;
     let x = canvas.width - 150;
-    let mut y = st.top + 10;
+    let reserve = crate::ingame::modern_hud::top_reserve(fe, canvas.width, canvas.height);
+    let mut y = st.top.max(reserve) + 10;
     if selecting {
         let groups = groups(&fe.game.ig.view.selection);
         y += groups.len() as i32 * h + 20 - 10;
@@ -753,8 +788,7 @@ fn draw_messages(fe: &mut Fe, canvas: &mut Canvas, view: &HostView, base: i32) {
 }
 
 /// `moDrawPlayerStats`: colour swatches and names; returns the next free y.
-fn draw_player_names(fe: &Fe, canvas: &mut Canvas, view: &HostView) -> i32 {
-    let top = fe.game.ig.overlay.top;
+fn draw_player_names(fe: &Fe, canvas: &mut Canvas, view: &HostView, top: i32) -> i32 {
     let Some(f) = font(fe, FONT_TEXT) else {
         return top + 20;
     };
