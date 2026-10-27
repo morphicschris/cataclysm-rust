@@ -333,8 +333,12 @@ impl Loading {
         let path = self.saved.clone().expect("saved game");
         let statics = self.loader.statics.clone().expect("statics");
         let relink = crate::saves::relink(&self.assets, statics, self.mission)?;
-        let (_, payload) =
+        let (_, mut payload) =
             crate::saves::read(&path, &relink).map_err(|e| format!("{}: {e}", path.display()))?;
+        // A level without a mission file (the tutorial) keeps the statics as loaded.
+        let _ = payload
+            .run
+            .restore_ship_availability(&hwc_sim::mission::GameDataSource(self.assets.data()));
         self.saved_ui = Some(payload.ui);
         Ok(payload.run)
     }

@@ -667,6 +667,26 @@ impl MissionRun {
         self.game.disguise_tables = t;
     }
 
+    /// Restores what the build manager may offer in a loaded game, which lives in the statics a
+    /// saved game does not hold: the level's ExcludeShips / IncludeShips, the fleet that came
+    /// through hyperspace, then the mission's `EnableShipConstruction` calls in order.
+    pub fn restore_ship_availability(&mut self, src: &dyn DataSource) -> Result<(), MissionError> {
+        let mission = self.game.config.mission;
+        let fleet_modifier = fleet_modifier(&self.game, &self.universe.statics, mission);
+        let ctx = LevelContext { single_player: true, mission, fleet_modifier, resources: ResourceTweaks::load(src) };
+        let (dir, file) = level::mission_paths(mission, None);
+        level::reapply_ship_exclusions(&mut self.universe, src, &dir, &file, &ctx)?;
+        for f in &self.game.fleet {
+            level::flag_ship_needed(&mut self.universe, f.ship_type, true);
+        }
+        for (t, r, enabled) in &self.game.construction {
+            if let (Some(ty), Some(race)) = (ShipType::from_name(t), ShipRace::from_name(r)) {
+                level::enable_ship(&mut self.universe, race.index(), ty, *enabled != 0);
+            }
+        }
+        Ok(())
+    }
+
     /// Sets up mission `config.mission` from `src` with the mission script `script`: the
     /// player's fleet (from the opening NIS for mission 1) goes into hyperspace and the level is
     /// loaded; the KAS mission starts on the first [`step`](Self::step).

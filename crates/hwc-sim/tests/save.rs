@@ -381,3 +381,37 @@ fn mission_autosave_requests() {
 fn header_of(run: &MissionRun) -> SaveHeader {
     SaveHeader { mission: run.game.config.mission, script_fingerprint: save::script_fingerprint(run.kas.mission()), ..SaveHeader::default() }
 }
+
+/// What Mission 3's build manager offers survives a save: the level's ExcludeShips and the
+/// script's `EnableShipConstruction` change statics a saved game does not hold, so loading
+/// builds them again (no Super Acolyte, no Advanced Engineering, Armour or Weapons modules
+/// until the script enables them).
+#[test]
+fn mission3_build_list_survives_a_save() {
+    use hwc_sim::statics::ShipType as T;
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    let c = Carry::warp(d.statics.clone(), d.tweaks.clone(), &src, 3).expect("warp.script level 3");
+    let mut run = start(d, 3, Some(&c));
+    while !run.game.ships_have_arrived && run.universe.update_counter < 3000 {
+        run.step();
+    }
+    let ms = run.universe.base.players[0].mothership.expect("mothership");
+    let list = hwc_sim::level::construction_list(&run.universe, ms);
+    for t in [T::dAcolyte, T::sMothershipSpecial, T::sMothershipArmour, T::sMothershipWeapons] {
+        assert!(!list.contains(&t), "{t:?} offered at the start of mission 3: {list:?}");
+    }
+    let h = SaveHeader { mission: 3, script_fingerprint: save::script_fingerprint(run.kas.mission()), ..Default::default() };
+    let bytes = save::encode(&h, &run).unwrap();
+    let (_, mut loaded): (SaveHeader, MissionRun) = save::decode(&bytes, &relink(d, 3)).unwrap();
+    loaded.after_load();
+    loaded.restore_ship_availability(&src).unwrap();
+    assert_eq!(hwc_sim::level::construction_list(&loaded.universe, ms), list);
+
+    // The Weapons module once the script enables it (Mission 3's "Missile2").
+    run.game.construction.push(("sMothershipWeapons".into(), "RACE_SECT".into(), 1));
+    let bytes = save::encode(&h, &run).unwrap();
+    let (_, mut loaded): (SaveHeader, MissionRun) = save::decode(&bytes, &relink(d, 3)).unwrap();
+    loaded.restore_ship_availability(&src).unwrap();
+    assert!(hwc_sim::level::construction_offers(&loaded.universe, ms, T::sMothershipWeapons));
+}
