@@ -37,10 +37,18 @@ pub fn install() {
     native::install();
     std::panic::set_hook(Box::new(|info| {
         if gpu_lost() {
-            // The GPU calls after a device loss fail; the loss itself is already in the log.
+            // The GPU calls after a device loss fail; the loss itself is already in the log,
+            // the failure that ends the game goes after it in a line.
             eprintln!(
                 "cataclysm: the graphics device was lost (the driver reset the GPU); details are in {LOG_NAME}"
             );
+            let place = info
+                .location()
+                .map_or_else(String::new, |l| format!(" at {}:{}", l.file(), l.line()));
+            let _ = write_log(&format!(
+                "cataclysm: after the device loss the game stopped{place}: {}\n",
+                payload_text(info)
+            ));
             if std::thread::current().name() == Some("main") {
                 std::process::exit(1);
             }
@@ -59,14 +67,18 @@ pub fn install() {
     }));
 }
 
-/// The text of a report.
-fn report(info: &PanicHookInfo<'_>) -> String {
-    let message = info
-        .payload()
+/// A panic's message.
+fn payload_text(info: &PanicHookInfo<'_>) -> String {
+    info.payload()
         .downcast_ref::<&str>()
         .map(|s| s.to_string())
         .or_else(|| info.payload().downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "(no message)".into());
+        .unwrap_or_else(|| "(no message)".into())
+}
+
+/// The text of a report.
+fn report(info: &PanicHookInfo<'_>) -> String {
+    let message = payload_text(info);
     let location = info.location().map_or_else(
         || "unknown place".into(),
         |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
@@ -97,6 +109,14 @@ pub fn log(what: &str) {
     );
     eprintln!("{report}");
     if let Some(p) = write_log(&report) {
+        eprintln!("cataclysm: report written to {}", p.display());
+    }
+}
+
+/// Appends a report as it is (no backtrace of the calling thread) to the log and stderr.
+pub fn append(report: &str) {
+    eprintln!("{report}");
+    if let Some(p) = write_log(report) {
         eprintln!("cataclysm: report written to {}", p.display());
     }
 }
@@ -193,6 +213,7 @@ mod native {
 
     const SIGABRT: i32 = 22;
     const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
+    const STACK_OVERFLOW: u32 = 0xC000_00FD;
     const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x4;
     const GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT: u32 = 0x2;
 
@@ -280,6 +301,17 @@ mod native {
                 None => (0, std::ptr::null(), Vec::new()),
             }
         };
+        if code == STACK_OVERFLOW {
+            // Only the stack's small reserve is left: a line without a backtrace (the standard
+            // library has printed which thread it was).
+            let _ = std::panic::catch_unwind(|| {
+                super::append(&format!(
+                    "cataclysm {}: stack overflow (native exception 0x{code:08x}) at {address:p}\n",
+                    env!("CARGO_PKG_VERSION")
+                ));
+            });
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
         let _ = std::panic::catch_unwind(|| {
             super::log(&format!(
                 "native exception 0x{code:08x} at {address:p} in {}, parameters {params:x?}",

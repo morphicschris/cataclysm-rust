@@ -39,6 +39,7 @@ use crate::pings::{self, Owner as PingOwner, Pings, Tweaks as PingTweaks};
 use crate::plate::{self, Plate};
 use crate::profile;
 use crate::sensors::{self, Phase, Sensors};
+use crate::tactical;
 use crate::world::World;
 use hwc_nis::{Action as NisAction, Fired};
 
@@ -260,6 +261,13 @@ pub struct Game {
     /// A user-requested change, on by default (`hwcDoubleClickSelectType`): double-clicking
     /// one of the player's ships selects all the player's ships of its type on screen.
     pub double_click_type: bool,
+    /// User-requested changes, on by default (see [`crate::tactical`]): lines from the
+    /// selected ships to their orders' targets (`hwcOrderLines`, `--order-lines`), class
+    /// icons over the ships (`hwcShipIcons`, `--ship-icons`, cycled by Tab) and the selected
+    /// ships' health bars outlined and bracketed (`hwcHealthBrackets`, `--health-bars`).
+    pub order_lines: bool,
+    pub ship_icons: tactical::IconMode,
+    pub health_brackets: bool,
     /// The last plain click on one of the player's ships, for the double click.
     last_ship_click: Option<(ShipId, std::time::Instant)>,
     /// Where the saved games are (none: saving is off, as in the headless tests that do not
@@ -303,6 +311,7 @@ impl Game {
                 default_keys: Some(ig.default_keys.to_config()),
                 keys: Some(ig.keys.to_config()),
                 keys_path: ig.keys_path.clone(),
+                options_path: session.fe.game.config_path.clone(),
             },
         )?;
         let strings = ui.state().strings.clone();
@@ -399,6 +408,9 @@ impl Game {
             pointer_warp: None,
             right_click_move: options.get("hwcRightClickMove") != 0,
             double_click_type: options.get("hwcDoubleClickSelectType") != 0,
+            order_lines: options.get("hwcOrderLines") != 0,
+            ship_icons: tactical::IconMode::from_option(options.get("hwcShipIcons")),
+            health_brackets: options.get("hwcHealthBrackets") != 0,
             last_ship_click: None,
             plate_from_right: false,
             saves: None,
@@ -454,6 +466,9 @@ impl Game {
         self.scene_at_window = options.get("hwcSceneAtWindow") != 0;
         self.right_click_move = options.get("hwcRightClickMove") != 0;
         self.double_click_type = options.get("hwcDoubleClickSelectType") != 0;
+        self.order_lines = options.get("hwcOrderLines") != 0;
+        self.ship_icons = tactical::IconMode::from_option(options.get("hwcShipIcons"));
+        self.health_brackets = options.get("hwcHealthBrackets") != 0;
         self.letterbox.tall = options.get("hwcOriginalLetterbox") == 0;
         self.world.full_detail = options.get("hwcFullDetailShips") != 0;
         self.world.focus_zoom = options.get("hwcFocusZoom") != 0;
@@ -1442,6 +1457,12 @@ impl Game {
             GameRequest::ApplyOptions | GameRequest::AudioSettings => {
                 out.push(Outcome::ApplyOptions)
             }
+            GameRequest::CycleShipIcons => {
+                self.ship_icons = self.ship_icons.next();
+                let v = self.ship_icons.to_option();
+                self.ui.fe.game.options.set("hwcShipIcons", v);
+                self.post(self.ship_icons.message());
+            }
             GameRequest::SkipFleetIntel => {
                 let now = self.world.universe().total_time_elapsed;
                 if let Some(s) = self.subtitles.as_mut() {
@@ -1946,6 +1967,8 @@ impl Game {
     /// mission's cues, the sound.
     pub fn update(&mut self, dt: f32, audio: &mut Option<Audio>) -> Vec<Outcome> {
         let mut out = Vec::new();
+        crate::watchdog::detail(|| self.watch_line());
+        crate::watchdog::checkpoint("update: interface");
         if let Some(p) = self.pending_load.take() {
             out.push(Outcome::LoadGame(p));
             return out;
@@ -1988,6 +2011,7 @@ impl Game {
             }
         }
         // The sensors manager: a mission opening or closing it, the zoom, panning.
+        crate::watchdog::checkpoint("update: sensors manager");
         let kas_open = self
             .world
             .mission_run()
@@ -2030,6 +2054,7 @@ impl Game {
             || self.nis_level_done;
         self.world.sensors_open = self.sensors.is_open() && self.nis.is_none();
         let steps = self.world.due_steps(f64::from(dt));
+        crate::watchdog::checkpoint("update: simulation steps");
         for _ in 0..steps {
             if self.movie || self.next_mission || self.nis_level_done {
                 break;
@@ -2084,7 +2109,9 @@ impl Game {
         for e in std::mem::take(&mut self.ping_sounds) {
             sound(audio, e);
         }
+        crate::watchdog::checkpoint("update: presentation");
         self.update_presentation(dt, audio);
+        crate::watchdog::checkpoint("update: done");
         if self.nis_level_done {
             out.push(Outcome::NisLevelDone);
         }
@@ -2094,6 +2121,25 @@ impl Game {
             }
         }
         out
+    }
+
+    /// The game's state in a line for the main-loop watchdog's report.
+    fn watch_line(&self) -> String {
+        format!(
+            "mission {}{}, nis {}, sensors {:?} (open {}, zooming {}, kas {}), bars fade {:.2} in {}, movie {}, paused {}, real time {:.2}",
+            self.world.mission(),
+            if self.world.nis_level().is_some() { " (NIS level)" } else { "" },
+            self.nis.is_some(),
+            self.sensors.phase(),
+            self.sensors.is_open(),
+            self.sensors.zooming(),
+            self.world.mission_run().is_some_and(|r| r.game.sensors_open),
+            self.letterbox.fade,
+            self.letterbox.fully,
+            self.movie,
+            self.paused,
+            self.real_time,
+        )
     }
 
     /// The jump's movie and the next mission (`singlePlayerGameUpdate` state 5).
@@ -2464,9 +2510,10 @@ impl Game {
     /// volumes are kept to restore, the letterbox comes in as the script says, and the
     /// events at time 0 run.
     pub fn begin_nis(&mut self, mut run: NisRun, fired: Vec<Fired>, audio: &mut Option<Audio>) {
-        if self.sensors.is_open() {
-            self.close_sensors(audio);
-        }
+        // `spMainScreen`'s `smSensorsCloseForGood`: at once, even in the middle of a zoom (a
+        // zoom left going, or refused because one was, kept the manager open through the
+        // cutscene, and the camera it saved and gave back at its end was the sensors one).
+        self.sensors.close_for_good(&mut self.world);
         self.mode = Mode::Select;
         self.left_down = None;
         self.right_down = false;
@@ -3294,12 +3341,23 @@ impl Game {
                 number.map(|n| (n, lod)),
             ));
         }
+        if !in_sensors {
+            let icons = &self.sensors.icons;
+            tactical::draw_icons(&mut self.canvas, &self.world, size, icons, self.ship_icons);
+            if self.order_lines {
+                tactical::draw_order_lines(&mut self.canvas, &self.world, size, &self.selection);
+            }
+        }
         for r in outlines {
             self.canvas.outline_rect(r, SELECTING_COLOR);
         }
         for (x, y, r, f, number) in bars {
             use hwc_ui::ingame::overlay;
             overlay::draw_health_bar(&mut self.canvas, x, y, r, f);
+            if self.health_brackets {
+                overlay::draw_health_outline(&mut self.canvas, overlay::status_rect(x, y, r));
+                overlay::draw_selection_brackets(&mut self.canvas, x, y, r);
+            }
             if let Some((n, lod)) = number {
                 let font = self.group_fonts[overlay::hotkey_font_index(lod)].as_deref();
                 if let Some(font) = font {

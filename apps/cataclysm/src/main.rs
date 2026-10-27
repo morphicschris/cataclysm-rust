@@ -16,6 +16,8 @@ mod crash;
 mod data;
 mod draw_check;
 mod game;
+#[cfg(test)]
+mod hang_checks;
 mod host;
 mod hotkeys;
 #[cfg(test)]
@@ -58,9 +60,11 @@ mod smoke;
 mod special_actions;
 #[cfg(test)]
 mod speech;
+mod tactical;
 #[cfg(test)]
 mod test_gpu;
 mod tour;
+mod watchdog;
 mod world;
 
 use std::path::{Path, PathBuf};
@@ -131,6 +135,19 @@ options:
                         (double-clicking one of your ships selects all your ships of that
                         type on screen, a user-requested change; options file:
                         hwcDoubleClickSelectType = 1/0)
+  --order-lines <mode>  modern (default, a user-requested change: lines from the selected
+                        ships to what they were ordered to, with a circle there, coloured by
+                        the order: green move, red attack, yellow harvest, blue dock, light
+                        blue guard, purple special) or original (none); options file:
+                        hwcOrderLines = 1/0
+  --ship-icons <mode>   all (default, a user-requested change: class icons over every ship),
+                        near (over the ships near the camera, fading out with distance) or
+                        none (the original); Tab cycles them in the game and Shift+Tab is
+                        then Toggle Ship Info (options file: hwcShipIcons = 2/1/0,
+                        hwcTabShipIcons = 1/0 to give Tab back to Toggle Ship Info)
+  --health-bars <mode>  modern (default, a user-requested change: a selected ship's health
+                        bar has a thin black outline and white [ ] brackets) or original;
+                        options file: hwcHealthBrackets = 1/0
   --zoom <mode>         smooth (default, a user-requested change: each mouse-wheel notch
                         eases the camera to its distance) or original (the original's
                         immediate step); options file: hwcSmoothZoom = 1/0
@@ -239,6 +256,11 @@ pub struct Args {
     /// `--right-click`: Some(true) modern, Some(false) original, None the options file's
     /// `hwcRightClickMove`.
     pub right_click_move: Option<bool>,
+    /// `--order-lines`, `--ship-icons` (the `hwcShipIcons` value), `--health-bars`; None: the
+    /// options file.
+    pub order_lines: Option<bool>,
+    pub ship_icons: Option<i32>,
+    pub health_brackets: Option<bool>,
     /// `--zoom`: Some(true) smooth, Some(false) the original's step, None the options file.
     pub smooth_zoom: Option<bool>,
     /// `--focus-zoom`, `--zoom-limit` (Some(true): hull), `--draw-distance` (Some(true):
@@ -281,6 +303,9 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
         autoplay: false,
         full_detail: None,
         right_click_move: None,
+        order_lines: None,
+        ship_icons: None,
+        health_brackets: None,
         smooth_zoom: None,
         focus_zoom: None,
         zoom_clear: None,
@@ -349,6 +374,32 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
                         "modern" => true,
                         "original" => false,
                         v => return Err(format!("unknown --right-click mode {v}")),
+                    },
+                )
+            }
+            "--order-lines" => {
+                a.order_lines = Some(
+                    match value("--order-lines")?.to_ascii_lowercase().as_str() {
+                        "modern" => true,
+                        "original" => false,
+                        v => return Err(format!("unknown --order-lines mode {v}")),
+                    },
+                )
+            }
+            "--ship-icons" => {
+                a.ship_icons = Some(match value("--ship-icons")?.to_ascii_lowercase().as_str() {
+                    "all" => 2,
+                    "near" => 1,
+                    "none" | "original" => 0,
+                    v => return Err(format!("unknown --ship-icons mode {v}")),
+                })
+            }
+            "--health-bars" => {
+                a.health_brackets = Some(
+                    match value("--health-bars")?.to_ascii_lowercase().as_str() {
+                        "modern" => true,
+                        "original" => false,
+                        v => return Err(format!("unknown --health-bars mode {v}")),
                     },
                 )
             }
@@ -485,6 +536,21 @@ pub fn open_game_data(args: &Args) -> Result<GameData, String> {
     }
 }
 
+/// Whether `path` (a file that may not exist yet) lies inside the directory `dir`.
+fn is_inside(dir: &Path, path: &Path) -> bool {
+    let Ok(dir) = dir.canonicalize() else {
+        return false;
+    };
+    let Ok(abs) = std::path::absolute(path) else {
+        return false;
+    };
+    // The nearest folder that exists, as the file system names it.
+    abs.ancestors()
+        .skip(1)
+        .find_map(|a| a.canonicalize().ok())
+        .is_some_and(|p| p.starts_with(&dir))
+}
+
 /// Builds the front-end session on the game files.
 fn open_session(args: &Args, data: Rc<GameData>) -> Result<Session, String> {
     let read = |p: Option<PathBuf>| {
@@ -499,6 +565,19 @@ fn open_session(args: &Args, data: Rc<GameData>) -> Result<Session, String> {
             .root()
             .map(|r| r.join("config").join("hwc-options.cfg")),
         _ => Some(PathBuf::from("hwc-options.cfg")),
+    });
+    // Never write into an original install, even when run from inside it: the options and
+    // key bindings are then kept for this run only.
+    let options_path = options_path.filter(|p| {
+        let inside = data.layout() == Layout::Install
+            && data.root().is_some_and(|root| is_inside(root, p));
+        if inside {
+            eprintln!(
+                "cataclysm: {} is inside the original install; options will not be saved                  (pass --config <file> elsewhere)",
+                p.display()
+            );
+        }
+        !inside
     });
     // The player's key bindings live beside the options file.
     let keys_path = options_path.as_ref().map(|p| p.with_file_name("keys.cfg"));
@@ -519,6 +598,8 @@ fn open_session(args: &Args, data: Rc<GameData>) -> Result<Session, String> {
 
 fn main() -> ExitCode {
     crash::install();
+    // A main loop that stops responding writes where it was to the crash log.
+    watchdog::install(watchdog::to_crash_log);
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -536,7 +617,8 @@ fn main() -> ExitCode {
     let (data, session) = match opened {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("cataclysm: {e}");
+            // The game cannot start: the reason goes into the crash log too.
+            crash::append(&format!("cataclysm: the game could not start: {e}\n"));
             return ExitCode::FAILURE;
         }
     };
@@ -557,6 +639,21 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn options_inside_the_install_are_refused() {
+        let root = std::env::temp_dir().join(format!("hwc-inside-{}", std::process::id()));
+        let install = root.join("Cataclysm");
+        std::fs::create_dir_all(&install).unwrap();
+        assert!(is_inside(&install, &install.join("hwc-options.cfg")));
+        assert!(is_inside(
+            &install,
+            &install.join("config").join("keys.cfg")
+        ));
+        assert!(!is_inside(&install, &root.join("hwc-options.cfg")));
+        assert!(!is_inside(&install, &root.join("Cataclysm2").join("x.cfg")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn parse(args: &[&str]) -> Result<Args, String> {
         parse_args_from(args.iter().map(|s| s.to_string()))

@@ -35,6 +35,7 @@ impl Preview {
                 default_keys: Some(ig.default_keys.to_config()),
                 keys: Some(ig.keys.to_config()),
                 keys_path: ig.keys_path.clone(),
+                options_path: None,
             },
         )?;
         Ok(Preview {

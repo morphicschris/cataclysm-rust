@@ -39,6 +39,7 @@ fn ui(src: Rc<dyn AssetSource>) -> InGameUi {
             default_keys: Some(DEFAULT_KEYS.into()),
             keys: None,
             keys_path: None,
+            options_path: None,
         },
     )
     .expect("in-game ui");
@@ -528,9 +529,23 @@ fn key_dispatch_to_host_requests() {
     assert!(frame(&mut ui, &mut host).is_empty());
     input(&mut ui, &mut host, InputEvent::KeyUp(107));
     assert!(!ui.action_held(keys::ZOOM_IN));
-    // V cycles the overlay view; Tab the ship info panel.
+    // V cycles the overlay view; Tab the ship icons (`hwcTabShipIcons`, a user-requested
+    // change) and Shift+Tab the ship info panel, or Tab the panel as in the original.
     key(&mut ui, &mut host, 86);
     assert_eq!(ui.state().overlay.view, 1);
+    let out = key(&mut ui, &mut host, 9);
+    assert!(out.contains(&GameRequest::CycleShipIcons));
+    assert!(!ui.state().ship_print.on);
+    input(&mut ui, &mut host, InputEvent::KeyDown(0x10));
+    let out = key(&mut ui, &mut host, 9);
+    input(&mut ui, &mut host, InputEvent::KeyUp(0x10));
+    frame(&mut ui, &mut host);
+    assert!(!out.contains(&GameRequest::CycleShipIcons));
+    assert!(ui.state().ship_print.on);
+    ui.fe.game.options.set("hwcTabShipIcons", 0);
+    let out = key(&mut ui, &mut host, 9);
+    assert!(!out.contains(&GameRequest::CycleShipIcons));
+    assert!(!ui.state().ship_print.on);
     key(&mut ui, &mut host, 9);
     assert!(ui.state().ship_print.on);
     // Escape opens the escape menu and pauses single player.

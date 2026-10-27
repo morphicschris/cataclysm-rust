@@ -550,3 +550,53 @@ fn quick_save_and_autosave() {
     );
     rig.frame(&mut l);
 }
+
+/// Options kept in a mission are in the options file at once, go back to the front end when
+/// the mission ends, and a restart (a new session from the file) starts the next mission with
+/// them.
+#[test]
+fn options_kept_in_a_mission_start_the_next_one() {
+    let Some(mut rig) = rig("options") else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/save-checks/options-config/hwc-options.cfg");
+    let _ = std::fs::remove_file(&path);
+    rig.session.fe.game.config_path = Some(path.clone());
+    let mut game = rig.mission_one();
+    let ui = &mut game.ui.fe.game;
+    assert!(!ui.options.get_bool("hwcFxaa"));
+    ui.options.set("hwcFxaa", 1);
+    ui.options.set("SpeechVolume", 33);
+    ui.options_commit();
+    let saved = hwc_ui::options::Options::load(&path).expect("the options file");
+    assert_eq!(saved.get("hwcFxaa"), 1, "written on accept");
+    assert_eq!(saved.get("SpeechVolume"), 33);
+    // The mission ends: the front end has them (and writes them again).
+    crate::app::hand_back_options(&mut rig.session, &game);
+    drop(game);
+    assert_eq!(rig.session.fe.game.options.get("hwcFxaa"), 1);
+    // A restart: a new session from the file.
+    let source: Rc<dyn AssetSource> = rig.data.clone();
+    rig.session = Session::new(
+        source,
+        Setup {
+            options_path: Some(path.clone()),
+            original_cfg: None,
+            default_keys: None,
+            keys: None,
+            keys_path: None,
+            scale: ScaleMode::Original,
+        },
+    )
+    .expect("session");
+    rig.session.resize(SIZE.0 as u32, SIZE.1 as u32);
+    rig.session.fe.game.saves = Some(rig.saves.clone());
+    let game = rig.mission_one();
+    assert!(
+        game.quality.fxaa,
+        "the next game starts with the kept option"
+    );
+    assert_eq!(game.ui.fe.game.options.get("SpeechVolume"), 33);
+}

@@ -13,6 +13,36 @@ pub type Color = [u8; 4];
 pub const BLACK: Color = [0, 0, 0, 255];
 pub const WHITE: Color = [255, 255, 255, 255];
 
+/// How far outside the clip a line's ends may be before the line is cut to it first.
+const LINE_REACH: i32 = 1 << 14;
+
+/// Liang-Barsky: the part of the segment `a`-`b` inside `[x0, y0, x1, y1]`, as the parameters
+/// along it.
+fn clip_segment(a: [f64; 2], b: [f64; 2], r: [f64; 4]) -> Option<(f64, f64)> {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for (p, q) in [
+        (-d[0], a[0] - r[0]),
+        (d[0], r[2] - a[0]),
+        (-d[1], a[1] - r[1]),
+        (d[1], r[3] - a[1]),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let t = q / p;
+            if p < 0.0 {
+                t0 = t0.max(t);
+            } else {
+                t1 = t1.min(t);
+            }
+        }
+    }
+    (t0 <= t1).then_some((t0, t1))
+}
+
 /// Rectangle with exclusive right/bottom edges, the engine's `rectangle` (x0, y0, x1, y1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct Rect {
@@ -210,10 +240,13 @@ impl Canvas {
         }
     }
 
-    /// Translucent rectangle (`primRectTranslucent2`).
+    /// Translucent rectangle (`primRectTranslucent2`). Only the part inside the clip is
+    /// visited (a rectangle projected from near the camera can be billions of pixels wide).
     pub fn blend_rect(&mut self, r: Rect, c: Color) {
-        for y in r.y0..r.y1 {
-            for x in r.x0..r.x1 {
+        let (x0, x1) = (r.x0.max(self.clip.x0), r.x1.min(self.clip.x1));
+        let (y0, y1) = (r.y0.max(self.clip.y0), r.y1.min(self.clip.y1));
+        for y in y0..y1 {
+            for x in x0..x1 {
                 self.blend(x, y, c);
             }
         }
@@ -236,13 +269,16 @@ impl Canvas {
     }
 
     /// One-pixel outline of `r`, bottom edge at `y1 - 1` like `primRectOutline2`.
+    /// Only the pixels inside the clip are visited.
     pub fn outline_rect(&mut self, r: Rect, c: Color) {
-        let bottom = r.y1 - 1;
-        for x in r.x0..=r.x1 {
+        let bottom = r.y1.saturating_sub(1);
+        let (cx0, cx1) = (self.clip.x0, self.clip.x1 - 1);
+        let (cy0, cy1) = (self.clip.y0, self.clip.y1 - 1);
+        for x in r.x0.max(cx0)..=r.x1.min(cx1) {
             self.put(x, r.y0, c);
             self.put(x, bottom, c);
         }
-        for y in r.y0..=bottom {
+        for y in r.y0.max(cy0)..=bottom.min(cy1) {
             self.put(r.x0, y, c);
             self.put(r.x1, y, c);
         }
@@ -255,14 +291,102 @@ impl Canvas {
 
     /// A line drawn through a 16-pixel stipple pattern like `glLineStipple(1, pattern)`: the
     /// n-th pixel from the start is drawn when bit `n % 16` of the pattern is set.
+    ///
+    /// A line reaching far outside the canvas (an end projected from a point beside the camera
+    /// comes out at billions of pixels, or saturated at `i32::MAX`) is first cut to the
+    /// clip with a margin, its pattern kept in step; walking all of it would take minutes,
+    /// and past `2^30` pixels the stepping overflows and never reaches its end.
     pub fn line_stippled(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, c: Color, pattern: u16) {
+        self.line_clipped(x0, y0, x1, y1, c, pattern, false);
+    }
+
+    /// Non-antialiased line blended with straight alpha (both endpoints drawn).
+    pub fn line_blend(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, c: Color) {
+        self.line_clipped(x0, y0, x1, y1, c, 0xffff, true);
+    }
+
+    /// [`line_blend`](Self::line_blend) through a 16-pixel stipple pattern.
+    pub fn line_blend_stippled(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        c: Color,
+        pattern: u16,
+    ) {
+        self.line_clipped(x0, y0, x1, y1, c, pattern, true);
+    }
+
+    /// [`line_stippled`](Self::line_stippled), each pixel put or (`blend`) blended.
+    #[allow(clippy::too_many_arguments)]
+    fn line_clipped(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        c: Color,
+        pattern: u16,
+        blend: bool,
+    ) {
+        let near = |v: i32, lo: i32, hi: i32| v >= lo - LINE_REACH && v <= hi + LINE_REACH;
+        let (cl, ct, cr, cb) = (self.clip.x0, self.clip.y0, self.clip.x1, self.clip.y1);
+        if near(x0, cl, cr) && near(x1, cl, cr) && near(y0, ct, cb) && near(y1, ct, cb) {
+            self.bresenham(x0, y0, x1, y1, c, pattern, 0, blend);
+            return;
+        }
+        let Some((t0, t1)) = clip_segment(
+            [f64::from(x0), f64::from(y0)],
+            [f64::from(x1), f64::from(y1)],
+            [
+                f64::from(cl) - 2.0,
+                f64::from(ct) - 2.0,
+                f64::from(cr) + 2.0,
+                f64::from(cb) + 2.0,
+            ],
+        ) else {
+            return;
+        };
+        let at = |t: f64| {
+            (
+                (f64::from(x0) + (f64::from(x1) - f64::from(x0)) * t).round() as i32,
+                (f64::from(y0) + (f64::from(y1) - f64::from(y0)) * t).round() as i32,
+            )
+        };
+        let (a, b) = (at(t0), at(t1));
+        // The pattern goes on from where the whole line's walk would be.
+        let skipped = (i64::from(a.0) - i64::from(x0))
+            .abs()
+            .max((i64::from(a.1) - i64::from(y0)).abs());
+        self.bresenham(a.0, a.1, b.0, b.1, c, pattern, (skipped % 16) as u32, blend);
+    }
+
+    /// The line's walk, both ends drawn, from bit `phase` of the pattern; the ends are near
+    /// enough to the canvas for the error terms to stay small.
+    #[allow(clippy::too_many_arguments)]
+    fn bresenham(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        c: Color,
+        pattern: u16,
+        phase: u32,
+        blend: bool,
+    ) {
         let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
         let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
         let (mut x, mut y, mut err) = (x0, y0, dx + dy);
-        let mut n = 0u32;
+        let mut n = phase;
         loop {
             if pattern & (1 << (n % 16)) != 0 {
-                self.put(x, y, c);
+                if blend {
+                    self.blend(x, y, c);
+                } else {
+                    self.put(x, y, c);
+                }
             }
             n += 1;
             if x == x1 && y == y1 {
@@ -381,6 +505,82 @@ mod tests {
         let mut d = Canvas::new(8, 8);
         d.line(0, 0, 7, 7, [255, 0, 0, 255]);
         assert!((0..8).all(|i| d.get(i, i)[0] == 255));
+    }
+
+    /// Lines and rectangles from points projected from beside the camera (saturated to the
+    /// `i32` range) end at once, and draw what they cross of the canvas.
+    #[test]
+    fn huge_lines_and_rectangles_end() {
+        let mut c = Canvas::new(64, 48);
+        c.clear(BLACK);
+        let started = std::time::Instant::now();
+        c.line(10, 10, i32::MAX, i32::MIN, WHITE);
+        c.line(i32::MIN, 20, i32::MAX, 20, WHITE);
+        c.line(5, 5, 900_000_000, 5, WHITE);
+        c.line_stippled(-2_000_000_000, 30, 2_000_000_000, 30, WHITE, 0xf0f0);
+        let mut r = Canvas::new(64, 48);
+        r.clear(BLACK);
+        let huge = Rect::new(i32::MIN / 2, i32::MIN / 2, i32::MAX / 2, i32::MAX / 2);
+        r.blend_rect(huge, [255, 0, 0, 128]);
+        r.outline_rect(
+            Rect::new(-1_000_000_000, -1_000_000_000, 1_000_000_000, 1_000_000_000),
+            WHITE,
+        );
+        r.outline_rect(Rect::new(2, 2, i32::MAX, i32::MAX), WHITE);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        // The horizontal lines cross the whole width; the first goes up and to the right.
+        assert!((0..64).all(|x| c.get(x, 20)[1] == 255), "row 20");
+        assert!((5..64).all(|x| c.get(x, 5)[1] == 255), "row 5");
+        assert_eq!(c.get(10, 10)[1], 255);
+        // The stipple stays in step with the whole line's walk.
+        let lit = (0..64).filter(|&x| c.get(x, 30)[1] == 255).count();
+        assert_eq!(lit, 32);
+        assert!(r.get(30, 30)[0] > 100 && r.get(30, 30)[1] == 0);
+        assert_eq!(r.get(2, 10), WHITE);
+    }
+
+    /// Lines whose ends are within reach of the canvas are walked as before, pixel for pixel.
+    #[test]
+    fn lines_near_the_canvas_are_unchanged() {
+        let reference = |x0: i32, y0: i32, x1: i32, y1: i32, pattern: u16| {
+            let mut lit = std::collections::HashSet::new();
+            let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
+            let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
+            let (mut x, mut y, mut err, mut n) = (x0, y0, dx + dy, 0u32);
+            loop {
+                if pattern & (1 << (n % 16)) != 0 {
+                    lit.insert((x, y));
+                }
+                n += 1;
+                if x == x1 && y == y1 {
+                    break lit;
+                }
+                let e2 = 2 * err;
+                if e2 >= dy {
+                    err += dy;
+                    x += sx;
+                }
+                if e2 <= dx {
+                    err += dx;
+                    y += sy;
+                }
+            }
+        };
+        for (x0, y0, x1, y1, pattern) in [
+            (-300, -200, 500, 77, 0xffff),
+            (39, 0, -1000, 29, 0x3c3c),
+            (-16000, 15, 16000, 16, 0x0ff0),
+        ] {
+            let mut a = Canvas::new(40, 30);
+            a.clear(BLACK);
+            a.line_stippled(x0, y0, x1, y1, WHITE, pattern);
+            let want = reference(x0, y0, x1, y1, pattern);
+            for y in 0..30 {
+                for x in 0..40 {
+                    assert_eq!(a.get(x, y) == WHITE, want.contains(&(x, y)), "({x}, {y})");
+                }
+            }
+        }
     }
 
     #[test]

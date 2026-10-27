@@ -145,7 +145,26 @@ pub const ENTRIES: &[Entry] = &[
         2,
         Control::Toggle,
     ),
+    entry(
+        "hwcTabShipIcons",
+        "TAB CYCLES SHIP ICONS",
+        2,
+        Control::Toggle,
+    ),
     entry(modern_hud::OPTION_KEY, "MODERN HUD", 3, Control::Toggle),
+    entry("hwcOrderLines", "ORDER LINES", 3, Control::Toggle),
+    entry(
+        "hwcShipIcons",
+        "SHIP ICONS",
+        3,
+        Control::Choice(&[("ALL", 2), ("NEARBY", 1), ("OFF", 0)]),
+    ),
+    entry(
+        "hwcHealthBrackets",
+        "BRACKETED HEALTH BARS",
+        3,
+        Control::Toggle,
+    ),
     Entry {
         needs_hud: true,
         ..entry(
@@ -649,10 +668,10 @@ pub fn accept(fe: &mut Fe) {
             changed = true;
         }
     }
-    // The screen mode and resolution: kept when they differ from the display in use or the
-    // options (the game switches to them).
-    let stored = Setting::from_options(&fe.game.options);
-    if page.display != stored || !page.display.same_display(&fe.game.display) {
+    // The screen mode and resolution: kept when the player changed them from the display in
+    // use (the game switches to them). A display the command line asked for is not written to
+    // the options by an ACCEPT that left it alone.
+    if page.display != fe.game.display {
         page.display.store(&mut fe.game.options);
         changed = true;
     }

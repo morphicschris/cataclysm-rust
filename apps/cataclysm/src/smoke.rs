@@ -1339,3 +1339,136 @@ fn double_click_selects_the_type_on_screen() {
     rig.click(g, x, y, true);
     assert_eq!(g.selection.len(), 1);
 }
+
+/// The modern tactical marks (user-requested, [`crate::tactical`]): order lines from the
+/// selected ships with a circle at the target, the class icons (all, nearby, off; Tab cycles
+/// them) and the bracketed health bars, against the original's view of the same frame.
+#[test]
+fn modern_order_lines_icons_and_health_brackets() {
+    use crate::tactical::IconMode;
+    let Some((data, mut rig)) = setup() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut loading = Loading::new(data.clone(), &rig.session, 1, 2, SIZE).expect("loading");
+    loading.opening_nis = false;
+    loading.loader.play_nislets = false;
+    let mut game = loop {
+        if let Progress::Ready(g) = loading.advance(&rig.session, Some(&mut rig.renderer), DT) {
+            break g;
+        }
+    };
+    let g = &mut *game;
+    rig.frames(g, 1600);
+    let u = g.world.universe();
+    let mine: Vec<hwc_sim::ShipId> = u
+        .ship_list
+        .iter()
+        .copied()
+        .filter(|&id| u.ship(id).is_some_and(|s| s.player == crate::host::PLAYER))
+        .filter(|&id| crate::host::selectable(u, id))
+        .collect();
+    let class = |id| {
+        u.ship(id)
+            .and_then(|s| u.statics.ship(s.ship_type))
+            .and_then(|st| st.ship_class)
+    };
+    use hwc_sim::statics::ShipClass;
+    let harvesters: Vec<_> = mine
+        .iter()
+        .copied()
+        .filter(|&id| class(id) == Some(ShipClass::Resource))
+        .collect();
+    let movers: Vec<_> = mine
+        .iter()
+        .copied()
+        .filter(|&id| !matches!(class(id), Some(ShipClass::Resource | ShipClass::Mothership)))
+        .take(4)
+        .collect();
+    assert!(!movers.is_empty(), "the player has ships to move");
+    // The movers fly out ahead of the mothership; the harvesters harvest.
+    // Half the movers attack the nearest enemy, if there is one.
+    let centre = hwc_sim::harness::group_centre(g.world.universe(), &movers);
+    let u = g.world.universe();
+    let enemy = u
+        .ship_list
+        .iter()
+        .copied()
+        .filter(|&id| {
+            u.ship(id).is_some_and(|s| {
+                s.player != crate::host::PLAYER
+                    && s.flags & (hwc_sim::object::sof::DEAD | hwc_sim::object::sof::HIDE) == 0
+                    && u.statics
+                        .ship(s.ship_type)
+                        .is_some_and(|st| st.ship_class.is_some())
+            })
+        })
+        .min_by(|&a, &b| {
+            let d = |id| (u.ships.ship(id).posinfo.position - centre).mag_sq();
+            d(a).total_cmp(&d(b))
+        });
+    let (attackers, movers) = match enemy {
+        Some(_) if movers.len() >= 2 => movers.split_at(movers.len() / 2),
+        _ => (&movers[..0], &movers[..]),
+    };
+    let (attackers, movers) = (attackers.to_vec(), movers.to_vec());
+    if let Some(e) = enemy.filter(|_| !attackers.is_empty()) {
+        hwc_sim::command::cl_attack(g.world.universe_mut(), &attackers, &[e]);
+    }
+    let to = hwc_math::Vector::new(centre.x + 1500.0, centre.y + 800.0, centre.z);
+    hwc_sim::command::cl_move(g.world.universe_mut(), &movers, 0, centre, &[to]);
+    hwc_sim::resource::cl_collect_resource(g.world.universe_mut(), &harvesters, None);
+    rig.frames(g, 20);
+    let mut sel = movers.clone();
+    sel.extend(&attackers);
+    g.world.focus_on(sel.clone(), false);
+    rig.frames(g, 60);
+    sel.extend(&harvesters);
+    g.selection = sel;
+    let u = g.world.universe();
+    let lines = g
+        .selection
+        .iter()
+        .filter_map(|&id| crate::tactical::order_of(u, id))
+        .count();
+    let kinds: Vec<_> = g
+        .selection
+        .iter()
+        .map(|&id| crate::tactical::order_of(u, id).map(|o| o.0))
+        .collect();
+    eprintln!("order lines: enemy {enemy:?}, {kinds:?}");
+    assert!(lines > 0, "the selected ships have orders to draw");
+
+    g.ship_icons = IconMode::All;
+    rig.render(g, "21_modern_order_lines_icons_all");
+    let modern = g.canvas().pixels.clone();
+    g.ship_icons = IconMode::Near;
+    rig.render(g, "22_modern_icons_near");
+    g.ship_icons = IconMode::Off;
+    g.order_lines = false;
+    g.health_brackets = false;
+    rig.render(g, "23_original_marks");
+    let original = g.canvas().pixels.clone();
+    let changed = modern.iter().zip(&original).filter(|(a, b)| a != b).count();
+    assert!(
+        changed > 200,
+        "the modern marks change the view ({changed} pixels)"
+    );
+    // Lines alone.
+    g.order_lines = true;
+    rig.render(g, "24_modern_order_lines_only");
+    let lines_only = g.canvas().pixels.clone();
+    assert!(lines_only.iter().zip(&original).any(|(a, b)| a != b));
+    // Tab cycles the icons: off, all, nearby, off.
+    g.health_brackets = true;
+    rig.key(g, 9);
+    assert_eq!(g.ship_icons, IconMode::All);
+    rig.key(g, 9);
+    assert_eq!(g.ship_icons, IconMode::Near);
+    rig.key(g, 9);
+    assert_eq!(g.ship_icons, IconMode::Off);
+    assert!(
+        !g.ui.state().ship_print.on,
+        "Tab no longer opens the ship info"
+    );
+}

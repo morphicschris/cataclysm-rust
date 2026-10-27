@@ -15,7 +15,7 @@ use crate::credits::Credits;
 use crate::display::{self, Mode, Monitor, Setting, VideoMode};
 use crate::fe::{Call, FrontEnd};
 use crate::fer::Fer;
-use crate::options::Options;
+use crate::options::{write_atomic, Options};
 use crate::region::{AtomRef, RegionId};
 use crate::saves::{SaveEntry, SaveFolder, SaveStore};
 use crate::text::{self, Shadow};
@@ -181,36 +181,67 @@ impl Cataclysm {
         self.ig.binding = None;
     }
 
-    /// An option changed from the game itself (not the options screens), kept and saved at
-    /// once: the modern HUD's objectives panel remembers whether it is collapsed.
+    /// Options changed from the game itself (not the options screens), kept and saved at
+    /// once: the modern HUD's panels remember whether they are collapsed, Alt+Enter the
+    /// screen mode.
+    pub fn set_options_now(&mut self, values: &[(&str, i32)]) {
+        for &(key, v) in values {
+            self.options.set(key, v);
+            self.saved.set(key, v);
+        }
+        self.save_options();
+    }
+
+    /// One option changed from the game itself, kept and saved at once.
     pub fn set_option_now(&mut self, key: &str, v: i32) {
+        self.set_options_now(&[(key, v)]);
+    }
+
+    /// An option set outside the options screens (the player's race, the training prompt):
+    /// kept, so a later Cancel in the options does not take it back, and saved with the rest.
+    pub fn keep_option(&mut self, key: &str, v: i32) {
         self.options.set(key, v);
         self.saved.set(key, v);
-        self.save_options();
     }
 
-    /// Accept: the current values become the restore point and are saved.
+    /// Accept: the current values and key bindings become the restore point and are saved.
     pub fn options_commit(&mut self) {
         self.saved = self.options.clone();
+        self.ig.saved_keys = self.ig.keys.clone();
         self.save_options();
     }
 
-    /// Writes `keys.cfg` (`kbSaveBindings`) when a path is set.
-    pub fn save_keys(&mut self) {
-        self.ig.saved_keys = self.ig.keys.clone();
+    /// The options as kept: the restore point, so an options screen still open (a change not
+    /// yet accepted) is not saved.
+    pub fn kept_options(&self) -> &Options {
+        &self.saved
+    }
+
+    /// Takes over the kept options and key bindings of another copy of the game's state (the
+    /// in-game interface's, when its mission ends: `gameEnd`).
+    pub fn adopt_kept(&mut self, other: &Cataclysm) {
+        self.options = other.saved.clone();
+        self.saved = other.saved.clone();
+        self.sub_saved = other.saved.clone();
+        self.ig.keys = other.ig.saved_keys.clone();
+        self.ig.saved_keys = other.ig.saved_keys.clone();
+        self.ig.binding = None;
+    }
+
+    /// `opOptionsSaveSettings`: writes the kept options to the options file and the kept key
+    /// bindings to `keys.cfg` (`utyOptionsFileWrite`, `kbSaveBindings`), when their paths are
+    /// set. Both are written atomically. What an options screen has changed but not accepted
+    /// is not written.
+    pub fn save_options(&mut self) {
+        self.colors.store(&mut self.options);
+        self.colors.store(&mut self.saved);
         if let Some(path) = &self.ig.keys_path {
-            if let Err(e) = std::fs::write(path, self.ig.keys.to_config()) {
+            if let Err(e) = write_atomic(path, &self.ig.saved_keys.to_config()) {
                 eprintln!("hwc-ui: saving {}: {e}", path.display());
             }
         }
-    }
-
-    /// Saves the options if a config path is set.
-    pub fn save_options(&mut self) {
-        self.save_keys();
-        self.colors.store(&mut self.options);
         if let Some(path) = &self.config_path {
-            if let Err(e) = self.options.save(path) {
+            if let Err(e) = self.saved.save(path) {
                 eprintln!("hwc-ui: saving {}: {e}", path.display());
             }
         }
@@ -296,7 +327,7 @@ pub fn register(fe: &mut Fe) {
     });
     fe.callback_add("TA_StartSinglePlayer", |fe, _| {
         fe.game.tutorial = true;
-        fe.game.options.set("TutorialNeeded", 0);
+        fe.game.keep_option("TutorialNeeded", 0);
         start_game(fe, "TA_StartSinglePlayer");
     });
     fe.callback_add("TutorialAlertCancel", |fe, _| {
@@ -509,7 +540,7 @@ fn single_player_options(fe: &mut Fe, call: &Call) {
     }
     fe.current_screen_delete();
     fe.screen_start("Create_new_game");
-    fe.game.options.set("PlayerRace", 0);
+    fe.game.keep_option("PlayerRace", 0);
 }
 
 /// `mgStartMultiPlayerGameScreens` (navigation only): the connection-method screen of
@@ -560,8 +591,7 @@ fn options_accept(fe: &mut Fe, call: &Call) {
     // Only a mode the player changed in the screens is switched to (not one the command line
     // overrode for this run).
     let before = Setting::from_options(&fe.game.saved);
-    fe.game.saved = fe.game.options.clone();
-    fe.game.save_options();
+    fe.game.options_commit();
     fe.game.requests.push(Request::ApplyOptions);
     let mode = Setting::from_options(&fe.game.options);
     if !mode.same_display(&before) && !mode.same_display(&fe.game.display) {
@@ -580,8 +610,7 @@ fn options_accept(fe: &mut Fe, call: &Call) {
 fn revert_display_mode(fe: &mut Fe, previous: Setting) {
     fe.game.display = previous;
     previous.store(&mut fe.game.options);
-    fe.game.saved = fe.game.options.clone();
-    fe.game.save_options();
+    fe.game.options_commit();
     fe.game.requests.push(Request::DisplayMode(previous));
 }
 
