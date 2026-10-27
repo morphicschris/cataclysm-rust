@@ -270,6 +270,12 @@ impl ShipAnimator {
                     self.time = a.start_time;
                     return false;
                 }
+                if dt >= len {
+                    // The engine's loop below never ends for a loop shorter than one step;
+                    // wrap by the remainder instead.
+                    self.time = a.start_time + (self.time + dt - a.start_time) % len;
+                    return false;
+                }
                 // Wrap the way the engine does: subtract whole animation lengths until the next
                 // step fits.
                 loop {

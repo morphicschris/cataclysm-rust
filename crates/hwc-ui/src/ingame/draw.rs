@@ -17,12 +17,16 @@ pub fn fill_triangle(c: &mut Canvas, p: [(i32, i32); 3], colour: Color) {
         p.iter().map(|v| v.1).max().unwrap_or(0),
     );
     let edge = |a: (i32, i32), b: (i32, i32), x: f32, y: f32| {
-        (b.0 - a.0) as f32 * (y - a.1 as f32) - (b.1 - a.1) as f32 * (x - a.0 as f32)
+        (b.0 as f32 - a.0 as f32) * (y - a.1 as f32) - (b.1 as f32 - a.1 as f32) * (x - a.0 as f32)
     };
     let area = edge(p[0], p[1], p[2].0 as f32, p[2].1 as f32);
     if area == 0.0 {
         return;
     }
+    // Only the pixels on the canvas (a corner projected from near the camera can be billions
+    // of pixels away).
+    let (x0, x1) = (x0.max(0), x1.min(c.width - 1));
+    let (y0, y1) = (y0.max(0), y1.min(c.height - 1));
     for y in y0..=y1 {
         for x in x0..=x1 {
             let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);

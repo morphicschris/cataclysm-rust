@@ -35,6 +35,7 @@ fn ui(src: Rc<dyn AssetSource>, size: (i32, i32)) -> InGameUi {
             default_keys: Some(KEYS.into()),
             keys: None,
             keys_path: None,
+            options_path: None,
         },
     )
     .expect("in-game ui");
@@ -412,6 +413,7 @@ fn outside_clicks_and_default() {
                 default_keys: Some(KEYS.into()),
                 keys: None,
                 keys_path: None,
+                options_path: None,
             },
         )
         .unwrap();

@@ -616,6 +616,24 @@ impl Sensors {
         Some(SOUND_EXIT)
     }
 
+    /// `smSensorsCloseForGood`: closes at once, whatever it is doing (zooming out or in
+    /// included), with the main camera as it was when the manager opened. An NIS starting
+    /// does this (`spMainScreen`): the cutscene must not start, or end, with the sensors
+    /// camera or a zoom still going.
+    pub fn close_for_good(&mut self, world: &mut World) -> bool {
+        let Some(o) = self.open.take() else {
+            return false;
+        };
+        world.camera = o.main;
+        world.follow_focus = true;
+        world.update_focus();
+        if let Some(run) = world.mission_run_mut() {
+            run.game.sensors_open = false;
+            run.game.sensors_kas_flag = 0;
+        }
+        true
+    }
+
     /// `smCullAndFocusSelecting`: close onto these ships (those within the focus radius of
     /// their mean). Returns the sound, or None when nothing could be focused.
     pub fn close_on(&mut self, world: &World, ships: &[ShipId]) -> Option<u32> {
@@ -1443,7 +1461,7 @@ fn point(canvas: &mut Canvas, p: [f32; 2], size: i32, c: Color) {
     } else {
         for dy in -1..1 {
             for dx in -1..1 {
-                canvas.put(x + dx, y + dy, c);
+                canvas.put(x.saturating_add(dx), y.saturating_add(dy), c);
             }
         }
     }

@@ -311,6 +311,7 @@ impl Game {
                 default_keys: Some(ig.default_keys.to_config()),
                 keys: Some(ig.keys.to_config()),
                 keys_path: ig.keys_path.clone(),
+                options_path: session.fe.game.config_path.clone(),
             },
         )?;
         let strings = ui.state().strings.clone();
@@ -1962,6 +1963,8 @@ impl Game {
     /// mission's cues, the sound.
     pub fn update(&mut self, dt: f32, audio: &mut Option<Audio>) -> Vec<Outcome> {
         let mut out = Vec::new();
+        crate::watchdog::detail(|| self.watch_line());
+        crate::watchdog::checkpoint("update: interface");
         if let Some(p) = self.pending_load.take() {
             out.push(Outcome::LoadGame(p));
             return out;
@@ -2004,6 +2007,7 @@ impl Game {
             }
         }
         // The sensors manager: a mission opening or closing it, the zoom, panning.
+        crate::watchdog::checkpoint("update: sensors manager");
         let kas_open = self
             .world
             .mission_run()
@@ -2046,6 +2050,7 @@ impl Game {
             || self.nis_level_done;
         self.world.sensors_open = self.sensors.is_open() && self.nis.is_none();
         let steps = self.world.due_steps(f64::from(dt));
+        crate::watchdog::checkpoint("update: simulation steps");
         for _ in 0..steps {
             if self.movie || self.next_mission || self.nis_level_done {
                 break;
@@ -2100,7 +2105,9 @@ impl Game {
         for e in std::mem::take(&mut self.ping_sounds) {
             sound(audio, e);
         }
+        crate::watchdog::checkpoint("update: presentation");
         self.update_presentation(dt, audio);
+        crate::watchdog::checkpoint("update: done");
         if self.nis_level_done {
             out.push(Outcome::NisLevelDone);
         }
@@ -2110,6 +2117,25 @@ impl Game {
             }
         }
         out
+    }
+
+    /// The game's state in a line for the main-loop watchdog's report.
+    fn watch_line(&self) -> String {
+        format!(
+            "mission {}{}, nis {}, sensors {:?} (open {}, zooming {}, kas {}), bars fade {:.2} in {}, movie {}, paused {}, real time {:.2}",
+            self.world.mission(),
+            if self.world.nis_level().is_some() { " (NIS level)" } else { "" },
+            self.nis.is_some(),
+            self.sensors.phase(),
+            self.sensors.is_open(),
+            self.sensors.zooming(),
+            self.world.mission_run().is_some_and(|r| r.game.sensors_open),
+            self.letterbox.fade,
+            self.letterbox.fully,
+            self.movie,
+            self.paused,
+            self.real_time,
+        )
     }
 
     /// The jump's movie and the next mission (`singlePlayerGameUpdate` state 5).
@@ -2480,9 +2506,10 @@ impl Game {
     /// volumes are kept to restore, the letterbox comes in as the script says, and the
     /// events at time 0 run.
     pub fn begin_nis(&mut self, mut run: NisRun, fired: Vec<Fired>, audio: &mut Option<Audio>) {
-        if self.sensors.is_open() {
-            self.close_sensors(audio);
-        }
+        // `spMainScreen`'s `smSensorsCloseForGood`: at once, even in the middle of a zoom (a
+        // zoom left going, or refused because one was, kept the manager open through the
+        // cutscene, and the camera it saved and gave back at its end was the sensors one).
+        self.sensors.close_for_good(&mut self.world);
         self.mode = Mode::Select;
         self.left_down = None;
         self.right_down = false;
