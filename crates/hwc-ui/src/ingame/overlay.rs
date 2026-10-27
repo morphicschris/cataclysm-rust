@@ -1491,27 +1491,6 @@ pub fn draw_health_outline(canvas: &mut Canvas, bar: Rect) {
     canvas.outline_rect(Rect::new(bar.x0 - 1, bar.y0 - 1, bar.x1, bar.y1 + 1), BLACK);
 }
 
-/// A user-requested change (`hwcHealthBrackets`): white `[ ]` brackets either side of a
-/// selected ship (its screen box, centre and half-width as [`status_rect`] takes them), from
-/// above its health bar to the bottom of the box.
-pub fn draw_selection_brackets(canvas: &mut Canvas, cx: i32, cy: i32, radius: f32) {
-    let bar = status_rect(cx, cy, radius);
-    let r = radius as i32;
-    let (left, right) = ((cx - r).min(bar.x0) - 3, (cx + r).max(bar.x1) + 2);
-    let (top, bottom) = (bar.y0 - 3, cy + r);
-    let arm = (r / 4).clamp(3, 8);
-    for (x, dir) in [(left, 1), (right, -1)] {
-        canvas.fill_rect(Rect::new(x, top, x + 1, bottom + 1), WHITE);
-        let (a, b) = if dir > 0 {
-            (x, x + arm)
-        } else {
-            (x + 1 - arm, x + 1)
-        };
-        canvas.fill_rect(Rect::new(a, top, b, top + 1), WHITE);
-        canvas.fill_rect(Rect::new(a, bottom, b, bottom + 1), WHITE);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -264,7 +264,7 @@ pub struct Game {
     /// User-requested changes, on by default (see [`crate::tactical`]): lines from the
     /// selected ships to their orders' targets (`hwcOrderLines`, `--order-lines`), class
     /// icons over the ships (`hwcShipIcons`, `--ship-icons`, cycled by Tab) and the selected
-    /// ships' health bars outlined and bracketed (`hwcHealthBrackets`, `--health-bars`).
+    /// ships' health bars outlined (`hwcHealthBrackets`, `--health-bars`).
     pub order_lines: bool,
     pub ship_icons: tactical::IconMode,
     pub health_brackets: bool,
@@ -3358,7 +3358,6 @@ impl Game {
             overlay::draw_health_bar(&mut self.canvas, x, y, r, f);
             if self.health_brackets {
                 overlay::draw_health_outline(&mut self.canvas, overlay::status_rect(x, y, r));
-                overlay::draw_selection_brackets(&mut self.canvas, x, y, r);
             }
             if let Some((n, lod)) = number {
                 let font = self.group_fonts[overlay::hotkey_font_index(lod)].as_deref();

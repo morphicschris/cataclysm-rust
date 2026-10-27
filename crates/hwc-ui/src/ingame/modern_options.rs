@@ -157,11 +157,11 @@ pub const ENTRIES: &[Entry] = &[
         "hwcShipIcons",
         "SHIP ICONS",
         3,
-        Control::Choice(&[("ALL", 2), ("NEARBY", 1), ("OFF", 0)]),
+        Control::Choice(&[("ALL", 2), ("FAR", 1), ("OFF", 0)]),
     ),
     entry(
         "hwcHealthBrackets",
-        "BRACKETED HEALTH BARS",
+        "OUTLINED HEALTH BARS",
         3,
         Control::Toggle,
     ),

@@ -6,7 +6,7 @@
 //!   on, the resource it harvests) with a circle there, coloured by the order.
 //! * Ship icons (`hwcShipIcons`, `--ship-icons`): the class outline icons of `Tactical.script`
 //!   (triangle fighters, square corvettes, rhombus frigates...) over every ship, over the ships
-//!   near the camera fading out with distance, or none (the original). Tab cycles them
+//!   away from the camera (fading out as they come close), or none (the original). Tab cycles them
 //!   (`hwcTabShipIcons`; Shift+Tab is then the original's Toggle_Ship_Info).
 
 use glam::Vec3;
@@ -25,18 +25,19 @@ use crate::world::World;
 pub enum IconMode {
     /// None: the original.
     Off,
-    /// Ships near the camera, fading out between [`NEAR_FULL`] and [`NEAR_GONE`].
-    Near,
+    /// Ships away from the camera: none up to [`FAR_HIDDEN`] from the eye, fading in to
+    /// whole at [`FAR_FULL`].
+    Far,
     /// Every ship the view shows.
     All,
 }
 
 impl IconMode {
-    /// The `hwcShipIcons` value: 0 off, 1 near, 2 all.
+    /// The `hwcShipIcons` value: 0 off, 1 far, 2 all.
     pub fn from_option(v: i32) -> IconMode {
         match v {
             0 => IconMode::Off,
-            1 => IconMode::Near,
+            1 => IconMode::Far,
             _ => IconMode::All,
         }
     }
@@ -44,16 +45,16 @@ impl IconMode {
     pub fn to_option(self) -> i32 {
         match self {
             IconMode::Off => 0,
-            IconMode::Near => 1,
+            IconMode::Far => 1,
             IconMode::All => 2,
         }
     }
 
-    /// The next mode Tab gives: all, near, off, all...
+    /// The next mode Tab gives: all, far, off, all...
     pub fn next(self) -> IconMode {
         match self {
-            IconMode::All => IconMode::Near,
-            IconMode::Near => IconMode::Off,
+            IconMode::All => IconMode::Far,
+            IconMode::Far => IconMode::Off,
             IconMode::Off => IconMode::All,
         }
     }
@@ -62,16 +63,16 @@ impl IconMode {
     pub fn message(self) -> &'static str {
         match self {
             IconMode::All => "Ship icons: all ships",
-            IconMode::Near => "Ship icons: nearby ships",
+            IconMode::Far => "Ship icons: distant ships",
             IconMode::Off => "Ship icons: off",
         }
     }
 }
 
-/// Near icons are drawn whole up to this distance from the eye...
-pub const NEAR_FULL: f32 = 8000.0;
-/// ...and are gone at this one (the render list's reach for most classes, `tweak.script`).
-pub const NEAR_GONE: f32 = 16000.0;
+/// Far icons are not drawn on ships closer to the eye than this...
+pub const FAR_HIDDEN: f32 = 4000.0;
+/// ...and are drawn whole from this distance on.
+pub const FAR_FULL: f32 = 10000.0;
 
 /// What an order line points at, and its colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,10 +345,10 @@ fn icon_color(u: &Universe, player: usize) -> Color {
     }
 }
 
-/// The opacity of a near icon at this distance from the eye (1 up to [`NEAR_FULL`], 0 from
-/// [`NEAR_GONE`]).
-pub fn near_fade(distance: f32) -> f32 {
-    (1.0 - (distance - NEAR_FULL) / (NEAR_GONE - NEAR_FULL)).clamp(0.0, 1.0)
+/// The opacity of a far icon at this distance from the eye (0 up to [`FAR_HIDDEN`], 1 from
+/// [`FAR_FULL`]).
+pub fn far_fade(distance: f32) -> f32 {
+    ((distance - FAR_HIDDEN) / (FAR_FULL - FAR_HIDDEN)).clamp(0.0, 1.0)
 }
 
 /// The class icons over the main view's ships.
@@ -379,7 +380,7 @@ pub fn draw_icons(
         }
         let p = v3(s.coll.coll_position);
         let alpha = match mode {
-            IconMode::Near => near_fade((p - eye).length()),
+            IconMode::Far => far_fade((p - eye).length()),
             _ => 1.0,
         };
         if alpha <= 0.0 {
@@ -437,19 +438,19 @@ mod tests {
             m = m.next();
             seen.push(m);
         }
-        assert_eq!(seen, [IconMode::Near, IconMode::Off, IconMode::All]);
+        assert_eq!(seen, [IconMode::Far, IconMode::Off, IconMode::All]);
         for m in seen {
             assert_eq!(IconMode::from_option(m.to_option()), m);
         }
     }
 
     #[test]
-    fn near_icons_fade_with_distance() {
-        assert_eq!(near_fade(0.0), 1.0);
-        assert_eq!(near_fade(NEAR_FULL), 1.0);
-        assert!((near_fade((NEAR_FULL + NEAR_GONE) * 0.5) - 0.5).abs() < 1e-6);
-        assert_eq!(near_fade(NEAR_GONE), 0.0);
-        assert_eq!(near_fade(1e6), 0.0);
+    fn far_icons_fade_out_close_to_the_camera() {
+        assert_eq!(far_fade(0.0), 0.0);
+        assert_eq!(far_fade(FAR_HIDDEN), 0.0);
+        assert!((far_fade((FAR_HIDDEN + FAR_FULL) * 0.5) - 0.5).abs() < 1e-6);
+        assert_eq!(far_fade(FAR_FULL), 1.0);
+        assert_eq!(far_fade(1e6), 1.0);
     }
 
     #[test]

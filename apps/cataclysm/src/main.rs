@@ -141,12 +141,13 @@ options:
                         blue guard, purple special) or original (none); options file:
                         hwcOrderLines = 1/0
   --ship-icons <mode>   all (default, a user-requested change: class icons over every ship),
-                        near (over the ships near the camera, fading out with distance) or
+                        far (over the ships away from the camera, fading out as they come
+                        close) or
                         none (the original); Tab cycles them in the game and Shift+Tab is
                         then Toggle Ship Info (options file: hwcShipIcons = 2/1/0,
                         hwcTabShipIcons = 1/0 to give Tab back to Toggle Ship Info)
   --health-bars <mode>  modern (default, a user-requested change: a selected ship's health
-                        bar has a thin black outline and white [ ] brackets) or original;
+                        bar has a thin black outline) or original;
                         options file: hwcHealthBrackets = 1/0
   --zoom <mode>         smooth (default, a user-requested change: each mouse-wheel notch
                         eases the camera to its distance) or original (the original's
@@ -389,7 +390,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
             "--ship-icons" => {
                 a.ship_icons = Some(match value("--ship-icons")?.to_ascii_lowercase().as_str() {
                     "all" => 2,
-                    "near" => 1,
+                    "far" => 1,
                     "none" | "original" => 0,
                     v => return Err(format!("unknown --ship-icons mode {v}")),
                 })

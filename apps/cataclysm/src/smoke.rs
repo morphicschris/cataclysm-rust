@@ -1341,8 +1341,8 @@ fn double_click_selects_the_type_on_screen() {
 }
 
 /// The modern tactical marks (user-requested, [`crate::tactical`]): order lines from the
-/// selected ships with a circle at the target, the class icons (all, nearby, off; Tab cycles
-/// them) and the bracketed health bars, against the original's view of the same frame.
+/// selected ships with a circle at the target, the class icons (all, distant, off; Tab cycles
+/// them) and the outlined health bars, against the original's view of the same frame.
 #[test]
 fn modern_order_lines_icons_and_health_brackets() {
     use crate::tactical::IconMode;
@@ -1442,8 +1442,8 @@ fn modern_order_lines_icons_and_health_brackets() {
     g.ship_icons = IconMode::All;
     rig.render(g, "21_modern_order_lines_icons_all");
     let modern = g.canvas().pixels.clone();
-    g.ship_icons = IconMode::Near;
-    rig.render(g, "22_modern_icons_near");
+    g.ship_icons = IconMode::Far;
+    rig.render(g, "22_modern_icons_far");
     g.ship_icons = IconMode::Off;
     g.order_lines = false;
     g.health_brackets = false;
@@ -1459,12 +1459,12 @@ fn modern_order_lines_icons_and_health_brackets() {
     rig.render(g, "24_modern_order_lines_only");
     let lines_only = g.canvas().pixels.clone();
     assert!(lines_only.iter().zip(&original).any(|(a, b)| a != b));
-    // Tab cycles the icons: off, all, nearby, off.
+    // Tab cycles the icons: off, all, distant, off.
     g.health_brackets = true;
     rig.key(g, 9);
     assert_eq!(g.ship_icons, IconMode::All);
     rig.key(g, 9);
-    assert_eq!(g.ship_icons, IconMode::Near);
+    assert_eq!(g.ship_icons, IconMode::Far);
     rig.key(g, 9);
     assert_eq!(g.ship_icons, IconMode::Off);
     assert!(

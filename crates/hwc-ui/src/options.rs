@@ -132,14 +132,14 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // 1: lines from the selected ships to what they were ordered to, with a circle there,
     // coloured by the order; 0: none, the original (`--order-lines`).
     ("hwcOrderLines", 1),
-    // Class icons over the ships: 2 every ship, 1 the ships near the camera (fading out with
-    // distance), 0 none, the original (`--ship-icons`).
+    // Class icons over the ships: 2 every ship, 1 the ships away from the camera (fading out
+    // as they come close), 0 none, the original (`--ship-icons`).
     ("hwcShipIcons", 2),
     // 1: Tab cycles the ship icons and Shift+Tab is Toggle_Ship_Info; 0: Tab is the
     // original's Toggle_Ship_Info.
     ("hwcTabShipIcons", 1),
-    // 1: a selected ship's health bar has a thin black outline and white [ ] brackets; 0:
-    // the original bar (`--health-bars`).
+    // 1: a selected ship's health bar has a thin black outline; 0: the original bar
+    // (`--health-bars`).
     ("hwcHealthBrackets", 1),
     // 1: the mouse wheel eases the zoom to each notch's distance; 0: the original's
     // immediate step per notch (`--zoom`).
