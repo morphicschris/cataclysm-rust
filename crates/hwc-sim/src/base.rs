@@ -570,6 +570,10 @@ pub struct ShipBase {
     pub prev_cone_normal: Vector,
     /// +0x615: the depot slot dock point (-1 none).
     pub depot_point: i32,
+    /// +0x608: a ship this one does not avoid, nor modules clamped to it, and which does not
+    /// avoid this one (a towed message pod's depot, once it is coming up to the bay).
+    #[serde(default, deserialize_with = "crate::save::added_in_3")]
+    pub avoid_exception: Option<ShipId>,
     /// +0x618 / +0x61c: salvage notification and depot re-check times.
     pub salvage_notify_time: f32,
     pub salvage_depot_check: f32,
@@ -628,6 +632,7 @@ impl Default for ShipBase {
             upgrade_end: 0.0,
             prev_cone_normal: Vector::ZERO,
             depot_point: -1,
+            avoid_exception: None,
             salvage_notify_time: f32::from_bits(0x6258_d727),
             salvage_depot_check: 0.0,
             slipgate_timer: 0.0,

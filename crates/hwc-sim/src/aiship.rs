@@ -72,6 +72,8 @@ struct Neighbour {
     special_flags: u32,
     docking_ship: Option<ShipId>,
     player: usize,
+    /// The host a component-class ship is clamped to.
+    module_host: Option<ShipId>,
     ship: Ship,
 }
 
@@ -218,6 +220,7 @@ pub fn fly_to_point_avoiding_objs(
             break 'avoid;
         }
         let ship_size = stat.header.coll.avoid_coll_sphere_size;
+        let own_module_host = module_host(u, &ship);
         let mut ship_pad = stat.header.coll.avoid_coll_sphere_pad;
         let mut ship_row_pad = ship_pad;
         let mut row_enabled = false;
@@ -271,6 +274,12 @@ pub fn fly_to_point_avoiding_objs(
                 let dist_check = st(ld(n.coll_optimize_dist) - ld(ship.coll_optimize_dist));
                 if ld(dist_check) > ld(max_possible) {
                     break;
+                }
+                // Avoidance exceptions (+0x608) work both ways and cover modules clamped to
+                // the excepted ship.
+                let excepted = |by: Option<ShipId>, other: ShipId, other_module_host: Option<ShipId>| by.is_some_and(|e| e == other || other_module_host == Some(e));
+                if excepted(ship.base.avoid_exception, n.id, n.module_host) || excepted(n.ship.base.avoid_exception, id, own_module_host) {
+                    continue;
                 }
                 let abs_check = if ld(dist_check) < 0.0 { -ld(dist_check) } else { ld(dist_check) };
                 let mut max_consider = st(ld(ship_row_pad) + ld(n.avoid_pad));
@@ -729,6 +738,15 @@ pub fn pitch_to_descend_with(tw: &crate::tunables::SimTweaks, zleft: f32, pd: f3
     pd
 }
 
+/// The host a component-class ship (`shipclass` 10) is clamped to.
+fn module_host(u: &Universe, s: &Ship) -> Option<ShipId> {
+    let class = u.statics.ship(s.ship_type).and_then(|st| st.ship_class);
+    if class != Some(crate::statics::ShipClass::Component) {
+        return None;
+    }
+    s.base.clamp.as_ref().and_then(|c| c.host)
+}
+
 fn neighbour(u: &Universe, id: ShipId) -> Neighbour {
     let s = u.ships.ship(id);
     let stat = u.statics.ship(s.ship_type);
@@ -746,6 +764,7 @@ fn neighbour(u: &Universe, id: ShipId) -> Neighbour {
         special_flags: s.special_flags,
         docking_ship: s.docking_ship,
         player: s.player,
+        module_host: module_host(u, s),
         ship: s.clone(),
     }
 }

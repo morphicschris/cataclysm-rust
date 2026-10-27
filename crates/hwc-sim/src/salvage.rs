@@ -2,8 +2,9 @@
 //! corvettes) latch onto the salvage points of a damaged ship or derelict; once every point
 //! has a salvager the group tows the target to the nearest depot (carrier, processor or
 //! mothership of the salvagers' player), which takes it in, waits a retrofit time and converts
-//! it to its player (`univConvertShipToPlayer`). Only the generic depot process is modelled
-//! (not crystals, the Beast infection, the big gun or message pods).
+//! it to its player (`univConvertShipToPlayer`). Message pods and buoys are not converted: they
+//! fly into a bay and are deleted (`salvDepotProcessDockIn`). The crystal, Beast and big gun
+//! depot processes are not modelled (those ships take the generic one).
 
 use hwc_math::fpu::{ftol_i32, ld, st};
 use hwc_math::Vector;
@@ -394,6 +395,126 @@ fn fly_to_depot(u: &mut Universe, target: ShipId, depot: ShipId) -> bool {
     false
 }
 
+/// Towed ships that come up to a bay of the depot (`salvApproachTarget`) instead of just
+/// near it: message pods, buoys and crystals.
+fn approaches_depot(t: ShipType) -> bool {
+    matches!(t, ShipType::dMessagePod | ShipType::dBuoy | ShipType::dCrystal0 | ShipType::dCrystal1)
+}
+
+/// `salvApproachTarget` (0x4f5710): the towed ship flies to within 6000 m of the depot,
+/// reserves a free bay of the kind it goes into (medium bay for pods and buoys, the
+/// engineering one on a Somtaaw mothership without a docking bay module; crystal process point
+/// for crystals) and flies to the bay's cone mouth. True once there.
+fn approach_depot(u: &mut Universe, target: ShipId, depot: ShipId) -> bool {
+    let statics = u.statics.clone();
+    let tt = u.ships.ship(target).ship_type;
+    let Some(stat) = statics.ship(tt) else { return true };
+    let dp = u.ships.ship(depot).posinfo.position;
+    if !aitrack::move_reached_destination(u.ships.ship(target), dp, 6000.0) {
+        let t = u.ships.ship(target);
+        let mult = crate::tactics::speed_multiplier(t, stat);
+        let max = crate::tactics::ships_max_velocity(t, stat, u.max_velocity_context(t));
+        fly_to_point_avoiding_objs(u, target, Some(dp), 0, st(max * ld(st(mult))), None);
+        turn_to_velocity(u, target);
+        return false;
+    }
+    let dt = u.ships.ship(depot).ship_type;
+    let Some(dinfo) = statics.ship(dt).and_then(|s| s.dock.as_ref()) else { return true };
+    if u.ships.ship(target).base.depot_point == -1 {
+        let kind: i32 = match tt {
+            ShipType::dBigGunUnit => {
+                if dt == ShipType::sMothership {
+                    0x12
+                } else {
+                    0x1d
+                }
+            }
+            ShipType::dMessagePod | ShipType::dBuoy => 6,
+            ShipType::dCrystal0 | ShipType::dCrystal1 => 0x17,
+            _ => -1,
+        };
+        let mut wanted = kind;
+        if dt == ShipType::sMothership && kind == 6 && !base::player_has_ship_of_type(u, ShipType::sMothershipDockingBay, u.ships.ship(depot).player) {
+            wanted = 8;
+        }
+        let reserved = u.ships.ship(depot).base.occupancy.as_ref().map(|o| o.reserved.clone()).unwrap_or_default();
+        let free = dinfo.points.iter().enumerate().position(|(i, p)| p.dock_type.map_or(-1, |x| x.index() as i32) == wanted && !reserved.get(i).copied().unwrap_or(false));
+        if let Some(i) = free {
+            // The count goes up under the kind asked for, not the one found.
+            if let Some(o) = u.ships.ship_mut(depot).base.occupancy.as_mut() {
+                if let Some(c) = o.used_per_type.get_mut(kind as usize) {
+                    *c = c.wrapping_add(1);
+                }
+                if let Some(r) = o.reserved.get_mut(i) {
+                    *r = true;
+                }
+            }
+            u.ships.ship_mut(target).base.depot_point = i as i32;
+        }
+    }
+    let idx = u.ships.ship(target).base.depot_point;
+    if idx == -1 {
+        let tw = u.tweaks.clone();
+        let dt = u.phys_time_elapsed;
+        let s = u.ships.ship_mut(target);
+        aitrack::stabilize(s, stat, &tw, dt);
+        aitrack::zero_velocity(s, stat, &tw, dt);
+        return false;
+    }
+    let p = &dinfo.points[idx as usize];
+    let local = Vector::new(
+        st(ld(p.max_dist) * ld(p.cone_normal.x) + ld(p.position.x)),
+        st(ld(p.max_dist) * ld(p.cone_normal.y) + ld(p.position.y)),
+        st(ld(p.max_dist) * ld(p.cone_normal.z) + ld(p.position.z)),
+    );
+    let mouth = dock::point_world_position(u.ships.ship(depot), local);
+    let tolerance = if matches!(tt, ShipType::dCrystal0 | ShipType::dCrystal1) { 150.0 } else { 50.0 };
+    if aitrack::move_reached_destination(u.ships.ship(target), mouth, tolerance) {
+        return true;
+    }
+    // Coming at the mouth from outside, the target stops avoiding the depot (and the depot
+    // it).
+    let tp = u.ships.ship(target).posinfo.position;
+    let ahead = (ld(dp.x) - ld(mouth.x)) * (ld(dp.x) - ld(tp.x)) + (ld(dp.y) - ld(mouth.y)) * (ld(dp.y) - ld(tp.y)) + (ld(dp.z) - ld(mouth.z)) * (ld(dp.z) - ld(tp.z));
+    if u.ships.ship(target).base.avoid_exception != Some(depot) && 0.0 < ahead {
+        u.ships.ship_mut(target).base.avoid_exception = Some(depot);
+    }
+    fly_to_point_avoiding_objs(u, target, Some(mouth), 2, 0.0, None);
+    false
+}
+
+/// `salvTurnToVelocity` (0x4f3ac0): the towed ship turns to face where it is going.
+fn turn_to_velocity(u: &mut Universe, target: ShipId) {
+    let statics = u.statics.clone();
+    let tw = u.tweaks.clone();
+    let dt = u.phys_time_elapsed;
+    let s = u.ships.ship_mut(target);
+    let Some(stat) = statics.ship(s.ship_type) else { return };
+    let mut v = s.posinfo.velocity;
+    v.normalize();
+    let a = f32::from_bits(0x3f7f_be77);
+    aitrack::heading(s, stat, &tw, dt, &mut v, a, a, 0.0, 0);
+}
+
+/// Gives up the depot bay `target` reserved (the inline code in `salvSpecialTarget` and
+/// `salvDepotProcessDockIn`): the count of the point's own kind goes down.
+fn release_depot_point(u: &mut Universe, target: ShipId, depot: ShipId) {
+    let idx = u.ships.ship(target).base.depot_point;
+    if idx == -1 {
+        return;
+    }
+    let kind = u.ships.get(depot).and_then(|d| u.statics.ship(d.ship_type)).and_then(|s| s.dock.as_ref()).and_then(|d| d.points.get(idx as usize)).and_then(|p| p.dock_type).map(|t| t.index());
+    if let Some(o) = u.ships.get_mut(depot).and_then(|d| d.base.occupancy.as_mut()) {
+        if let Some(c) = kind.and_then(|k| o.used_per_type.get_mut(k)) {
+            *c = c.wrapping_sub(1);
+        }
+        if let Some(r) = o.reserved.get_mut(idx as usize) {
+            *r = false;
+        }
+    }
+    u.ships.ship_mut(target).base.depot_point = -1;
+}
+
 /// `salvSpecialTarget` (0x4f5dd0): one step of a salvager's job. True when it is over.
 fn special_target(u: &mut Universe, ship: ShipId, _cid: CommandId, targets: &[ShipId]) -> bool {
     if !crate::upgrade::has_upgrade(u.ships.ship(ship), crate::upgrade::BIT_SALVAGE) {
@@ -571,6 +692,27 @@ fn special_target(u: &mut Universe, ship: ShipId, _cid: CommandId, targets: &[Sh
                 reset(u, ship);
                 return false;
             };
+            // Every 10 s, a depot over 1000 m nearer than the one picked makes the salvagers
+            // pick again (state 8), giving up the bay the target reserved.
+            if ld(u.ships.ship(t).base.salvage_depot_check) + 10.0 < ld(now) {
+                let mut repick = false;
+                if let Some(nearest) = find_depot(u, ship, t).filter(|&n| n != depot) {
+                    let tp = u.ships.ship(t).posinfo.position;
+                    let here = st(Vector::distance_ext(tp, u.ships.ship(depot).posinfo.position));
+                    let there = Vector::distance_ext(tp, u.ships.ship(nearest).posinfo.position);
+                    if 1000.0 < (ld(here) - there).abs() {
+                        release_depot_point(u, t, depot);
+                        repick = true;
+                        for s in docked_salvagers(u, t) {
+                            u.ships.ship_mut(s).base.salvage.state = 8;
+                        }
+                    }
+                }
+                u.ships.ship_mut(t).base.salvage_depot_check = now;
+                if repick {
+                    return false;
+                }
+            }
             command::remove_ships_from_doing_stuff(u, &[t]);
             let tg = u.ships.ship_mut(t);
             tg.flags &= !sof::SELECTABLE;
@@ -578,7 +720,8 @@ fn special_target(u: &mut Universe, ship: ShipId, _cid: CommandId, targets: &[Sh
             tg.special_flags &= !0x100;
             tg.special_flags2 |= special2::BEING_SALVAGED;
             if tg.special_flags & special::SALVAGE_TOWING == 0 {
-                if fly_to_depot(u, t, depot) {
+                let arrived = if approaches_depot(tg.ship_type) { approach_depot(u, t, depot) } else { fly_to_depot(u, t, depot) };
+                if arrived {
                     for s in docked_salvagers(u, t) {
                         u.ships.ship_mut(s).base.salvage.state = 0xb;
                     }
@@ -663,7 +806,71 @@ pub fn depot_housekeep(u: &mut Universe, depot: ShipId) {
             }
             continue;
         }
-        depot_process_generic(u, depot, i);
+        let docks_in = u.ships.get(t).is_some_and(|x| matches!(x.ship_type, ShipType::dMessagePod | ShipType::dBuoy));
+        if docks_in {
+            depot_process_dock_in(u, depot, i);
+        } else {
+            depot_process_generic(u, depot, i);
+        }
+    }
+}
+
+/// `salvDepotProcessDockIn` (0x4f50c0): a message pod or buoy flies into the bay it reserved
+/// and is gone: counted as salvaged by the depot's player and deleted, never converted.
+fn depot_process_dock_in(u: &mut Universe, depot: ShipId, i: usize) {
+    let Some(slot) = u.ships.ship(depot).base.depot.as_ref().map(|d| d[i]) else { return };
+    let Some(t) = slot.ship else { return };
+    if u.ships.get(t).is_none() {
+        u.ships.ship_mut(depot).base.depot.as_mut().expect("depot")[i] = DepotSlot::default();
+        return;
+    }
+    let statics = u.statics.clone();
+    let idx = u.ships.ship(t).base.depot_point;
+    let point = (idx >= 0).then(|| statics.ship(u.ships.ship(depot).ship_type).and_then(|s| s.dock.as_ref()).and_then(|d| d.points.get(idx as usize)).cloned()).flatten();
+    let set_state = |u: &mut Universe, s: i32| u.ships.ship_mut(depot).base.depot.as_mut().expect("depot")[i].state = s;
+    if slot.state != 0 && slot.state != 4 {
+        let s = u.ships.ship_mut(t);
+        s.ship_idle = false;
+        s.autostabilize_ship = false;
+    }
+    match slot.state {
+        0 => {
+            let s = u.ships.ship_mut(t);
+            s.flags |= sof::NO_BUMPS;
+            s.special_flags2 |= special2::DOCKING;
+            s.ship_idle = false;
+            s.autostabilize_ship = false;
+            s.base.dock_point = s.base.depot_point;
+            set_state(u, 1);
+        }
+        1 => {
+            let Some(p) = point else { return };
+            if dock::fly_to_cone_inside_pub(u, t, depot, &p) {
+                set_state(u, 2);
+            }
+        }
+        2 => {
+            let Some(p) = point else { return };
+            if dock::fly_to_latch_standoff_pub(u, t, depot, &p) {
+                let n = u.ships.ship(depot).rotinfo.coordsys.mul_vec(p.cone_normal);
+                u.ships.ship_mut(t).base.prev_cone_normal = n;
+                set_state(u, 3);
+            }
+        }
+        3 => {
+            if dock::fly_to_cone_origin_pub(u, t, depot, 4.0) {
+                set_state(u, 4);
+            }
+        }
+        4 => {
+            release_depot_point(u, t, depot);
+            let tt = u.ships.ship(t).ship_type;
+            let player = u.ships.ship(depot).player;
+            u.base.stats.add_ship_salvaged(tt, player);
+            crate::damage::really_delete_ship(u, t);
+            u.ships.ship_mut(depot).base.depot.as_mut().expect("depot")[i] = DepotSlot::default();
+        }
+        _ => {}
     }
 }
 

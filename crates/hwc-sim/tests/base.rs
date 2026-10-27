@@ -308,3 +308,49 @@ fn salvage_count_quirk_for_other_players() {
     // ... which the getter reads as player 0's type 8.
     assert_eq!(st.ships_salvaged(ShipType::from_index(8).unwrap(), 0), 1);
 }
+
+fn message_pod_scenario() -> Scenario {
+    let mut s = salvage_scenario();
+    s.name = "message pod";
+    s.spawns[3] = Spawn { ship_type: ShipType::dMessagePod, player: 1, position: Vector::new(6000.0, 0.0, 0.0) };
+    s
+}
+
+fn prepare_message_pod(run: &mut Run) {
+    let u = &mut run.universe;
+    u.base.players[0].tech.add(Technology::Salvage.index());
+    hwc_sim::upgrade::player_update_from_research(u, 0);
+    for i in [1, 2] {
+        hwc_sim::upgrade::apply_upgrades(u, run.ids[i]);
+    }
+}
+
+/// Mission 2's message pod is not converted to the salvaging player as other derelicts are:
+/// `salvDepotHouseKeep` hands pods and buoys to `salvDepotProcessDockIn` (0x4f50c0), which flies
+/// the pod into a bay of the mothership, counts it as salvaged and deletes it, so it never joins
+/// the fleet (nor carries over to the next mission).
+#[test]
+fn message_pod_docks_in_and_is_gone() {
+    let Some(mut run) = start(message_pod_scenario()) else { return };
+    prepare_message_pod(&mut run);
+    let pod = run.ids[3];
+    let mut converted = false;
+    let (tick, h1) = run_until(&mut run, 9000, |r| {
+        converted |= events(r).iter().any(|e| matches!(e, BaseEvent::Salvaged { .. }));
+        r.universe.base.stats.ships_salvaged(ShipType::dMessagePod, 0) == 1
+    })
+    .expect("pod salvaged");
+    let u = &run.universe;
+    assert!(u.ship(pod).is_none());
+    assert!(u.ships.iter().all(|s| s.ship_type != ShipType::dMessagePod), "no pod left in either fleet");
+    assert!(!converted, "a pod is not converted");
+    // The bay it went into is free again.
+    let m = u.ship(run.ids[0]).unwrap();
+    assert!(m.base.occupancy.as_ref().unwrap().reserved.iter().all(|r| !r));
+    let mut again = start(message_pod_scenario()).unwrap();
+    prepare_message_pod(&mut again);
+    for _ in 0..tick {
+        again.step();
+    }
+    assert_eq!(hwc_sim::harness::world_hash(&again.universe), h1);
+}

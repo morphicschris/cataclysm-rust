@@ -167,7 +167,11 @@ Code: `base` (shared state, `univCreateShip`, clean-up when a ship dies), `clamp
   flies itself to the player's nearest depot, which keeps it for its length / `twSalTransSpeed`
   seconds (whole seconds, as stored) and converts it (`univConvertShipToPlayer`: a new ship keeps
   pose, health, cargo and upgrades). `gameStatsAddShipSalvaged` keeps its indexing quirk (it
-  writes `[type + player*8]`, the getter reads `[player*145 + type]`).
+  writes `[type + player*8]`, the getter reads `[player*145 + type]`). Message pods and buoys are
+  not converted (`salvDepotProcessDockIn` 0x4f50c0): towed up to the depot (`salvApproachTarget`
+  0x4f5710), the pod reserves a medium bay (the engineering one on a Somtaaw mothership without a
+  docking bay), flies in, is counted as salvaged and deleted, so Mission 2's pod never joins the
+  fleet. Loading a game drops any pod or buoy the player owns (older builds converted them).
 - **Linking**: Acolyte + Acolyte -> ACV, Mimic + Mimic -> MCV, Beast Acolyte pair -> Beast ACV
   (`processLinkToDo`: approach below the partner, align upside down, merge; health is the mean of
   the two health fractions, kills add up); unlinking splits the ship.

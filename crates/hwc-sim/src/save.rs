@@ -45,7 +45,7 @@ pub const MAGIC: [u8; 8] = *b"HWCSAVE\0";
 /// removed, reordered or retyped). A field added at version `n` is read with `added_in_<n>`
 /// ([`added_in_2`]), so files of older versions still load with the field at its default;
 /// files of a newer version, or older ones whose shape is not known, are refused.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 /// The oldest version still read.
 pub const OLDEST_VERSION: u32 = 1;
@@ -173,6 +173,12 @@ fn added_in<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(n: 
 /// version 2: [`crate::universe::Universe::letterbox`].
 pub fn added_in_2<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
     added_in(2, d)
+}
+
+/// `#[serde(default, deserialize_with = "crate::save::added_in_3")]` on a field added at
+/// version 3: [`crate::base::ShipBase::avoid_exception`].
+pub fn added_in_3<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
+    added_in(3, d)
 }
 
 fn current<T>(f: impl FnOnce(&Relink) -> T) -> T {

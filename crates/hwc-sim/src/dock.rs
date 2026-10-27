@@ -937,6 +937,11 @@ pub fn fly_to_cone_inside_pub(u: &mut Universe, ship: ShipId, dw: ShipId, p: &Do
     fly_to_cone_inside(u, ship, dw, p)
 }
 
+/// `dockFlyToConeOrigin` for the salvage code.
+pub fn fly_to_cone_origin_pub(u: &mut Universe, ship: ShipId, dw: ShipId, tolerance: f32) -> bool {
+    fly_to_cone_origin(u, ship, dw, tolerance)
+}
+
 /// `dockFlyToLatchStandoff` for the salvage code.
 pub fn fly_to_latch_standoff_pub(u: &mut Universe, ship: ShipId, dw: ShipId, p: &DockStaticPoint) -> bool {
     fly_to_latch_standoff(u, ship, dw, p)

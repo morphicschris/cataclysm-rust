@@ -651,8 +651,22 @@ pub struct MissionRun {
 
 impl MissionRun {
     /// Restores the state a saved game does not hold from what it does: the sensors manager's
-    /// show-mines flag from the last `ShowMinesInSensors` call in the log.
+    /// show-mines flag from the last `ShowMinesInSensors` call in the log. Also drops message
+    /// pods and buoys the human player owns: games saved before salvaged pods docked in
+    /// (`salvDepotProcessDockIn`) had them converted into the fleet, where the original never
+    /// has one.
     pub fn after_load(&mut self) {
+        let pods: Vec<ShipId> = self
+            .universe
+            .ships
+            .iter()
+            .filter(|s| s.player == HUMAN_PLAYER && matches!(s.ship_type, ShipType::dMessagePod | ShipType::dBuoy))
+            .map(|s| s.id)
+            .collect();
+        for id in pods {
+            crate::damage::really_delete_ship(&mut self.universe, id);
+            self.game.ship_removed(id);
+        }
         self.game.show_mines_in_sensors = self
             .game
             .log
