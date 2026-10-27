@@ -273,7 +273,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    println!("output: {} at {} Hz, {} channels (mixer runs at 22050 Hz)", out.device_name, out.device_rate, out.device_channels);
+    println!("output: {} at {} Hz, {} channels, {:?} (mixer runs at 22050 Hz)", out.device_name, out.device_rate, out.device_channels, out.sample_format);
 
     if !args.rest.is_empty() {
         run(&mut sys, &args.rest);

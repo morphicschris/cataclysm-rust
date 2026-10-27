@@ -2,7 +2,8 @@
 //!
 //! The mixer produces 22 050 Hz stereo, as the game's DirectSound buffer did. If the device can
 //! open a stream at that rate it is used directly; otherwise the output is resampled to the
-//! device rate (the operating system did that for the original).
+//! device rate with a windowed-sinc filter (see [`crate::resample`]); the operating system did
+//! that for the original.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,16 +13,8 @@ use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig};
 
 use crate::codec::{BLOCK_FRAMES, OUTPUT_RATE};
 use crate::mixer::Mixer;
-
-/// How the 22 050 Hz mix is converted to the device rate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Resampling {
-    /// Linear interpolation (comparable to the old Windows kernel mixer).
-    #[default]
-    Linear,
-    /// Catmull-Rom cubic interpolation (opt-in, less aliasing).
-    Cubic,
-}
+pub use crate::resample::Resampling;
+use crate::resample::Resampler;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputOptions {
@@ -32,7 +25,7 @@ pub struct OutputOptions {
 
 impl Default for OutputOptions {
     fn default() -> Self {
-        Self { resampling: Resampling::Linear, prefer_native_rate: true }
+        Self { resampling: Resampling::Sinc, prefer_native_rate: true }
     }
 }
 
@@ -51,56 +44,22 @@ impl std::error::Error for OutputError {}
 struct Feeder {
     mixer: Arc<Mutex<Mixer>>,
     paused: Arc<AtomicBool>,
-    step: f64,
-    resampling: Resampling,
-    src: Vec<[f32; 2]>,
-    pos: f64,
+    resampler: Resampler,
 }
 
 impl Feeder {
-    fn refill(&mut self) {
-        let mut block = [0i16; 2 * BLOCK_FRAMES];
-        if let Ok(mut m) = self.mixer.lock() {
-            m.process_block(&mut block);
-        }
-        for f in block.as_chunks::<2>().0 {
-            self.src.push([f32::from(f[0]) / 32768.0, f32::from(f[1]) / 32768.0]);
-        }
-    }
-
     fn next_frame(&mut self) -> [f32; 2] {
         if self.paused.load(Ordering::Relaxed) {
             return [0.0; 2];
         }
-        while self.pos as usize + 3 >= self.src.len() {
-            self.refill();
-        }
-        let i = self.pos as usize;
-        let t = (self.pos - i as f64) as f32;
-        let out = match self.resampling {
-            Resampling::Linear => {
-                let (a, b) = (self.src[i], self.src[i + 1]);
-                [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+        while self.resampler.needs_input() {
+            let mut block = [0i16; 2 * BLOCK_FRAMES];
+            if let Ok(mut m) = self.mixer.lock() {
+                m.process_block(&mut block);
             }
-            Resampling::Cubic => {
-                let p0 = self.src[i.saturating_sub(1)];
-                let (p1, p2, p3) = (self.src[i], self.src[i + 1], self.src[i + 2]);
-                let c = |k: usize| {
-                    let (a, b, c, d) = (p0[k], p1[k], p2[k], p3[k]);
-                    b + 0.5 * t * (c - a + t * (2.0 * a - 5.0 * b + 4.0 * c - d + t * (3.0 * (b - c) + d - a)))
-                };
-                // The cubic can overshoot between samples near full scale; keep it in range.
-                [c(0).clamp(-1.0, 1.0), c(1).clamp(-1.0, 1.0)]
-            }
-        };
-        self.pos += self.step;
-        // Drop consumed history, keeping one frame before the read position.
-        let consumed = (self.pos as usize).saturating_sub(1);
-        if consumed > 4096 {
-            self.src.drain(..consumed);
-            self.pos -= consumed as f64;
+            self.resampler.push(block.as_chunks::<2>().0.iter().map(|f| [f32::from(f[0]) / 32768.0, f32::from(f[1]) / 32768.0]));
         }
-        out
+        self.resampler.next_frame()
     }
 }
 
@@ -111,6 +70,7 @@ pub struct AudioOutput {
     pub device_rate: u32,
     pub device_channels: u16,
     pub device_name: String,
+    pub sample_format: SampleFormat,
 }
 
 impl AudioOutput {
@@ -119,28 +79,31 @@ impl AudioOutput {
         let host = cpal::default_host();
         let device = host.default_output_device().ok_or_else(|| OutputError("no output device".into()))?;
         let device_name = device.id().map(|id| id.to_string()).unwrap_or_else(|_| "default".into());
+        let default = device.default_output_config().map_err(|e| OutputError(e.to_string()))?;
         let native = if opts.prefer_native_rate {
-            device
-                .supported_output_configs()
-                .ok()
-                .and_then(|mut it| it.find_map(|r| if r.channels() >= 2 { r.try_with_sample_rate(OUTPUT_RATE) } else { None }))
+            // WASAPI lists every format at every rate, 8-bit first; taking the first match
+            // played the game through an 8-bit stream (a constant hiss under the music).
+            device.supported_output_configs().ok().and_then(|it| {
+                it.filter(|r| r.channels() >= 2 && format_rank(r.sample_format()).is_some())
+                    .filter_map(|r| r.try_with_sample_rate(OUTPUT_RATE))
+                    .min_by_key(|c| {
+                        (c.sample_format() != default.sample_format(), format_rank(c.sample_format()), c.channels() != 2)
+                    })
+            })
         } else {
             None
         };
-        let supported = match native {
-            Some(c) => c,
-            None => device.default_output_config().map_err(|e| OutputError(e.to_string()))?,
-        };
+        let supported = native.unwrap_or(default);
         let format = supported.sample_format();
+        if format_rank(format).is_none_or(|r| r >= 4) {
+            eprintln!("audio: {device_name} only offers {format:?} output; expect quantisation noise");
+        }
         let config: StreamConfig = supported.into();
         let paused = Arc::new(AtomicBool::new(false));
         let feeder = Feeder {
             mixer,
             paused: paused.clone(),
-            step: f64::from(OUTPUT_RATE) / f64::from(config.sample_rate),
-            resampling: opts.resampling,
-            src: Vec::new(),
-            pos: 0.0,
+            resampler: Resampler::new(opts.resampling, OUTPUT_RATE, config.sample_rate),
         };
         let stream = match format {
             SampleFormat::F32 => build::<f32>(&device, config, feeder),
@@ -153,13 +116,34 @@ impl AudioOutput {
             other => return Err(OutputError(format!("unsupported sample format {other:?}"))),
         }?;
         stream.play().map_err(|e| OutputError(e.to_string()))?;
-        Ok(Self { _stream: stream, paused, device_rate: config.sample_rate, device_channels: config.channels, device_name })
+        Ok(Self {
+            _stream: stream,
+            paused,
+            device_rate: config.sample_rate,
+            device_channels: config.channels,
+            device_name,
+            sample_format: format,
+        })
     }
 
     /// Pause output without advancing the mixer (the game's sound pause).
     pub fn set_paused(&self, paused: bool) {
         self.paused.store(paused, Ordering::Relaxed);
     }
+}
+
+/// Preference among the sample formats [`build`] handles (lower is better); 8-bit formats last.
+fn format_rank(f: SampleFormat) -> Option<u8> {
+    Some(match f {
+        SampleFormat::F32 => 0,
+        SampleFormat::F64 => 1,
+        SampleFormat::I32 => 2,
+        SampleFormat::I16 => 3,
+        SampleFormat::U16 => 4,
+        SampleFormat::U8 => 5,
+        SampleFormat::I8 => 6,
+        _ => return None,
+    })
 }
 
 fn build<T>(device: &cpal::Device, config: StreamConfig, mut feeder: Feeder) -> Result<cpal::Stream, OutputError>

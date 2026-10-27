@@ -12,10 +12,10 @@
 //! * [`system`]: what the game calls: sound events resolved through the `PKG0` tables, speech
 //!   sentences through `LUT1`/`LUT2` and the `.vce` files, music tracks, volumes, listener.
 //! * [`offline`]: deterministic rendering of a scripted sequence to WAV, and level/spectrum
-//!   measurements; [`output`] (feature `output`): real-time playback through cpal.
+//!   measurements; [`output`] (feature `output`): real-time playback through cpal, converted to
+//!   the device rate by [`resample`].
 //!
-//! The defaults reproduce the original; improvements (symmetric synthesis window, soft limiter,
-//! cubic resampling, music crossfades, music ducking under speech) are opt-in.
+//! The defaults reproduce the original; improvements (symmetric synthesis window, soft limiter, music crossfades, music ducking under speech) are opt-in.
 
 pub mod codec;
 pub mod data;
@@ -23,6 +23,7 @@ pub mod mixer;
 pub mod offline;
 #[cfg(feature = "output")]
 pub mod output;
+pub mod resample;
 pub mod system;
 pub mod tables;
 

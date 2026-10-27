@@ -463,3 +463,35 @@ fn nearby_objects_set_the_music_context() {
     s.note_nearby([NearbyObject { position: [range * 3.0, 0.0, 0.0], class_row: None, speed: 0.0 }]);
     assert_eq!(s.context.closest_distance, range * 3.0);
 }
+
+/// Played at 48 kHz, the music keeps nothing above the mix's 11 025 Hz band through the
+/// output converter; linear interpolation left mirrored images there that were heard as hiss.
+#[test]
+fn music_at_the_device_rate_has_no_images() {
+    use hwc_audio::resample::{Resampler, Resampling};
+    let Some(d) = data() else { return };
+    if d.music.is_none() {
+        eprintln!("no music (HWC_GAME_DIR not set); skipping");
+        return;
+    }
+    let mut s = system(&d);
+    s.set_music_volume(0.4);
+    let r = offline::render(&mut s, &[Cue::new(0.0, Command::Music(0))], 20.0, 3);
+    let above = |kind: Resampling| {
+        let mut rs = Resampler::new(kind, 22_050, 48_000);
+        rs.push(r.left.iter().zip(&r.right).map(|(&l, &r)| [l / 32768.0, r / 32768.0]));
+        let mut out = Vec::new();
+        while !rs.needs_input() {
+            out.push(rs.next_frame()[0]);
+        }
+        let n = 4096;
+        let spec = power_spectrum(&out[48_000..], n);
+        let total: f64 = spec.iter().sum();
+        // Bins from 11.5 kHz (well clear of the converter's transition band) up to 24 kHz.
+        let k0 = (11_500.0 * n as f64 / 48_000.0) as usize;
+        10.0 * (spec[k0..].iter().sum::<f64>() / total).log10()
+    };
+    let (linear, sinc) = (above(Resampling::Linear), above(Resampling::Sinc));
+    eprintln!("music energy above 11.5 kHz at 48 kHz: linear {linear:.1} dB, sinc {sinc:.1} dB");
+    assert!(sinc < -80.0, "{sinc}");
+}
