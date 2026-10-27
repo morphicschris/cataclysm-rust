@@ -260,6 +260,45 @@ fn ring(
 }
 
 /// The order lines of the selected ships (main view), drawn under the health bars.
+/// A world segment on screen, cut at the camera's near side first: a line whose end is
+/// behind the camera (its target out of view after the camera turned) still shows the part in
+/// front. None when all of it is behind.
+fn project_segment(
+    world: &World,
+    size: (u32, u32),
+    a: Vec3,
+    b: Vec3,
+) -> Option<([f32; 2], [f32; 2])> {
+    segment_on_screen(world.view_proj(size), size, a, b)
+}
+
+fn segment_on_screen(
+    m: glam::Mat4,
+    size: (u32, u32),
+    a: Vec3,
+    b: Vec3,
+) -> Option<([f32; 2], [f32; 2])> {
+    const NEAR_W: f32 = 1.0;
+    let (ca, cb) = (m * a.extend(1.0), m * b.extend(1.0));
+    if ca.w < NEAR_W && cb.w < NEAR_W {
+        return None;
+    }
+    let cut = |p: glam::Vec4, q: glam::Vec4| p + (q - p) * ((NEAR_W - p.w) / (q.w - p.w));
+    let (ca, cb) = match (ca.w < NEAR_W, cb.w < NEAR_W) {
+        (true, _) => (cut(ca, cb), cb),
+        (_, true) => (ca, cut(cb, ca)),
+        _ => (ca, cb),
+    };
+    let px = |c: glam::Vec4| {
+        let n = c.truncate() / c.w;
+        [
+            (n.x + 1.0) * 0.5 * size.0 as f32,
+            (1.0 - n.y) * 0.5 * size.1 as f32,
+        ]
+    };
+    Some((px(ca), px(cb)))
+}
+
 /// Ships in a group are this close (world units) to the group's first ship, and their targets
 /// to its target, to share one order line.
 pub const GROUP_REACH: f32 = 800.0;
@@ -360,7 +399,7 @@ pub fn draw_order_lines(
         lines.push((kind, target, v3(s.posinfo.position), to));
     }
     for g in group_orders(&lines) {
-        let (Some(a), Some(b)) = (world.project(size, g.from), world.project(size, g.to)) else {
+        let Some((a, b)) = project_segment(world, size, g.from, g.to) else {
             continue;
         };
         let mut c = g.kind.color();
@@ -541,6 +580,21 @@ mod tests {
         assert!((g[0].spread - 210.0).abs() < 1e-3);
         assert_eq!(g[1].count, 1);
         assert_eq!(g[2].kind, OrderKind::Attack);
+    }
+
+    #[test]
+    fn a_line_to_a_point_behind_the_camera_still_shows() {
+        // Camera at the origin looking down -z.
+        let m = glam::Mat4::perspective_rh(1.0, 4.0 / 3.0, 10.0, 1e5)
+            * glam::Mat4::look_at_rh(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
+        let size = (640, 480);
+        let ship = Vec3::new(100.0, 0.0, -1000.0);
+        let behind = Vec3::new(100.0, 0.0, 2000.0);
+        let (a, b) = segment_on_screen(m, size, ship, behind).expect("drawn");
+        assert!((a[0] - 320.0).abs() < 100.0 && (a[1] - 240.0).abs() < 1.0);
+        // The cut end runs off the right of the screen, along the line.
+        assert!(b[0] > 640.0 && (b[1] - 240.0).abs() < 1.0);
+        assert!(segment_on_screen(m, size, behind, behind * 2.0).is_none());
     }
 
     #[test]
