@@ -17,7 +17,7 @@ use hwc_sim::{ShipId, Universe};
 use hwc_ui::canvas::{Canvas, Color};
 
 use crate::host::PLAYER;
-use crate::sensors::Icons;
+use crate::sensors::{self, Fog, Icons};
 use crate::world::World;
 
 /// Which ships carry a class icon.
@@ -267,6 +267,7 @@ pub fn draw_order_lines(
 ) {
     let u = world.universe();
     let min_px = (size.1 as f32 / 1080.0 * 7.0).max(5.0);
+    let fog = Fog::of(u);
     let mut ends: Vec<(OrderKind, OrderTarget)> = Vec::new();
     for &id in selection {
         let Some(s) = u.ship(id) else { continue };
@@ -276,6 +277,12 @@ pub fn draw_order_lines(
         let Some((kind, target)) = order_of(u, id) else {
             continue;
         };
+        // No line to a ship the player cannot see now (out of sensor range, cloaked).
+        if let OrderTarget::Ship(t) = target {
+            if !shown(u, &fog, t) {
+                continue;
+            }
+        }
         let to = match target {
             OrderTarget::Point(p) | OrderTarget::Resource(p) => p,
             OrderTarget::Ship(t) => v3(u.ship(t).expect("alive").posinfo.position),
@@ -312,7 +319,9 @@ pub fn draw_order_lines(
 }
 
 /// Whether the main view shows a ship to the player (an icon goes on it).
-fn shown(u: &Universe, id: ShipId) -> bool {
+/// Others' ships follow the sensors' rules (`smEnemyShipVisible`): not cloaked and in a part
+/// of the map the player's ships see now, so an icon never shows a ship the original hides.
+fn shown(u: &Universe, fog: &Fog, id: ShipId) -> bool {
     let Some(s) = u.ship(id) else { return false };
     if s.flags & (sof::DEAD | sof::HIDE) != 0 {
         return false;
@@ -322,8 +331,7 @@ fn shown(u: &Universe, id: ShipId) -> bool {
     if st.is_some_and(|st| st.ship_class == Some(ShipClass::Component)) {
         return false;
     }
-    let ally = s.player == PLAYER || u.players.get(PLAYER).is_some_and(|p| p.is_ally(s.player));
-    ally || !hwc_sim::cloak::is_cloaked(s)
+    sensors::ship_visible(u, fog, id)
 }
 
 fn icon_color(u: &Universe, player: usize) -> Color {
@@ -354,10 +362,11 @@ pub fn draw_icons(
         return;
     }
     let u = world.universe();
+    let fog = Fog::of(u);
     let eye = world.camera.eye();
     let half = (size.1 as f32 / 1080.0 * 9.0).max(6.0);
     for &id in &u.ship_list {
-        if !shown(u, id) {
+        if !shown(u, &fog, id) {
             continue;
         }
         let s = u.ship(id).expect("shown");
