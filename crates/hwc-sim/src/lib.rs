@@ -68,6 +68,7 @@ pub mod ships;
 pub mod shockwave;
 pub mod statics;
 pub mod tactics;
+pub mod target;
 pub mod think;
 pub mod tunables;
 pub mod universe;

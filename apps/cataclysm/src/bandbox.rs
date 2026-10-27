@@ -120,6 +120,8 @@ pub struct Facts {
     /// `MakeTargetsNotIncludeUntargetable`'s other cases (Acolytes, the infected Ecclesiam,
     /// special flag 0x200000).
     pub untargetable: bool,
+    /// A mine (`OBJ_MissileType` with `MISSILE_Mine`), not a ship.
+    pub mine: bool,
 }
 
 impl Facts {
@@ -162,6 +164,35 @@ impl Facts {
                 || s.ship_type == ShipType::sAcolyte
                 || s.special_flags & 0x20_0000 != 0
                 || s.ship_type == ShipType::dEcclesiamInfected,
+            mine: false,
+        })
+    }
+}
+
+impl Facts {
+    /// The facts of a mine (`id` is its selection id) for the local player. `sensors`: the box
+    /// is dragged in the sensors manager, where a mine the player's ships do not see now is
+    /// left out (`selFowPointHidden`), as are Mission 3's mines until the script shows them
+    /// (`ShowMinesInSensors`).
+    pub fn of_mine(
+        u: &Universe,
+        id: ShipId,
+        sensors: bool,
+        mines_shown: bool,
+        fog_hidden: bool,
+    ) -> Option<Facts> {
+        let m = u.missiles.get(hwc_sim::target::live_mine(u, id)?)?;
+        let mission3 = u.single_player && u.base.options.mission == 3;
+        Some(Facts {
+            selectable: m.flags & sof::SELECTABLE != 0,
+            targetable: m.flags & (sof::SELECTABLE | sof::TARGETABLE) != 0,
+            hidden: m.flags & sof::HIDE != 0 || (sensors && mission3 && !mines_shown),
+            dead: m.flags & sof::DEAD != 0,
+            on_screen: true,
+            ship_type: usize::MAX,
+            cloaked_unseen: sensors && fog_hidden,
+            mine: true,
+            ..Facts::default()
         })
     }
 }
@@ -197,9 +228,12 @@ pub fn gathered(f: &Facts, g: Gather) -> bool {
 }
 
 /// `MakeTargetsOnlyNonForceAttackTargets`: what a plain attack may target: enemy ships that
-/// are not crystals, disabled for good, or Mimics in disguise, and derelicts that are not the
-/// player's.
+/// are not crystals, disabled for good, or Mimics in disguise, derelicts that are not the
+/// player's, and mines.
 pub fn plain_attack_target(f: &Facts) -> bool {
+    if f.mine {
+        return true;
+    }
     if f.derelict && !f.own && !f.crystal {
         return true;
     }

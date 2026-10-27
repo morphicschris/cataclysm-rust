@@ -498,7 +498,7 @@ fn guide_missile(u: &mut Universe, mid: MissileId) -> bool {
 /// `aishipFlyMissileToTarget` (0x415b70): fly at the target's collision centre, leading it
 /// once within 250 m when going faster than 200 m/s, at full speed.
 fn fly_missile_to_target(u: &mut Universe, mid: MissileId, tid: ShipId) {
-    let Some(t) = u.ships.get(tid) else { return };
+    let Some(t) = crate::target::get(u, tid) else { return };
     let (tc, tv) = (t.coll.coll_position, t.posinfo.velocity);
     let m = u.missiles.missile(mid);
     let Some(mst) = statics_of(u, m) else { return };
@@ -1205,8 +1205,24 @@ pub fn delete_dead(u: &mut Universe) {
         u.special_events.push(SpecialEvent::MissileDied { missile: mid, position: m.posinfo.position, exploded: bullet_type >= 0, mine: m.kind == kind::MINE });
         crate::effects::missile_died(u, mid, bullet_type);
         u.blobs.object_died(ObjRef::Missile(mid));
-        // (Bullets and other missiles never aim at missiles in this simulation, so there are
-        // no references to clear.)
+        // Bullets and missiles aimed at a mine lose their target.
+        if let Some(sel) = ShipId::from_mine(mid) {
+            for &bid in &u.bullet_list {
+                if let Some(b) = u.bullets.get_mut(bid) {
+                    if b.target == Some(sel) {
+                        b.target = None;
+                    }
+                }
+            }
+            for &other in &u.missile_list {
+                if let Some(o) = u.missiles.get_mut(other) {
+                    if o.target == Some(sel) {
+                        o.target = None;
+                        cap_remaining_life(o);
+                    }
+                }
+            }
+        }
         if let Some(f) = u.missiles.missile(mid).formation {
             crate::ships::minelayer::mine_died(u, f, mid);
         }

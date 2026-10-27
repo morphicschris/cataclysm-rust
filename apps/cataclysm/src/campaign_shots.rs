@@ -1116,4 +1116,66 @@ fn mission_three_mines() {
         rig.frame(g);
     }
     rig.shot(g, "10b_m3_minefield");
+
+    // The player's ships that can attack are selected; a Ctrl band box over the whole view
+    // gathers the mines in it (the main view does not hide them), and its release orders the
+    // attack on them.
+    let fleet: Vec<hwc_sim::ShipId> = {
+        let u = g.world.universe();
+        let own: Vec<_> = u
+            .ship_list
+            .iter()
+            .copied()
+            .filter(|&id| crate::host::selectable(u, id))
+            .collect();
+        hwc_sim::command::attack_capable(u, &own)
+    };
+    assert!(!fleet.is_empty(), "nothing of the fleet can attack");
+    g.selection = fleet.clone();
+    g.input(InputEvent::KeyDown(0x11), &mut rig.audio);
+    g.input(InputEvent::MouseMove { x: 2, y: 2 }, &mut rig.audio);
+    g.input(
+        InputEvent::MouseButton {
+            left: true,
+            down: true,
+        },
+        &mut rig.audio,
+    );
+    g.input(
+        InputEvent::MouseMove {
+            x: SIZE.0 - 3,
+            y: SIZE.1 - 3,
+        },
+        &mut rig.audio,
+    );
+    rig.frame(g);
+    let gathered = g.selecting.clone();
+    rig.shot(g, "10c_m3_mines_band_box");
+    g.input(
+        InputEvent::MouseButton {
+            left: true,
+            down: false,
+        },
+        &mut rig.audio,
+    );
+    g.input(InputEvent::KeyUp(0x11), &mut rig.audio);
+    rig.frame(g);
+    let boxed: Vec<_> = gathered
+        .iter()
+        .filter(|id| id.mine().is_some())
+        .copied()
+        .collect();
+    eprintln!("the Ctrl band box gathered {} mines", boxed.len());
+    assert!(
+        !boxed.is_empty(),
+        "the Ctrl band box found no mine: {gathered:?}"
+    );
+    let u = g.world.universe();
+    let ordered = g.selection.iter().any(|&id| {
+        u.ship(id)
+            .and_then(|s| s.command)
+            .and_then(|c| u.commands.get(c))
+            .is_some_and(|c| c.attack_targets.iter().any(|t| boxed.contains(t)))
+    });
+    assert!(ordered, "no attack order on the boxed mines");
 }

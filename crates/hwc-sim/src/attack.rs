@@ -27,6 +27,7 @@ use crate::gun;
 use crate::object::{special, ShipId};
 use crate::physics::apply_force;
 use crate::statics::{GunType, ShipClass};
+use crate::target::Target;
 use crate::universe::Universe;
 
 /// The heading accuracy the attack routines track targets with (0x7436e8, 0x7436ec).
@@ -54,7 +55,7 @@ pub fn can_attack_passive(u: &Universe, id: ShipId) -> bool {
 /// `CustShipAttack`: one frame of attacking `target`.
 pub fn ship_attack(u: &mut Universe, id: ShipId, target: ShipId) {
     let Some(c) = combat(u, id) else { return };
-    if u.ships.get(target).is_none() {
+    if !crate::target::exists(u, target) {
         return;
     }
     match c.attack {
@@ -90,7 +91,7 @@ pub fn ship_attack(u: &mut Universe, id: ShipId, target: ShipId) {
 /// turn to retaliate (`rotateToRetaliate`) do so.
 pub fn ship_attack_passive(u: &mut Universe, id: ShipId, target: ShipId, rotate: bool) {
     let Some(c) = combat(u, id) else { return };
-    if u.ships.get(target).is_none() {
+    if !crate::target::exists(u, target) {
         return;
     }
     let stat = u.statics.ship(u.ships.ship(id).ship_type).expect("statics").clone();
@@ -164,13 +165,14 @@ fn heading(u: &mut Universe, id: ShipId, desired: &mut Vector, acc: f32, sinbank
     aitrack::heading(s, stat, &tw, dt, desired, acc, acc, sinbank, flags)
 }
 
-fn target_stat(u: &Universe, target: ShipId) -> crate::statics::ShipStaticInfo {
-    u.statics.ship(u.ships.ship(target).ship_type).expect("statics").clone()
+/// The target (a ship or a mine) as the attack routines read it.
+fn target_stat(u: &Universe, target: ShipId) -> Target {
+    crate::target::get(u, target).expect("attack target")
 }
 
-/// The target-class column of the interceptor tables.
+/// The target-class column of the interceptor tables (`NUM_CLASSES` for a mine).
 fn target_class(u: &Universe, target: ShipId) -> usize {
-    class_index(u.statics.ship(u.ships.ship(target).ship_type).and_then(|s| s.ship_class))
+    class_index(target_stat(u, target).ship_class)
 }
 
 /// `GenericInterceptorCanFire` (0x5acc50): the fire interval has passed, a gun is ready (the
@@ -249,7 +251,7 @@ pub fn interceptor_fire(u: &mut Universe, id: ShipId, target: ShipId) {
 /// The interceptor trajectory: led by the first gun's bullet speed when the ship has guns.
 fn interceptor_trajectory(u: &Universe, id: ShipId, target: ShipId) -> Vector {
     let s = u.ships.ship(id);
-    let t = u.ships.ship(target);
+    let t = &target_stat(u, target);
     let stat = u.statics.ship(s.ship_type).expect("statics");
     match stat.guns.as_ref().and_then(|g| g.first()) {
         Some(gs) if !s.guns.is_empty() => {
@@ -266,7 +268,7 @@ fn interceptor_passive(u: &mut Universe, id: ShipId, target: ShipId, rotate: boo
     let mut traj = interceptor_trajectory(u, id, target);
     let dist = normalize_by_dist(&mut traj);
     let tstat = target_stat(u, target);
-    let r = st(aiship::range_given_dist(&tstat, ld(dist)));
+    let r = st(aiship::range_given_coll(&tstat.coll_header, ld(dist)));
     if rotate {
         heading(u, id, &mut traj, HEADING_ACCURACY, 0.0, 0);
     }
@@ -286,11 +288,10 @@ fn interceptor_passive(u: &mut Universe, id: ShipId, target: ShipId, rotate: boo
 fn setup_whip_strafe(u: &mut Universe, id: ShipId, target: ShipId) {
     let t = u.tweaks.combat.flightman.clone();
     let s = u.ships.ship(id);
-    let tg = u.ships.ship(target);
+    let tg = target_stat(u, target);
     let stat = u.statics.ship(s.ship_type).expect("statics");
-    let tstat = u.statics.ship(tg.ship_type).expect("statics");
     let tz = tg.posinfo.position.z;
-    let d = ld(t.whipstrafe_bulletrangeoptimum) * ld(stat.bullet_range[s.tactics]) + ld(tstat.header.coll.approx_coll_sphere_size);
+    let d = ld(t.whipstrafe_bulletrangeoptimum) * ld(stat.bullet_range[s.tactics]) + ld(tg.coll_header.approx_coll_sphere_size);
     let mz = s.posinfo.position.z;
     let z = if mz <= tz { ld(tz) - d } else { d + ld(tz) };
     let dx = ld(tg.posinfo.position.x) - ld(s.posinfo.position.x);
@@ -330,7 +331,7 @@ fn interceptor_attack(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeComb
     let prob = ic.flightman_prob[tac][tclass];
     let tw = u.tweaks.combat.clone();
     let now = u.total_time_elapsed;
-    let target_pos = u.ships.ship(target).posinfo.position;
+    let target_pos = target_stat(u, target).posinfo.position;
     let attack_state = u.ships.ship(id).ai_state_attack;
     match attack_state {
         0 | 1 | 5 => {
@@ -341,10 +342,10 @@ fn interceptor_attack(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeComb
                 s.interceptor.aip_flightman = 0;
                 s.ai_state_attack = 1;
             }
-            let traj = aiship::trajectory(u.ships.ship(id), u.ships.ship(target));
+            let traj = aiship::trajectory(u.ships.ship(id), &target_stat(u, target));
             let f = if state == 5 { fly::POINT_IN_DIRECTION_FLYING } else { fly::POINT_IN_DIRECTION_FLYING | fly::CAR_TURN };
             aiship::fly_to_point_avoiding_objs(u, id, Some(target_pos), f, 0.0, None);
-            let r = aiship::range_to_target(&tstat, traj);
+            let r = aiship::range_given_coll(&tstat.coll_header, aiship::traj_dist(traj));
             if r < ld(range) {
                 let s = u.ships.ship_mut(id);
                 s.ai_state_attack = 2;
@@ -354,7 +355,7 @@ fn interceptor_attack(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeComb
         2 => {
             let mut traj = interceptor_trajectory(u, id, target);
             let dist = normalize_by_dist(&mut traj);
-            let tv = u.ships.ship(target).posinfo.velocity;
+            let tv = target_stat(u, target).posinfo.velocity;
             let dot = (ld(traj.z) * ld(tv.z) + ld(traj.y) * ld(tv.y)) + ld(traj.x) * ld(tv.x);
             let with = if dot < 0.0 { None } else { Some(tv) };
             aiship::fly_to_point_avoiding_objs(u, id, Some(target_pos), fly::FAST_AS_POSSIBLE, -stat.header.max_velocity, with);
@@ -371,7 +372,7 @@ fn interceptor_attack(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeComb
             }
             let acc = ic.face_target_accuracy[tac][tclass];
             heading(u, id, &mut traj, acc, stat.sinbank, track_flags);
-            let r = st(aiship::range_given_dist(&tstat, ld(dist)));
+            let r = st(aiship::range_given_coll(&tstat.coll_header, ld(dist)));
             if ld(range) <= ld(r) {
                 return;
             }
@@ -457,7 +458,7 @@ fn interceptor_attack(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeComb
             finish_ai_vec(u, id, v, target_pos);
         }
         3 => {
-            let traj = aiship::trajectory(u.ships.ship(id), u.ships.ship(target));
+            let traj = aiship::trajectory(u.ships.ship(id), &target_stat(u, target));
             let far = !(tstat.ship_class.is_some_and(|c| c.index() < ShipClass::Corvette.index()));
             let d2 = (ld(traj.x) * ld(traj.x) + ld(traj.y) * ld(traj.y)) + ld(traj.z) * ld(traj.z);
             if d2 <= ld(ic.max_fly_away_dist_sq[tac][tclass]) {
@@ -512,9 +513,9 @@ fn interceptor_attack(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeComb
                 u.ships.ship_mut(id).ai_state_attack = 0;
                 return;
             }
-            let mut traj = aiship::trajectory_with_angle_correction(u.ships.ship(id), u.ships.ship(target));
+            let mut traj = aiship::trajectory_with_angle_correction(u.ships.ship(id), &target_stat(u, target));
             let dist = normalize_by_dist(&mut traj);
-            let r = aiship::range_given_dist(&tstat, ld(dist));
+            let r = aiship::range_given_coll(&tstat.coll_header, ld(dist));
             let aiv = u.ships.ship(id).interceptor.ai_vec;
             let minv = tw.flightman.whipstrafe_minvelocity;
             if ld(range) * 0.7 <= r {
@@ -595,9 +596,9 @@ pub fn attack_simple(u: &mut Universe, id: ShipId, target: ShipId) {
         gun::shoot_guns_at_multiple_targets(u, id);
         return;
     }
-    let mut traj = aiship::trajectory(s, u.ships.ship(target));
+    let mut traj = aiship::trajectory(s, &target_stat(u, target));
     let dist = normalize_by_dist(&mut traj);
-    let r = st(aiship::range_given_dist(&target_stat(u, target), ld(dist)));
+    let r = st(aiship::range_given_coll(&target_stat(u, target).coll_header, ld(dist)));
     gun::shoot_guns_at_target(u, id, target, r, traj);
 }
 
@@ -609,9 +610,9 @@ pub fn attack_passive_rotate(u: &mut Universe, id: ShipId, target: ShipId) {
         return;
     }
     let stat = u.statics.ship(s.ship_type).expect("statics").clone();
-    let mut traj = aiship::trajectory(s, u.ships.ship(target));
+    let mut traj = aiship::trajectory(s, &target_stat(u, target));
     let class = class_index(stat.ship_class);
-    let tv = u.ships.ship(target).posinfo.velocity;
+    let tv = target_stat(u, target).posinfo.velocity;
     let tsq = (ld(tv.z) * ld(tv.z) + ld(tv.y) * ld(tv.y)) + ld(tv.x) * ld(tv.x);
     let lie_flat = class < 12 && stat.is_capital_ship && ld(u.tweaks.combat.cap_ship_lie_flat_speed_sq[class]) < tsq;
     if stat.ship_class == Some(ShipClass::Carrier) || lie_flat || matches!(s.ship_type, crate::statics::ShipType::sSwarmer) {
@@ -625,7 +626,7 @@ pub fn attack_passive_rotate(u: &mut Universe, id: ShipId, target: ShipId) {
         gun::shoot_guns_at_multiple_targets(u, id);
         return;
     }
-    let r = st(aiship::range_given_dist(&target_stat(u, target), ld(dist)));
+    let r = st(aiship::range_given_coll(&target_stat(u, target).coll_header, ld(dist)));
     gun::shoot_guns_at_target(u, id, target, r, traj);
 }
 
@@ -638,7 +639,7 @@ fn need_same_vertical_plane(u: &Universe, id: ShipId, target: ShipId, dist: f32,
     if stat.ship_class == Some(ShipClass::Carrier) || matches!(s.ship_type, sSwarmer) {
         return true;
     }
-    let t = u.ships.ship(target);
+    let t = target_stat(u, target);
     let v = t.posinfo.velocity;
     if ld(speed_sq) < (ld(v.z) * ld(v.z) + ld(v.y) * ld(v.y)) + ld(v.x) * ld(v.x) {
         let dz = ld(s.posinfo.position.z) - ld(t.posinfo.position.z);
@@ -655,15 +656,15 @@ fn need_same_vertical_plane(u: &Universe, id: ShipId, target: ShipId, dist: f32,
 /// targets (`capShipLieFlat*`).
 pub fn attack_passive(u: &mut Universe, id: ShipId, target: ShipId, max: f32, min: f32) {
     let stat = u.statics.ship(u.ships.ship(id).ship_type).expect("statics").clone();
-    let mut traj = aiship::trajectory(u.ships.ship(id), u.ships.ship(target));
+    let mut traj = aiship::trajectory(u.ships.ship(id), &target_stat(u, target));
     let raw = traj;
     let dist = normalize_by_dist(&mut traj);
-    let r = st(aiship::range_given_dist(&target_stat(u, target), ld(dist)));
+    let r = st(aiship::range_given_coll(&target_stat(u, target).coll_header, ld(dist)));
     let class = class_index(stat.ship_class).min(11);
     let lie_speed = u.tweaks.combat.cap_ship_lie_flat_speed_sq[class];
     let lie_dist = u.tweaks.combat.cap_ship_lie_flat_distance[class];
-    let tp = u.ships.ship(target).posinfo.position;
-    let tv = u.ships.ship(target).posinfo.velocity;
+    let tp = target_stat(u, target).posinfo.position;
+    let tv = target_stat(u, target).posinfo.velocity;
     let mut in_range = false;
     if lie_speed == 0.0 || !need_same_vertical_plane(u, id, target, lie_dist, lie_speed) {
         if ld(r) <= ld(max) {
@@ -688,11 +689,12 @@ pub fn attack_passive(u: &mut Universe, id: ShipId, target: ShipId, max: f32, mi
         if ld(min) < ld(r) {
             point = Vector::new(st((ld(point.x) + ld(tp.x)) * 0.5), st((ld(point.y) + ld(tp.y)) * 0.5), st((ld(point.z) + ld(tp.z)) * 0.5));
         }
-        let t = u.ships.ship(target);
         let tclass = target_class(u, target);
         let attacking_me = (tclass == ShipClass::Fighter.index() || tclass == ShipClass::Corvette.index())
-            && t.command.and_then(|c| u.commands.get(c)).is_some_and(|c| c.order == crate::command::order::ATTACK)
-            && t.attack.target == Some(id);
+            && u.ships.get(target).is_some_and(|t| {
+                t.command.and_then(|c| u.commands.get(c)).is_some_and(|c| c.order == crate::command::order::ATTACK)
+                    && t.attack.target == Some(id)
+            });
         if !attacking_me {
             aiship::fly_to_point_avoiding_objs(u, id, Some(point), 0, 0.0, Some(tv));
         }
@@ -744,16 +746,16 @@ pub fn attack_side_step(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeCo
     let tac = u.ships.ship(id).tactics;
     let range = stat.bullet_range[tac];
     let now = u.total_time_elapsed;
-    let tp = u.ships.ship(target).posinfo.position;
+    let tp = target_stat(u, target).posinfo.position;
     let full = p.full_movement_freedom;
     let state = u.ships.ship(id).ai_state_attack;
     let own_vel = |u: &Universe| u.ships.ship(id).posinfo.velocity;
     let mut back_to_start = false;
     match state {
         0 => {
-            let traj = aiship::trajectory(u.ships.ship(id), u.ships.ship(target));
+            let traj = aiship::trajectory(u.ships.ship(id), &target_stat(u, target));
             aiship::fly_to_point_avoiding_objs(u, id, Some(tp), fly::POINT_IN_DIRECTION_FLYING | fly::CAR_TURN, 0.0, None);
-            let r = st(aiship::range_to_target(&tstat, traj));
+            let r = st(aiship::range_given_coll(&tstat.coll_header, aiship::traj_dist(traj)));
             if ld(r) < ld(range) && fire_guns(u, id, target, r, traj) {
                 let dir = side_step_direction(u, id, full);
                 let s = u.ships.ship_mut(id);
@@ -767,12 +769,12 @@ pub fn attack_side_step(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeCo
             }
         }
         1 => {
-            let mut traj = aiship::trajectory(u.ships.ship(id), u.ships.ship(target));
+            let mut traj = aiship::trajectory(u.ships.ship(id), &target_stat(u, target));
             let dist = normalize_by_dist(&mut traj);
             let v = own_vel(u);
             aiship::fly_to_point_avoiding_objs(u, id, None, 0, 0.0, Some(v));
             heading(u, id, &mut traj, HEADING_ACCURACY, stat.sinbank, 0);
-            let r = st(aiship::range_given_dist(&tstat, ld(dist)));
+            let r = st(aiship::range_given_coll(&tstat.coll_header, ld(dist)));
             if ld(r) < ld(range) && fire_guns(u, id, target, r, traj) {
                 let dir = side_step_direction(u, id, full);
                 let s = u.ships.ship_mut(id);
@@ -786,10 +788,10 @@ pub fn attack_side_step(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeCo
             }
         }
         2 | 3 => {
-            let mut traj = aiship::trajectory(u.ships.ship(id), u.ships.ship(target));
+            let mut traj = aiship::trajectory(u.ships.ship(id), &target_stat(u, target));
             let dist = normalize_by_dist(&mut traj);
             heading(u, id, &mut traj, HEADING_ACCURACY, stat.sinbank, 0);
-            let r = st(aiship::range_given_dist(&tstat, ld(dist)));
+            let r = st(aiship::range_given_coll(&tstat.coll_header, ld(dist)));
             let dir = u.ships.ship(id).side_step.direction as i32 as usize;
             let side = |u: &mut Universe| {
                 let s = u.ships.ship_mut(id);
@@ -850,10 +852,10 @@ fn multibeam_attack(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeCombat
             if state == 0 {
                 u.ships.ship_mut(id).ai_state_attack = 1;
             }
-            let traj = aiship::trajectory(u.ships.ship(id), u.ships.ship(target));
-            let r = aiship::range_to_target(&tstat, traj);
-            let tp = u.ships.ship(target).posinfo.position;
-            let tv = u.ships.ship(target).posinfo.velocity;
+            let traj = aiship::trajectory(u.ships.ship(id), &target_stat(u, target));
+            let r = aiship::range_given_coll(&tstat.coll_header, aiship::traj_dist(traj));
+            let tp = target_stat(u, target).posinfo.position;
+            let tv = target_stat(u, target).posinfo.velocity;
             if r < near || aiship::fly_to_point_avoiding_objs(u, id, Some(tp), fly::POINT_IN_DIRECTION_FLYING | fly::CAR_TURN, -10.0, Some(tv)) != 0 {
                 let statics = u.statics.clone();
                 let tw = u.tweaks.clone();
@@ -867,7 +869,7 @@ fn multibeam_attack(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeCombat
             ship_fire(u, id, target);
         }
         3 => {
-            let traj = aiship::trajectory(u.ships.ship(id), u.ships.ship(target));
+            let traj = aiship::trajectory(u.ships.ship(id), &target_stat(u, target));
             let dir = u.ships.ship(id).side_step.direction as i32 as usize;
             {
                 let s = u.ships.ship_mut(id);
@@ -877,10 +879,10 @@ fn multibeam_attack(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeCombat
             let v = u.ships.ship(id).posinfo.velocity;
             aiship::fly_to_point_avoiding_objs(u, id, None, 0, 0.0, Some(v));
             ship_fire(u, id, target);
-            if u.ships.get(target).is_none() {
+            if !crate::target::exists(u, target) {
                 return;
             }
-            let r = aiship::range_to_target(&tstat, traj);
+            let r = aiship::range_given_coll(&tstat.coll_header, aiship::traj_dist(traj));
             if !(r <= near) {
                 u.ships.ship_mut(id).ai_state_attack = 1;
             }
@@ -896,9 +898,9 @@ fn multibeam_fire(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeCombat) 
     let statics = u.statics.clone();
     let stat = statics.ship(u.ships.ship(id).ship_type).expect("statics");
     let Some(guns) = stat.guns.as_ref() else { return };
-    let r = u.ships.get(target).map(|t| {
-        let traj = aiship::trajectory(u.ships.ship(id), t);
-        st(aiship::range_given_dist(&target_stat(u, target), aiship::traj_dist(traj)))
+    let r = crate::target::get(u, target).map(|t| {
+        let traj = aiship::trajectory(u.ships.ship(id), &t);
+        st(aiship::range_given_coll(&target_stat(u, target).coll_header, aiship::traj_dist(traj)))
     });
     let mut chosen: Option<(usize, ShipId)> = None;
     if let Some(r) = r {

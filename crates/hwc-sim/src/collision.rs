@@ -203,7 +203,7 @@ pub fn line_of_sight(u: &Universe, id: ShipId, target: Option<ShipId>, pos: Vect
     let Some(me) = u.ships.get(id) else { return true };
     let mut length = REALLY_BIG;
     let mut same_blob = true;
-    if let Some(t) = target.and_then(|t| u.ships.get(t)) {
+    if let Some(t) = target.and_then(|t| crate::target::get(u, t)) {
         let dx = ld(t.posinfo.position.x) - ld(pos.x);
         let dy = ld(t.posinfo.position.y) - ld(pos.y);
         let dz = ld(t.posinfo.position.z) - ld(pos.z);
@@ -248,7 +248,11 @@ pub fn line_of_sight(u: &Universe, id: ShipId, target: Option<ShipId>, pos: Vect
 /// The sphere pre-test of the bullet walk: the bullet's path this frame passes within the
 /// target's collision sphere.
 fn bullet_sphere_test(t: &Ship, tstat: &ShipStaticInfo, b: &Bullet) -> bool {
-    let tc = t.coll.coll_position;
+    bullet_sphere_test_at(t.coll.coll_position, tstat.header.coll.coll_sphere_size_sqr, b)
+}
+
+/// [`bullet_sphere_test`] for any object: its collision centre and squared sphere size.
+fn bullet_sphere_test_at(tc: Vector, size_sqr: f32, b: &Bullet) -> bool {
     let bp = b.posinfo.position;
     let h = b.heading;
     let dx = ld(tc.x) - ld(bp.x);
@@ -256,12 +260,32 @@ fn bullet_sphere_test(t: &Ship, tstat: &ShipStaticInfo, b: &Bullet) -> bool {
     let dz = ld(tc.z) - ld(bp.z);
     let proj = (dx * ld(h.x) + dy * ld(h.y)) + dz * ld(h.z);
     let proj2 = st(proj * proj);
-    let v = ld(tstat.header.coll.coll_sphere_size_sqr) - (((dz * dz + dy * dy) + dx * dx) - ld(proj2));
+    let v = ld(size_sqr) - (((dz * dz + dy * dy) + dx * dx) - ld(proj2));
     if !(v > 0.0) {
         return false;
     }
     let tr = ld(b.travel_dist);
     tr * tr > ld(proj2) - v
+}
+
+/// The first test of `collCheckBulletTargetColl` for a bullet aimed at a mine: it can hit its
+/// target only (mines are in no blob's target lists). The distance along the path and the
+/// face, when it does.
+fn bullet_hits_mine(u: &Universe, b: &Bullet) -> Option<(crate::object::MissileId, f32, i32)> {
+    let mid = crate::target::live_mine(u, b.target?)?;
+    let m = u.missiles.get(mid)?;
+    let mst = crate::missile::statics_of(u, m)?;
+    let c = &mst.header.coll;
+    let diff = ld(m.coll_optimize_dist) - ld(b.coll_optimize_dist);
+    let ad = ld(st(diff)).abs();
+    if ld(c.coll_sphere_size) + ld(b.travel_dist) < ad {
+        return None;
+    }
+    if !bullet_sphere_test_at(m.coll.coll_position, c.coll_sphere_size_sqr, b) {
+        return None;
+    }
+    let (t, side) = rect_line_at(c, m.posinfo.position, &m.rotinfo.coordsys, b.posinfo.position, b.heading, b.travel_dist);
+    (ld(t) >= 0.0).then_some((mid, t, side))
 }
 
 /// `collCheckAllBulletMissileCollisions` (bullets part): every blob's bullets against the
@@ -300,6 +324,11 @@ fn check_bullets_in_blob(u: &mut Universe, bi: usize) {
             _ => {}
         }
         let b = b.clone();
+        if let Some((mid, tt, side)) = bullet_hits_mine(u, &b) {
+            crate::damage::bullet_collided_with_mine(u, true, mid, bid, tt, side);
+            crate::bullet::delete(u, bid);
+            continue;
+        }
         let mut hit = None;
         'passes: for pass in 0..2 {
             let blob = &u.blobs.blobs[bi];
@@ -430,6 +459,10 @@ fn check_beam(u: &mut Universe, own_blob: usize, bid: BulletId) {
     let beam = u.bullets.bullet(bid).clone();
     let len = beam.travel_dist;
     let mut best = (f32::from_bits(0x6258_d727), None, -1);
+    // A beam aimed at a mine tests it first (mines are in no blob's target lists).
+    if let Some(mid) = beam.target.and_then(|t| crate::target::live_mine(u, t)) {
+        beam_against_mine(u, &beam, mid, len, &mut best);
+    }
     beam_against_blob(u, &beam, own_blob, len, &mut best);
     let h = beam.heading;
     let bp = beam.posinfo.position;
@@ -457,7 +490,9 @@ fn check_beam(u: &mut Universe, own_blob: usize, bid: BulletId) {
             u.bullets.bullet_mut(bid).beam_travel_dist = beam.length_mag;
         }
         Some(tid) => {
-            if best.2 == FIELD_HIT {
+            if let Some(mid) = tid.mine() {
+                crate::damage::bullet_collided_with_mine(u, true, mid, bid, best.0, best.2);
+            } else if best.2 == FIELD_HIT {
                 crate::ships::sentinel::field_take_damage(u, tid, &beam);
                 crate::damage::bullet_collided_with_target(u, false, tid, bid, best.0, 1);
             } else {
@@ -467,6 +502,39 @@ fn check_beam(u: &mut Universe, own_blob: usize, bid: BulletId) {
                 b.beam_travel_dist = best.0;
             }
         }
+    }
+}
+
+/// `collCheckBeamColl`'s test of the mine a beam is aimed at.
+fn beam_against_mine(u: &Universe, beam: &Bullet, mid: crate::object::MissileId, len: f32, best: &mut (f32, Option<ShipId>, i32)) {
+    let Some(m) = u.missiles.get(mid) else { return };
+    let Some(mst) = crate::missile::statics_of(u, m) else { return };
+    let c = &mst.header.coll;
+    let h = beam.heading;
+    let bp = beam.posinfo.position;
+    let tc = m.coll.coll_position;
+    let dx = st(ld(tc.x) - ld(bp.x));
+    let dy = st(ld(tc.y) - ld(bp.y));
+    let dz = st(ld(tc.z) - ld(bp.z));
+    let proj = st((ld(dx) * ld(h.x) + ld(dy) * ld(h.y)) + ld(dz) * ld(h.z));
+    let proj2 = st(ld(proj) * ld(proj));
+    let lensq = (ld(dx) * ld(dx) + ld(dy) * ld(dy)) + ld(dz) * ld(dz);
+    let v = st(ld(c.coll_sphere_size_sqr) - (lensq - ld(proj2)));
+    if !(ld(v) > 0.0 && ld(proj2) - ld(v) < ld(len) * ld(len)) {
+        return;
+    }
+    let (mut tt, side) = rect_line_at(c, m.posinfo.position, &m.rotinfo.coordsys, bp, h, len);
+    if !(ld(tt) >= 0.0) {
+        return;
+    }
+    if tt == 0.0 {
+        tt = st(ld(proj) - fsqrt(ld(v)));
+        if tt < 0.0 {
+            tt = 0.0;
+        }
+    }
+    if ld(tt) < ld(best.0) {
+        *best = (tt, ShipId::from_mine(mid), side);
     }
 }
 

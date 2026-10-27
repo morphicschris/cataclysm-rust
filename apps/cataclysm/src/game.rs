@@ -739,6 +739,13 @@ impl Game {
 
     /// `mrObjectClick`.
     fn object_click(&mut self, id: ShipId, audio: &mut Option<Audio>) {
+        // A mine: clicking it with ships selected attacks it (it is never the player's).
+        if id.mine().is_some() {
+            if !self.ui.action_held(keys::BANDBOX_FOCUS) && !self.selection.is_empty() {
+                self.attack(&[id]);
+            }
+            return;
+        }
         let u = self.world.universe();
         let Some(s) = u.ship(id) else { return };
         let own = s.player == PLAYER;
@@ -1151,14 +1158,45 @@ impl Game {
 
     /// The ship under the pointer among those the local player can see (in the sensors
     /// manager the fog of war hides ships).
+    /// Mines can be picked too (`selClickFromArray` takes any targetable object): in the
+    /// sensors manager only those it shows.
     fn pick_ship(&self, size: (u32, u32), p: [f32; 2]) -> Option<ShipId> {
         if self.sensors.is_open() {
             let u = self.world.universe();
             let fog = sensors::Fog::of(u);
-            self.world
-                .ship_at_where(size, p, |id| sensors::ship_visible(u, &fog, id))
+            self.world.object_at_where(
+                size,
+                p,
+                |id| sensors::ship_visible(u, &fog, id),
+                |id| {
+                    self.mine_facts(id)
+                        .is_some_and(|f| !f.hidden && !f.cloaked_unseen)
+                },
+            )
         } else {
-            self.world.ship_at(size, p)
+            self.world.object_at_where(size, p, |_| true, |_| true)
+        }
+    }
+
+    /// The band-box facts of a mine (`id` is its selection id) as the local player sees it
+    /// now.
+    fn mine_facts(&self, id: ShipId) -> Option<bandbox::Facts> {
+        let u = self.world.universe();
+        let t = hwc_sim::target::get(u, id)?;
+        let shown = self
+            .world
+            .mission_run()
+            .is_some_and(|r| r.game.show_mines_in_sensors);
+        let fog_hidden = sensors::Fog::of(u).point_hidden(t.posinfo.position);
+        bandbox::Facts::of_mine(u, id, self.sensors.is_open(), shown, fog_hidden)
+    }
+
+    /// The band-box facts of a ship or a mine.
+    fn object_facts(&self, id: ShipId) -> Option<bandbox::Facts> {
+        if id.mine().is_some() {
+            self.mine_facts(id)
+        } else {
+            bandbox::Facts::of(self.world.universe(), id, PLAYER)
         }
     }
 
@@ -1220,18 +1258,57 @@ impl Game {
         bandbox::Mode::from_held(|a| self.ui.action_held(a))
     }
 
-    /// Ships inside the box with their facts for the local player.
-    fn band_box_inside(&self, a: [f32; 2], b: [f32; 2]) -> Vec<(ShipId, bandbox::Facts)> {
+    /// Ships inside the box with their facts for the local player; an attack box also finds
+    /// mines (`selRectDragFunction` with its "anything" option).
+    fn band_box_inside(
+        &self,
+        mode: bandbox::Mode,
+        a: [f32; 2],
+        b: [f32; 2],
+    ) -> Vec<(ShipId, bandbox::Facts)> {
         let u = self.world.universe();
-        self.ships_in_box(a, b)
+        let mut inside: Vec<(ShipId, bandbox::Facts)> = self
+            .ships_in_box(a, b)
             .into_iter()
             .filter_map(|id| Some((id, bandbox::Facts::of(u, id, PLAYER)?)))
+            .collect();
+        if matches!(mode, bandbox::Mode::Attack | bandbox::Mode::ForceAttack) {
+            inside.extend(
+                self.mines_in_box(a, b)
+                    .into_iter()
+                    .filter_map(|id| Some((id, self.mine_facts(id)?))),
+            );
+        }
+        inside
+    }
+
+    /// Mines (by selection id) whose centres project inside the band box.
+    fn mines_in_box(&self, a: [f32; 2], b: [f32; 2]) -> Vec<ShipId> {
+        let size = self.size();
+        let (lo, hi) = (
+            [a[0].min(b[0]), a[1].min(b[1])],
+            [a[0].max(b[0]), a[1].max(b[1])],
+        );
+        let u = self.world.universe();
+        u.missile_list
+            .iter()
+            .filter_map(|&mid| ShipId::from_mine(mid))
+            .filter(|&id| {
+                self.world.mine_box(size, id).is_some()
+                    && hwc_sim::target::get(u, id).is_some_and(|t| {
+                        self.world
+                            .project(size, v3(t.posinfo.position))
+                            .is_some_and(|p| {
+                                p[0] >= lo[0] && p[0] <= hi[0] && p[1] >= lo[1] && p[1] <= hi[1]
+                            })
+                    })
+            })
             .collect()
     }
 
     /// The "selecting" list of a band box being dragged (`mrSelectHold`).
     fn band_box_selecting(&self, mode: bandbox::Mode, a: [f32; 2], b: [f32; 2]) -> Vec<ShipId> {
-        let inside = self.band_box_inside(a, b);
+        let inside = self.band_box_inside(mode, a, b);
         let u = self.world.universe();
         let sel = bandbox::Selected {
             ships: &self.selection,
@@ -1258,13 +1335,10 @@ impl Game {
                 if attackers.is_empty() {
                     return;
                 }
-                let facts: Vec<(ShipId, bandbox::Facts)> = {
-                    let u = self.world.universe();
-                    selecting
-                        .iter()
-                        .filter_map(|&id| Some((id, bandbox::Facts::of(u, id, PLAYER)?)))
-                        .collect()
-                };
+                let facts: Vec<(ShipId, bandbox::Facts)> = selecting
+                    .iter()
+                    .filter_map(|&id| Some((id, self.object_facts(id)?)))
+                    .collect();
                 let targets =
                     bandbox::attack_targets(&facts, &attackers, mode == Mode::ForceAttack);
                 if !targets.is_empty() {
@@ -3375,11 +3449,14 @@ impl Game {
         // `selSelectingDraw`: the band box's gathered ships are outlined, not given bars.
         let mut outlines = Vec::new();
         for &id in selecting {
-            let Some(s) = u.ship(id) else { continue };
-            if s.flags & hwc_sim::object::sof::DEAD != 0 {
-                continue;
-            }
-            if let Some((lo, hi)) = self.world.screen_box(size, s) {
+            let boxed = match u.ship(id) {
+                Some(s) if s.flags & hwc_sim::object::sof::DEAD == 0 => {
+                    self.world.screen_box(size, s)
+                }
+                Some(_) => None,
+                None => self.world.mine_box(size, id),
+            };
+            if let Some((lo, hi)) = boxed {
                 outlines.push(Rect::new(
                     lo[0] as i32,
                     lo[1] as i32,

@@ -473,19 +473,19 @@ pub fn fly_to_point_avoiding_objs(
 
 /// `aishipGetTrajectory` (0x413ef0): from the ship's position to the target's collision
 /// centre.
-pub fn trajectory(ship: &Ship, target: &Ship) -> Vector {
-    let t = target.coll.coll_position;
+pub fn trajectory<T: crate::target::Aim + ?Sized>(ship: &Ship, target: &T) -> Vector {
+    let t = target.aim_point();
     let p = ship.posinfo.position;
     Vector::new(st(ld(t.x) - ld(p.x)), st(ld(t.y) - ld(p.y)), st(ld(t.z) - ld(p.z)))
 }
 
 /// `aishipGetTrajectoryWithVelPrediction` (0x413e20): the trajectory led by where the target
 /// will be when a bullet of `speed` arrives (no lead at or below `below`).
-pub fn trajectory_with_vel_prediction(ship: &Ship, target: &Ship, speed: f32, below: f32) -> Vector {
+pub fn trajectory_with_vel_prediction<T: crate::target::Aim + ?Sized>(ship: &Ship, target: &T, speed: f32, below: f32) -> Vector {
     let mut t = trajectory(ship, target);
     if ld(speed) > ld(below) {
         let k = fsqrt((ld(t.z) * ld(t.z) + ld(t.y) * ld(t.y)) + ld(t.x) * ld(t.x)) / ld(speed);
-        let v = target.posinfo.velocity;
+        let v = target.aim_velocity();
         let a = st(k * ld(v.x));
         let b = st(k * ld(v.y));
         let c = k * ld(v.z);
@@ -498,14 +498,14 @@ pub fn trajectory_with_vel_prediction(ship: &Ship, target: &Ship, speed: f32, be
 
 /// `aishipGetTrajectoryWithAngleCorrection` (0x413f20): from where the ship will be in a
 /// quarter of a second.
-pub fn trajectory_with_angle_correction(ship: &Ship, target: &Ship) -> Vector {
+pub fn trajectory_with_angle_correction<T: crate::target::Aim + ?Sized>(ship: &Ship, target: &T) -> Vector {
     let p = ship.posinfo.position;
     let v = ship.posinfo.velocity;
     let q = ld(0.25f32);
     let px = ld(v.x) * q + ld(p.x);
     let py = st(ld(v.y) * q + ld(p.y));
     let pz = st(ld(v.z) * q + ld(p.z));
-    let t = target.coll.coll_position;
+    let t = target.aim_point();
     Vector::new(st(ld(t.x) - px), st(ld(t.y) - ld(py)), st(ld(t.z) - ld(pz)))
 }
 
@@ -522,7 +522,12 @@ pub fn range_to_target(target_stat: &ShipStaticInfo, traj: Vector) -> Ext {
 
 /// `RangeToTargetGivenDist` (0x435770) on an already computed distance.
 pub fn range_given_dist(target_stat: &ShipStaticInfo, dist: Ext) -> Ext {
-    let r = dist - ld(target_stat.header.coll.approx_coll_sphere_size);
+    range_given_coll(&target_stat.header.coll, dist)
+}
+
+/// [`range_given_dist`] for any target's collision statics.
+pub fn range_given_coll(coll: &crate::statics::StaticCollInfo, dist: Ext) -> Ext {
+    let r = dist - ld(coll.approx_coll_sphere_size);
     if r <= 0.0 || r.is_nan() {
         0.0
     } else {

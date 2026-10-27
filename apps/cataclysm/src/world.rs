@@ -2030,9 +2030,27 @@ impl World {
             .universe()
             .statics
             .ship(s.ship_type)
-            .map_or(50.0, |st| st.header.coll.coll_sphere_size)
-            .max(20.0);
-        let c = v3(s.coll.coll_position);
+            .map_or(50.0, |st| st.header.coll.coll_sphere_size);
+        self.sphere_box(size, v3(s.coll.coll_position), r)
+    }
+
+    /// Screen box of a live mine (`id` is its selection id) that is drawn in the main view.
+    pub fn mine_box(&self, size: (u32, u32), id: ShipId) -> Option<([f32; 2], [f32; 2])> {
+        let u = self.universe();
+        let m = u.missiles.get(hwc_sim::target::live_mine(u, id)?)?;
+        if m.flags & hwc_sim::object::sof::HIDE != 0
+            || !self.object_in_view(v3(m.posinfo.position), false)
+        {
+            return None;
+        }
+        let r =
+            hwc_sim::missile::statics_of(u, m).map_or(50.0, |st| st.header.coll.coll_sphere_size);
+        self.sphere_box(size, v3(m.coll.coll_position), r)
+    }
+
+    /// Screen box of a sphere of radius `r` (at least 20) about `c`.
+    fn sphere_box(&self, size: (u32, u32), c: Vec3, r: f32) -> Option<([f32; 2], [f32; 2])> {
+        let r = r.max(20.0);
         let p = self.project(size, c)?;
         let right = self.camera.view().row(0).truncate();
         let q = self.project(size, c + right * r)?;
@@ -2040,6 +2058,43 @@ impl World {
             .sqrt()
             .max(6.0);
         Some(([p[0] - rad, p[1] - rad], [p[0] + rad, p[1] + rad]))
+    }
+
+    /// The nearest object under the point among the ships `keep` lets through and the mines
+    /// `keep_mine` does (a mine is given by its selection id).
+    pub fn object_at_where(
+        &self,
+        size: (u32, u32),
+        px: [f32; 2],
+        keep: impl Fn(ShipId) -> bool,
+        keep_mine: impl Fn(ShipId) -> bool,
+    ) -> Option<ShipId> {
+        let ship = self.ship_at_where(size, px, keep);
+        let eye = self.camera.eye();
+        let u = self.universe();
+        let dist = |id: ShipId| {
+            hwc_sim::target::get(u, id)
+                .map_or(f32::MAX, |t| (v3(t.posinfo.position) - eye).length())
+        };
+        let mut best = ship.map(|id| (dist(id), id));
+        for &mid in &u.missile_list {
+            let Some(id) = ShipId::from_mine(mid) else {
+                continue;
+            };
+            if !keep_mine(id) {
+                continue;
+            }
+            let Some((lo, hi)) = self.mine_box(size, id) else {
+                continue;
+            };
+            if px[0] >= lo[0] && px[0] <= hi[0] && px[1] >= lo[1] && px[1] <= hi[1] {
+                let d = dist(id);
+                if best.is_none_or(|b| d < b.0) {
+                    best = Some((d, id));
+                }
+            }
+        }
+        best.map(|b| b.1)
     }
 
     /// The nearest visible ship whose screen box contains the point.

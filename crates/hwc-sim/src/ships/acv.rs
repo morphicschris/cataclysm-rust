@@ -495,7 +495,7 @@ pub fn attack(u: &mut Universe, id: ShipId, target: ShipId) {
         }
         return;
     }
-    let tp = u.ships.ship(target).posinfo.position;
+    let Some(tp) = crate::target::get(u, target).map(|t| t.posinfo.position) else { return };
     let cid = u.ships.ship(id).command;
     let formation = cid.and_then(|c| u.commands.get(c)).filter(|c| c.attributes & crate::command::attr::FORMATION != 0).cloned();
     match formation {
