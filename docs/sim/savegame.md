@@ -426,17 +426,25 @@ progress then ends by the original's safety timeout), the sensors manager's own 
 | Bytes | Content |
 |---|---|
 | 8 | magic `HWCSAVE\0` |
-| 4 | format version (`FORMAT_VERSION`, 1) |
+| 4 | format version (`FORMAT_VERSION`, 2) |
 | 4 | header length `n` |
 | n | header: description, mission number and name, date (seconds since 1970, UTC), game time, update counter, autosave flag, skill, fingerprint of the mission script, program version, a 160-pixel-wide RGB thumbnail |
 | rest | the payload (`MissionRun` and `UiState`), `bincode` with fixed-size integers and floats as their bits, deflate-compressed |
 
 The header can be read alone (the save list). The version is checked before anything else is decoded:
-another version is refused with "saved game format version N; this version of the game reads version 1".
+a newer version is refused with "saved game format version N; this version of the game reads version 2".
 A damaged file, or one whose payload does not match this build's types, is refused ("the saved game is
 damaged or from a different build"); trailing bytes are an error. A save made with a different mission
-script (a re-extracted mission) is refused by the fingerprint. `FORMAT_VERSION` has to go up whenever a
-saved type changes shape. Mission 1 saves are 30-130 KB.
+script (a re-extracted mission) is refused by the fingerprint. Mission 1 saves are 30-130 KB.
+
+Because `bincode` stores fields by position, `#[serde(default)]` alone does not let an older file load:
+every saved field added moves everything after it. So `FORMAT_VERSION` goes up whenever a saved type
+changes shape, and a field added at version `n` is read with
+`#[serde(default, deserialize_with = "crate::save::added_in_n")]`, which leaves it at its default
+without reading anything when the file is older. Older saves keep loading. Version 1 files were written
+by builds that added fields without raising the version, so they are tried as each shape version 1 had
+(`VERSION_1_SHAPES`, newest first) until one decodes whole. Version 2 added `Universe::letterbox`.
+Fields that are not saved (`#[serde(skip)]`, rebuilt on load) need none of this.
 
 ### Where
 

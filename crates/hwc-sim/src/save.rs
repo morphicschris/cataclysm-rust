@@ -25,7 +25,7 @@
 //! before anything else is decoded: a file of another version is refused with
 //! [`SaveError::Version`].
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -42,8 +42,18 @@ use crate::statics::StaticWorld;
 pub const MAGIC: [u8; 8] = *b"HWCSAVE\0";
 
 /// The version of the save format. Raise it whenever a saved type changes shape (a field added,
-/// removed, reordered or retyped): files of any other version are refused.
-pub const FORMAT_VERSION: u32 = 1;
+/// removed, reordered or retyped). A field added at version `n` is read with `added_in_<n>`
+/// ([`added_in_2`]), so files of older versions still load with the field at its default;
+/// files of a newer version, or older ones whose shape is not known, are refused.
+pub const FORMAT_VERSION: u32 = 2;
+
+/// The oldest version still read.
+pub const OLDEST_VERSION: u32 = 1;
+
+/// The shapes files of version 1 were written in, newest first: version 1 was not raised while
+/// fields were added to it, so its files are tried as each shape it had until one decodes
+/// whole. Shape `n` lacks every field added at a later shape (see [`added_in_2`]).
+const VERSION_1_SHAPES: &[u32] = &[1];
 
 /// The largest payload a save may decode to (guards against damaged files).
 const MAX_PAYLOAD: u64 = 1 << 30;
@@ -145,6 +155,24 @@ impl Relink {
 
 thread_local! {
     static RELINK: RefCell<Option<Relink>> = const { RefCell::new(None) };
+    /// The shape of the file being decoded (the version, or a version 1 shape).
+    static SHAPE: Cell<u32> = const { Cell::new(FORMAT_VERSION) };
+}
+
+/// Reads a field added at shape `n`: a file of an older shape does not have it, so it is left
+/// at its default without reading anything.
+fn added_in<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(n: u32, d: D) -> Result<T, D::Error> {
+    if SHAPE.with(Cell::get) < n {
+        Ok(T::default())
+    } else {
+        T::deserialize(d)
+    }
+}
+
+/// `#[serde(default, deserialize_with = "crate::save::added_in_2")]` on a field added at
+/// version 2: [`crate::universe::Universe::letterbox`].
+pub fn added_in_2<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
+    added_in(2, d)
 }
 
 fn current<T>(f: impl FnOnce(&Relink) -> T) -> T {
@@ -204,7 +232,7 @@ fn split(bytes: &[u8]) -> Result<(SaveHeader, &[u8]), SaveError> {
         return Err(SaveError::NotASave);
     }
     let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-    if version != FORMAT_VERSION {
+    if !(OLDEST_VERSION..=FORMAT_VERSION).contains(&version) {
         return Err(SaveError::Version { found: version, expected: FORMAT_VERSION });
     }
     let n = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
@@ -222,6 +250,7 @@ pub fn decode_header(bytes: &[u8]) -> Result<SaveHeader, SaveError> {
 /// mission script, it must be the one the game was saved with.
 pub fn decode<T: DeserializeOwned>(bytes: &[u8], relink: &Relink) -> Result<(SaveHeader, T), SaveError> {
     let (header, body) = split(bytes)?;
+    let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
     if let Some(m) = &relink.mission {
         if header.script_fingerprint != 0 && script_fingerprint(m) != header.script_fingerprint {
             return Err(SaveError::Script { mission: header.mission });
@@ -229,8 +258,20 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8], relink: &Relink) -> Result<(Sav
     }
     let mut raw = Vec::new();
     flate2::read::DeflateDecoder::new(body).take(MAX_PAYLOAD).read_to_end(&mut raw).map_err(|e| SaveError::Corrupt(e.to_string()))?;
-    let payload = with_relink(relink, || codec().deserialize(&raw)).map_err(|e| SaveError::Corrupt(e.to_string()))?;
-    Ok((header, payload))
+    let shapes = if version == 1 { VERSION_1_SHAPES } else { std::slice::from_ref(&version) };
+    let mut first_error = None;
+    for &shape in shapes {
+        let old = SHAPE.with(|s| s.replace(shape));
+        let decoded = with_relink(relink, || codec().deserialize(&raw));
+        SHAPE.with(|s| s.set(old));
+        match decoded {
+            Ok(payload) => return Ok((header, payload)),
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    Err(SaveError::Corrupt(first_error.map_or_else(String::new, |e| e.to_string())))
 }
 
 /// Writes a saved game to `path` (through a temporary file, so a failed save leaves any older
@@ -258,7 +299,7 @@ pub fn read_header(path: &Path) -> Result<SaveHeader, SaveError> {
     }
     let n = u32::from_le_bytes(start[12..16].try_into().unwrap()) as usize;
     let mut bytes = start.to_vec();
-    if u32::from_le_bytes(start[8..12].try_into().unwrap()) == FORMAT_VERSION {
+    if (OLDEST_VERSION..=FORMAT_VERSION).contains(&u32::from_le_bytes(start[8..12].try_into().unwrap())) {
         if n > 64 << 20 {
             return Err(SaveError::Corrupt("header too large".into()));
         }
@@ -330,6 +371,33 @@ mod tests {
         let msg = decode_header(&bytes).unwrap_err().to_string();
         assert!(msg.contains("version"), "{msg}");
         assert!(matches!(decode_header(b"not a save file at all"), Err(SaveError::NotASave)));
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Before {
+        a: u32,
+        c: u8,
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct After {
+        a: u32,
+        #[serde(default, deserialize_with = "added_in_2")]
+        b: Vec<u16>,
+        c: u8,
+    }
+
+    #[test]
+    fn version_1_files_load_without_later_fields() {
+        let mut bytes = encode(&SaveHeader::default(), &Before { a: 5, c: 9 }).unwrap();
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        decode_header(&bytes).unwrap();
+        let (_, got): (SaveHeader, After) = decode(&bytes, &relink()).unwrap();
+        assert_eq!(got, After { a: 5, b: Vec::new(), c: 9 });
+        // A file of this version has the field.
+        let now = After { a: 1, b: vec![2, 3], c: 4 };
+        let (_, got): (SaveHeader, After) = decode(&encode(&SaveHeader::default(), &now).unwrap(), &relink()).unwrap();
+        assert_eq!(got, now);
     }
 
     #[test]

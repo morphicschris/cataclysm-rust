@@ -179,7 +179,7 @@ pub struct Universe {
     #[serde(skip)]
     pub nis_running: bool,
     /// The letterbox bars as the damage rules see them (saved, as the original saves them).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::save::added_in_2")]
     pub letterbox: crate::letterbox::Letterbox,
     /// The base-building layer: players' resources, research and construction, resources,
     /// factories (see [`crate::base`]).
