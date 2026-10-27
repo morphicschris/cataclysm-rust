@@ -104,6 +104,8 @@ impl Stage {
     /// ([`nis_support::hyperspace_ship_types_attached_to_mothership`], empty for the opening).
     pub fn create(u: &mut Universe, player: &NisPlayer, mission: u32, module_types: &[ShipType]) -> Stage {
         let mut stage = Stage::default();
+        // `nisStart` sets `nisIsRunning` before it creates the objects.
+        u.nis_running = true;
         let local_race = u.players.first().map(|p| p.race);
         for (i, path) in player.data.objects.iter().enumerate() {
             let state = &player.objects[i];
@@ -422,6 +424,7 @@ impl Stage {
     /// they keep moving, vincible, counted by the unit caps), the others, the extra modules and
     /// the effects leave the universe. A hidden universe is shown again.
     pub fn stop(&mut self, u: &mut Universe, report: &StopReport) {
+        u.nis_running = false;
         for id in self.extra_ships.drain(..) {
             if u.ships.get(id).is_some() {
                 hwc_sim::damage::really_delete_ship(u, id);

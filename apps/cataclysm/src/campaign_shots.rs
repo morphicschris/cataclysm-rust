@@ -452,11 +452,30 @@ fn banked_nis_camera() {
     let mut done = false;
     let mut frames = 0;
     let mut shot = false;
+    let mut ejected_shot = false;
+    let hangar = |g: &Game| {
+        g.world
+            .universe()
+            .ships
+            .iter()
+            .any(|s| s.ship_type == hwc_sim::statics::ShipType::bSectMoship)
+    };
+    assert!(hangar(g), "NIS 2 has no hangar module");
     while g.nis.as_ref().is_some_and(|n| n.kind.in_own_level()) {
         done |= rig.frame(g).contains(&Outcome::NisLevelDone);
         frames += 1;
         let Some(n) = g.nis.as_ref() else { break };
         let time = n.player.time;
+        // The hangar module is ejected at 60.5 s and tumbles away to the end; the module
+        // housekeeping leaves it alone while an NIS plays (it used to explode at once).
+        if n.kind.in_own_level() && time < 78.0 {
+            assert!(hangar(g), "the hangar module died at {time:.1} s");
+        }
+        if !ejected_shot && time > 64.0 {
+            rig.shot(g, "10_nis_hangar_ejected");
+            ejected_shot = true;
+        }
+        let Some(n) = g.nis.as_ref() else { break };
         let c = n.player.camera;
         let f = Vec3::new(
             c.look_at.x - c.eye.x,

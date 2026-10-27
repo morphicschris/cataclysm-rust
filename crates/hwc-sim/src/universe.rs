@@ -174,6 +174,10 @@ pub struct Universe {
     pub special_events: Vec<SpecialEvent>,
     /// KAS `PauseUniverse` (0x8f1fc0): orders and ship movement stop, time goes on.
     pub universe_paused: bool,
+    /// `nisIsRunning` (0x8f1f14): an NIS is playing (set by `nisStart`, cleared by `nisStop`).
+    /// Games are not saved during one.
+    #[serde(skip)]
+    pub nis_running: bool,
     /// The base-building layer: players' resources, research and construction, resources,
     /// factories (see [`crate::base`]).
     pub base: crate::base::BaseState,
@@ -239,6 +243,7 @@ impl Universe {
             events: Vec::new(),
             special_events: Vec::new(),
             universe_paused: false,
+            nis_running: false,
             base: crate::base::BaseState::new(players),
             fog: Default::default(),
             multiplayer_game: false,

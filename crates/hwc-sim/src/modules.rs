@@ -162,8 +162,9 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
             return;
         }
     }
+    // Not while an NIS plays: its module paths (n02's hangar, bSectMoship) fly free of a host.
     let s = u.ships.ship(id);
-    if s.base.clamp.is_none() && !s.base.module.broken_away {
+    if !u.nis_running && s.base.clamp.is_none() && !s.base.module.broken_away {
         let delay = module_delay(s.ship_type).unwrap_or(0.0);
         let r = u.randy.random(RAN_ETG);
         let end = st(ld(r as f32) * 4.656_613e-10 + ld(delay) + ld(now));

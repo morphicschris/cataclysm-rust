@@ -65,6 +65,19 @@ fn mothership_comes_with_its_modules() {
     assert!(u.base.factories.iter().any(|f| f.ship == Some(ms)));
 }
 
+/// `ShipModuleHouseKeep`: a module with no host breaks away and explodes a couple of seconds
+/// later, but not while an NIS plays (n02 flies the Kuun-Lan's hangar, `bSectMoship`, free).
+#[test]
+fn hostless_module_waits_for_the_nis_to_end() {
+    for nis in [false, true] {
+        let Some(mut run) = start(scenario("base").unwrap()) else { return };
+        run.universe.nis_running = nis;
+        let id = hwc_sim::base::create_ship(&mut run.universe, ShipType::bSectMoship, 0, Vector::new(5000.0, 0.0, 0.0), Default::default()).unwrap();
+        let died = run_until(&mut run, 16 * 10, |r| r.universe.ships.get(id).is_none());
+        assert_eq!(died.is_some(), !nis, "nis running {nis}");
+    }
+}
+
 #[test]
 fn build_a_ship_and_launch_it() {
     let Some(mut run) = start(scenario("base").unwrap()) else { return };

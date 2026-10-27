@@ -70,9 +70,9 @@ fn spec_mut(u: &mut Universe, id: ShipId) -> Option<&mut NomadSpec> {
     }
 }
 
-/// Whether an NIS is playing (`nisIsRunning`); this simulation plays none.
-fn nis_running(_u: &Universe) -> bool {
-    false
+/// Whether an NIS is playing (`nisIsRunning`).
+fn nis_running(u: &Universe) -> bool {
+    u.nis_running
 }
 
 /// `NomadMoonInit` (0x5b8480): the two field emitters.
