@@ -376,6 +376,26 @@ fn allied(u: &Universe, player: usize) -> bool {
     player == PLAYER || u.players.get(PLAYER).is_some_and(|p| p.is_ally(player))
 }
 
+/// Whether another player's ship is coloured as an ally (`smShipsDraw`, `toAllShipsDraw`): an
+/// allied player's, or a Mimic disguised as one of the local player's ships
+/// (`MimicIsDisguisedAsPlayer`).
+pub fn looks_allied(u: &Universe, id: ShipId) -> bool {
+    let Some(s) = u.ship(id) else { return false };
+    allied(u, s.player) || hwc_sim::ships::mimic::is_disguised_as_player(u, id, PLAYER)
+}
+
+/// The class a ship's overlay icon shows: a Mimic disguised as one of the local player's
+/// ships shows its disguise's (`MimicGetApparentShipClass` in `toAllShipsDraw`).
+pub fn apparent_class(u: &Universe, id: ShipId) -> Option<ShipClass> {
+    let s = u.ship(id)?;
+    let t = if s.player != PLAYER && hwc_sim::ships::mimic::is_disguised_as_player(u, id, PLAYER) {
+        hwc_sim::ships::mimic::apparent_ship_type(u, id).unwrap_or(s.ship_type)
+    } else {
+        s.ship_type
+    };
+    u.statics.ship(t).and_then(|st| st.ship_class)
+}
+
 /// The zoom between the main view and the sensors view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Zoom {
@@ -1373,7 +1393,7 @@ impl Sensors {
                 } else {
                     OWN_COLOR
                 }
-            } else if allied(u, s.player) {
+            } else if looks_allied(u, id) {
                 ALLY_COLOR
             } else if crystal {
                 CRYSTAL_COLOR

@@ -447,10 +447,10 @@ fn shown(u: &Universe, fog: &Fog, id: ShipId) -> bool {
     sensors::ship_visible(u, fog, id)
 }
 
-fn icon_color(u: &Universe, player: usize) -> Color {
-    if player == PLAYER {
+fn icon_color(u: &Universe, id: ShipId) -> Color {
+    if u.ship(id).is_some_and(|s| s.player == PLAYER) {
         [0, 255, 0, 255]
-    } else if u.players.get(PLAYER).is_some_and(|p| p.is_ally(player)) {
+    } else if sensors::looks_allied(u, id) {
         [0, 192, 255, 255]
     } else {
         [255, 40, 40, 255]
@@ -483,7 +483,7 @@ pub fn draw_icons(
             continue;
         }
         let s = u.ship(id).expect("shown");
-        let Some(mut class) = u.statics.ship(s.ship_type).and_then(|st| st.ship_class) else {
+        let Some(mut class) = sensors::apparent_class(u, id) else {
             continue;
         };
         // The script has no icon for the monster ships; they are drawn as motherships.
@@ -517,7 +517,7 @@ pub fn draw_icons(
             .or_else(|| icons.by_class.get(ShipClass::Corvette.index()))
             .filter(|v| v.len() >= 2);
         let Some(verts) = verts else { continue };
-        let mut col = icon_color(u, s.player);
+        let mut col = icon_color(u, id);
         col[3] = (200.0 * alpha) as u8;
         // Capital ships get a larger icon.
         let big = matches!(

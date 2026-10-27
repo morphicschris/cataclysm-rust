@@ -997,7 +997,12 @@ impl Game {
             let st = u.statics.ship(s.ship_type);
             let class = st.and_then(|st| st.ship_class);
             let ti = s.ship_type.index();
-            if s.player == PLAYER || u.players.get(PLAYER).is_some_and(|p| p.is_ally(s.player)) {
+            // A Mimic disguised as one of the player's ships counts as an ally
+            // (`selGetCommandAvailability`).
+            if s.player == PLAYER
+                || u.players.get(PLAYER).is_some_and(|p| p.is_ally(s.player))
+                || hwc_sim::ships::mimic::is_disguised_as_player(u, id, PLAYER)
+            {
                 t[avail::ALLY] = true;
             } else {
                 t[avail::ENEMY] = true;

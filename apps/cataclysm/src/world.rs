@@ -123,6 +123,12 @@ struct MissileArt {
 /// Which missile mesh: the race's index and whether it is the mine.
 type MissileKey = (usize, bool);
 
+/// The type and colour scheme a ship is drawn with: a Mimic past half its morph shows its
+/// disguise (`MimicGetApparentShipType`, with the scheme `MimicChooseColourScheme` picked).
+fn drawn_look(u: &Universe, s: &hwc_sim::object::Ship) -> (ShipType, usize) {
+    hwc_sim::ships::mimic::drawn_look(u, s.id).unwrap_or((s.ship_type, s.color_scheme))
+}
+
 fn missile_key(m: &hwc_sim::missile::Missile) -> MissileKey {
     (m.race.index(), m.kind == hwc_sim::missile::kind::MINE)
 }
@@ -602,7 +608,12 @@ impl World {
 
     fn load_art(&mut self) -> Result<(), String> {
         self.load_missile_art();
-        let types: Vec<ShipType> = self.universe().ships.iter().map(|s| s.ship_type).collect();
+        let u = self.universe();
+        let types: Vec<ShipType> = u
+            .ships
+            .iter()
+            .flat_map(|s| [s.ship_type, drawn_look(u, s).0])
+            .collect();
         if types.iter().all(|t| self.art.contains_key(t)) && self.resource_kinds_loaded() {
             return Ok(());
         }
@@ -746,7 +757,7 @@ impl World {
             .universe()
             .ships
             .iter()
-            .map(|s| (s.ship_type, s.color_scheme))
+            .map(|s| drawn_look(self.universe(), s))
             .collect();
         for (t, scheme) in needed {
             let Some(art) = self.art.get_mut(&t) else {
@@ -1331,7 +1342,12 @@ impl World {
                     }
                     _ => m,
                 };
-                (s.id, s.ship_type, m, age - s.time_created + 0.75)
+                (
+                    s.id,
+                    drawn_look(self.universe(), s).0,
+                    m,
+                    age - s.time_created + 0.75,
+                )
             })
             .collect()
     }
@@ -1365,10 +1381,11 @@ impl World {
             if !self.ship_in_view(s, transform.w_axis.truncate()) {
                 continue;
             }
+            let color_scheme = drawn_look(u, s).1;
             let Some(art) = self.art.get(&t) else {
                 continue;
             };
-            let Some(gpu) = art.gpu.get(&s.color_scheme) else {
+            let Some(gpu) = art.gpu.get(&color_scheme) else {
                 continue;
             };
             let Some(fx) = self.fx.get_mut(&id) else {
@@ -1387,7 +1404,7 @@ impl World {
             let scheme = self
                 .team_colors
                 .schemes
-                .get(s.color_scheme)
+                .get(color_scheme)
                 .or(self.team_colors.schemes.first());
             let team_color = scheme.map_or([1.0; 3], |c| normalized_team_color(c.base));
             // Hyperspace: the window cuts the hull along its heading (`hsGetEquation`). A ship
@@ -1454,7 +1471,7 @@ impl World {
                     max_velocity,
                     gate,
                     lod,
-                    team: s.color_scheme,
+                    team: color_scheme,
                     team_color,
                     eye,
                     eye_space_z: view.transform_point3(transform.w_axis.truncate()).z,
@@ -1470,7 +1487,7 @@ impl World {
                 .params(team_color, fx.trails.engine_glow_levels(&self.trail_tweaks));
             let construction = st.and_then(|st| construction_state(s, &st.header.coll));
             frame.items.push(Item {
-                kind: ItemKind::Ship(t, s.color_scheme),
+                kind: ItemKind::Ship(t, color_scheme),
                 transform,
                 age,
                 lod,
