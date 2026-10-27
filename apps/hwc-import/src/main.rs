@@ -188,10 +188,11 @@ fn main() -> ExitCode {
         match hwc_hwr::import::import(src, &dest) {
             Ok(r) => {
                 println!(
-                    "hwr: {} ships, {} effects, {} textures ({:.1} MB) into {}",
+                    "hwr: {} ships, {} effects, {} textures, {} sounds ({:.1} MB) into {}",
                     r.ships,
                     r.effects,
                     r.textures,
+                    r.sounds,
                     r.bytes as f64 / 1e6,
                     dest.display()
                 );

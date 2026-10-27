@@ -17,6 +17,7 @@ pub mod library;
 pub mod lua;
 pub mod player;
 pub mod ships;
+pub mod sound;
 
 pub use library::{Image, Library, TexId};
 pub use player::{Anchor, DrawList, Player};

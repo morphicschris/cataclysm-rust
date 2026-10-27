@@ -32,6 +32,8 @@ use hwc_sim::{ShipId, Universe};
 const UNIT_SCALE: f32 = 4.5;
 /// `fx_scale = "entity"` events are scaled by the ship's collision radius over this.
 const ENTITY_RADIUS: f32 = 8.0;
+/// Remastered sound volumes to Cataclysm's mix.
+const SOUND_BOOST: f32 = 0.6;
 /// The part of a dying ship's velocity its explosion keeps.
 const DEATH_DRIFT: f32 = 0.35;
 /// Owner of effects that follow nothing.
@@ -107,6 +109,31 @@ pub struct HwrFx {
     draw: DrawList,
     /// Dead ships drawn by the Remastered sequence instead of the simulation's hulk.
     ghosts: BTreeMap<ShipId, Ghost>,
+    /// Sound events by name (`None`: not imported).
+    sounds: HashMap<String, Option<HwrSound>>,
+    sound_pick: u32,
+}
+
+/// A Remastered sound event: its volume over distance and its clips as mixer patches.
+#[derive(Clone)]
+pub struct HwrSound {
+    pub envelope: hwc_hwr::sound::Envelope,
+    pub clips: Vec<hwc_audio::mixer::PatchRef>,
+}
+
+/// A sound to play now.
+pub struct SoundCue {
+    pub patch: hwc_audio::mixer::PatchRef,
+    pub position: [f32; 3],
+    pub envelope: hwc_hwr::sound::Envelope,
+}
+
+impl SoundCue {
+    /// Volume at `distance` (Cataclysm units) from the listener: the envelope is in Remastered
+    /// units, scaled to sit with Cataclysm's own effects (several Remastered events overlap).
+    pub fn volume(&self, distance: f32) -> f32 {
+        (self.envelope.volume(distance / UNIT_SCALE) * SOUND_BOOST).min(1.0)
+    }
 }
 
 /// A dead ship's hull, kept in view until its death sequence's last blast (Remastered ships
@@ -175,6 +202,8 @@ impl HwrFx {
             glow_tex,
             draw: DrawList::default(),
             ghosts: BTreeMap::new(),
+            sounds: HashMap::new(),
+            sound_pick: 0x2545_f491,
         })
     }
 
@@ -301,6 +330,55 @@ impl HwrFx {
         self.ghosts
             .values()
             .filter_map(move |g| g.transform(now).map(|m| (*g, m)))
+    }
+
+    /// The sounds the death sequences asked for since the last call, one random clip each.
+    pub fn take_sounds(&mut self) -> Vec<SoundCue> {
+        let mut out = Vec::new();
+        for cue in self.player.take_sounds() {
+            let lib = &self.player.lib;
+            let sound = self
+                .sounds
+                .entry(cue.event.to_ascii_lowercase())
+                .or_insert_with(|| {
+                    lib.sound(&cue.event).map(|(envelope, clips)| HwrSound {
+                        envelope,
+                        clips: clips
+                            .iter()
+                            .map(|c| {
+                                let data: std::sync::Arc<[u8]> = c.mono().into();
+                                hwc_audio::mixer::PatchRef {
+                                    end: data.len(),
+                                    data,
+                                    start: 0,
+                                    loop_start: 0,
+                                    loop_end: 0,
+                                    bitrate: c.bitrate,
+                                    flags: 0,
+                                    sample_rate: c.sample_rate,
+                                    volume: 255,
+                                    pan: 0,
+                                    priority: 0,
+                                }
+                            })
+                            .collect(),
+                    })
+                })
+                .clone();
+            let Some(sound) = sound.filter(|s| !s.clips.is_empty()) else {
+                continue;
+            };
+            self.sound_pick ^= self.sound_pick << 13;
+            self.sound_pick ^= self.sound_pick >> 17;
+            self.sound_pick ^= self.sound_pick << 5;
+            let patch = sound.clips[self.sound_pick as usize % sound.clips.len()].clone();
+            out.push(SoundCue {
+                patch,
+                position: cue.position.to_array(),
+                envelope: sound.envelope,
+            });
+        }
+        out
     }
 
     /// Whether an original effect is replaced (a death effect, its spawns, anything a hulk owns).

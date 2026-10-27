@@ -595,8 +595,16 @@ struct Pending {
     markers: Vec<String>,
     scale: f32,
     radius: f32,
+    sound: Option<String>,
     /// The owner when last seen.
     anchor: Anchor,
+}
+
+/// A sound a death event asks for, at the explosion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoundCue {
+    pub event: String,
+    pub position: Vec3,
 }
 
 /// Running effects.
@@ -607,6 +615,7 @@ pub struct Player {
     pending: Vec<Pending>,
     time: f32,
     rng: Rng,
+    sounds: Vec<SoundCue>,
 }
 
 impl Player {
@@ -617,6 +626,7 @@ impl Player {
             pending: Vec::new(),
             time: 0.0,
             rng: Rng::new(seed),
+            sounds: Vec::new(),
         }
     }
 
@@ -672,6 +682,7 @@ impl Player {
                 },
                 scale: e.scale.map_or(entity, |s| s * size),
                 radius,
+                sound: e.sound.clone(),
                 anchor,
             });
         }
@@ -695,6 +706,12 @@ impl Player {
         };
         for p in due {
             let anchor = p.anchor;
+            if let Some(event) = &p.sound {
+                self.sounds.push(SoundCue {
+                    event: event.clone(),
+                    position: anchor.position,
+                });
+            }
             for m in &p.markers {
                 let offset = marker_offset(m, &mut self.rng) * p.radius;
                 for f in &p.fx {
@@ -714,6 +731,11 @@ impl Player {
             r.node.update(lib, dt, &a, rng, 0);
         }
         self.roots.retain(|r| !r.node.done());
+    }
+
+    /// The sounds asked for since the last call.
+    pub fn take_sounds(&mut self) -> Vec<SoundCue> {
+        std::mem::take(&mut self.sounds)
     }
 
     /// Drops everything (a level change).
@@ -861,6 +883,7 @@ mod tests {
                 fx: vec!["flash".into()],
                 markers: vec!["Root".into()],
                 scale: Some(1.0),
+                sound: Some("BOOM".into()),
             }],
         };
         let mut pl = Player::new(lib(), 2);
@@ -874,6 +897,14 @@ mod tests {
         pl.draw(&mut d);
         assert_eq!(d.sprites.len(), 1);
         assert_eq!(d.sprites[0].position, pos);
+        assert_eq!(
+            pl.take_sounds(),
+            vec![SoundCue {
+                event: "BOOM".into(),
+                position: pos
+            }]
+        );
+        assert!(pl.take_sounds().is_empty());
     }
 
     #[test]

@@ -67,6 +67,20 @@ impl Audio {
         }
     }
 
+    /// Mixes `blocks` blocks and returns them (interleaved stereo at the mixer's rate), for
+    /// recordings without a device.
+    #[cfg(test)]
+    pub fn record(&mut self, blocks: usize) -> Vec<i16> {
+        let mut out = [0i16; 2 * hwc_audio::codec::BLOCK_FRAMES];
+        let mut all = Vec::with_capacity(blocks * out.len());
+        let mut m = self.system.mixer();
+        for _ in 0..blocks {
+            m.process_block(&mut out);
+            all.extend_from_slice(&out);
+        }
+        all
+    }
+
     /// Loads the sound data and opens the default output device (`play` false: no device, for
     /// the screenshot tour and tests).
     pub fn open(game: GameData, play: bool) -> Result<Audio, String> {
@@ -252,13 +266,20 @@ impl Audio {
         self.system.stop_speech(0, fade);
     }
 
-    /// Sounds the effect scripts asked for in the last update (`playSound`: at the effect).
-    pub fn effect_events(&mut self, u: &Universe) {
+    /// Sounds the effect scripts asked for in the last update (`playSound`: at the effect),
+    /// but those of effects `muted` says are replaced (the optional Remastered deaths).
+    pub fn effect_events(&mut self, u: &Universe, muted: impl Fn(u32) -> bool) {
         for e in hwc_sim::effects::events(u) {
             if let hwc_fx::FxEvent::Sound {
-                event, position, ..
+                event,
+                position,
+                effect,
+                ..
             } = *e
             {
+                if muted(effect) {
+                    continue;
+                }
                 let emitter = Emitter {
                     position: [position.x, position.y, position.z],
                     is_ship: false,
@@ -267,6 +288,14 @@ impl Audio {
                 self.system
                     .play_event(Some(&emitter), event, &mut ShipSounds::default());
             }
+        }
+    }
+
+    /// The optional Remastered death sounds.
+    pub fn remastered_sounds(&mut self, cues: Vec<crate::hwr_fx::SoundCue>) {
+        for c in cues {
+            self.system
+                .play_external(&c.patch, c.position, |d| c.volume(d));
         }
     }
 

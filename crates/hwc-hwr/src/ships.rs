@@ -19,6 +19,8 @@ pub struct DeathEvent {
     pub markers: Vec<String>,
     /// `fx_scale`: a number, or `None` for `entity` (scaled by the ship's size).
     pub scale: Option<f32>,
+    /// Sound event played with the effects (`EXPLOSION/SMALL/ETG_EXPLODE_SMALL_PLASMA`).
+    pub sound: Option<String>,
 }
 
 /// A ship's death sequence (the events of its `Death` animation).
@@ -95,6 +97,10 @@ impl DeathSequence {
                     fx,
                     markers: get("marker").map(split).unwrap_or_default(),
                     scale: get("fx_scale").and_then(|s| s.parse().ok()),
+                    sound: get("sound")
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
                 });
             }
         }

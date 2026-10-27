@@ -233,6 +233,31 @@ impl Library {
         Some(TexRef::Still(self.tex_id(path)))
     }
 
+    /// A sound event's envelope and clips (each clip's mono Relic blocks, bit rate and sample
+    /// rate); `None` when the event was not imported.
+    pub fn sound(&self, event: &str) -> Option<(crate::sound::Envelope, Vec<crate::sound::Fda>)> {
+        let dir = crate::sound::event_dir(event);
+        let path = self.file(&dir);
+        let mut env = crate::sound::Envelope::default();
+        let mut clips = Vec::new();
+        let mut names: Vec<_> = fs::read_dir(&path)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .collect();
+        names.sort();
+        for p in names {
+            match p.extension().and_then(|e| e.to_str()) {
+                Some("lua") => env = crate::sound::Envelope::parse(&fs::read(&p).ok()?),
+                Some("fda") => {
+                    clips.extend(fs::read(&p).ok().and_then(|b| crate::sound::Fda::parse(&b)))
+                }
+                _ => {}
+            }
+        }
+        (!clips.is_empty()).then_some((env, clips))
+    }
+
     /// Reads and decodes a texture by id.
     pub fn load_image(&self, id: TexId) -> Option<Image> {
         let path = self.textures.get(id as usize)?;

@@ -37,6 +37,8 @@ pub struct Report {
     pub ships: usize,
     pub effects: usize,
     pub textures: usize,
+    /// Sound clips.
+    pub sounds: usize,
     pub bytes: u64,
     /// Effects named somewhere but not found in the archive.
     pub missing: Vec<String>,
@@ -87,6 +89,7 @@ pub fn import(root: &Path, out: &Path) -> io::Result<Report> {
 
     // Ships: their events and tuning; the death effects seed the effect closure.
     let mut seeds: BTreeSet<String> = BTreeSet::new();
+    let mut sounds: BTreeSet<String> = BTreeSet::new();
     let ship_files: Vec<_> = ships
         .entries()
         .iter()
@@ -105,7 +108,14 @@ pub fn import(root: &Path, out: &Path) -> io::Result<Report> {
         let bytes = ships.read_entry(e)?;
         let file = e.path.rsplit('/').next().unwrap_or("");
         if file.ends_with(".events") {
-            seeds.extend(DeathSequence::parse(&bytes).effects().map(str::to_string));
+            let seq = DeathSequence::parse(&bytes);
+            seeds.extend(seq.effects().map(str::to_string));
+            sounds.extend(
+                seq.events
+                    .iter()
+                    .filter_map(|e| e.sound.as_deref())
+                    .map(crate::sound::event_dir),
+            );
         }
         ship_names.insert(file.rsplit_once('.').map_or(file, |(s, _)| s).to_string());
         write(out, &format!("ships/{file}"), &bytes, &mut report)?;
@@ -172,11 +182,29 @@ pub fn import(root: &Path, out: &Path) -> io::Result<Report> {
         write(out, &t, &bytes, &mut report)?;
     }
 
+    // Death sounds: each event's folder (its `.lua` and `.fda` clips).
+    let sound_files: Vec<crate::big::Entry> = main
+        .entries()
+        .iter()
+        .filter(|e| {
+            e.path.rsplit_once('/').is_some_and(|(dir, f)| {
+                sounds.contains(dir) && (f.ends_with(".lua") || f.ends_with(".fda"))
+            })
+        })
+        .cloned()
+        .collect();
+    for e in &sound_files {
+        let bytes = main.read_entry(e)?;
+        write(out, &e.path, &bytes, &mut report)?;
+        report.sounds += usize::from(e.path.ends_with(".fda"));
+    }
+
     let index = format!(
-        "{INDEX_FORMAT}\nships {}\neffects {}\ntextures {}\nsource {}\n",
+        "{INDEX_FORMAT}\nships {}\neffects {}\ntextures {}\nsounds {}\nsource {}\n",
         report.ships,
         report.effects,
         report.textures,
+        report.sounds,
         data.display()
     );
     fs::write(out.join("index.txt"), index)?;

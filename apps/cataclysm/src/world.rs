@@ -469,6 +469,23 @@ impl World {
         }
     }
 
+    /// The Remastered death sounds due since the last call.
+    pub fn take_remastered_sounds(&mut self) -> Vec<crate::hwr_fx::SoundCue> {
+        self.hwr.as_mut().map_or_else(Vec::new, |h| h.take_sounds())
+    }
+
+    /// Whether effect `id`'s output is replaced by the Remastered effects (its sounds too).
+    pub fn remastered_hides_effect(&self, id: u32) -> bool {
+        let (Some(h), Some(fx)) = (&self.hwr, self.universe().effects.as_ref()) else {
+            return false;
+        };
+        fx.world
+            .effects
+            .iter()
+            .find(|e| e.id == id)
+            .is_some_and(|e| h.hides(e))
+    }
+
     /// Team colour schemes (base, stripe); scheme 0 is the local player's.
     pub fn team_schemes(&self) -> Vec<([u8; 3], [u8; 3])> {
         self.team_colors

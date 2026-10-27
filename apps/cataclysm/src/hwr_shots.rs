@@ -160,6 +160,28 @@ fn ship_named(g: &Game, name: &str) -> Option<ShipId> {
         })
 }
 
+/// A 16-bit stereo WAV file.
+fn write_wav(path: &std::path::Path, pcm: &[i16], rate: u32) {
+    let data_len = (pcm.len() * 2) as u32;
+    let mut b = Vec::with_capacity(44 + data_len as usize);
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data_len).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&rate.to_le_bytes());
+    b.extend_from_slice(&(rate * 4).to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&data_len.to_le_bytes());
+    for s in pcm {
+        b.extend_from_slice(&s.to_le_bytes());
+    }
+    std::fs::write(path, b).expect("wav");
+}
+
 #[test]
 fn remastered_big_death_draws() {
     let size = (960, 540);
@@ -346,6 +368,12 @@ fn remastered_death_video_frames() {
             let g = &mut *game;
             g.world.set_remastered_fx(hwr);
             g.world.interpolate = true;
+            // Sound, mixed without a device and saved beside the frames.
+            let mut audio = std::env::var_os("HWC_GAME_DIR")
+                .and_then(|d| GameData::open(PathBuf::from(d)).ok())
+                .and_then(|d| crate::audio::Audio::open(d, false).ok());
+            let mut pcm: Vec<i16> = Vec::new();
+            let mut mixed_frames = 0usize;
             for _ in 0..32 {
                 g.update(DT, &mut None);
             }
@@ -358,7 +386,13 @@ fn remastered_death_video_frames() {
                 let u = g.world.universe();
                 for &id in &u.ship_list {
                     let s = u.ship(id).unwrap();
-                    eprintln!("  {id:?} {:?} flags {:x} clamp {} dock {}", s.ship_type, s.flags, s.base.clamp.is_some(), s.base.dock_state);
+                    eprintln!(
+                        "  {id:?} {:?} flags {:x} clamp {} dock {}",
+                        s.ship_type,
+                        s.flags,
+                        s.base.clamp.is_some(),
+                        s.base.dock_state
+                    );
                 }
                 panic!("no ship for scene {scene}");
             }
@@ -403,11 +437,23 @@ fn remastered_death_video_frames() {
                         );
                     }
                 }
-                g.update(1.0 / FPS, &mut None);
+                g.update(1.0 / FPS, &mut audio);
                 g.render(&mut rig.renderer, size).expect("render");
                 g.canvas()
                     .save_png(&dir.join(format!("{f:04}.png")))
                     .expect("png");
+                if let Some(a) = audio.as_mut() {
+                    let want =
+                        ((f + 1) as f32 / FPS * hwc_audio::codec::OUTPUT_RATE as f32) as usize;
+                    let blocks = want
+                        .saturating_sub(mixed_frames)
+                        .div_ceil(hwc_audio::codec::BLOCK_FRAMES);
+                    mixed_frames += blocks * hwc_audio::codec::BLOCK_FRAMES;
+                    pcm.extend(a.record(blocks));
+                }
+            }
+            if !pcm.is_empty() {
+                write_wav(&dir.join("audio.wav"), &pcm, hwc_audio::codec::OUTPUT_RATE);
             }
         }
     }

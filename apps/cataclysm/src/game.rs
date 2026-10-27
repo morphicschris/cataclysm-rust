@@ -2073,7 +2073,9 @@ impl Game {
             }
             if let Some(a) = audio.as_mut() {
                 a.sim_events(self.world.universe(), !self.world.effects_on);
-                a.effect_events(self.world.universe());
+                let world = &self.world;
+                a.effect_events(world.universe(), |id| world.remastered_hides_effect(id));
+                a.remastered_sounds(self.world.take_remastered_sounds());
             }
             if !opening {
                 self.groups_after_step(&before, audio);

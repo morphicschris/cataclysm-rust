@@ -12,10 +12,10 @@ hwc-import --hwr "<Steam>\steamapps\common\Homeworld" <data folder>
 ```
 
 `--hwr` can also be given with a normal import. The install is only read. It writes
-`<data folder>\hwr\` (about 11 MB): the `.events` and `.ship` files of the Kushan and Taiidan
+`<data folder>\hwr\` (about 15 MB): the `.events` and `.ship` files of the Kushan and Taiidan
 ships from `HW1Ships.big`, every effect their death sequences start (followed through combos,
 spray particles and spawns), the textures and animations those effects use and the engine-trail
-textures from `Homeworld2.big`. The game looks for the folder in `$HWC_HWR_DIR`, then `hwr\` in
+textures and the death sounds from `Homeworld2.big`. The game looks for the folder in `$HWC_HWR_DIR`, then `hwr\` in
 the data folder, then `hwr\` next to the executable.
 
 ## Turning it on
@@ -39,6 +39,10 @@ list (`FxWorld::draw_except`; spawned effects are traced to their death effect t
   drawn with Remastered's ribbon texture, the stand-in ship's `setEngineTrail` width and the
   race's `*_trail_clr` brightness ramp, in the team's trail colour with a hot core. Capital-ship
   glows are unchanged.
+* **Sounds.** Each death event's sound (`sound/sfx/etg/<event>/`: an `.lua` volume-by-distance
+  envelope and `.fda` clips, one picked at random) plays at the explosion. `.fda` files are
+  AIFF-C with "Relic Codec v1.6" blocks, the block-coded MDCT format of Cataclysm's own banks,
+  so the game's mixer plays them unchanged; the replaced death effects' own sounds are muted.
 
 ## The effect player (`crates/hwc-hwr`)
 
@@ -50,12 +54,9 @@ plane) sized by `Radius`, tinted by `Colour`, spun by `SpinZ` and moved by `Offs
 effect moving at `Particle_Speed` and slowed by `Emitter_Drag`; `STYLE_COMBO` starts its effects
 together; `STYLE_TRAIL` is a ribbon through its parent's recent positions. Animated textures
 (`.anim`) are image lists or sprite-sheet cells. `Blending = 2` adds; the others blend by alpha
-(24-bit art takes its coverage from brightness). Lights, beams, lens flares and mesh shapes
-(`UseMesh`) are not drawn.
+(24-bit art takes its coverage from brightness). Lights are drawn as soft white glows (Remastered's
+bloom); beams, lens flares and mesh shapes (`UseMesh`) are not drawn.
 
 ## Known gaps
 
-* A capital ship's hull disappears when the original death effect removes it, which can be
-  before the Remastered sequence's final blast.
-* Death sounds stay the original's.
 * Damage smoke and fire (the `.events` damage animations) are not imported yet.
