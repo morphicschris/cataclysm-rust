@@ -157,6 +157,12 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // 1: the closest zoom on focused ships also keeps the near clip plane outside their
     // hulls; 0: the original's limit alone (`--zoom-limit`).
     ("hwcZoomClear", 1),
+    // 1: opening the sensors manager while the camera follows ships keeps the sensors camera
+    // following them (until it is panned); 0: the original's still camera (`--sensors-follow`).
+    ("hwcSensorsFollow", 1),
+    // 1: the focus key in the sensors manager centres the sensors camera on the selection
+    // and follows it; 0: the original, closing onto them (`--sensors-focus`).
+    ("hwcSensorsFocusStays", 1),
     // 1: ships, effects and asteroids are drawn by the original's render list (within a
     // radial distance of the look-at point); 0: everything within the far clip distance
     // of the eye (`--draw-distance`).

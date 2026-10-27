@@ -145,6 +145,9 @@ struct App {
     render_list: Option<bool>,
     /// `--letterbox` (None: the options file).
     tall_letterbox: Option<bool>,
+    /// `--sensors-follow`, `--sensors-focus` (None: the options file).
+    sensors_follow: Option<bool>,
+    sensors_focus_stays: Option<bool>,
     /// `--no-vsync`.
     no_vsync: bool,
     /// `--frame-times`: the 3D frame's draw times, printed every few seconds.
@@ -281,6 +284,8 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         zoom_clear: args.zoom_clear,
         render_list: args.render_list,
         tall_letterbox: args.tall_letterbox,
+        sensors_follow: args.sensors_follow,
+        sensors_focus_stays: args.sensors_focus_stays,
         no_vsync: args.no_vsync,
         frame_times: args.frame_times.then(FrameTimes::default),
     };
@@ -626,6 +631,8 @@ struct Overrides {
     zoom_clear: Option<bool>,
     render_list: Option<bool>,
     tall_letterbox: Option<bool>,
+    sensors_follow: Option<bool>,
+    sensors_focus_stays: Option<bool>,
 }
 
 impl Overrides {
@@ -676,6 +683,12 @@ impl Overrides {
         if let Some(v) = self.tall_letterbox {
             game.letterbox.tall = v;
         }
+        if let Some(v) = self.sensors_follow {
+            game.sensors.follow_focus = v;
+        }
+        if let Some(v) = self.sensors_focus_stays {
+            game.sensors.focus_stays = v;
+        }
     }
 
     /// Tells the modern options screen which of its options the command line set (shown,
@@ -702,6 +715,8 @@ impl Overrides {
             ("hwcZoomClear", self.zoom_clear.map(b)),
             ("hwcRenderList", self.render_list.map(b)),
             ("hwcOriginalLetterbox", self.tall_letterbox.map(|t| b(!t))),
+            ("hwcSensorsFollow", self.sensors_follow.map(b)),
+            ("hwcSensorsFocusStays", self.sensors_focus_stays.map(b)),
         ];
         for (key, v) in locks {
             if let Some(v) = v {
@@ -729,6 +744,8 @@ impl App {
             zoom_clear: self.zoom_clear,
             render_list: self.render_list,
             tall_letterbox: self.tall_letterbox,
+            sensors_follow: self.sensors_follow,
+            sensors_focus_stays: self.sensors_focus_stays,
         }
     }
 

@@ -584,6 +584,7 @@ fn sensors_manager_and_pointers() {
             y: SIZE.1 / 2,
         },
     );
+    let followed = g.world.follow_focus.then(|| g.world.focus.clone());
     rig.input(g, InputEvent::KeyDown(SPACE));
     rig.input(g, InputEvent::KeyUp(SPACE));
     rig.frame(g);
@@ -600,6 +601,15 @@ fn sensors_manager_and_pointers() {
     assert!(phases.contains(&Phase::Main) && phases.contains(&Phase::Sensors));
     rig.frames(g, 4);
     rig.shot(g, "20_sensors_view");
+    // The sensors camera keeps following what the main view followed.
+    let centre = |g: &Game, ships: &[hwc_sim::ShipId]| {
+        let c = hwc_sim::harness::group_centre(g.world.universe(), ships);
+        glam::Vec3::new(c.x, c.y, c.z)
+    };
+    if let Some(f) = followed.filter(|f| !f.is_empty()) {
+        let d = g.world.camera.look_at.distance(centre(g, &f));
+        assert!(d < 1.0, "sensors camera {d} from the followed ships");
+    }
     // Pan left a little.
     let before = g.world.camera.look_at;
     rig.input(g, InputEvent::KeyDown(LEFT));
@@ -614,6 +624,20 @@ fn sensors_manager_and_pointers() {
     assert!(!g.selection.is_empty(), "band box in sensors");
     g.selection.retain(|&id| id != ms);
     rig.shot(g, "22_sensors_selected");
+    // F in the sensors view (on one ship: a fleet spread wider than the focus radius has
+    // nothing to focus on): the sensors camera goes to it and the manager stays open.
+    let band = std::mem::replace(&mut g.selection, vec![ms]);
+    rig.key(g, 0x46);
+    rig.frames(g, 60);
+    g.selection = band;
+    assert!(
+        g.sensors.is_open() && !g.sensors.zooming(),
+        "F stays in sensors"
+    );
+    assert_eq!(g.world.focus, vec![ms], "F sets the focus");
+    let d = g.world.camera.look_at.distance(centre(g, &g.world.focus));
+    assert!(d < 1.0, "sensors camera {d} from the focused ships");
+    rig.shot(g, "22b_sensors_focused");
     // The move plate inside the sensors view, and the order.
     let movers = g.selection.clone();
     rig.key(g, 0x4d);

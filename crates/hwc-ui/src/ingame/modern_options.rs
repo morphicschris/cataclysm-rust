@@ -152,6 +152,18 @@ pub const ENTRIES: &[Entry] = &[
         Control::Toggle,
     ),
     entry(
+        "hwcSensorsFollow",
+        "SENSORS CAMERA FOLLOWS THE FOCUS",
+        1,
+        Control::Toggle,
+    ),
+    entry(
+        "hwcSensorsFocusStays",
+        "FOCUS IN SENSORS STAYS IN SENSORS",
+        1,
+        Control::Toggle,
+    ),
+    entry(
         "hwcRightClickMove",
         "RIGHT CLICK OPENS THE MOVE PLATE",
         2,

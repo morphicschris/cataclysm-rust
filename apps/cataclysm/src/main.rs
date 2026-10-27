@@ -170,6 +170,16 @@ options:
                         render list) or far (everything within the far clip distance of the
                         eye); both are radial, the same at any camera angle. Options file:
                         hwcRenderList = 1/0
+  --sensors-follow <on|off>
+                        on (default, a user-requested addition: opening the sensors manager
+                        while the camera follows ships keeps the sensors camera following
+                        them until you pan) or off (the original's camera stays where it
+                        opened); options file: hwcSensorsFollow = 1/0
+  --sensors-focus <mode>
+                        stay (default, a user-requested change: F in the sensors manager
+                        centres the sensors camera on the selection and follows it) or
+                        original (F closes the sensors manager onto the selection); options
+                        file: hwcSensorsFocusStays = 1/0
   Formation focus fire  hwcFormationFocusFire = 1 in the options file (a user-requested
                         change, off by default, also on the ENHANCEMENTS screen): in a
                         formation attack the wingmen always fire at the leader's target
@@ -283,6 +293,9 @@ pub struct Args {
     pub render_list: Option<bool>,
     /// `--letterbox` (Some(true): tall); None: the options file.
     pub tall_letterbox: Option<bool>,
+    /// `--sensors-follow`, `--sensors-focus` (Some(true): stay); None: the options file.
+    pub sensors_follow: Option<bool>,
+    pub sensors_focus_stays: Option<bool>,
     /// `--render-scale`, `--msaa`, `--fxaa`, `--scene-res` (None: the options file).
     pub render_scale: Option<f32>,
     pub msaa: Option<u32>,
@@ -325,6 +338,8 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
         zoom_clear: None,
         render_list: None,
         tall_letterbox: None,
+        sensors_follow: None,
+        sensors_focus_stays: None,
         render_scale: None,
         msaa: None,
         fxaa: None,
@@ -461,6 +476,24 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
                     "original" => false,
                     v => return Err(format!("unknown --letterbox mode {v}")),
                 })
+            }
+            "--sensors-follow" => {
+                a.sensors_follow = Some(
+                    match value("--sensors-follow")?.to_ascii_lowercase().as_str() {
+                        "on" => true,
+                        "off" => false,
+                        v => return Err(format!("unknown --sensors-follow value {v}")),
+                    },
+                )
+            }
+            "--sensors-focus" => {
+                a.sensors_focus_stays = Some(
+                    match value("--sensors-focus")?.to_ascii_lowercase().as_str() {
+                        "stay" => true,
+                        "original" => false,
+                        v => return Err(format!("unknown --sensors-focus mode {v}")),
+                    },
+                )
             }
             "--build-ui" => {
                 let v = value("--build-ui")?;

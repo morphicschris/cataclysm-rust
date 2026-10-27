@@ -334,6 +334,8 @@ impl Game {
         let ping_blobs = pings::blob_properties(source.as_ref());
         let mut sensors = Sensors::new(tweaks, sensors::Toggles::from_options(&options), icons);
         sensors.instant = options.get("InstantTransition") != 0;
+        sensors.follow_focus = options.get("hwcSensorsFollow") != 0;
+        sensors.focus_stays = options.get("hwcSensorsFocusStays") != 0;
         let pointer = Pointer::new(hwc_ui::Resources::new(source.clone()));
         let mut res = hwc_ui::Resources::new(source);
         res.set_language(hwc_ui::Language::from_index(options.get("language") as u32));
@@ -477,6 +479,8 @@ impl Game {
         self.order_lines = options.get("hwcOrderLines") != 0;
         self.ship_icons = tactical::IconMode::from_option(options.get("hwcShipIcons"));
         self.health_brackets = options.get("hwcHealthBrackets") != 0;
+        self.sensors.follow_focus = options.get("hwcSensorsFollow") != 0;
+        self.sensors.focus_stays = options.get("hwcSensorsFocusStays") != 0;
         self.letterbox.tall = options.get("hwcOriginalLetterbox") == 0;
         self.world.full_detail = options.get("hwcFullDetailShips") != 0;
         self.world.focus_zoom = options.get("hwcFocusZoom") != 0;
@@ -1203,10 +1207,13 @@ impl Game {
     }
 
     /// Focus on ships (`ccFocus`, or `ccFocusClose` with `close`: the Alt focus): in the
-    /// sensors manager, zoom back onto them.
+    /// sensors manager, zoom back onto them, or (the modern focus key) centre the sensors
+    /// camera on them.
     fn focus_on(&mut self, ships: Vec<ShipId>, close: bool, audio: &mut Option<Audio>) {
         if self.sensors.is_open() {
-            if let Some(e) = self.sensors.close_on(&self.world, &ships) {
+            if !close && self.sensors.focus_stays {
+                self.sensors.focus_here(&mut self.world, &ships);
+            } else if let Some(e) = self.sensors.close_on(&self.world, &ships) {
                 sound(audio, e);
             }
         } else {
