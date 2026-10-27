@@ -70,6 +70,8 @@ const EXPLOSION_TIME: f32 = 1.5;
 const BEAM_COLOR: [f32; 4] = [0.6, 1.0, 0.9, 0.8];
 /// One universe update in seconds.
 const TICK: f32 = 1.0 / 16.0;
+/// Pieces each recorded trail segment is curved into with smooth trails on.
+const SMOOTH_TRAIL_PIECES: usize = 4;
 /// The lens-flare set the game loads (`lensflare\\ps-50-300mm-zoom`).
 const LENS_FLARE_SET: &str = "ps-50-300mm-zoom";
 /// A short-lived effect drawn as sprites.
@@ -496,6 +498,12 @@ impl World {
     /// The Remastered death sounds due since the last call.
     pub fn take_remastered_sounds(&mut self) -> Vec<crate::hwr_fx::SoundCue> {
         self.hwr.as_mut().map_or_else(Vec::new, |h| h.take_sounds())
+    }
+
+    /// Engine trails curve through their recorded points (`hwcSmoothTrails`) or keep the
+    /// original's straight segments.
+    pub fn set_smooth_trails(&mut self, on: bool) {
+        self.trail_tweaks.smoothing = if on { SMOOTH_TRAIL_PIECES } else { 1 };
     }
 
     /// Whether effect `id`'s output is replaced by the Remastered effects (its sounds too).

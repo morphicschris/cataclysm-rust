@@ -162,6 +162,9 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // player's own Remastered install (`hwc-import --hwr`; a user-requested addition); 0 or
     // nothing imported: the original's.
     ("hwcRemasteredFx", 0),
+    // 1: engine trails curve smoothly through their recorded points (a user-requested change);
+    // 0: the original's straight segments.
+    ("hwcSmoothTrails", 1),
     // The 3D view's internal render scale in percent, 50..200 (100: the original, drawn at
     // the screen's pixels; above 100 supersampled; `--render-scale`).
     ("hwcRenderScale", 100),

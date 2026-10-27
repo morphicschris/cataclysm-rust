@@ -114,6 +114,12 @@ pub const ENTRIES: &[Entry] = &[
         Control::Toggle,
     ),
     entry(
+        "hwcSmoothTrails",
+        "SMOOTH ENGINE TRAILS",
+        0,
+        Control::Toggle,
+    ),
+    entry(
         "hwcFullDetailShips",
         "FULL-DETAIL SHIPS AT ANY DISTANCE",
         1,

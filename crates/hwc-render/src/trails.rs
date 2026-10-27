@@ -57,6 +57,9 @@ pub struct TrailTweaks {
     pub exponent_base: f32,
     pub exponent_range: f32,
     pub expansion_ticks: u8,
+    /// Ribbon trails are curved through their recorded points with this many pieces per segment
+    /// (a user-requested change, `hwcSmoothTrails`); 1 draws the original's straight segments.
+    pub smoothing: usize,
 }
 
 impl Default for TrailTweaks {
@@ -82,6 +85,7 @@ impl Default for TrailTweaks {
             exponent_base: 3.75,
             exponent_range: 0.55,
             expansion_ticks: 16,
+            smoothing: 1,
         }
     }
 }
@@ -976,7 +980,8 @@ pub struct RibbonStyle {
     pub texture: EffectTexture,
     /// Full width in world units.
     pub width: f32,
-    /// Brightness from the nozzle (first) to the end of the trail (last), 0..1.
+    /// Brightness from the nozzle (first) to the end of the trail (last), 0..1; the ribbon fades
+    /// from the brightest value to the last.
     pub ramp: Vec<f32>,
     /// Most recorded positions drawn.
     pub max_points: usize,
@@ -1039,37 +1044,47 @@ fn draw_styled_ribbon(
         points.push(p);
         index = if index <= 1 { n_seg - 1 } else { index - 1 };
     }
+    // Like the original ribbon, the oldest walked record is not drawn (a full ring wraps back
+    // round to the newest one there, which drew a stray line along the trail).
+    if points.len() > 2 {
+        points.pop();
+    }
     if points.len() < 2 {
         return;
     }
-    // One strip per run of the ramp, so the brightness follows it along the trail.
-    let runs = style.ramp.len().saturating_sub(1).clamp(1, 8);
-    let last = points.len() - 1;
-    let ramp_at = |t: f32| {
-        if style.ramp.is_empty() {
-            return 1.0 - t;
+    if tw.smoothing > 1 && points.len() > 2 {
+        let k = tw.smoothing;
+        let mut smooth = Vec::with_capacity((points.len() - 1) * k + 1);
+        for i in 0..points.len() - 1 {
+            for j in 0..k {
+                smooth.push(catmull_rom(&points, i, j as f32 / k as f32));
+            }
         }
-        let x = t.clamp(0.0, 1.0) * (style.ramp.len() - 1) as f32;
-        let i = (x as usize).min(style.ramp.len() - 1);
-        let j = (i + 1).min(style.ramp.len() - 1);
-        style.ramp[i] + (style.ramp[j] - style.ramp[i]) * (x - i as f32)
-    };
-    for r in 0..runs {
-        let a = r * last / runs;
-        let b = ((r + 1) * last / runs).max(a + 1).min(last);
-        if b <= a {
-            continue;
-        }
-        let (ta, tb) = (a as f32 / last as f32, b as f32 / last as f32);
-        out.strips.push(Strip {
-            points: points[a..=b].to_vec(),
-            width: style.width * frame.scale,
-            start_color: color(ramp_at(ta), 1.0),
-            end_color: color(ramp_at(tb), 1.0),
-            texture: style.texture,
-            blend: style.blend,
-        });
+        smooth.push(points[points.len() - 1]);
+        points = smooth;
     }
+    // One strip (no seams between pieces), from the ramp's brightest (at the nozzle) to its end.
+    let first = style.ramp.iter().copied().fold(0.0, f32::max);
+    let last = style.ramp.last().copied().unwrap_or(0.0);
+    out.strips.push(Strip {
+        points,
+        width: style.width * frame.scale,
+        start_color: color(first, 1.0),
+        end_color: color(last, 1.0),
+        texture: style.texture,
+        blend: style.blend,
+    });
+}
+
+/// The point `t` (0..1) of the way from `p[i]` to `p[i + 1]` on a Catmull-Rom curve through
+/// `p` (the ends repeat).
+fn catmull_rom(p: &[Vec3], i: usize, t: f32) -> Vec3 {
+    let a = p[i.saturating_sub(1)];
+    let b = p[i];
+    let c = p[(i + 1).min(p.len() - 1)];
+    let d = p[(i + 2).min(p.len() - 1)];
+    let (t2, t3) = (t * t, t * t * t);
+    0.5 * ((2.0 * b) + (c - a) * t + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2 + (3.0 * b - a - 3.0 * c + d) * t3)
 }
 
 fn draw_capital_glow(
@@ -1257,6 +1272,42 @@ fn draw_ribbon(
         if let Some(bad) = positions[..n].iter().position(|p| !p.is_finite()) {
             n = bad.saturating_sub(1);
         }
+        // Each drawn point's recorded segment (for the colour ramp).
+        let mut src: Vec<usize> = (0..=n).collect();
+        if tw.smoothing > 1 && n >= 2 {
+            let k = tw.smoothing;
+            let (p, h, v) = (&positions[..n], &horizontals[..n], &verticals[..n]);
+            let mut np = Vec::with_capacity((n - 1) * k + 2);
+            let (mut nh, mut nv, mut nw, mut ns) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for i in 0..n - 1 {
+                for j in 0..k {
+                    let t = j as f32 / k as f32;
+                    np.push(catmull_rom(p, i, t));
+                    nh.push(h[i].lerp(h[i + 1], t).normalize_or(h[i]));
+                    nv.push(v[i].lerp(v[i + 1], t).normalize_or(v[i]));
+                    nw.push(wides[i] && j == 0);
+                    ns.push(i);
+                }
+            }
+            np.push(p[n - 1]);
+            nh.push(h[n - 1]);
+            nv.push(v[n - 1]);
+            nw.push(wides[n - 1]);
+            ns.push(n - 1);
+            let m = np.len();
+            np.push(p[n - 1]);
+            nh.push(h[n - 1]);
+            nv.push(v[n - 1]);
+            nw.push(false);
+            ns.push(n - 1);
+            (positions, horizontals, verticals, wides, src, n) = (np, nh, nv, nw, ns, m);
+        }
+        // The ribbon narrows by the falloff per recorded segment, so by a share of it per piece.
+        let piece = TrailTweaks {
+            halfwidth_falloff: tw.halfwidth_falloff / tw.smoothing.max(1) as f32,
+            ..*tw
+        };
+        let tw = &piece;
         let surprise = |i: usize, n: usize, c: [u8; 3], rng: &mut Rng| -> [u8; 3] {
             if tw.color_adjust == 0 || tw.coloradjust_freq == 0 || i as i64 > n as i64 - 5 {
                 return c;
@@ -1276,8 +1327,8 @@ fn draw_ribbon(
             let alpha = (163.0 * frame.fade) as u8;
             let width = if frame.lod == 3 { 2.0 } else { 1.0 };
             for i in 0..n.saturating_sub(1) {
-                let ca = surprise(i, n, seg_color(i), rng);
-                let cb = surprise(i + 1, n, seg_color(i + 1), rng);
+                let ca = surprise(i, n, seg_color(src[i]), rng);
+                let cb = surprise(i + 1, n, seg_color(src[i + 1]), rng);
                 out.lines.push(Line {
                     from: positions[i],
                     to: positions[i + 1],
@@ -1303,7 +1354,7 @@ fn draw_ribbon(
             };
             #[allow(clippy::needless_range_loop)]
             for i in 0..n.saturating_sub(1) {
-                let c = surprise(i, n, seg_color(i), rng);
+                let c = surprise(i, n, seg_color(src[i]), rng);
                 ribbon_segment(tw, trail, frame, &mut ctx, i, &positions, c, out);
                 if frame.lod < 2 {
                     if trail.style == 1 {
@@ -1684,6 +1735,74 @@ mod tests {
         };
         trails.draw(&d, &tw, &stopped, &mut EffectBatch::default());
         assert!(trails.trails[0].is_empty());
+    }
+
+    #[test]
+    fn smooth_trails_curve_through_the_recorded_points() {
+        let d = def();
+        let mut tw = TrailTweaks::default();
+        let mut trails = ShipTrails::new(&d, 7);
+        let at = |step: usize| {
+            let a = step as f32 * 0.1;
+            Vec3::new(1000.0 * a.cos(), 0.0, 1000.0 * a.sin())
+        };
+        for step in 0..30 {
+            let tick = TrailTick {
+                transform: Mat4::from_translation(at(step)),
+                objects: None,
+            };
+            trails.update(&d, &tw, &tick);
+        }
+        let frame = TrailFrame {
+            transform: Mat4::from_translation(at(29)),
+            objects: None,
+            velocity: Vec3::new(0.0, 0.0, 100.0),
+            max_velocity: 100.0,
+            gate: TrailGate {
+                moving: true,
+                ..Default::default()
+            },
+            lod: 3,
+            team: 0,
+            team_color: [1.0; 3],
+            eye: Vec3::new(0.0, 3000.0, 0.0),
+            eye_space_z: -3000.0,
+            scale: 1.0,
+            fade: 1.0,
+            glow_texture: EffectTexture::WHITE,
+        };
+        let draw = |tw: &TrailTweaks, trails: &mut ShipTrails| {
+            let mut out = EffectBatch::default();
+            trails.draw(&d, tw, &frame, &mut out);
+            out.lines
+        };
+        let straight = draw(&tw, &mut trails);
+        tw.smoothing = 4;
+        let smooth = draw(&tw, &mut trails);
+        assert!(smooth.len() >= 3 * straight.len(), "{} vs {}", smooth.len(), straight.len());
+        for w in smooth.windows(2) {
+            assert!((w[0].to - w[1].from).length() < 1e-3, "gap");
+        }
+        for l in &smooth {
+            assert!(l.from_color[3] > 0.0 && l.to_color[3] > 0.0);
+        }
+        // The styled ribbon: one strip through the curved points.
+        let style = RibbonStyle {
+            texture: EffectTexture::WHITE,
+            width: 5.0,
+            ramp: vec![1.0, 0.5, 0.0],
+            max_points: 38,
+            glow: None,
+            hot: 0.5,
+            blend: Blend::Additive,
+        };
+        let near = TrailFrame { lod: 0, ..frame };
+        let mut out = EffectBatch::default();
+        trails.draw_styled(&d, &tw, &near, Some(&style), &mut out);
+        assert_eq!(out.strips.len(), 1);
+        let s = &out.strips[0];
+        assert!(s.points.len() > 20, "{}", s.points.len());
+        assert!(s.start_color[0] > 0.5 && s.start_color[3] == 1.0, "{:?}", s.start_color);
     }
 
     #[test]

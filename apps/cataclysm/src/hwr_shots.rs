@@ -458,3 +458,108 @@ fn remastered_death_video_frames() {
         }
     }
 }
+
+/// A moving heavy cruiser's engine glows at several zoom distances (`--ignored`), stock and
+/// Remastered, into `HWC_HWR_SHOTS/glow-<mode>-<distance>.png`.
+#[test]
+#[ignore]
+fn capital_glow_zoom_shots() {
+    let size = (960, 540);
+    let Some(mut rig) = rig(size) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let dir = shot_dir();
+    for hwr in [false, true] {
+        let mut game = mission_one(&mut rig, size);
+        let g = &mut *game;
+        g.world.set_remastered_fx(hwr);
+        for _ in 0..32 {
+            g.update(DT, &mut None);
+        }
+        let id = ship_named(g, "heavycruiser").expect("a heavy cruiser");
+        let at = |g: &Game| {
+            g.world
+                .universe()
+                .ship(id)
+                .map(|s| s.posinfo.position)
+                .unwrap()
+        };
+        let from = at(g);
+        let to = hwc_math::Vector::new(from.x + 20000.0, from.y + 5000.0, from.z);
+        hwc_sim::command::cl_move(g.world.universe_mut(), &[id], 0, from, &[to]);
+        g.world.follow_focus = false;
+        g.world.camera.declination = (-15f32).to_radians();
+        for _ in 0..80 {
+            g.update(DT, &mut None);
+        }
+        let tag = if hwr { "hwr" } else { "stock" };
+        for distance in [3000.0f32, 8000.0, 16000.0, 30000.0] {
+            g.world.camera.distance = distance;
+            for _ in 0..4 {
+                g.update(DT, &mut None);
+                let p = at(g);
+                g.world.camera.look_at = glam::Vec3::new(p.x, p.y, p.z);
+                g.render(&mut rig.renderer, size).expect("render");
+            }
+            g.canvas()
+                .save_png(&dir.join(format!("glow-{tag}-{}.png", distance as u32)))
+                .expect("png");
+        }
+    }
+}
+
+/// Fighters turning, seen from above, with smooth and original trails, stock and Remastered
+/// (`--ignored`): `HWC_HWR_SHOTS/turns-<stock|hwr>-<smooth|original>.png`.
+#[test]
+#[ignore]
+fn smooth_trail_shots() {
+    let size = (960, 540);
+    let Some(mut rig) = rig(size) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let dir = shot_dir();
+    for hwr in [false, true] {
+        for smooth in [false, true] {
+            let mut game = mission_one(&mut rig, size);
+            let g = &mut *game;
+            g.world.set_remastered_fx(hwr);
+            g.world.set_smooth_trails(smooth);
+            for _ in 0..32 {
+                g.update(DT, &mut None);
+            }
+            let (ids, _) = victims(g);
+            let at = |g: &Game| {
+                g.world
+                    .universe()
+                    .ship(ids[0])
+                    .map(|s| s.posinfo.position)
+                    .unwrap()
+            };
+            let legs = [(3000.0, 0.0), (1500.0, 2500.0), (-2500.0, 1500.0)];
+            g.world.follow_focus = false;
+            g.world.camera.distance = 2600.0;
+            g.world.camera.declination = (-75f32).to_radians();
+            for (leg, (dx, dy)) in legs.iter().enumerate() {
+                let from = at(g);
+                let to = hwc_math::Vector::new(from.x + dx, from.y + dy, from.z);
+                hwc_sim::command::cl_move(g.world.universe_mut(), &ids, 0, from, &[to]);
+                for f in 0..24 {
+                    g.update(DT, &mut None);
+                    let p = at(g);
+                    g.world.camera.look_at = glam::Vec3::new(p.x, p.y, p.z);
+                    g.render(&mut rig.renderer, size).expect("render");
+                    if leg == 2 && f == 23 {
+                        let name = format!(
+                            "turns-{}-{}.png",
+                            if hwr { "hwr" } else { "stock" },
+                            if smooth { "smooth" } else { "original" }
+                        );
+                        g.canvas().save_png(&dir.join(name)).expect("png");
+                    }
+                }
+            }
+        }
+    }
+}
