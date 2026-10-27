@@ -832,7 +832,10 @@ impl World {
         }
         self.update_ship_fx();
         if let Some(h) = &mut self.hwr {
-            h.after_update(self.sim.universe());
+            let art = &self.art;
+            h.after_update(self.sim.universe(), |t| {
+                art.get(&t).and_then(|a| a.any_gpu()).map(|g| g.bounds().1)
+            });
         }
         let u = self.sim.universe();
         self.focus.retain(|id| u.ship(*id).is_some());

@@ -585,6 +585,22 @@ struct Root {
     /// Offset from the owner in its axes.
     offset: Vec3,
     anchor: Anchor,
+    /// Axes the effect runs in instead of the owner's (death effects: up points away from the
+    /// ship, so smoke and fire stream outwards; space has no up).
+    orient: Option<Mat3>,
+}
+
+impl Root {
+    /// Where the effect is: the owner's anchor moved by the offset, in its own axes if it has
+    /// them.
+    fn frame(&self) -> Anchor {
+        let mut a = self.anchor;
+        a.position += a.basis * self.offset;
+        if let Some(o) = self.orient {
+            a.basis = o;
+        }
+        a
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -655,6 +671,7 @@ impl Player {
             node,
             offset,
             anchor,
+            orient: None,
         });
         true
     }
@@ -714,8 +731,17 @@ impl Player {
             }
             for m in &p.markers {
                 let offset = marker_offset(m, &mut self.rng) * p.radius;
+                // Outwards from the hull at a marker, a random way at the centre.
+                let out = (anchor.basis * offset)
+                    .try_normalize()
+                    .unwrap_or_else(|| self.rng.cone(Vec3::Y, std::f32::consts::PI));
+                let orient = basis_along(out, anchor.basis);
                 for f in &p.fx {
-                    self.spawn(f, p.owner, anchor, offset, p.scale);
+                    if self.spawn(f, p.owner, anchor, offset, p.scale) {
+                        if let Some(r) = self.roots.last_mut() {
+                            r.orient = Some(orient);
+                        }
+                    }
                 }
             }
         }
@@ -726,8 +752,7 @@ impl Player {
                 Some(a) => r.anchor = a,
                 None => drift(&mut r.anchor, dt),
             }
-            let mut a = r.anchor;
-            a.position += a.basis * r.offset;
+            let a = r.frame();
             r.node.update(lib, dt, &a, rng, 0);
         }
         self.roots.retain(|r| !r.node.done());
@@ -746,9 +771,7 @@ impl Player {
 
     pub fn draw(&self, out: &mut DrawList) {
         for r in &self.roots {
-            let mut a = r.anchor;
-            a.position += a.basis * r.offset;
-            r.node.draw(&self.lib, &a, out);
+            r.node.draw(&self.lib, &r.frame(), out);
         }
     }
 }

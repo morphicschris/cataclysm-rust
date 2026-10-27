@@ -226,7 +226,9 @@ impl HwrFx {
 
     /// After a universe update: start the death sequence of every new hulk and note its original
     /// death effect for hiding.
-    pub fn after_update(&mut self, u: &Universe) {
+    /// `hull_radius` gives a ship type's drawn size (death markers sit on the hull, which can be
+    /// much smaller than the collision sphere).
+    pub fn after_update(&mut self, u: &Universe, hull_radius: impl Fn(ShipType) -> Option<f32>) {
         self.started.retain(|id| u.hulks.contains(id));
         let fx = u.effects.as_ref();
         for &id in &u.hulks {
@@ -274,11 +276,12 @@ impl HwrFx {
                         until: now + f64::from(hold),
                     },
                 );
+                let markers = hull_radius(s.ship_type).map_or(radius, |r| r.min(radius));
                 self.player.start_death(
                     &seq,
                     NO_OWNER,
                     anchor,
-                    radius,
+                    markers,
                     radius / ENTITY_RADIUS,
                     UNIT_SCALE,
                 );
