@@ -459,8 +459,8 @@ fn remastered_death_video_frames() {
     }
 }
 
-/// A moving heavy cruiser's engine glows at several zoom distances (`--ignored`), stock and
-/// Remastered, into `HWC_HWR_SHOTS/glow-<mode>-<distance>.png`.
+/// Moving capital ships' engine glows and N-LIPS at several zoom distances (`--ignored`), with
+/// the original's and proportional glows, into `HWC_HWR_SHOTS/glow-<ship>-<mode>-<distance>.png`.
 #[test]
 #[ignore]
 fn capital_glow_zoom_shots() {
@@ -470,14 +470,18 @@ fn capital_glow_zoom_shots() {
         return;
     };
     let dir = shot_dir();
-    for hwr in [false, true] {
+    for (ship, proportional) in [
+        ("heavycruiser", false),
+        ("heavycruiser", true),
+        ("standarddestroyer", true),
+    ] {
         let mut game = mission_one(&mut rig, size);
         let g = &mut *game;
-        g.world.set_remastered_fx(hwr);
+        g.world.set_glows_in_proportion(proportional);
         for _ in 0..32 {
             g.update(DT, &mut None);
         }
-        let id = ship_named(g, "heavycruiser").expect("a heavy cruiser");
+        let id = ship_named(g, ship).expect("the ship");
         let at = |g: &Game| {
             g.world
                 .universe()
@@ -493,7 +497,14 @@ fn capital_glow_zoom_shots() {
         for _ in 0..80 {
             g.update(DT, &mut None);
         }
-        let tag = if hwr { "hwr" } else { "stock" };
+        let tag = format!(
+            "{ship}-{}",
+            if proportional {
+                "proportional"
+            } else {
+                "original"
+            }
+        );
         for distance in [3000.0f32, 8000.0, 16000.0, 30000.0] {
             g.world.camera.distance = distance;
             for _ in 0..4 {

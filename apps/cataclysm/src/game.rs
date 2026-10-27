@@ -449,6 +449,8 @@ impl Game {
             .set_remastered_fx(options.get("hwcRemasteredFx") != 0);
         g.world
             .set_smooth_trails(options.get("hwcSmoothTrails") != 0);
+        g.world
+            .set_glows_in_proportion(options.get("hwcGlowsInProportion") != 0);
         let mut subs = Subtitles::load(&res, true, &g.world.team_schemes());
         if let Some(s) = subs.as_mut() {
             s.language = options.get("language").max(0) as usize;
@@ -484,6 +486,8 @@ impl Game {
             .set_remastered_fx(options.get("hwcRemasteredFx") != 0);
         self.world
             .set_smooth_trails(options.get("hwcSmoothTrails") != 0);
+        self.world
+            .set_glows_in_proportion(options.get("hwcGlowsInProportion") != 0);
     }
 
     fn screen_pos(world: &World, size: (u32, u32), id: ShipId) -> Option<(i32, i32, i32)> {

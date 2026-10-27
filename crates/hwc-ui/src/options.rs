@@ -165,6 +165,9 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // 1: engine trails curve smoothly through their recorded points (a user-requested change);
     // 0: the original's straight segments.
     ("hwcSmoothTrails", 1),
+    // 1: capital-ship engine glows keep their size relative to the hull at every zoom (a
+    // user-requested change); 0: the original's glows that grow with distance.
+    ("hwcGlowsInProportion", 1),
     // The 3D view's internal render scale in percent, 50..200 (100: the original, drawn at
     // the screen's pixels; above 100 supersampled; `--render-scale`).
     ("hwcRenderScale", 100),

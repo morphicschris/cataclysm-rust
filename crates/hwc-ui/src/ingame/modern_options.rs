@@ -120,6 +120,12 @@ pub const ENTRIES: &[Entry] = &[
         Control::Toggle,
     ),
     entry(
+        "hwcGlowsInProportion",
+        "ENGINE GLOWS SIZED TO THE SHIP",
+        0,
+        Control::Toggle,
+    ),
+    entry(
         "hwcFullDetailShips",
         "FULL-DETAIL SHIPS AT ANY DISTANCE",
         1,

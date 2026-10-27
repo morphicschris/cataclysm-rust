@@ -60,6 +60,9 @@ pub struct TrailTweaks {
     /// Ribbon trails are curved through their recorded points with this many pieces per segment
     /// (a user-requested change, `hwcSmoothTrails`); 1 draws the original's straight segments.
     pub smoothing: usize,
+    /// Capital glows keep their size relative to the hull at every zoom (a user-requested change,
+    /// `hwcGlowsInProportion`) instead of the original's growth with distance (`trailScaleCap`).
+    pub glows_in_proportion: bool,
 }
 
 impl Default for TrailTweaks {
@@ -86,6 +89,7 @@ impl Default for TrailTweaks {
             exponent_range: 0.55,
             expansion_ticks: 16,
             smoothing: 1,
+            glows_in_proportion: false,
         }
     }
 }
@@ -1126,12 +1130,16 @@ fn draw_capital_glow(
     let nozzle = nozzle_offset(def, trail.slot, frame.objects);
     let (translate, factor) = match family {
         GlowFamily::Standard => {
-            let f = if trail.scale_cap == -1.0 || trail.scale_cap == 0.0 {
+            // The nozzle moves out with the ship's N-LIPS scale (`frame.scale`); the glow itself
+            // grows by its own cap, or with the hull.
+            let f = if tweaks.glows_in_proportion {
+                frame.scale
+            } else if trail.scale_cap == -1.0 || trail.scale_cap == 0.0 {
                 1.0
             } else {
                 1.0 - frame.eye_space_z * trail.scale_cap
             };
-            (nozzle, f)
+            (nozzle * frame.scale, f)
         }
         GlowFamily::MothershipP1 => (nozzle, 1.0),
         _ => (Vec3::new(0.0, 0.0, nozzle.z), 1.0),

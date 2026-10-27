@@ -506,6 +506,12 @@ impl World {
         self.trail_tweaks.smoothing = if on { SMOOTH_TRAIL_PIECES } else { 1 };
     }
 
+    /// Capital glows keep their size relative to the hull at every zoom (`hwcGlowsInProportion`)
+    /// or grow with distance as the original's do.
+    pub fn set_glows_in_proportion(&mut self, on: bool) {
+        self.trail_tweaks.glows_in_proportion = on;
+    }
+
     /// Whether effect `id`'s output is replaced by the Remastered effects (its sounds too).
     pub fn remastered_hides_effect(&self, id: u32) -> bool {
         let (Some(h), Some(fx)) = (&self.hwr, self.universe().effects.as_ref()) else {
@@ -1440,6 +1446,20 @@ impl World {
                     None => sk.rest_matrices(),
                 })
             };
+            // N-LIPS (`rndRenderObject`): a ship drawn as a mesh with a scaling cap grows with its
+            // distance in front of the camera, and its engines with it.
+            let eye_space_z = view.transform_point3(transform.w_axis.truncate()).z;
+            let drawn_mesh = art
+                .table
+                .as_ref()
+                .and_then(|t| t.levels.get(lod))
+                .is_none_or(|l| l.kind == LodKind::Mesh);
+            let nlips = match st {
+                Some(st) if st.scale_cap != 0.0 && eye_space_z < 0.0 && drawn_mesh => {
+                    1.0 - eye_space_z * st.scale_cap
+                }
+                _ => 1.0,
+            };
             let gate = TrailGate {
                 moving: s.posinfo.is_moving != 0 || v3(s.posinfo.velocity).length_squared() > 1.0,
                 docked: s.base.dock_state == hwc_sim::dock::state::INSIDE,
@@ -1465,8 +1485,8 @@ impl World {
                     team: s.color_scheme,
                     team_color,
                     eye,
-                    eye_space_z: view.transform_point3(transform.w_axis.truncate()).z,
-                    scale: 1.0,
+                    eye_space_z,
+                    scale: nlips,
                     fade: 1.0,
                     glow_texture,
                 },
@@ -1479,7 +1499,7 @@ impl World {
             let construction = st.and_then(|st| construction_state(s, &st.header.coll));
             frame.items.push(Item {
                 kind: ItemKind::Ship(t, s.color_scheme),
-                transform,
+                transform: transform * Mat4::from_scale(Vec3::splat(nlips)),
                 age,
                 lod,
                 clip,
