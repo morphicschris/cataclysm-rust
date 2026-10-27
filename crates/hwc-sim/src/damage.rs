@@ -218,6 +218,11 @@ pub fn apply_damage_to_target(u: &mut Universe, tid: ShipId, damage: f32, bullet
     if s.flags2 & 4 != 0 {
         return false;
     }
+    // Nor while the letterbox is in, unless the mission lets this ship be hurt then.
+    if crate::letterbox::shields(u, u.ships.ship(tid)) {
+        return false;
+    }
+    let Some(s) = u.ships.get_mut(tid) else { return false };
     s.health = st(ld(s.health) - ld(damage));
     let max = ld(stat.health.max_health);
     if 0.25 <= ld(old) / max && ld(s.health) / max < 0.25 {

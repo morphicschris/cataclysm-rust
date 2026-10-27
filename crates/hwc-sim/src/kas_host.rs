@@ -1321,13 +1321,11 @@ impl KasRuntime for SimHost<'_> {
     }
 
     fn wide_screen_in_dont_close_sensors(&mut self, _cx: &Cx, frames: i32) {
-        let t = self.u.total_time_elapsed;
-        self.g.wide_screen_call(crate::mission::WideScreenKind::InDontCloseSensors, frames, t);
+        self.g.wide_screen_call(self.u, crate::mission::WideScreenKind::InDontCloseSensors, frames);
     }
 
     fn wide_screen_out(&mut self, _cx: &Cx, frames: i32) {
-        let t = self.u.total_time_elapsed;
-        self.g.wide_screen_call(crate::mission::WideScreenKind::Out, frames, t);
+        self.g.wide_screen_call(self.u, crate::mission::WideScreenKind::Out, frames);
     }
 
     fn camera_focus(&mut self, _cx: &Cx, ships: Ships) {

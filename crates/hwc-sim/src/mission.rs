@@ -1161,6 +1161,12 @@ fn single_player_update(u: &mut Universe, kas: &mut Interpreter, game: &mut Game
             }
             let mut host = crate::kas_host::SimHost { u, g: game };
             kas.start(&mut host);
+            // The mission starts with the bars counted as in (until its first `wideScreenOut`);
+            // Mission 1's stay in when its opening NIS ends.
+            u.letterbox.fully = true;
+            if game.config.mission == 1 {
+                u.letterbox.keep_after_nis = true;
+            }
         }
         sp_state::ARRIVING => arrival_update(u, kas, game),
         sp_state::WAITING_ROLLCALL | sp_state::WAITING_FLEET_COMMAND | sp_state::SHIPS_LEAVING | sp_state::WHITEOUT | sp_state::FAILED => {
@@ -1589,9 +1595,15 @@ pub struct IntelEnd {
 
 impl Game {
     /// Records a wide-screen call (sets [`Game::wide_screen`] and queues the event).
-    pub fn wide_screen_call(&mut self, kind: WideScreenKind, frames: i32, time: f32) {
+    /// The universe's letterbox ([`Universe::letterbox`]) starts moving too.
+    pub fn wide_screen_call(&mut self, u: &mut Universe, kind: WideScreenKind, frames: i32) {
+        if kind == WideScreenKind::Out {
+            u.letterbox.wide_screen_out(frames);
+        } else {
+            u.letterbox.wide_screen_in(frames);
+        }
         self.wide_screen = kind != WideScreenKind::Out;
-        self.wide_screen_events.push(WideScreenEvent { kind, frames, time });
+        self.wide_screen_events.push(WideScreenEvent { kind, frames, time: u.total_time_elapsed });
     }
 }
 

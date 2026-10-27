@@ -225,8 +225,7 @@ macro_rules! ai_ui_methods {
         /// normal, chase mode off, effects ducked: front-end matters). Its body is the same as
         /// `WideScreenInDontCloseSensors`.
         fn wide_screen_in(&mut self, _cx: &Cx, frames: i32) {
-            let t = self.u.total_time_elapsed;
-            self.g.wide_screen_call(crate::mission::WideScreenKind::In, frames, t);
+            self.g.wide_screen_call(self.u, crate::mission::WideScreenKind::In, frames);
         }
 
         // ---- sound -----------------------------------------------------------------------

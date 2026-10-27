@@ -178,6 +178,9 @@ pub struct Universe {
     /// Games are not saved during one.
     #[serde(skip)]
     pub nis_running: bool,
+    /// The letterbox bars as the damage rules see them (saved, as the original saves them).
+    #[serde(default)]
+    pub letterbox: crate::letterbox::Letterbox,
     /// The base-building layer: players' resources, research and construction, resources,
     /// factories (see [`crate::base`]).
     pub base: crate::base::BaseState,
@@ -243,6 +246,7 @@ impl Universe {
             events: Vec::new(),
             special_events: Vec::new(),
             universe_paused: false,
+            letterbox: Default::default(),
             nis_running: false,
             base: crate::base::BaseState::new(players),
             fog: Default::default(),
@@ -291,6 +295,8 @@ impl Universe {
         self.total_time_elapsed = st(ld(self.total_time_elapsed) + ld(dt));
         self.update_counter = self.update_counter.wrapping_add(1);
         self.phys_time_elapsed = dt;
+        // `nisUpdateTask` steps the letterbox at the same rate.
+        self.letterbox.tick();
         crate::effects::begin_update(self);
         // The multiplayer resource trickle.
         crate::resource::resource_trickle(self);

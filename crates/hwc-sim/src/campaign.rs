@@ -348,7 +348,7 @@ pub fn hyperspace_button(u: &mut Universe, game: &mut Game) -> Result<(), Hypers
     let now = u.total_time_elapsed;
     if skips_roll_call(game.config.mission) {
         // kasWideScreenInHyperspace(90): five seconds of wide screen first.
-        game.wide_screen_call(crate::mission::WideScreenKind::InHyperspace, 90, u.total_time_elapsed);
+        game.wide_screen_call(u, crate::mission::WideScreenKind::InHyperspace, 90);
         game.hyper.no_roll_call_until = st(ld(now) + 5.0);
         game.log(LogKind::Flow, "hyperspace: no roll call in this mission (the fleet jumps in 5 s)");
         return Ok(());
@@ -408,7 +408,7 @@ pub fn go_now(u: &mut Universe, game: &mut Game) -> bool {
     if game.sp_state != sp_state::WAITING_ROLLCALL || skips_roll_call(game.config.mission) {
         return false;
     }
-    game.wide_screen_call(crate::mission::WideScreenKind::InHyperspace, 90, u.total_time_elapsed);
+    game.wide_screen_call(u, crate::mission::WideScreenKind::InHyperspace, 90);
     let small = non_hyperspacing_ships(u);
     crate::dock::cl_dock(u, &small, crate::dock::purpose::INSTANT_STAY, None);
     for id in hyperspacing_ships(u) {
@@ -438,7 +438,7 @@ pub fn emergency_hyperspace(u: &mut Universe, game: &mut Game) -> bool {
     if game.sp_state != sp_state::WAITING_ROLLCALL || skips_roll_call(game.config.mission) {
         return false;
     }
-    game.wide_screen_call(crate::mission::WideScreenKind::InHyperspace, 90, u.total_time_elapsed);
+    game.wide_screen_call(u, crate::mission::WideScreenKind::InHyperspace, 90);
     for id in non_hyperspacing_ships(u) {
         crate::command::remove_ships_from_doing_stuff(u, &[id]);
         game.hyper.rec(id).abandoned = true;

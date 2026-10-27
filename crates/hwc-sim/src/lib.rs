@@ -47,6 +47,7 @@ pub mod fow;
 pub mod gun;
 pub mod harness;
 pub mod kas_host;
+pub mod letterbox;
 pub mod level;
 pub mod link;
 pub mod missile;

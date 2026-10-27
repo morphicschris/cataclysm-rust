@@ -95,6 +95,23 @@ fn module_damage_goes_to_the_mothership() {
     u.nis_running = true;
     hwc_sim::damage::apply_damage_to_target(u, ms, 100.0, 0, 0, 99, None);
     assert_eq!(u.ships.ship(ms).health, ph);
+    u.nis_running = false;
+    // While the letterbox is in, only ships the mission marked vulnerable in wide screen.
+    u.letterbox.wide_screen_in(30);
+    for _ in 0..17 {
+        u.letterbox.tick();
+    }
+    assert!(u.letterbox.fully);
+    hwc_sim::damage::apply_damage_to_target(u, ms, 100.0, 0, 0, 99, None);
+    assert_eq!(u.ships.ship(ms).health, ph);
+    u.ships.ship_mut(ms).special_flags2 |= 0x0100_0000;
+    hwc_sim::damage::apply_damage_to_target(u, ms, 100.0, 0, 0, 99, None);
+    assert!(u.ships.ship(ms).health < ph);
+    // The bars stop counting as in on the first step out.
+    u.ships.ship_mut(ms).special_flags2 &= !0x0100_0000;
+    u.letterbox.wide_screen_out(30);
+    u.letterbox.tick();
+    assert!(!u.letterbox.fully);
 }
 
 #[test]
