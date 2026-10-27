@@ -148,6 +148,7 @@ fn acolyte_close_ups() {
             ("quarter", 135.0f32, -22.0f32, 1.5f32),
             ("rear", 45.0, -28.0, 1.5),
             ("top", 300.0, -55.0, 1.5),
+            ("close", 150.0, -35.0, 1.0),
             ("far", 135.0, -25.0, 6.0),
         ] {
             let mut camera = OrbitCamera::new(CameraTweaks::default(), radius * dist);
