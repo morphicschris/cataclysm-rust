@@ -1268,12 +1268,13 @@ impl Game {
             [a[0].max(b[0]), a[1].max(b[1])],
         );
         let u = self.world.universe();
+        // Others' ships the sensors do not show now (out of sensor range, cloaked) are left
+        // out in both views, so a band box never finds an enemy the player has not seen.
         let fog = sensors::Fog::of(u);
-        let in_sensors = self.sensors.is_open();
         u.ship_list
             .iter()
             .copied()
-            .filter(|&id| !in_sensors || sensors::ship_visible(u, &fog, id))
+            .filter(|&id| sensors::ship_visible(u, &fog, id))
             .filter(|&id| {
                 u.ship(id).is_some_and(|s| {
                     s.flags & hwc_sim::object::sof::HIDE == 0
