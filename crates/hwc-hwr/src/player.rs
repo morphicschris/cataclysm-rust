@@ -20,11 +20,11 @@ use crate::ships::DeathSequence;
 
 /// `STYLE_LIGHT` effects light their surroundings in Remastered (and its bloom turns that into
 /// a bright sphere around an explosion); here they are drawn as a glow of this texture, this
-/// fraction of the light's radius, its colour half-way to white (Remastered's bloom washes the
+/// fraction of the light's radius (by the square root of the effect's scale), its colour half-way to white (Remastered's bloom washes the
 /// core out) with its alpha scaled by [`LIGHT_GLOW_ALPHA`].
 pub const LIGHT_TEXTURE: &str = "effect/trails/glowtex.tga";
-pub const LIGHT_GLOW_RADIUS: f32 = 0.2;
-pub const LIGHT_GLOW_ALPHA: f32 = 1.6;
+pub const LIGHT_GLOW_RADIUS: f32 = 0.12;
+pub const LIGHT_GLOW_ALPHA: f32 = 0.6;
 
 /// Most particles alive in one spray.
 pub const MAX_SPRAY_PARTICLES: usize = 160;
@@ -488,7 +488,9 @@ impl Node {
                     w(c[2]),
                     (c[3] * LIGHT_GLOW_ALPHA).min(1.0),
                 ];
-                let radius = l.radius.at(t) * LIGHT_GLOW_RADIUS * self.scale;
+                // A light's reach grows slower than the effect's size, or big ships' blasts would white
+                // out the screen.
+                let radius = l.radius.at(t) * LIGHT_GLOW_RADIUS * self.scale.sqrt();
                 if radius > 0.0 && color[3] > 0.003 {
                     let (texture, uv) = frame_of(tx, 0, false, self.age);
                     out.sprites.push(Sprite {

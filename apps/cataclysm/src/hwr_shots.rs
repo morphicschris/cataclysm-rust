@@ -138,6 +138,28 @@ fn big_victim(g: &Game) -> Option<ShipId> {
         .map(|(_, id)| id)
 }
 
+/// A ship (not the mothership or a module) whose class or type name contains `name`
+/// (`frigate`, `worker`...), ignoring case.
+fn ship_named(g: &Game, name: &str) -> Option<ShipId> {
+    let u = g.world.universe();
+    let ms = u.base.players.first().and_then(|p| p.mothership);
+    u.ship_list
+        .iter()
+        .copied()
+        .filter(|&id| Some(id) != ms)
+        .find(|&id| {
+            let Some(s) = u.ship(id) else { return false };
+            let Some(st) = u.statics.ship(s.ship_type) else {
+                return false;
+            };
+            if s.flags & hwc_sim::base::SOF_MODULE != 0 || s.base.clamp.is_some() {
+                return false;
+            }
+            let text = format!("{:?} {:?}", s.ship_type, st.ship_class).to_ascii_lowercase();
+            text.contains(name)
+        })
+}
+
 #[test]
 fn remastered_big_death_draws() {
     let size = (960, 540);
@@ -317,7 +339,8 @@ fn remastered_death_video_frames() {
         return;
     };
     const FPS: f32 = 30.0;
-    for scene in ["fighters", "capital"] {
+    let scenes = std::env::var("HWC_HWR_SCENES").unwrap_or_else(|_| "fighters,capital".into());
+    for scene in scenes.split(',') {
         for hwr in [false, true] {
             let mut game = mission_one(&mut rig, size);
             let g = &mut *game;
@@ -326,11 +349,19 @@ fn remastered_death_video_frames() {
             for _ in 0..32 {
                 g.update(DT, &mut None);
             }
-            let ids = if scene == "fighters" {
-                victims(g).0
-            } else {
-                big_victim(g).into_iter().collect()
+            let ids: Vec<ShipId> = match scene {
+                "fighters" => victims(g).0,
+                "capital" => big_victim(g).into_iter().collect(),
+                name => ship_named(g, name).into_iter().collect(),
             };
+            if ids.is_empty() {
+                let u = g.world.universe();
+                for &id in &u.ship_list {
+                    let s = u.ship(id).unwrap();
+                    eprintln!("  {id:?} {:?} flags {:x} clamp {} dock {}", s.ship_type, s.flags, s.base.clamp.is_some(), s.base.dock_state);
+                }
+                panic!("no ship for scene {scene}");
+            }
             let (p, r) = {
                 let u = g.world.universe();
                 let s = u.ship(ids[0]).unwrap();
@@ -350,13 +381,17 @@ fn remastered_death_video_frames() {
             g.world.camera.declination = (-20f32).to_radians();
             let dir = out.join(format!("{scene}-{}", if hwr { "hwr" } else { "stock" }));
             std::fs::create_dir_all(&dir).unwrap();
-            let seconds = if scene == "fighters" { 6.0 } else { 12.0 };
+            let seconds = match scene {
+                "fighters" => 6.0,
+                "capital" => 12.0,
+                _ => 8.0,
+            };
             let frames = (seconds * FPS) as usize;
             for f in 0..frames {
                 // The fighters die one after another from half a second in, the capital ship at once.
                 let at = |k: usize| (0.5 + 0.4 * k as f32) * FPS;
                 for (k, &id) in ids.iter().enumerate() {
-                    if f == at(k) as usize || (scene == "capital" && f == 15 && k == 0) {
+                    if f == at(k) as usize || (scene != "fighters" && f == 15 && k == 0) {
                         hwc_sim::damage::apply_damage_to_target(
                             g.world.universe_mut(),
                             id,
