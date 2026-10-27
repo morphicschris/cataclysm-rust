@@ -574,3 +574,52 @@ fn smooth_trail_shots() {
         }
     }
 }
+
+/// Frames of fighters flying past, stock and Remastered trails (`--ignored`), at 30 a second:
+/// `HWC_HWR_FRAMES/trails-<stock|hwr>/NNNN.png`.
+#[test]
+#[ignore]
+fn trail_video_frames() {
+    let size = (960, 540);
+    let Some(mut rig) = rig(size) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let Some(out) = std::env::var_os("HWC_HWR_FRAMES").map(PathBuf::from) else {
+        eprintln!("skipped: set HWC_HWR_FRAMES");
+        return;
+    };
+    for hwr in [false, true] {
+        let mut game = mission_one(&mut rig, size);
+        let g = &mut *game;
+        g.world.set_remastered_fx(hwr);
+        for _ in 0..32 {
+            g.update(DT, &mut None);
+        }
+        let (ids, _) = victims(g);
+        let at = |g: &Game| {
+            g.world
+                .universe()
+                .ship(ids[0])
+                .map(|s| s.posinfo.position)
+                .unwrap()
+        };
+        let from = at(g);
+        let to = hwc_math::Vector::new(from.x + 8000.0, from.y + 3000.0, from.z);
+        hwc_sim::command::cl_move(g.world.universe_mut(), &ids, 0, from, &[to]);
+        g.world.follow_focus = false;
+        g.world.camera.distance = 1400.0;
+        g.world.camera.declination = (-30f32).to_radians();
+        let dir = out.join(format!("trails-{}", if hwr { "hwr" } else { "stock" }));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in 0..120 {
+            g.update(1.0 / 30.0, &mut None);
+            let p = at(g);
+            g.world.camera.look_at = glam::Vec3::new(p.x, p.y, p.z);
+            g.render(&mut rig.renderer, size).expect("render");
+            g.canvas()
+                .save_png(&dir.join(format!("{f:04}.png")))
+                .expect("png");
+        }
+    }
+}

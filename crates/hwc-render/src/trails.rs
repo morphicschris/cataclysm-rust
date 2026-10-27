@@ -770,6 +770,9 @@ pub struct TrailFrame<'a> {
     /// Overall alpha (fading ships).
     pub fade: f32,
     pub glow_texture: EffectTexture,
+    /// How far the drawn frame is between the last simulation tick and the next, 0..1: the tail
+    /// shortens and the colours age by it, so trails tail off smoothly between records.
+    pub tick_alpha: f32,
 }
 
 /// Small deterministic generator standing in for the game's trail random streams.
@@ -1053,6 +1056,15 @@ fn draw_styled_ribbon(
     if points.len() > 2 {
         points.pop();
     }
+    // The tail shortens continuously between records (see `draw_ribbon`).
+    let drawn = points.len() - 1;
+    if let (Some(ramp), true) = (&def.ramp, points.len() > 2) {
+        if tail_shrinks(trail, drawn) {
+            let aging = record_fraction(ramp, trail, frame.tick_alpha);
+            let l = points.len() - 1;
+            points[l] = points[l].lerp(points[l - 1], aging);
+        }
+    }
     if points.len() < 2 {
         return;
     }
@@ -1078,6 +1090,19 @@ fn draw_styled_ribbon(
         texture: style.texture,
         blend: style.blend,
     });
+}
+
+/// How far a ribbon trail is from its next record, 0..1 (`frame` adds the time since the last
+/// tick): records come every `granularity + 1` ticks.
+fn record_fraction(ramp: &TrailStatic, trail: &ShipTrail, tick_alpha: f32) -> f32 {
+    let g = ramp.granularity.max(0) as f32;
+    ((g - trail.grain_counter as f32 + tick_alpha) / (g + 1.0)).clamp(0.0, 1.0)
+}
+
+/// Whether the next record drops the oldest of the `drawn` records (the ring is full, or more
+/// records are kept than drawn).
+fn tail_shrinks(trail: &ShipTrail, drawn: usize) -> bool {
+    trail.length >= trail.segments.len() || trail.length > drawn
 }
 
 /// The point `t` (0..1) of the way from `p[i]` to `p[i + 1]` on a Catmull-Rom curve through
@@ -1276,6 +1301,13 @@ fn draw_ribbon(
         wides.push(false);
         positions[n] = positions[n - 1];
         positions[0] = current;
+        // Between records the oldest drawn point slides toward the next one and the colours age,
+        // so the tail shortens continuously instead of a segment at a time.
+        let aging = record_fraction(ramp, trail, frame.tick_alpha);
+        if n >= 2 && tail_shrinks(trail, n) {
+            positions[n - 1] = positions[n - 1].lerp(positions[n - 2], aging);
+            positions[n] = positions[n - 1];
+        }
         let mut n = n;
         if let Some(bad) = positions[..n].iter().position(|p| !p.is_finite()) {
             n = bad.saturating_sub(1);
@@ -1330,7 +1362,13 @@ fn draw_ribbon(
                 (if up { (v + r).min(255) } else { (v - r).max(0) }) as u8
             })
         };
-        let seg_color = |i: usize| colors[(i + usize::from(i == 0)).min(colors.len() - 1)];
+        let ramp_color = |i: usize| colors[(i + usize::from(i == 0)).min(colors.len() - 1)];
+        let seg_color = |i: usize| {
+            let (a, b) = (ramp_color(i), ramp_color(i + 1));
+            std::array::from_fn::<u8, 3, _>(|c| {
+                (f32::from(a[c]) + (f32::from(b[c]) - f32::from(a[c])) * aging).round() as u8
+            })
+        };
         if frame.lod > LINE_CUTOFF_LOD {
             let alpha = (163.0 * frame.fade) as u8;
             let width = if frame.lod == 3 { 2.0 } else { 1.0 };
@@ -1725,6 +1763,7 @@ mod tests {
             eye_space_z: -500.0,
             scale: 1.0,
             fade: 1.0,
+            tick_alpha: 0.0,
             glow_texture: EffectTexture::WHITE,
         };
         let mut out = EffectBatch::default();
@@ -1777,6 +1816,7 @@ mod tests {
             eye_space_z: -3000.0,
             scale: 1.0,
             fade: 1.0,
+            tick_alpha: 0.0,
             glow_texture: EffectTexture::WHITE,
         };
         let draw = |tw: &TrailTweaks, trails: &mut ShipTrails| {
@@ -1850,6 +1890,7 @@ mod tests {
             eye_space_z: -500.0,
             scale: 1.0,
             fade: 1.0,
+            tick_alpha: 0.0,
             glow_texture: EffectTexture::WHITE,
         };
         let mut out = EffectBatch::default();

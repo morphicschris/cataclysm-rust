@@ -1054,6 +1054,7 @@ impl Sandbox {
                     eye_space_z: view.transform_point3(transform.w_axis.truncate()).z,
                     scale: 1.0,
                     fade: 1.0,
+                    tick_alpha: 0.0,
                     glow_texture,
                 },
                 &mut frame.effects,

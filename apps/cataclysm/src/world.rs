@@ -1378,6 +1378,9 @@ impl World {
             .map_or(EffectTexture::WHITE, |e| e.glow_texture);
         let hyper = self.hyperspace();
         let now = self.universe().total_time_elapsed;
+        // Time since the last tick for the trails' tails (0 without interpolation: the frame
+        // shows the last update).
+        let tick_alpha = if self.interpolate { self.alpha() } else { 0.0 };
         let mut frame = Frame {
             items: Vec::new(),
             ids: Vec::new(),
@@ -1505,6 +1508,7 @@ impl World {
                     eye_space_z,
                     scale: nlips,
                     fade: 1.0,
+                    tick_alpha,
                     glow_texture,
                 },
                 ribbon.as_ref(),

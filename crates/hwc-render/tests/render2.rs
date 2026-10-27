@@ -217,6 +217,7 @@ fn trails_and_glows_behind_moving_ships() {
                 eye_space_z,
                 scale: 1.0,
                 fade: 1.0,
+                tick_alpha: 0.0,
                 glow_texture: assets.glow_texture,
             };
             effects.clear();
@@ -654,6 +655,7 @@ fn frigate_trails_follow_their_engines() {
                     eye_space_z,
                     scale: 1.0,
                     fade: 1.0,
+                    tick_alpha: 0.0,
                     glow_texture: assets.glow_texture,
                 };
                 effects.clear();
