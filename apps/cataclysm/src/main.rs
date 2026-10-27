@@ -181,6 +181,10 @@ options:
   Formation focus fire  hwcFormationFocusFire = 1 in the options file (a user-requested
                         change, off by default, also on the ENHANCEMENTS screen): in a
                         formation attack the wingmen always fire at the leader's target
+  Ship look             hwcShipLook = 1 in the options file (default, a user-requested
+                        change, also on the ENHANCEMENTS screen): hulls get mipmapped
+                        textures, per-pixel light with a highlight, a bump from their own
+                        textures and smoothed facets; 0 draws them as the original did
   Remastered effects    hwcRemasteredFx = 1 in the options file (a user-requested addition,
                         off by default, also on the ENHANCEMENTS screen): ship deaths and
                         engine trails use Homeworld Remastered's effects, imported from your

@@ -19,6 +19,7 @@ pub mod fx;
 pub mod gpu;
 pub mod lighting;
 pub mod lod;
+pub mod look;
 pub mod mesh;
 pub mod nebula;
 pub mod nis_sun;
@@ -39,6 +40,7 @@ pub use gpu::{
 };
 pub use lighting::SceneLighting;
 pub use lod::{LodSelector, LodTable};
+pub use look::ShipLook;
 pub use mesh::{mesh_to_world, Skeleton};
 pub use nebula::NebulaRenderer;
 pub use nis_sun::NisSunFlare;

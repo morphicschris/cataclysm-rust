@@ -107,6 +107,7 @@ pub const ENTRIES: &[Entry] = &[
         0,
         Control::Toggle,
     ),
+    entry("hwcShipLook", "MODERN SHIP LIGHTING AND TEXTURES", 0, Control::Toggle),
     entry(
         "hwcRemasteredFx",
         "REMASTERED EXPLOSIONS AND TRAILS",

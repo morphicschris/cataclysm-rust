@@ -21,7 +21,7 @@ use crate::effects::{
 };
 use crate::lighting::SceneLighting;
 use crate::lod::LodTable;
-use crate::mesh::{build_level_geometry, ShipVertex, Skeleton, TintVertex};
+use crate::mesh::{build_level_geometry_smoothed, ShipVertex, Skeleton, TintVertex};
 use crate::render_state::{plane_to_world, PhaseStage, ShipRenderState};
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -39,6 +39,8 @@ struct FrameUniform {
     light_diffuse: [[f32; 4]; 2],
     params: [f32; 4],
     inv_view: [[f32; 4]; 4],
+    /// [`ShipLook::uniform`](crate::look::ShipLook): x per-pixel, y highlight, z bump.
+    look: [f32; 4],
 }
 
 #[repr(C)]
@@ -248,6 +250,10 @@ pub struct Renderer {
     sprite_layout: wgpu::BindGroupLayout,
     linear_sampler: wgpu::Sampler,
     nearest_sampler: wgpu::Sampler,
+    /// Trilinear, anisotropic: hull textures uploaded with mipmaps ([`ShipLook::filtering`]).
+    mip_sampler: wgpu::Sampler,
+    /// The ship look new uploads and frames use ([`Renderer::set_ship_look`]).
+    ship_look: crate::look::ShipLook,
     white: wgpu::TextureView,
     kit: PipelineKit,
     pipes: Pipelines,
@@ -777,6 +783,16 @@ impl Renderer {
         };
         let linear_sampler = sampler(wgpu::FilterMode::Linear);
         let nearest_sampler = sampler(wgpu::FilterMode::Nearest);
+        let mip_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("hull mips"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            anisotropy_clamp: 8,
+            ..Default::default()
+        });
 
         let white = Self::make_texture(device, queue, 1, 1, &[255; 4], "white");
 
@@ -829,6 +845,8 @@ impl Renderer {
             sprite_layout,
             linear_sampler,
             nearest_sampler,
+            mip_sampler,
+            ship_look: crate::look::ShipLook::original(),
             white,
             kit,
             pipes,
@@ -915,6 +933,16 @@ impl Renderer {
         n
     }
 
+    /// The ship look: textures and smoothed normals apply to ships uploaded after this call,
+    /// the per-pixel lighting, highlight and bump to the next frame.
+    pub fn set_ship_look(&mut self, look: crate::look::ShipLook) {
+        self.ship_look = look;
+    }
+
+    pub fn ship_look(&self) -> crate::look::ShipLook {
+        self.ship_look
+    }
+
     fn object_storage(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
@@ -967,6 +995,43 @@ impl Renderer {
             },
             wgpu::util::TextureDataOrder::LayerMajor,
             rgba,
+        );
+        texture.create_view(&Default::default())
+    }
+
+    /// An RGBA8 texture with its whole mip chain ([`crate::look::mip_chain`]).
+    fn make_mipped_texture(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        label: &str,
+    ) -> wgpu::TextureView {
+        let (width, height) = (width.max(1), height.max(1));
+        let chain = crate::look::mip_chain(width, height, rgba);
+        let mut data = rgba.to_vec();
+        for (_, _, level) in &chain {
+            data.extend_from_slice(level);
+        }
+        let texture = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: chain.len() as u32 + 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &data,
         );
         texture.create_view(&Default::default())
     }
@@ -1060,7 +1125,8 @@ impl Renderer {
     }
 
     fn upload_level(&self, model: &ShipModel, paint: TeamPaint<'_>) -> GpuLevel {
-        let geometry = build_level_geometry(model);
+        let look = self.ship_look;
+        let geometry = build_level_geometry_smoothed(model, look.crease_degrees);
         let (verts, tints) = if geometry.vertices.is_empty() {
             (
                 vec![ShipVertex {
@@ -1099,15 +1165,18 @@ impl Renderer {
                         TeamPaint::None => lif.to_rgba(),
                         TeamPaint::Scheme(_, s) => lif.to_rgba_team(s.base, s.stripe),
                     };
-                    Self::make_texture(
-                        &self.device,
-                        &self.queue,
-                        lif.width,
-                        lif.height,
-                        &rgba,
-                        &part.path,
-                    )
+                    let make = if look.filtering {
+                        Self::make_mipped_texture
+                    } else {
+                        Self::make_texture
+                    };
+                    make(&self.device, &self.queue, lif.width, lif.height, &rgba, &part.path)
                 });
+                let sampler = if look.filtering && view.is_some() {
+                    &self.mip_sampler
+                } else {
+                    &self.linear_sampler
+                };
                 let (mut ambient, mut diffuse) = (info.ambient, info.diffuse);
                 if info.team_colored() {
                     if let TeamPaint::Scheme(colors, scheme) = paint {
@@ -1146,7 +1215,7 @@ impl Renderer {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                            resource: wgpu::BindingResource::Sampler(sampler),
                         },
                     ],
                 });
@@ -1355,6 +1424,7 @@ impl Renderer {
             light_diffuse: [0, 1].map(|i| light(i).map_or([0.0; 4], |l| v4(l.diffuse))),
             params: [lights.len().min(2) as f32, width as f32, height as f32, 0.0],
             inv_view: mat(inv_view),
+            look: self.ship_look.uniform(),
         };
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));

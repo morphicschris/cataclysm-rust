@@ -257,6 +257,12 @@ const MAX_EDGES: usize = 512;
 /// Builds per-object triangle lists in object space (unlike [`build_geometry`], which bakes the
 /// rest pose into the vertices).
 pub fn build_level_geometry(model: &ShipModel) -> LevelGeometry {
+    build_level_geometry_smoothed(model, 0.0)
+}
+
+/// [`build_level_geometry`], with each object's flat-shaded faces given smoothed normals
+/// where they meet at less than `crease_degrees` ([`crate::look::smoothed_normals`]; 0: off).
+pub fn build_level_geometry_smoothed(model: &ShipModel, crease_degrees: f32) -> LevelGeometry {
     let mut out = LevelGeometry {
         skeleton: Skeleton::from_model(model),
         ..Default::default()
@@ -309,6 +315,9 @@ pub fn build_level_geometry(model: &ShipModel) -> LevelGeometry {
                     all_edges.push((global, corners[0], corners[1]));
                 }
             }
+            if crease_degrees > 0.0 {
+                smooth_flat_materials(&mut per_material, &materials, crease_degrees);
+            }
             for (material, verts) in per_material.into_iter().enumerate() {
                 if verts.len() < 3 {
                     continue;
@@ -334,6 +343,40 @@ pub fn build_level_geometry(model: &ShipModel) -> LevelGeometry {
     let step = all_edges.len().div_ceil(MAX_EDGES).max(1);
     out.edges = all_edges.into_iter().step_by(step).collect();
     out
+}
+
+/// Smooths the normals of one object's flat-shaded materials together (the smooth ones keep
+/// the normals they were modelled with). A smoothed normal that turns against the modelled
+/// face is flipped, in case a mesh winds its faces the other way round.
+fn smooth_flat_materials(
+    per_material: &mut [Vec<(ShipVertex, TintVertex)>],
+    materials: &[MaterialInfo],
+    crease_degrees: f32,
+) {
+    let flat = |m: usize| materials[m].flags & geo::MATERIAL_SMOOTHING == 0;
+    let mut positions = Vec::new();
+    for (m, verts) in per_material.iter().enumerate() {
+        if flat(m) {
+            let whole = verts.len() - verts.len() % 3;
+            positions.extend(verts[..whole].iter().map(|(v, _)| v.position));
+        }
+    }
+    if positions.is_empty() {
+        return;
+    }
+    let mut normals = crate::look::smoothed_normals(&positions, crease_degrees).into_iter();
+    for (m, verts) in per_material.iter_mut().enumerate() {
+        if !flat(m) {
+            continue;
+        }
+        let whole = verts.len() - verts.len() % 3;
+        for (v, _) in &mut verts[..whole] {
+            let Some(n) = normals.next() else { return };
+            let n = Vec3::from_array(n);
+            let old = Vec3::from_array(v.normal);
+            v.normal = if n.dot(old) < 0.0 { -n } else { n }.into();
+        }
+    }
 }
 
 #[cfg(test)]

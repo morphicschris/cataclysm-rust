@@ -123,3 +123,27 @@ wheel works the same in the sensors manager, where it moves the sensors camera w
 own limits. A key or mouse-drag zoom takes over from the point the easing has reached.
 `--zoom original` restores the immediate step. This changes only rendering and the camera;
 the simulation is not affected.
+
+## Modern ship look
+
+`hwcShipLook` (on by default, MODERN SHIP LIGHTING AND TEXTURES on the ENHANCEMENTS screen;
+0 gives back the original's hulls exactly). Everything is worked out from the player's own
+meshes and textures when a ship is uploaded or drawn, so nothing new is stored or shipped
+(`hwc_render::look`, `ShipLook`):
+
+- Hull textures get a box-filtered mip chain and a trilinear sampler with 8x anisotropy.
+  The original samples level 0 only, so distant ships shimmer.
+- Lighting is evaluated per pixel with the same terms as the fixed-function per-vertex
+  lighting (global ambient, two lights' ambient and diffuse), plus a Blinn-Phong highlight
+  (exponent 32, 0.35 of each light's diffuse, stronger on brighter paint). The original
+  sets no material specular.
+- A bump from each texture's brightness, 1.5 texels deep, applied with a surface-gradient
+  bump (Mikkelsen 2010) from screen derivatives, so no tangents or extra textures are needed.
+  Dark panel lines become grooves.
+- Flat-shaded materials get angle-weighted smoothed normals where faces meet at less than
+  40°. Sharper edges stay hard. Materials modelled smooth keep their own normals.
+
+Cost, measured on the Acolyte filling a 960x600 view: 0.17 ms original, 0.24 ms modern.
+Changing the option uploads the ships again at the next frame. Close-ups of both looks:
+`cargo test --release -p hwc-render --test ship_look -- --ignored --nocapture`
+(`HWC_SHIP` picks another ship, pictures in `target/ship_look`).

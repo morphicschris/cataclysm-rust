@@ -454,6 +454,7 @@ impl Game {
             .set_smooth_trails(options.get("hwcSmoothTrails") != 0);
         g.world
             .set_glows_in_proportion(options.get("hwcGlowsInProportion") != 0);
+        g.world.ship_look = ship_look(&options);
         let mut subs = Subtitles::load(&res, true, &g.world.team_schemes());
         if let Some(s) = subs.as_mut() {
             s.language = options.get("language").max(0) as usize;
@@ -494,6 +495,7 @@ impl Game {
             .set_smooth_trails(options.get("hwcSmoothTrails") != 0);
         self.world
             .set_glows_in_proportion(options.get("hwcGlowsInProportion") != 0);
+        self.world.ship_look = ship_look(options);
     }
 
     fn screen_pos(world: &World, size: (u32, u32), id: ShipId) -> Option<(i32, i32, i32)> {
@@ -3783,5 +3785,14 @@ mod tests {
         // At 1/2 the full blue, at 1 black.
         assert_eq!(whiteout_colour(0.5), Whiteout::Opaque([69, 69, 254, 255]));
         assert_eq!(whiteout_colour(1.0), Whiteout::Opaque([0, 0, 0, 255]));
+    }
+}
+
+/// The hull look from `hwcShipLook`: 1 the modern ship look, 0 the original's.
+pub fn ship_look(options: &hwc_ui::options::Options) -> hwc_render::ShipLook {
+    if options.get("hwcShipLook") != 0 {
+        hwc_render::ShipLook::modern()
+    } else {
+        hwc_render::ShipLook::original()
     }
 }

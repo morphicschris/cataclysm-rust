@@ -11,6 +11,9 @@ struct Frame {
     // x: light count, y: viewport width, z: viewport height
     params: vec4<f32>,
     inv_view: mat4x4<f32>,
+    // The modern ship look (all 0: the original). x: per-pixel lighting, y: highlight
+    // strength, z: bump depth in texels.
+    look: vec4<f32>,
 };
 
 struct Object {
@@ -49,6 +52,9 @@ struct ShipOut {
     @location(1) front: vec3<f32>,
     @location(2) back: vec3<f32>,
     @location(3) world: vec3<f32>,
+    // World normal and per-vertex tint offset, for per-pixel lighting.
+    @location(4) normal: vec3<f32>,
+    @location(5) tint: vec3<f32>,
 };
 
 fn signed_byte(v: u32, shift: u32) -> f32 {
@@ -113,7 +119,59 @@ fn vs_ship(
     let t = tint_offset(tint.x, tint.y);
     out.front = clamp(lit(n) + t, vec3<f32>(0.0), vec3<f32>(1.0));
     out.back = clamp(lit(-n) + t, vec3<f32>(0.0), vec3<f32>(1.0));
+    out.normal = n;
+    out.tint = t;
     return out;
+}
+
+fn luma(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.299, 0.587, 0.114));
+}
+
+// The modern look's normal: the interpolated one, turned to the side being drawn and bumped
+// by the texture's brightness (a surface-gradient bump: Mikkelsen, "Bump Mapping Unparametrized
+// Surfaces on the GPU", 2010), with the height `look.z` texels per unit of brightness.
+fn look_normal(in: ShipOut, front_facing: bool, dp_x: vec3<f32>, dp_y: vec3<f32>,
+               duv_x: vec2<f32>, duv_y: vec2<f32>, h0: f32) -> vec3<f32> {
+    var n = normalize(in.normal);
+    if (!front_facing) {
+        n = -n;
+    }
+    if (frame.look.z <= 0.0 || material.flags.y < 0.5) {
+        return n;
+    }
+    let hx = luma(textureSampleGrad(material_tex, material_sampler, in.uv + duv_x, duv_x, duv_y).rgb);
+    let hy = luma(textureSampleGrad(material_tex, material_sampler, in.uv + duv_y, duv_x, duv_y).rgb);
+    let dims = vec2<f32>(textureDimensions(material_tex));
+    // World size of one texel here.
+    let texels = max(length(duv_x * dims) + length(duv_y * dims), 1e-6);
+    let texel = (length(dp_x) + length(dp_y)) / texels;
+    let k = frame.look.z * texel;
+    let r1 = cross(dp_y, n);
+    let r2 = cross(n, dp_x);
+    let det = dot(dp_x, r1);
+    let grad = sign(det) * ((hx - h0) * k * r1 + (hy - h0) * k * r2);
+    let bumped = abs(det) * n - grad;
+    if (dot(bumped, bumped) < 1e-20) {
+        return n;
+    }
+    return normalize(bumped);
+}
+
+// The highlight the original never had: Blinn-Phong from each light's diffuse colour.
+fn highlight(n: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
+    let eye = (frame.inv_view * vec4<f32>(0.0, 0.0, 0.0, 1.0)).xyz;
+    let v = normalize(eye - world);
+    var c = vec3<f32>(0.0);
+    let count = i32(frame.params.x);
+    for (var i = 0; i < count; i++) {
+        let l = frame.light_dir[i].xyz;
+        if (dot(n, l) > 0.0) {
+            let h = normalize(l + v);
+            c += frame.light_diffuse[i].rgb * pow(max(dot(n, h), 0.0), 32.0);
+        }
+    }
+    return c * frame.look.y;
 }
 
 @fragment
@@ -122,11 +180,30 @@ fn fs_ship(in: ShipOut, @builtin(front_facing) front_facing: bool) -> @location(
         discard;
     }
     let fade = object.params.x;
+    let dp_x = dpdx(in.world);
+    let dp_y = dpdy(in.world);
+    let duv_x = dpdx(in.uv);
+    let duv_y = dpdy(in.uv);
+    let t = textureSample(material_tex, material_sampler, in.uv);
+    if (frame.look.x > 0.5) {
+        let h0 = luma(t.rgb);
+        let n = look_normal(in, front_facing, dp_x, dp_y, duv_x, duv_y, h0);
+        let shade = clamp(lit(n) + in.tint, vec3<f32>(0.0), vec3<f32>(1.0));
+        let spec = highlight(n, in.world);
+        if (material.flags.y < 0.5) {
+            return vec4<f32>(shade + spec, material.diffuse.a * fade);
+        }
+        if (material.flags.x > 0.5) {
+            return vec4<f32>(t.rgb, t.a * fade);
+        }
+        // Brighter paint shines more than dark panelling.
+        let gloss = 0.35 + 0.65 * h0;
+        return vec4<f32>(t.rgb * shade + spec * gloss, t.a * material.diffuse.a * fade);
+    }
     let shade = select(in.back, in.front, front_facing);
     if (material.flags.y < 0.5) {
         return vec4<f32>(shade, material.diffuse.a * fade);
     }
-    let t = textureSample(material_tex, material_sampler, in.uv);
     if (material.flags.x > 0.5) {
         return vec4<f32>(t.rgb, t.a * fade);
     }

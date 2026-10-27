@@ -355,6 +355,11 @@ pub struct World {
     /// The optional Homeworld Remastered deaths and engine trails (`hwcRemasteredFx`), when on
     /// and imported.
     hwr: Option<crate::hwr_fx::HwrFx>,
+    /// How hulls are drawn: the modern ship look (filtered textures, per-pixel light, bump,
+    /// smoothed facets; a user-requested change, on in the game by default, `hwcShipLook = 0`
+    /// gives back the original's) or the original's. [`prepare`](Self::prepare) hands it to
+    /// the renderer and uploads the ships again when it changes.
+    pub ship_look: hwc_render::ShipLook,
 }
 
 /// The main camera and what it follows, as saved with a game ([`World::view_state`]).
@@ -468,6 +473,7 @@ impl World {
             effects: Vec::new(),
             resource_art: BTreeMap::new(),
             missile_art: BTreeMap::new(),
+            ship_look: hwc_render::ShipLook::original(),
             camera_pending: true,
             follow_focus: true,
             effects_on: false,
@@ -804,6 +810,18 @@ impl World {
 
     /// Uploads models, engine effects and the background (call before drawing).
     pub fn prepare(&mut self, renderer: &mut Renderer) {
+        if renderer.ship_look() != self.ship_look {
+            renderer.set_ship_look(self.ship_look);
+            for art in self.art.values_mut() {
+                art.gpu.clear();
+            }
+            for art in self.missile_art.values_mut().flatten() {
+                art.gpu.clear();
+            }
+            for art in self.resource_art.values_mut().flatten() {
+                art.gpu = None;
+            }
+        }
         if self.engine_fx.is_none() {
             self.engine_fx = Some(renderer.load_engine_effects(&self.src));
         }
