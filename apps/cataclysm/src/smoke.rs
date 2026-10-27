@@ -1508,6 +1508,9 @@ fn modern_order_lines_icons_and_health_brackets() {
     assert_eq!(g.ship_icons, IconMode::All);
     rig.key(g, 9);
     assert_eq!(g.ship_icons, IconMode::Far);
+    // Kept for the next game (a loaded save, the next mission, the next run).
+    let kept = g.ui.fe.game.kept_options().get("hwcShipIcons");
+    assert_eq!(kept, IconMode::Far.to_option());
     rig.key(g, 9);
     assert_eq!(g.ship_icons, IconMode::Off);
     assert!(

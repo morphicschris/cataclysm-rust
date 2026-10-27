@@ -1533,7 +1533,9 @@ impl Game {
             GameRequest::CycleShipIcons => {
                 self.ship_icons = self.ship_icons.next();
                 let v = self.ship_icons.to_option();
-                self.ui.fe.game.options.set("hwcShipIcons", v);
+                // Kept and saved at once, so a loaded game, the next mission and the next run
+                // start with it.
+                self.ui.fe.game.set_option_now("hwcShipIcons", v);
                 self.post(self.ship_icons.message());
             }
             GameRequest::SkipFleetIntel => {
