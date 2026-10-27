@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use hwc_audio::codec::Quality;
 use hwc_audio::mixer::AutoMode;
@@ -41,6 +42,9 @@ pub struct Audio {
     output: Option<AudioOutput>,
     ship: ShipSounds,
     ships: HashMap<ShipId, ShipSounds>,
+    /// Per speech stream, the group event playing now, its variable and when it ends
+    /// (`speechqueue[channel].current`).
+    fleet_current: [Option<(u32, i32, Instant)>; hwc_audio::mixer::NUM_STREAMS],
 }
 
 fn explosion_event(class: Option<ShipClass>) -> u32 {
@@ -112,6 +116,7 @@ impl Audio {
             output,
             ship: ShipSounds::default(),
             ships: HashMap::new(),
+            fleet_current: [None; hwc_audio::mixer::NUM_STREAMS],
         })
     }
 
@@ -176,10 +181,23 @@ impl Audio {
     }
 
     /// `speechEventQueue(NULL, event, variable, ...)` for a ship-group event (`COMM_AssGrp_*`,
-    /// `STAT_F_AssGrp_*`), on the stream of its speaker class.
+    /// `STAT_F_AssGrp_*`), on the stream of its speaker class. Like `speechEventQueue`, an
+    /// event is dropped while the same event with the same variable is playing on its stream,
+    /// so pressing a group key twice (select, then focus) says "Standby group n" once.
     pub fn fleet_speech(&mut self, event: u32, variable: i32) {
         let stream = crate::movie_script::speech_stream(event);
-        self.system.play_speech(event, variable, -1, stream);
+        let now = Instant::now();
+        if let Some(Some((e, v, end))) = self.fleet_current.get(stream) {
+            if (*e, *v) == (event, variable) && now < *end {
+                return;
+            }
+        }
+        if let Some(started) = self.system.play_speech(event, variable, -1, stream) {
+            let end = now + Duration::from_millis(started.duration_ms.max(0) as u64);
+            if let Some(slot) = self.fleet_current.get_mut(stream) {
+                *slot = Some((event, variable, end));
+            }
+        }
     }
 
     pub fn play_music(&mut self, track: i32) {
@@ -202,6 +220,7 @@ impl Audio {
         self.system.context.mission_speech = 0;
         if !in_game {
             self.system.stop_all(0.0, true);
+            self.fleet_current = [None; hwc_audio::mixer::NUM_STREAMS];
             self.ships.clear();
         }
     }
@@ -251,6 +270,7 @@ impl Audio {
 
     /// `speechEventCleanup`: every speech stream stops.
     pub fn stop_all_speech(&mut self) {
+        self.fleet_current = [None; hwc_audio::mixer::NUM_STREAMS];
         for stream in 0..hwc_audio::mixer::NUM_STREAMS - 1 {
             self.system.stop_speech(stream, 0.0);
         }
@@ -409,5 +429,33 @@ mod tests {
         assert!((slider_level(default) - 0.461_25).abs() < 1e-6);
         assert_eq!(slider_level(100), 1.0);
         assert_eq!(slider_level(-5), 0.0);
+    }
+
+    /// A second press of a group key (select, then focus) queues no second "Standby group n"
+    /// while the first plays; another group still answers.
+    #[test]
+    fn repeated_group_callout_is_dropped_while_it_plays() {
+        let Some(Ok(g)) = GameData::from_env() else {
+            eprintln!("skipped: no game data");
+            return;
+        };
+        let Ok(mut audio) = Audio::open(g, false) else {
+            eprintln!("skipped: no sound data");
+            return;
+        };
+        audio.set_in_game(true);
+        let event = crate::hotkeys::SPEECH_SELECT;
+        let stream = crate::movie_script::speech_stream(event);
+        let queued = |a: &Audio| {
+            let m = a.system.mixer();
+            m.stream_queued(m.stream_handle(stream))
+        };
+        audio.fleet_speech(event, 1);
+        let once = queued(&audio);
+        assert!(once > 0, "the callout was not queued");
+        audio.fleet_speech(event, 1);
+        assert_eq!(queued(&audio), once, "the repeat was queued");
+        audio.fleet_speech(event, 2);
+        assert!(queued(&audio) > once, "another group's callout was dropped");
     }
 }
