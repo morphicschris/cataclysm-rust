@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use glam::{Mat3, Vec2, Vec3};
+use glam::{Mat3, Mat4, Vec2, Vec3};
 use hwc_hwr::fx::BlendMode;
 use hwc_hwr::player::{Anchor, DrawList};
 use hwc_hwr::{Library, Player, TexId};
@@ -105,6 +105,39 @@ pub struct HwrFx {
     ribbon_tex: Option<TexId>,
     glow_tex: Option<TexId>,
     draw: DrawList,
+    /// Dead ships drawn by the Remastered sequence instead of the simulation's hulk.
+    ghosts: BTreeMap<ShipId, Ghost>,
+}
+
+/// A dead ship's hull, kept in view until its death sequence's last blast (Remastered ships
+/// stay whole while their death animation plays), drifting with the explosion.
+#[derive(Debug, Clone, Copy)]
+pub struct Ghost {
+    pub ship_type: ShipType,
+    pub color_scheme: usize,
+    rotation: Mat3,
+    origin: Vec3,
+    velocity: Vec3,
+    start: f64,
+    until: f64,
+}
+
+impl Ghost {
+    /// Its transform at time `now`, `None` once its sequence has blown it apart.
+    pub fn transform(&self, now: f64) -> Option<Mat4> {
+        if now >= self.until {
+            return None;
+        }
+        let t = (now - self.start).max(0.0) as f32;
+        let k = hwc_hwr::player::DRIFT_DECAY;
+        let p = self.origin + self.velocity * ((1.0 - (-k * t).exp()) / k);
+        Some(Mat4::from_cols(
+            self.rotation.x_axis.extend(0.0),
+            self.rotation.y_axis.extend(0.0),
+            self.rotation.z_axis.extend(0.0),
+            p.extend(1.0),
+        ))
+    }
 }
 
 impl HwrFx {
@@ -141,6 +174,7 @@ impl HwrFx {
             ribbon_tex,
             glow_tex,
             draw: DrawList::default(),
+            ghosts: BTreeMap::new(),
         })
     }
 
@@ -189,10 +223,27 @@ impl HwrFx {
                 );
             }
             if let Some((seq, radius)) = seq {
-                // The explosion stays where the ship died, drifting on with part of its speed
-                // (the hulk itself flies on until the original's death effect removes it).
+                // The explosion and the hull stay where the ship died, drifting on with part of
+                // its speed (the simulation's hulk is not drawn).
                 let mut anchor = anchor_of(s);
                 anchor.velocity *= DEATH_DRIFT;
+                let now = f64::from(u.total_time_elapsed);
+                let hold = seq.events.iter().map(|e| e.time).fold(0.0, f32::max);
+                let m = &s.rotinfo.coordsys.m;
+                self.ghosts.insert(
+                    id,
+                    Ghost {
+                        ship_type: s.ship_type,
+                        color_scheme: s.color_scheme,
+                        rotation: Mat3::from_cols_array(&[
+                            m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8],
+                        ]),
+                        origin: anchor.position,
+                        velocity: anchor.velocity,
+                        start: now,
+                        until: now + f64::from(hold),
+                    },
+                );
                 self.player.start_death(
                     &seq,
                     NO_OWNER,
@@ -203,13 +254,53 @@ impl HwrFx {
                 );
             }
         }
+        if std::env::var_os("HWC_HWR_TRACE").is_some() {
+            if let Some(fx) = fx {
+                for e in &fx.world.effects {
+                    let p = Vec3::new(e.position.x, e.position.y, e.position.z);
+                    let near = self
+                        .ghosts
+                        .values()
+                        .any(|g| (p - g.origin).length() < 3000.0);
+                    if near && !self.hides(e) {
+                        eprintln!(
+                            "hwr: shown near a ghost: #{} {} owner {:?} family {:?} flags {:x}",
+                            e.id, fx.world.lib.statics[e.stat].name, e.owner, e.family, e.flags
+                        );
+                    }
+                }
+            }
+        }
         // Forget what no longer runs.
         if let Some(fx) = fx {
-            let live: BTreeSet<u32> = fx.world.effects.iter().map(|e| e.id).collect();
+            // A death effect's spawns outlive it: keep its id while any of them runs.
+            let live: BTreeSet<u32> = fx
+                .world
+                .effects
+                .iter()
+                .flat_map(|e| [Some(e.id), e.family])
+                .flatten()
+                .collect();
             self.hidden_roots.retain(|id| live.contains(id));
         }
+        let now = f64::from(u.total_time_elapsed);
+        self.ghosts
+            .retain(|id, g| now < g.until || u.hulks.contains(id));
         let hulk_owners: BTreeSet<u32> = u.hulks.iter().map(|&id| FxOwner::Ship(id).id()).collect();
         self.hidden_owners.retain(|o| hulk_owners.contains(o));
+    }
+
+    /// Whether the simulation's hulk of `id` is replaced (drawn as a [`Ghost`] or already blown
+    /// apart).
+    pub fn replaces_hulk(&self, id: ShipId) -> bool {
+        self.ghosts.contains_key(&id)
+    }
+
+    /// The dead hulls to draw at time `now`.
+    pub fn ghosts(&self, now: f64) -> impl Iterator<Item = (Ghost, Mat4)> + '_ {
+        self.ghosts
+            .values()
+            .filter_map(move |g| g.transform(now).map(|m| (*g, m)))
     }
 
     /// Whether an original effect is replaced (a death effect, its spawns, anything a hulk owns).

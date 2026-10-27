@@ -1252,7 +1252,10 @@ impl World {
             effects: EffectBatch::default(),
             fx_list: hwc_fx::RenderList::default(),
         };
-        let transforms = self.render_transforms();
+        let mut transforms = self.render_transforms();
+        if let Some(h) = &self.hwr {
+            transforms.retain(|(id, ..)| !h.replaces_hulk(*id));
+        }
         let u = self.sim.universe();
         for (id, t, transform, age) in transforms {
             let Some(s) = u.ship(id) else { continue };
@@ -1383,6 +1386,32 @@ impl World {
             // TODO(render states): cloak fade/wipe, phase blend, Beast infection and EMP
             // lightning once the simulation exposes cloaking, phasing, infection and the
             // Naggarok's EMP.
+        }
+        // Dead hulls the Remastered death sequences keep in view.
+        if let Some(h) = &self.hwr {
+            let now = f64::from(now) + f64::from(self.alpha()) * f64::from(TICK);
+            for (g, transform) in h.ghosts(now) {
+                let scheme = g.color_scheme;
+                let uploaded = self
+                    .art
+                    .get(&g.ship_type)
+                    .is_some_and(|a| a.gpu.contains_key(&scheme));
+                if !uploaded || !self.object_in_view(transform.w_axis.truncate(), true) {
+                    continue;
+                }
+                frame.items.push(Item {
+                    kind: ItemKind::Ship(g.ship_type, scheme),
+                    transform,
+                    age: 10.0,
+                    lod: 0,
+                    clip: None,
+                    tint: TintParams::default(),
+                    time: now as f32,
+                    construction: None,
+                });
+                frame.poses.push(None);
+                frame.ids.push((None, true));
+            }
         }
         for r in &u.base.resources.list {
             let ResourceKind::Asteroid(k) = r.kind else {

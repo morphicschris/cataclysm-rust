@@ -18,6 +18,14 @@ use crate::fx::{BlendMode, Effect, FULL_UV};
 use crate::library::{FxId, Library, TexId, TexRef};
 use crate::ships::DeathSequence;
 
+/// `STYLE_LIGHT` effects light their surroundings in Remastered (and its bloom turns that into
+/// a bright sphere around an explosion); here they are drawn as a glow of this texture, this
+/// fraction of the light's radius, its colour half-way to white (Remastered's bloom washes the
+/// core out) with its alpha scaled by [`LIGHT_GLOW_ALPHA`].
+pub const LIGHT_TEXTURE: &str = "effect/trails/glowtex.tga";
+pub const LIGHT_GLOW_RADIUS: f32 = 0.2;
+pub const LIGHT_GLOW_ALPHA: f32 = 1.6;
+
 /// Most particles alive in one spray.
 pub const MAX_SPRAY_PARTICLES: usize = 160;
 /// Most primitives drawn per frame (beyond this, effects keep running but are not drawn).
@@ -171,6 +179,9 @@ enum State {
         points: VecDeque<(Vec3, f32)>,
         texture: Option<TexRef>,
     },
+    Light {
+        texture: Option<TexRef>,
+    },
     Plain,
 }
 
@@ -245,7 +256,10 @@ impl Node {
                 points: VecDeque::new(),
                 texture: t.texture.as_deref().and_then(|p| lib.texture(p)),
             },
-            Effect::Light(_) | Effect::Unsupported => State::Plain,
+            Effect::Light(_) => State::Light {
+                texture: lib.texture(LIGHT_TEXTURE),
+            },
+            Effect::Unsupported => State::Plain,
         };
         Some(Self {
             fx,
@@ -464,6 +478,30 @@ impl Node {
                     blend: tr.blend,
                 });
             }
+            (Effect::Light(l), State::Light { texture: Some(tx) }) if !self.finished => {
+                let t = (self.age / l.duration).clamp(0.0, 1.0);
+                let c = l.colour.at(t);
+                let w = |v: f32| v + (1.0 - v) * 0.5 * c[3].min(1.0);
+                let color = [
+                    w(c[0]),
+                    w(c[1]),
+                    w(c[2]),
+                    (c[3] * LIGHT_GLOW_ALPHA).min(1.0),
+                ];
+                let radius = l.radius.at(t) * LIGHT_GLOW_RADIUS * self.scale;
+                if radius > 0.0 && color[3] > 0.003 {
+                    let (texture, uv) = frame_of(tx, 0, false, self.age);
+                    out.sprites.push(Sprite {
+                        position: anchor.position,
+                        half_size: radius,
+                        rotation: 0.0,
+                        color,
+                        texture,
+                        uv,
+                        blend: BlendMode::Additive,
+                    });
+                }
+            }
             _ => {}
         }
         for c in &self.children {
@@ -530,7 +568,7 @@ pub fn marker_offset(marker: &str, rng: &mut Rng) -> Vec3 {
 }
 
 /// How fast a gone owner's last velocity dies away (per second).
-const DRIFT_DECAY: f32 = 1.5;
+pub const DRIFT_DECAY: f32 = 1.5;
 
 /// Moves an anchor whose owner is gone on with its last velocity, slowing down.
 fn drift(a: &mut Anchor, dt: f32) {

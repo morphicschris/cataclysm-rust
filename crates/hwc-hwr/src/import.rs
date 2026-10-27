@@ -150,6 +150,7 @@ pub fn import(root: &Path, out: &Path) -> io::Result<Report> {
         .map(|e| e.path.clone())
         .collect();
     textures.extend(trail);
+    textures.insert(crate::player::LIGHT_TEXTURE.to_string());
 
     // Textures, and the frames of animations.
     let mut written = BTreeSet::new();
