@@ -78,6 +78,25 @@ fn hostless_module_waits_for_the_nis_to_end() {
     }
 }
 
+/// `ApplyDamageToTarget`: a hit on one of the mothership's own modules hurts the mothership,
+/// and nothing is hurt while an NIS plays.
+#[test]
+fn module_damage_goes_to_the_mothership() {
+    let Some(mut run) = start(scenario("base").unwrap()) else { return };
+    let ms = run.ids[0];
+    let u = &mut run.universe;
+    let module = u.ships.iter().find(|s| s.base.clamp.as_ref().and_then(|c| c.host) == Some(ms)).map(|s| s.id).unwrap();
+    let (mh, ph) = (u.ships.ship(module).health, u.ships.ship(ms).health);
+    let killed = hwc_sim::damage::apply_damage_to_target(u, module, mh * 2.0, 0, 0, 99, None);
+    assert!(!killed);
+    assert_eq!(u.ships.ship(module).health, mh);
+    assert!(u.ships.ship(ms).health < ph);
+    let ph = u.ships.ship(ms).health;
+    u.nis_running = true;
+    hwc_sim::damage::apply_damage_to_target(u, ms, 100.0, 0, 0, 99, None);
+    assert_eq!(u.ships.ship(ms).health, ph);
+}
+
 #[test]
 fn build_a_ship_and_launch_it() {
     let Some(mut run) = start(scenario("base").unwrap()) else { return };
