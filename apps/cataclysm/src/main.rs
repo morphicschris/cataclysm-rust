@@ -49,8 +49,6 @@ mod quality_shots;
 mod resui_shots;
 #[cfg(test)]
 mod save_checks;
-#[cfg(test)]
-mod m3_dock_probe;
 mod saves;
 #[cfg(test)]
 mod screen_shots;
