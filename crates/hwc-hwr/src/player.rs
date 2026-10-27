@@ -570,7 +570,7 @@ pub fn marker_offset(marker: &str, rng: &mut Rng) -> Vec3 {
 }
 
 /// How fast a gone owner's last velocity dies away (per second).
-pub const DRIFT_DECAY: f32 = 1.5;
+pub const DRIFT_DECAY: f32 = 0.3;
 
 /// Moves an anchor whose owner is gone on with its last velocity, slowing down.
 fn drift(a: &mut Anchor, dt: f32) {

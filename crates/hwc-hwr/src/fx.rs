@@ -505,7 +505,8 @@ pub struct Frame {
 }
 
 /// An animated texture (`*.anim`): a list of images (`texture = { ... }`) or cells of sprite
-/// sheets (`layout = { columns, rows }`, `textureLayout = { { image, column, row }, ... }`).
+/// sheets (`layout = { rows, columns }`, `textureLayout = { { image, row, column }, ... }`; frames
+/// run along each row, e.g. 8 rows of 4 on a 512 x 1024 sheet).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Anim {
     pub fps: f32,
@@ -538,13 +539,13 @@ impl Anim {
                     .unwrap_or(1.0)
                     .max(1.0) as f32
             };
-            let (cols, rows) = (dim(0), dim(1));
+            let (rows, cols) = (dim(0), dim(1));
             for cell in cells.items.iter().filter_map(Value::as_table) {
                 let Some(path) = cell.items.first().and_then(Value::as_str) else {
                     continue;
                 };
                 let n = |i: usize| cell.items.get(i).and_then(Value::as_num).unwrap_or(0.0) as f32;
-                let (x, y) = (n(1), n(2));
+                let (y, x) = (n(1), n(2));
                 frames.push(Frame {
                     path: normalize(path),
                     uv: [x / cols, y / rows, (x + 1.0) / cols, (y + 1.0) / rows],
@@ -625,6 +626,6 @@ style = "STYLE_RING",
         let a = Anim::parse(src.as_bytes());
         assert_eq!(a.frames.len(), 2);
         assert_eq!(a.frames[0].path, "art/s.tga");
-        assert_eq!(a.frames[1].uv, [0.5, 0.75, 1.0, 1.0]);
+        assert_eq!(a.frames[1].uv, [0.75, 0.5, 1.0, 1.0]);
     }
 }

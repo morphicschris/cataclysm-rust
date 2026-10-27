@@ -34,8 +34,9 @@ const UNIT_SCALE: f32 = 4.5;
 const ENTITY_RADIUS: f32 = 8.0;
 /// Remastered sound volumes to Cataclysm's mix.
 const SOUND_BOOST: f32 = 0.6;
-/// The part of a dying ship's velocity its explosion keeps.
-const DEATH_DRIFT: f32 = 0.35;
+/// The part of a dying ship's velocity its hull and explosion keep (all of it: a dead fighter
+/// coasts on, slowing down slowly).
+const DEATH_DRIFT: f32 = 1.0;
 /// Owner of effects that follow nothing.
 const NO_OWNER: u64 = u64::MAX;
 /// Remastered trail widths to Cataclysm units.
@@ -402,6 +403,8 @@ impl HwrFx {
                         p[3] = p[0].max(p[1]).max(p[2]);
                     }
                 }
+                let (cols, rows) = self.player.lib.sheet(id);
+                fade_cell_edges(&mut rgba, img.width, img.height, cols, rows, additive);
                 renderer.create_effect_texture(img.width, img.height, &rgba)
             });
             self.textures.insert((id, additive), tex);
@@ -551,6 +554,32 @@ fn anchor_of(s: &hwc_sim::Ship) -> Anchor {
         position: Vec3::new(p.x, p.y, p.z),
         velocity: Vec3::new(v.x, v.y, v.z),
         basis,
+    }
+}
+
+/// Fades the outer texels of each cell of a `cols` x `rows` sprite sheet (the whole image for a
+/// still) to nothing. Remastered's art often runs to its edges, which a quad's edge shows as a
+/// hard line, and filtering pulls the next cell's edge into a sheet frame (the seams).
+fn fade_cell_edges(rgba: &mut [u8], width: u32, height: u32, cols: u32, rows: u32, additive: bool) {
+    let (cw, ch) = ((width / cols.max(1)).max(1), (height / rows.max(1)).max(1));
+    let border = (cw.min(ch) as f32 / 16.0).clamp(1.0, 8.0);
+    for y in 0..height {
+        for x in 0..width {
+            let (cx, cy) = (x % cw, y % ch);
+            let d = cx.min(cw - 1 - cx).min(cy).min(ch - 1 - cy) as f32;
+            if d >= border {
+                continue;
+            }
+            let k = d / border;
+            let o = ((y * width + x) * 4) as usize;
+            let p = &mut rgba[o..o + 4];
+            p[3] = (f32::from(p[3]) * k) as u8;
+            if additive {
+                for c in &mut p[..3] {
+                    *c = (f32::from(*c) * k) as u8;
+                }
+            }
+        }
     }
 }
 

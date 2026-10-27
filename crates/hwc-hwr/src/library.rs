@@ -98,6 +98,8 @@ pub struct Library {
     by_name: HashMap<String, FxId>,
     pub textures: Vec<String>,
     tex_by_path: HashMap<String, TexId>,
+    /// Sprite-sheet layout (columns, rows) of textures animations use as sheets.
+    sheets: HashMap<TexId, (u32, u32)>,
     anims: HashMap<String, Anim>,
     deaths: HashMap<String, DeathSequence>,
     trails: HashMap<String, Vec<EngineTrail>>,
@@ -219,11 +221,16 @@ impl Library {
             if anim.frames.is_empty() {
                 return None;
             }
-            let frames = anim
+            let frames: Vec<(TexId, [f32; 4])> = anim
                 .frames
                 .iter()
                 .map(|f| (self.tex_id(&f.path), f.uv))
                 .collect();
+            for (id, uv) in &frames {
+                let cells = |span: f32| (1.0 / span.max(1e-3)).round().max(1.0) as u32;
+                self.sheets
+                    .insert(*id, (cells(uv[2] - uv[0]), cells(uv[3] - uv[1])));
+            }
             return Some(TexRef::Anim {
                 frames,
                 fps: anim.fps.max(1.0),
@@ -256,6 +263,11 @@ impl Library {
             }
         }
         (!clips.is_empty()).then_some((env, clips))
+    }
+
+    /// The sprite-sheet layout (columns, rows) of a texture, `(1, 1)` for a plain image.
+    pub fn sheet(&self, id: TexId) -> (u32, u32) {
+        self.sheets.get(&id).copied().unwrap_or((1, 1))
     }
 
     /// Reads and decodes a texture by id.
