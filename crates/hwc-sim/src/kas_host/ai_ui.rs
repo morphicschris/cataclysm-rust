@@ -277,9 +277,11 @@ macro_rules! ai_ui_methods {
             }
         }
 
-        /// `kasfShowMinesInSensors` (0x493ab0): the sensors manager's show-mines flag; logged.
+        /// `kasfShowMinesInSensors` (0x493ab0): the sensors manager's show-mines flag (0x900604),
+        /// which lets `smMinesDraw` show Mission 3's mines; logged.
         fn show_mines_in_sensors(&mut self, _cx: &Cx, show_mines: i32) {
-            self.log(LogKind::Flow, format!("ShowMinesInSensors({show_mines})"));
+            self.g.show_mines_in_sensors = show_mines != 0;
+            self.log(LogKind::Flow, format!("{}{show_mines})", crate::mission::SHOW_MINES_LOG));
         }
 
         /// `kasfBuilderCloseIfOpen` (0x44fd50): closes the build manager when it is open; the

@@ -1139,19 +1139,32 @@ impl Sensors {
             self.draw_fog(canvas, inp, g);
         }
         let _p = profile::span("sm.mines_resources");
-        // Mines.
+        // Mines (`smMinesDraw`): Mission 3 keeps them off the sensors until its script calls
+        // `ShowMinesInSensors`; mines bigger than 45 m are drawn two pixels wide.
+        let shown = inp
+            .world
+            .mission_run()
+            .is_some_and(|r| r.game.show_mines_in_sensors);
+        let hidden = u.single_player && u.base.options.mission == 3 && !shown;
         for &mid in &u.missile_list {
+            if hidden {
+                break;
+            }
             let Some(m) = u.missiles.get(mid) else {
                 continue;
             };
-            if m.kind != hwc_sim::missile::kind::MINE {
+            if m.kind != hwc_sim::missile::kind::MINE || !fog.seen(m.posinfo.position) {
                 continue;
             }
-            let mission3 = u.single_player && u.base.options.mission == 3;
-            if fog.seen(m.posinfo.position) && !mission3 {
-                if let Some(p) = inp.world.project(inp.size, v3(m.posinfo.position)) {
-                    point(canvas, p, 1, MINE_COLOR);
+            let size = hwc_sim::missile::statics_of(u, m).map_or(1, |st| {
+                if st.header.coll.coll_sphere_size > 45.0 {
+                    2
+                } else {
+                    1
                 }
+            });
+            if let Some(p) = inp.world.project(inp.size, v3(m.posinfo.position)) {
+                point(canvas, p, size, MINE_COLOR);
             }
         }
         // Resources.

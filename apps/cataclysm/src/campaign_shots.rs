@@ -1071,3 +1071,49 @@ fn camera_focus_zoom_and_draw_distance() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/game-campaign/x.png"),
     );
 }
+
+/// Mission 3's minefield: the level's mines are drawn as meshes in the main view, and the
+/// sensors manager shows them only once the script calls `ShowMinesInSensors`.
+#[test]
+fn mission_three_mines() {
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(3, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    rig.frames_until(g, 16 * 90, "the fleet arriving in mission 3", |g| {
+        g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE
+    });
+    let u = g.world.universe();
+    let mines: Vec<Vec3> = u
+        .missile_list
+        .iter()
+        .filter_map(|&m| u.missiles.get(m))
+        .filter(|m| m.kind == hwc_sim::missile::kind::MINE)
+        .map(|m| {
+            Vec3::new(
+                m.posinfo.position.x,
+                m.posinfo.position.y,
+                m.posinfo.position.z,
+            )
+        })
+        .collect();
+    assert!(mines.len() > 100, "{} mines", mines.len());
+    assert!(!g.world.run().game.show_mines_in_sensors);
+    g.world.follow_focus = false;
+    g.world.focus.clear();
+    g.world.camera.look_at = mines[0];
+    g.world.camera.distance = 600.0;
+    for _ in 0..8 {
+        rig.frame(g);
+    }
+    rig.shot(g, "10_m3_mine_close");
+    g.world.camera.distance = 6000.0;
+    for _ in 0..8 {
+        rig.frame(g);
+    }
+    rig.shot(g, "10b_m3_minefield");
+}

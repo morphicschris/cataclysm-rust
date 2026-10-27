@@ -365,6 +365,11 @@ pub struct Game {
     /// The sensors manager is open (0x900620) and the KAS sensors flag (0x900608).
     pub sensors_open: bool,
     pub sensors_kas_flag: i32,
+    /// 0x900604: `ShowMinesInSensors` let the sensors manager show the mines (Mission 3 hides
+    /// them until then). The original saves it with the single-player game; here it comes
+    /// back from the log on load ([`MissionRun::after_load`]) so older saves still read.
+    #[serde(skip, default)]
+    pub show_mines_in_sensors: bool,
     pub sensors_look_at: Vector,
     pub wide_screen: bool,
     /// The wide-screen (letterbox) calls in order, with their frame counts, for a front end
@@ -595,6 +600,8 @@ pub fn opening_nis_fleet(src: &dyn DataSource, statics: &StaticWorld, mission: u
 
 /// KAS globals of the mission autosave (`kasfSaveLevelDeferred`, `kasAutoSaveOnLoad`).
 pub const AUTO_SAVE: &str = "G_AutoSave";
+/// How the log records a `ShowMinesInSensors` call (followed by the value and `)`).
+pub(crate) const SHOW_MINES_LOG: &str = "ShowMinesInSensors(";
 pub const TIMES_GAME_LOADED: &str = "G_TimesGameLoaded";
 
 /// A mission autosave (`SaveLevel(level, name)`).
@@ -634,6 +641,18 @@ pub struct MissionRun {
 }
 
 impl MissionRun {
+    /// Restores the state a saved game does not hold from what it does: the sensors manager's
+    /// show-mines flag from the last `ShowMinesInSensors` call in the log.
+    pub fn after_load(&mut self) {
+        self.game.show_mines_in_sensors = self
+            .game
+            .log
+            .iter()
+            .rev()
+            .find_map(|e| e.text.strip_prefix(SHOW_MINES_LOG))
+            .is_some_and(|rest| !rest.starts_with("0)"));
+    }
+
     /// Sets up mission `config.mission` from `src` with the mission script `script`: the
     /// player's fleet (from the opening NIS for mission 1) goes into hyperspace and the level is
     /// loaded; the KAS mission starts on the first [`step`](Self::step).
@@ -1017,6 +1036,7 @@ pub(crate) fn empty_game(config: MissionConfig) -> Game {
         tut_flags: Vec::new(),
         sensors_open: false,
         sensors_kas_flag: 0,
+        show_mines_in_sensors: false,
         sensors_look_at: Vector::ZERO,
         wide_screen: false,
         wide_screen_events: Vec::new(),

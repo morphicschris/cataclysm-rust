@@ -112,6 +112,21 @@ impl ShipArt {
     }
 }
 
+/// A race's missile or mine mesh (`RACE_X\Missile.lod` / `Mine.lod`) ready to draw.
+struct MissileArt {
+    levels: Vec<ShipModel>,
+    table: Option<LodTable>,
+    /// Uploaded per colour scheme.
+    gpu: BTreeMap<usize, GpuShip>,
+}
+
+/// Which missile mesh: the race's index and whether it is the mine.
+type MissileKey = (usize, bool);
+
+fn missile_key(m: &hwc_sim::missile::Missile) -> MissileKey {
+    (m.race.index(), m.kind == hwc_sim::missile::kind::MINE)
+}
+
 /// An asteroid kind ready to draw (`None` art when its mesh could not be loaded).
 struct ResourceArt {
     model: ShipModel,
@@ -163,6 +178,8 @@ pub struct Frame {
 enum ItemKind {
     Ship(ShipType, usize),
     Asteroid(u8),
+    /// A missile or mine, in a colour scheme.
+    Missile(MissileKey, usize),
 }
 
 struct Item {
@@ -252,6 +269,8 @@ pub struct World {
     pub focus: Vec<ShipId>,
     effects: Vec<Effect>,
     resource_art: BTreeMap<u8, Option<ResourceArt>>,
+    /// Missile and mine meshes (`None` when one could not be loaded).
+    missile_art: BTreeMap<MissileKey, Option<MissileArt>>,
     /// The camera has not been put on the mothership yet.
     camera_pending: bool,
     /// The camera follows [`focus`](Self::focus) (off while the sensors manager owns it).
@@ -399,6 +418,7 @@ impl World {
             focus: Vec::new(),
             effects: Vec::new(),
             resource_art: BTreeMap::new(),
+            missile_art: BTreeMap::new(),
             camera_pending: true,
             follow_focus: true,
             effects_on: false,
@@ -577,6 +597,7 @@ impl World {
     }
 
     fn load_art(&mut self) -> Result<(), String> {
+        self.load_missile_art();
         let types: Vec<ShipType> = self.universe().ships.iter().map(|s| s.ship_type).collect();
         if types.iter().all(|t| self.art.contains_key(t)) && self.resource_kinds_loaded() {
             return Ok(());
@@ -662,6 +683,34 @@ impl World {
         Ok(())
     }
 
+    /// Loads the meshes of missile and mine kinds that appeared since the last update.
+    fn load_missile_art(&mut self) {
+        let u = self.sim.universe();
+        let mut keys: Vec<(MissileKey, hwc_sim::statics::ShipRace)> = u
+            .missile_list
+            .iter()
+            .filter_map(|&mid| u.missiles.get(mid))
+            .map(|m| (missile_key(m), m.race))
+            .filter(|(k, _)| !self.missile_art.contains_key(k))
+            .collect();
+        keys.sort_by_key(|(k, _)| *k);
+        keys.dedup_by_key(|(k, _)| *k);
+        for ((race_index, mine), race) in keys {
+            let dir = race.name().to_ascii_lowercase();
+            let name = if mine { "mine" } else { "missile" };
+            let art = ShipDef::load(&self.src, &dir, name)
+                .and_then(|d| ShipModel::load_lods(&self.src, &d))
+                .map_err(|e| eprintln!("warning: {dir}\\{name}: {e}"))
+                .ok()
+                .map(|(levels, table)| MissileArt {
+                    levels,
+                    table,
+                    gpu: BTreeMap::new(),
+                });
+            self.missile_art.insert((race_index, mine), art);
+        }
+    }
+
     /// Loads the art of ships and asteroids that appeared since the last update.
     pub fn load_new_art(&mut self) {
         if let Err(e) = self.load_art() {
@@ -721,6 +770,34 @@ impl World {
                     })
                     .collect();
             }
+            art.gpu.insert(scheme, gpu);
+        }
+        let u = self.sim.universe();
+        let mut missiles: Vec<(MissileKey, usize)> = u
+            .missile_list
+            .iter()
+            .filter_map(|&mid| u.missiles.get(mid))
+            .map(|m| (missile_key(m), usize::from(m.color_scheme)))
+            .collect();
+        missiles.sort_unstable();
+        missiles.dedup();
+        for (key, scheme) in missiles {
+            let Some(Some(art)) = self.missile_art.get_mut(&key) else {
+                continue;
+            };
+            if art.gpu.contains_key(&scheme) {
+                continue;
+            }
+            let paint = match self
+                .team_colors
+                .schemes
+                .get(scheme)
+                .or(self.team_colors.schemes.first())
+            {
+                Some(s) => TeamPaint::Scheme(&self.team_colors, *s),
+                None => TeamPaint::None,
+            };
+            let gpu = renderer.upload_ship_lods(&art.levels, art.table.clone(), paint);
             art.gpu.insert(scheme, gpu);
         }
         for art in self.resource_art.values_mut().flatten() {
@@ -1462,6 +1539,53 @@ impl World {
             frame.poses.push(None);
             frame.ids.push((None, false));
         }
+        // Missiles and mines (`rndRenderTask`'s `OBJ_MissileType`: their LOD meshes, in the
+        // owner's colours). The sensors manager draws mines as points of its own.
+        if !self.sensors_open {
+            let a = self.alpha();
+            for &mid in &u.missile_list {
+                let Some(m) = u.missiles.get(mid) else {
+                    continue;
+                };
+                if m.flags & hwc_sim::object::sof::HIDE != 0 {
+                    continue;
+                }
+                let key = missile_key(m);
+                let scheme = usize::from(m.color_scheme);
+                let Some(gpu) = self
+                    .missile_art
+                    .get(&key)
+                    .and_then(Option::as_ref)
+                    .and_then(|art| art.gpu.get(&scheme))
+                else {
+                    continue;
+                };
+                // Between updates a missile moves on along its velocity.
+                let p = v3(m.posinfo.position) + v3(m.posinfo.velocity) * (TICK * (a - 1.0));
+                if !self.object_in_view(p, false) {
+                    continue;
+                }
+                let transform = matrix(&m.rotinfo.coordsys, p);
+                let (centre, radius) = gpu.bounds();
+                let r = screen_radius(view, proj, transform.transform_point3(centre), radius);
+                let d2 = (p - eye).length_squared();
+                let nominal = self
+                    .lod
+                    .select(gpu.level_count(), 0, r, d2, gpu.lod_table());
+                frame.items.push(Item {
+                    kind: ItemKind::Missile(key, scheme),
+                    transform,
+                    age: 10.0,
+                    lod: drawn_lod(self.full_detail, nominal),
+                    clip: None,
+                    tint: TintParams::default(),
+                    time: now,
+                    construction: None,
+                });
+                frame.poses.push(None);
+                frame.ids.push((None, true));
+            }
+        }
         self.combat_effects(&mut frame.effects, glow_texture);
         if let Some(mut h) = self.hwr.take() {
             let u = self.sim.universe();
@@ -1635,6 +1759,11 @@ impl World {
         for (item, pose) in frame.items.iter().zip(&frame.poses) {
             let gpu = match item.kind {
                 ItemKind::Ship(t, scheme) => self.art.get(&t).and_then(|a| a.gpu.get(&scheme)),
+                ItemKind::Missile(key, scheme) => self
+                    .missile_art
+                    .get(&key)
+                    .and_then(|a| a.as_ref())
+                    .and_then(|a| a.gpu.get(&scheme)),
                 ItemKind::Asteroid(k) => self
                     .resource_art
                     .get(&k)

@@ -77,7 +77,9 @@ pub fn write(
 
 /// Reads a game, linked to the game data.
 pub fn read(path: &Path, relink: &Relink) -> Result<(SaveHeader, Payload), SaveError> {
-    save::read(path, relink)
+    let (header, mut payload): (SaveHeader, Payload) = save::read(path, relink)?;
+    payload.run.after_load();
+    Ok((header, payload))
 }
 
 /// The game data a saved game of `mission` links back to: the statics, the effects and the
