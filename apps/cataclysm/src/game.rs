@@ -256,7 +256,9 @@ pub struct Game {
     /// the menu; a right click on a ship or a resource does what it always did. Off: the
     /// original's right click (the menu, or the context-sensitive action).
     pub right_click_move: bool,
-    /// The open move plate came from that right click: right confirms it, left cancels it.
+    /// Right click confirms the open move plate and left click cancels it: a plate opened by
+    /// that right click, or (with [`right_click_move`](Self::right_click_move)) by the move key
+    /// or the menu. Otherwise the original's: left confirms, right cancels.
     plate_from_right: bool,
     /// A user-requested change, on by default (`hwcDoubleClickSelectType`): double-clicking
     /// one of the player's ships selects all the player's ships of its type on screen.
@@ -1673,7 +1675,7 @@ impl Game {
                 return;
             };
             self.mode = Mode::Move(Plate::new(c, size));
-            self.plate_from_right = false;
+            self.plate_from_right = self.right_click_move;
             sound(audio, MOVEMENT_GUI_ON);
         } else {
             self.mode = Mode::Select;

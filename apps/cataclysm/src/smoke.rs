@@ -282,6 +282,8 @@ fn mission_one_plays_through_the_game_path() {
     );
     rig.frame(g);
     rig.render(g, "08_move_pie_plate");
+    // With the user-requested right click the move key's plate works like the right click's:
+    // left click cancels it, right click confirms it.
     rig.input(
         g,
         InputEvent::MouseButton {
@@ -297,7 +299,29 @@ fn mission_one_plays_through_the_game_path() {
         },
     );
     rig.frame(g);
-    assert_eq!(g.mode, Mode::Select);
+    assert_eq!(
+        g.mode,
+        Mode::Select,
+        "a left click cancels the move key's plate"
+    );
+    rig.key(g, 0x4d); // M
+    assert!(matches!(g.mode, Mode::Move { .. }), "move plate up again");
+    rig.input(
+        g,
+        InputEvent::MouseButton {
+            left: false,
+            down: true,
+        },
+    );
+    rig.input(
+        g,
+        InputEvent::MouseButton {
+            left: false,
+            down: false,
+        },
+    );
+    rig.frame(g);
+    assert_eq!(g.mode, Mode::Select, "a right click confirms it");
     let u = g.world.universe();
     assert!(
         movers.iter().any(|&id| u
@@ -367,6 +391,24 @@ fn mission_one_plays_through_the_game_path() {
     assert!(menu_open(g), "the original's right click opens the menu");
     rig.render(g, "09_right_click_menu");
     rig.key(g, 0x1b);
+    // The original's move key plate: right click cancels it, left click confirms it.
+    rig.key(g, 0x4d); // M
+    assert!(matches!(g.mode, Mode::Move { .. }));
+    rig.click(g, ex, ey, false);
+    assert_eq!(
+        g.mode,
+        Mode::Select,
+        "the original's right click cancels the plate"
+    );
+    assert!(!menu_open(g));
+    rig.key(g, 0x4d); // M
+    assert!(matches!(g.mode, Mode::Move { .. }));
+    rig.click(g, ex, ey, true);
+    assert_eq!(
+        g.mode,
+        Mode::Select,
+        "the original's left click confirms the plate"
+    );
     g.right_click_move = true;
 
     // A few hundred updates more, then the research and launch managers.
@@ -611,14 +653,14 @@ fn sensors_manager_and_pointers() {
     rig.input(
         g,
         InputEvent::MouseButton {
-            left: true,
+            left: false,
             down: true,
         },
     );
     rig.input(
         g,
         InputEvent::MouseButton {
-            left: true,
+            left: false,
             down: false,
         },
     );
@@ -1223,20 +1265,21 @@ fn full_detail_and_the_move_plate_height() {
     rig.input(g, InputEvent::KeyUp(SHIFT));
     rig.frame(g);
     rig.render(g, "36_plate_before_click");
-    // Click: the ships go to the raised point.
+    // Right click (the move key's plate with the user-requested right click): the ships go to
+    // the raised point.
     let dest = g.plate().unwrap().destination();
     assert!(dest.z - g.plate().unwrap().centre.z > 100.0);
     rig.input(
         g,
         InputEvent::MouseButton {
-            left: true,
+            left: false,
             down: true,
         },
     );
     rig.input(
         g,
         InputEvent::MouseButton {
-            left: true,
+            left: false,
             down: false,
         },
     );
