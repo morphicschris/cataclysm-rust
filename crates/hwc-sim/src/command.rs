@@ -918,7 +918,7 @@ pub fn process_attack_to_do_in_formation(u: &mut Universe, cid: CommandId) -> bo
         return true;
     }
     let leader = sel[0];
-    let focus_fire = u.ships.ship(leader).tactics == crate::object::tactics::AGGRESSIVE;
+    let focus_fire = u.ships.ship(leader).tactics == crate::object::tactics::AGGRESSIVE || u.formation_focus_leader;
     if cmd.attack_targets.is_empty() {
         let strike_craft = sel.iter().all(|&id| {
             let c = u.statics.ship(u.ships.ship(id).ship_type).and_then(|s| s.ship_class);
@@ -979,10 +979,12 @@ pub fn process_attack_to_do_in_formation(u: &mut Universe, cid: CommandId) -> bo
             }
         }
         if i >= 1 {
-            if shareable(u, leader_target) {
+            // (`formation_focus_leader`: always the leader's target, and no sphere retargeting.)
+            let focus_leader = u.formation_focus_leader && leader_target.is_some();
+            if shareable(u, leader_target) || focus_leader {
                 u.ships.ship_mut(id).attack.target = leader_target;
             }
-            if sphere && counter & SPHERE_CHECK_TARGET_MASK == SPHERE_CHECK_TARGET_FRAME {
+            if sphere && !focus_leader && counter & SPHERE_CHECK_TARGET_MASK == SPHERE_CHECK_TARGET_FRAME {
                 if let Some(t) = alive(u, u.ships.ship(id).attack.target) {
                     let (s, ts) = (u.ships.ship(id), u.ships.ship(t));
                     let p = s.posinfo.position;

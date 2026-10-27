@@ -164,6 +164,9 @@ options:
                         render list) or far (everything within the far clip distance of the
                         eye); both are radial, the same at any camera angle. Options file:
                         hwcRenderList = 1/0
+  Formation focus fire  hwcFormationFocusFire = 1 in the options file (a user-requested
+                        change, off by default, also on the ENHANCEMENTS screen): in a
+                        formation attack the wingmen always fire at the leader's target
   Remastered effects    hwcRemasteredFx = 1 in the options file (a user-requested addition,
                         off by default, also on the ENHANCEMENTS screen): ship deaths and
                         engine trails use Homeworld Remastered's effects, imported from your

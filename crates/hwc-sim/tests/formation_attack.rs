@@ -283,3 +283,62 @@ fn formation_attack_is_reproducible() {
         println!("formation attack world hash after {} updates: {:016x}", a.hashes.len(), a.hashes.last().unwrap());
     }
 }
+
+/// Six fighters in a delta attack three ships that are under orders of their own: the
+/// original keeps each wingman on its own target, while `formation_focus_leader` (the
+/// user-requested `hwcFormationFocusFire`) puts every wingman on the leader's.
+#[test]
+fn focus_fire_puts_the_wingmen_on_the_leaders_target() {
+    let Some(d) = data() else { return };
+    let run = |focus: bool| -> (usize, usize) {
+        let n = 6;
+        let mut spawns: Vec<Spawn> = (0..n).map(|i| Spawn { ship_type: ShipType::sAcolyte, player: 0, position: Vector::new(-6000.0, i as f32 * 250.0, 0.0) }).collect();
+        for k in 0..3 {
+            spawns.push(Spawn { ship_type: ShipType::tResourceCollector, player: 1, position: Vector::new(4000.0, k as f32 * 1500.0 - 1500.0, 0.0) });
+        }
+        let ours: Vec<usize> = (0..n).collect();
+        let theirs: Vec<usize> = (n..n + 3).collect();
+        let sc = Scenario {
+            name: "formation_focus_fire",
+            players: vec![ShipRace::Somtaaw, ShipRace::Taiidan],
+            spawns,
+            orders: vec![
+                (0, Order::Formation { ships: ours.clone(), formation_type: kind::DELTA }),
+                (0, Order::Move { ships: theirs.clone(), mode: 0, waypoints: vec![Vector::new(6000.0, 0.0, 0.0)] }),
+                (50, Order::Attack { ships: ours.clone(), targets: theirs }),
+            ],
+            resources: Vec::new(),
+            resource_units: Vec::new(),
+        };
+        let mut r = Run::new(d.statics.clone(), d.tweaks.clone(), sc).unwrap();
+        r.universe.formation_focus_leader = focus;
+        let ids = r.ids.clone();
+        let (mut same, mut other) = (0, 0);
+        for tick in 0..16 * 30 {
+            for &t in &ids[n..] {
+                if let Some(s) = r.universe.ships.get_mut(t) {
+                    s.health = 1.0e9;
+                }
+            }
+            r.step();
+            if tick < 80 {
+                continue;
+            }
+            let u = &r.universe;
+            let Some(c) = u.ship(ids[0]).and_then(|s| s.command).and_then(|c| u.commands.get(c)) else { continue };
+            let lt = u.ship(c.selection[0]).and_then(|s| s.attack.target);
+            for &w in &c.selection[1..] {
+                if u.ship(w).and_then(|s| s.attack.target) == lt {
+                    same += 1;
+                } else {
+                    other += 1;
+                }
+            }
+        }
+        (same, other)
+    };
+    let (_, apart) = run(false);
+    assert!(apart > 0, "the original keeps the wingmen on their own targets");
+    let (together, apart) = run(true);
+    assert!(together > 0 && apart == 0, "focus fire: {apart} wingman updates off the leader's target");
+}

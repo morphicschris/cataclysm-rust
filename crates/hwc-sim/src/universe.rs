@@ -163,6 +163,11 @@ pub struct Universe {
     pub sp_difficulty: u32,
     /// `aishipTempDisableAvoiding`.
     pub temp_disable_avoiding: bool,
+    /// A user-requested change, off by default (`hwcFormationFocusFire`): in a formation attack
+    /// the wingmen always take the leader's target, as aggressive tactics do (the original
+    /// shares it only when the target is under no command). A setting, not saved.
+    #[serde(skip)]
+    pub formation_focus_leader: bool,
     /// What happened during the last update.
     pub events: Vec<SimEvent>,
     /// What the missiles and ship modules did during the last update.
@@ -230,6 +235,7 @@ impl Universe {
             single_player: false,
             sp_difficulty: 1,
             temp_disable_avoiding: false,
+            formation_focus_leader: false,
             events: Vec::new(),
             special_events: Vec::new(),
             universe_paused: false,

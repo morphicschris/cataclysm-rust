@@ -129,6 +129,10 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // 1: double-clicking one of the player's ships selects every ship of that type the
     // player owns on screen (a user-requested change); 0: the original's plain click.
     ("hwcDoubleClickSelectType", 1),
+    // 1: in a formation attack the wingmen always fire at the leader's target (a
+    // user-requested change); 0: the original, where they keep their own targets unless the
+    // leader's is under no command (or the tactics are aggressive).
+    ("hwcFormationFocusFire", 0),
     // 1: lines from the selected ships to what they were ordered to, with a circle there,
     // coloured by the order; 0: none, the original (`--order-lines`).
     ("hwcOrderLines", 1),

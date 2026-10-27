@@ -151,6 +151,12 @@ pub const ENTRIES: &[Entry] = &[
         2,
         Control::Toggle,
     ),
+    entry(
+        "hwcFormationFocusFire",
+        "FORMATION WINGMEN FOCUS FIRE",
+        2,
+        Control::Toggle,
+    ),
     entry(modern_hud::OPTION_KEY, "MODERN HUD", 3, Control::Toggle),
     entry("hwcOrderLines", "ORDER LINES", 3, Control::Toggle),
     entry(

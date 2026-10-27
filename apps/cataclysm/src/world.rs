@@ -303,6 +303,9 @@ pub struct World {
     /// The closest zoom on focused ships also keeps the near clip plane outside their hulls (a
     /// user-requested addition, on by default; `hwcZoomClear = 0` leaves the original's limit).
     pub zoom_clear: bool,
+    /// In a formation attack the wingmen always take the leader's target (a user-requested
+    /// change, off by default; `hwcFormationFocusFire`), handed to the universe each update.
+    pub formation_focus_leader: bool,
     /// The optional Homeworld Remastered deaths and engine trails (`hwcRemasteredFx`), when on
     /// and imported.
     hwr: Option<crate::hwr_fx::HwrFx>,
@@ -433,6 +436,7 @@ impl World {
             focus_close: false,
             focus_zoom: true,
             zoom_clear: true,
+            formation_focus_leader: false,
             hwr: None,
         };
         if let Ok(t) = read_script(&w.src, "tweak.script") {
@@ -837,6 +841,7 @@ impl World {
     pub fn step(&mut self) {
         self.snapshot();
         self.set_nebula_camera();
+        self.sim.universe_mut().formation_focus_leader = self.formation_focus_leader;
         match &mut self.sim {
             Sim::Mission(r) => r.step(),
             Sim::NisLevel(n) => n.universe.update(),
@@ -849,6 +854,7 @@ impl World {
     pub fn step_universe(&mut self) {
         self.snapshot();
         self.set_nebula_camera();
+        self.sim.universe_mut().formation_focus_leader = self.formation_focus_leader;
         self.sim.universe_mut().update();
         self.after_update();
     }
