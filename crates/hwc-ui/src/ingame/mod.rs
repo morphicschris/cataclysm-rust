@@ -154,6 +154,8 @@ pub struct Setup {
     pub keys: Option<String>,
     /// Where accepted options write `keys.cfg`.
     pub keys_path: Option<PathBuf>,
+    /// Where accepted options are written (the front end's options file).
+    pub options_path: Option<PathBuf>,
 }
 
 pub struct InGameUi {
@@ -224,6 +226,12 @@ impl InGameUi {
             }
         }
         game.ig.keys_path = setup.keys_path.clone();
+        game.config_path = setup.options_path.clone();
+        // The default colours as the front end has them, so the colours saved with the
+        // options are the same.
+        if let Some(t) = read_text(&*source, "teamcolors.script") {
+            game.colors.load_defaults(&t);
+        }
         if let Some(t) = read_text(&*source, "mainoverlay.script") {
             game.ig.overlay.load_script(&t);
         }

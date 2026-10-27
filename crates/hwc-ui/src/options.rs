@@ -1,10 +1,13 @@
 //! Player options and their persistence.
 //!
 //! The original keeps two stores (see `docs/frontend.md`): `Cataclysm.cfg`, a text file of
-//! `name value` lines written from one table of tweakable variables on exit and read back with the
+//! `name value` lines written from one table of tweakable variables and read back with the
 //! tweak-script parser at start-up, and the registry key `HKLM\SOFTWARE\Sierra On-Line\Cataclysm`
-//! for the display device and resolution. This module keeps every one of those values under its
-//! original name in a single file of our own format:
+//! for the display device and resolution. Both are written, with `keys.cfg`, by
+//! `opOptionsSaveSettings` (through `utyOptionsFileWrite` and `kbSaveBindings`): at start-up,
+//! when the front-end or in-game options are entered or accepted, and when a game ends
+//! (`gameEnd`). This module keeps every one of those values under its original name in a single
+//! file of our own format:
 //!
 //! ```text
 //! # hwc options v1
@@ -342,12 +345,7 @@ impl Options {
 
     /// Writes atomically (temporary file, then rename).
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("cfg.tmp");
-        std::fs::write(&tmp, self.to_text())?;
-        std::fs::rename(&tmp, path)
+        write_atomic(path, &self.to_text())
     }
 
     /// Imports the original `Cataclysm.cfg` (`name value` lines, `language=0` style also
@@ -374,9 +372,50 @@ impl Options {
     }
 }
 
+/// Writes `text` to `path` through a temporary file beside it, renamed over the old one, so a
+/// crash or a full disk never leaves half a file. The directory is made when missing.
+pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+    if let Err(e) = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_writes_replace_the_file_and_leave_no_temporary() {
+        let dir = std::env::temp_dir().join(format!("hwc-atomic-{}", std::process::id()));
+        let path = dir.join("sub").join("hwc-options.cfg");
+        let mut o = Options::default();
+        o.set("SFXVolume", 12);
+        o.save(&path).unwrap();
+        o.set("SFXVolume", 34);
+        o.save(&path).unwrap();
+        assert_eq!(Options::load(&path).unwrap().get("SFXVolume"), 34);
+        assert!(!dir.join("sub").join("hwc-options.cfg.tmp").exists());
+        write_atomic(
+            &dir.join("keys.cfg"),
+            "v 84
+",
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("keys.cfg")).unwrap(),
+            "v 84
+"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn recreation_options_default_on_and_round_trip() {

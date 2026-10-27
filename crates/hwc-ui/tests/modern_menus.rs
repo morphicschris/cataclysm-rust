@@ -39,6 +39,7 @@ fn ui_with(src: Rc<dyn AssetSource>, size: (i32, i32), options: Options) -> InGa
             default_keys: Some(KEYS.into()),
             keys: None,
             keys_path: None,
+            options_path: None,
         },
     )
     .expect("in-game ui");

@@ -39,6 +39,7 @@ fn ui(src: Rc<dyn AssetSource>) -> InGameUi {
             default_keys: Some(DEFAULT_KEYS.into()),
             keys: None,
             keys_path: None,
+            options_path: None,
         },
     )
     .expect("in-game ui");

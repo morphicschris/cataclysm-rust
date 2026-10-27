@@ -730,7 +730,7 @@ impl App {
     /// `utyLoadMultiSinglePlayerGame` / `gpLoadGame`: a saved game loads behind its mission's
     /// loading screen (the game running, if any, ends first and the music stops).
     fn load_saved_game(&mut self, path: &std::path::Path) {
-        self.game = None;
+        self.end_game();
         self.loading = None;
         if let Some(a) = &mut self.audio {
             a.stop_music(0.0);
@@ -753,7 +753,7 @@ impl App {
     /// The fleet has jumped: the next mission loads with it (`singlePlayerLoadNewLevel`, the
     /// loading screen of the next mission), or after the last one the game ends.
     fn next_mission(&mut self) {
-        let Some(g) = self.game.take() else { return };
+        let Some(g) = self.end_game() else { return };
         let run = g.world.run();
         let (mission, skill) = (run.game.config.mission, run.game.config.skill);
         let carry = run.carry();
@@ -799,7 +799,7 @@ impl App {
     /// The NIS level's NIS has stopped: the mission loads from it behind a loading screen
     /// of its own (`singlePlayerNisStoppedCB` -> `singlePlayerLoadNewLevel(0, 0)`).
     fn after_nis_level(&mut self) {
-        let Some(mut g) = self.game.take() else {
+        let Some(mut g) = self.end_game() else {
             return;
         };
         let skill = g.world.skill();
@@ -866,7 +866,7 @@ impl App {
     /// Back to the main menu and its music (quitting a game, or a mission that cannot start).
     fn back_to_menu(&mut self) {
         self.loading = None;
-        self.game = None;
+        self.end_game();
         if let Some(a) = &mut self.audio {
             a.set_in_game(false);
             a.apply_options(&self.session.fe.game.options);
@@ -898,6 +898,7 @@ impl App {
                     self.renderer = Some(r);
                 }
             }
+            crate::watchdog::checkpoint("loading: advance");
             match l.advance(&self.session, self.renderer.as_mut(), dt) {
                 Progress::Working => {}
                 Progress::Ready(mut game) => {
@@ -960,7 +961,9 @@ impl App {
         let mut display_options = None;
         crate::profile::frame_start();
         let span = crate::profile::span("update");
+        crate::watchdog::checkpoint("game: update");
         let outcomes = g.update(dt, &mut self.audio);
+        crate::watchdog::checkpoint("game: outcomes");
         drop(span);
         for o in outcomes {
             match o {
@@ -982,11 +985,11 @@ impl App {
                 game::Outcome::LoadGame(p) => load = Some(p),
             }
         }
-        // A screen mode or resolution accepted in the modern options: switched to, and kept
-        // in the options file.
+        // A screen mode or resolution accepted in the modern options (already in the options
+        // file): switched to.
         if let Some(s) = display_options {
             if s != self.options_display {
-                self.remember_display(s);
+                self.options_display = s;
                 self.apply_display(s);
             }
         }
@@ -995,6 +998,7 @@ impl App {
             return Ok(true);
         }
         if nis_level_done {
+            crate::watchdog::checkpoint("game: after the NIS level");
             self.after_nis_level();
             return Ok(true);
         }
@@ -1040,7 +1044,9 @@ impl App {
         });
         let started = Instant::now();
         let span = crate::profile::span("render");
+        crate::watchdog::checkpoint("game: render");
         g.render(r, size)?;
+        crate::watchdog::checkpoint("game: present");
         drop(span);
         if let Some(t) = &mut self.frame_times {
             t.add(started.elapsed().as_secs_f64() * 1e3, f64::from(dt) * 1e3);
@@ -1159,23 +1165,38 @@ impl App {
         w.request_redraw();
     }
 
-    /// Keeps a display in the options file (the front end's options, and the game's).
+    /// The options as the player has them now: the mission's interface while a mission is
+    /// up (its options screens change them), else the front end's. Everything that keeps an
+    /// option writes the options file through this one.
+    fn kept_options(&mut self) -> &mut hwc_ui::cataclysm::Cataclysm {
+        match self.game.as_mut() {
+            Some(g) => &mut g.ui.fe.game,
+            None => &mut self.session.fe.game,
+        }
+    }
+
+    /// Keeps a display in the options file.
     fn remember_display(&mut self, s: Setting) {
         self.options_display = s;
         let mut o = hwc_ui::options::Options::default();
         s.store(&mut o);
-        for key in [
+        let values = [
             display::MODE_KEY,
             "screenWidth",
             "screenHeight",
             display::REFRESH_KEY,
-        ] {
-            let v = o.get(key);
-            self.session.fe.game.set_option_now(key, v);
-            if let Some(g) = self.game.as_mut() {
-                g.ui.fe.game.options.set(key, v);
-            }
-        }
+        ]
+        .map(|key| (key, o.get(key)));
+        self.kept_options().set_options_now(&values);
+    }
+
+    /// The mission ends (`gameEnd`): the options and key bindings its options screens kept
+    /// go back to the front end (the next mission starts from them) and are saved
+    /// (`opOptionsSaveSettings`).
+    fn end_game(&mut self) -> Option<Box<Game>> {
+        let g = self.game.take()?;
+        hand_back_options(&mut self.session, &g);
+        Some(g)
     }
 
     /// Alt+Enter (and F11): from a window to the last full-screen mode, from full screen to a
@@ -1247,9 +1268,12 @@ impl App {
         let now = Instant::now();
         let dt = (now - self.last).as_secs_f32().min(0.25);
         self.last = now;
+        crate::watchdog::frame(self.frames);
+        crate::watchdog::checkpoint("redraw: audio");
         if let Some(a) = &mut self.audio {
             a.update();
         }
+        crate::watchdog::checkpoint("redraw: frame");
         if let Some(intro) = &mut self.intro {
             let cues = intro.update(dt);
             let done = intro.finished();
@@ -1319,6 +1343,7 @@ impl App {
                 }
             }
         } else if self.intro.is_none() {
+            crate::watchdog::checkpoint("front end: update");
             for r in self.session.update(dt) {
                 self.request(event_loop, r);
             }
@@ -1416,6 +1441,7 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let _busy = crate::watchdog::enter("resumed");
         if self.gpu.is_some() {
             return;
         }
@@ -1475,9 +1501,11 @@ impl ApplicationHandler for App {
         }
     }
 
-    /// Leaving: out of exclusive full screen first, so the desktop gets its own mode back
-    /// at once.
+    /// Leaving: the options are saved, and out of exclusive full screen first, so the desktop
+    /// gets its own mode back at once.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // The options as kept are saved on the way out, whatever the way out.
+        self.kept_options().save_options();
         if let Some(gpu) = &self.gpu {
             if matches!(gpu.window.fullscreen(), Some(Fullscreen::Exclusive(_))) {
                 gpu.window.set_fullscreen(None);
@@ -1486,6 +1514,14 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let _busy = crate::watchdog::enter(match event {
+            WindowEvent::RedrawRequested => "redraw",
+            WindowEvent::KeyboardInput { .. } => "key event",
+            WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => "mouse event",
+            WindowEvent::CursorMoved { .. } => "pointer event",
+            WindowEvent::Resized(_) => "resize",
+            _ => "window event",
+        });
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
@@ -1682,6 +1718,13 @@ impl ApplicationHandler for App {
 }
 
 /// `Movies\<name>.script` for `<name>.bik`.
+/// `gameEnd`'s `opOptionsSaveSettings`: the options and key bindings a mission's interface
+/// kept become the front end's (the next mission starts from them) and are saved.
+pub fn hand_back_options(session: &mut Session, game: &Game) {
+    session.fe.game.adopt_kept(&game.ui.fe.game);
+    session.fe.game.save_options();
+}
+
 pub fn script_name(movie: &str) -> String {
     let stem = movie.strip_suffix(".bik").unwrap_or(movie);
     format!("Movies\\{stem}.script")

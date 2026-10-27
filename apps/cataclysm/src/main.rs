@@ -16,6 +16,8 @@ mod crash;
 mod data;
 mod draw_check;
 mod game;
+#[cfg(test)]
+mod hang_checks;
 mod host;
 mod hotkeys;
 #[cfg(test)]
@@ -58,6 +60,7 @@ mod speech;
 #[cfg(test)]
 mod test_gpu;
 mod tour;
+mod watchdog;
 mod world;
 
 use std::path::{Path, PathBuf};
@@ -477,6 +480,21 @@ pub fn open_game_data(args: &Args) -> Result<GameData, String> {
     }
 }
 
+/// Whether `path` (a file that may not exist yet) lies inside the directory `dir`.
+fn is_inside(dir: &Path, path: &Path) -> bool {
+    let Ok(dir) = dir.canonicalize() else {
+        return false;
+    };
+    let Ok(abs) = std::path::absolute(path) else {
+        return false;
+    };
+    // The nearest folder that exists, as the file system names it.
+    abs.ancestors()
+        .skip(1)
+        .find_map(|a| a.canonicalize().ok())
+        .is_some_and(|p| p.starts_with(&dir))
+}
+
 /// Builds the front-end session on the game files.
 fn open_session(args: &Args, data: Rc<GameData>) -> Result<Session, String> {
     let read = |p: Option<PathBuf>| {
@@ -491,6 +509,19 @@ fn open_session(args: &Args, data: Rc<GameData>) -> Result<Session, String> {
             .root()
             .map(|r| r.join("config").join("hwc-options.cfg")),
         _ => Some(PathBuf::from("hwc-options.cfg")),
+    });
+    // Never write into an original install, even when run from inside it: the options and
+    // key bindings are then kept for this run only.
+    let options_path = options_path.filter(|p| {
+        let inside = data.layout() == Layout::Install
+            && data.root().is_some_and(|root| is_inside(root, p));
+        if inside {
+            eprintln!(
+                "cataclysm: {} is inside the original install; options will not be saved                  (pass --config <file> elsewhere)",
+                p.display()
+            );
+        }
+        !inside
     });
     // The player's key bindings live beside the options file.
     let keys_path = options_path.as_ref().map(|p| p.with_file_name("keys.cfg"));
@@ -511,6 +542,8 @@ fn open_session(args: &Args, data: Rc<GameData>) -> Result<Session, String> {
 
 fn main() -> ExitCode {
     crash::install();
+    // A main loop that stops responding writes where it was to the crash log.
+    watchdog::install(watchdog::to_crash_log);
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -528,7 +561,8 @@ fn main() -> ExitCode {
     let (data, session) = match opened {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("cataclysm: {e}");
+            // The game cannot start: the reason goes into the crash log too.
+            crash::append(&format!("cataclysm: the game could not start: {e}\n"));
             return ExitCode::FAILURE;
         }
     };
@@ -549,6 +583,21 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn options_inside_the_install_are_refused() {
+        let root = std::env::temp_dir().join(format!("hwc-inside-{}", std::process::id()));
+        let install = root.join("Cataclysm");
+        std::fs::create_dir_all(&install).unwrap();
+        assert!(is_inside(&install, &install.join("hwc-options.cfg")));
+        assert!(is_inside(
+            &install,
+            &install.join("config").join("keys.cfg")
+        ));
+        assert!(!is_inside(&install, &root.join("hwc-options.cfg")));
+        assert!(!is_inside(&install, &root.join("Cataclysm2").join("x.cfg")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn parse(args: &[&str]) -> Result<Args, String> {
         parse_args_from(args.iter().map(|s| s.to_string()))

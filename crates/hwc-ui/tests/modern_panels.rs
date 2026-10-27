@@ -32,6 +32,7 @@ fn ui(src: Rc<dyn AssetSource>, size: (i32, i32)) -> InGameUi {
             default_keys: Some("v 84\nkey  Escape  27\n".into()),
             keys: None,
             keys_path: None,
+            options_path: None,
         },
     )
     .expect("in-game ui");
