@@ -659,6 +659,14 @@ pub fn bullet_fired(u: &mut Universe, ship: ShipId, gun: usize, bullet: BulletId
     }
 }
 
+/// Set the `length` parameter (the third, `effect->variable + 8`) of the bullet's effect, as
+/// `beastCascadeEffectUpdate` does every frame so that the beam reaches its target.
+pub fn set_bullet_effect_length(u: &mut Universe, bullet: BulletId, length: f32) {
+    let Some(fx) = u.effects.as_mut() else { return };
+    let Some(&e) = fx.bullet_effect.get(&bullet) else { return };
+    fx.world.set_variable(e, 2, length.to_bits());
+}
+
 /// A bullet is gone: its effect goes with it (beams and big-gun shells keep theirs, which
 /// end by themselves).
 pub fn bullet_removed(u: &mut Universe, bullet: BulletId) {

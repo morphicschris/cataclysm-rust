@@ -348,3 +348,40 @@ fn crystals_are_unselectable_resource_holders() {
     let file = d.statics.ship(ShipType::dCrystal0).unwrap().custom_entries.iter().find(|(k, _)| k == "resourceValue").map(|(_, v)| v.split_whitespace().next().unwrap().parse::<i32>().unwrap());
     assert_eq!(Some(value), file);
 }
+
+/// The infection beam draws `eboltCascade.ebg` (the Beast weapon's bullet effect), and
+/// `beastCascadeEffectUpdate` keeps the effect's `length` parameter at the distance from the
+/// beam's source to its target, so the ribbons reach the infected ship.
+#[test]
+fn infection_beam_effect_spans_source_to_target() {
+    let Some(mut run) = armed_beast_run() else { return };
+    let src: Box<dyn DataSource> = if let Ok(dir) = std::env::var("HWC_EXTRACTED_DIR") {
+        Box::new(DirSource::new(dir).unwrap())
+    } else {
+        Box::new(BigArchive::open(std::path::Path::new(&std::env::var("HWC_GAME_DIR").unwrap()).join("cataclysm.big")).unwrap())
+    };
+    let data = hwc_sim::effects::EffectData::load_from(src.as_ref());
+    run.universe.effects = Some(Box::new(hwc_sim::effects::Effects::new(&data)));
+    let mut checked = 0;
+    for _ in 0..1200 {
+        run.step();
+        let u = &run.universe;
+        let fx = u.effects.as_ref().unwrap();
+        for &bid in &u.bullet_list {
+            let b = u.bullets.bullet(bid);
+            if b.weapon != hwc_sim::bullet::weapon::BEASTINFECT {
+                continue;
+            }
+            let e = fx.bullet_effect.get(&bid).and_then(|&e| fx.world.effect(e)).expect("the beam has its effect");
+            let l = b.length_vec;
+            let d = (l.x * l.x + l.y * l.y + l.z * l.z).sqrt();
+            let len = f32::from_bits(e.variables[2]);
+            // (A beam fired this update has not been through its effect update yet.)
+            if b.time_lived > 0.0 && d > 1.0 {
+                assert!((len - d).abs() < 0.01 * d, "effect length {len} vs beam {d}");
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "a beam was seen");
+}

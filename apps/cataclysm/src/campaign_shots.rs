@@ -334,6 +334,53 @@ fn mission_three_roll_call() {
         h.rollcall_docked, h.rollcall_remaining
     );
     rig.shot(g, "07_m3_roll_call");
+    // Off the screen the camera still turns (right drag) and zooms (wheel); the screen stays.
+    {
+        use hwc_ui::ingame::InputEvent as E;
+        assert!(!g
+            .ui
+            .fe
+            .screen_contains(hwc_ui::ingame::rollcall::SCREEN, 600, 400));
+        let angle = g.world.camera.angle;
+        g.input(E::MouseMove { x: 600, y: 400 }, &mut rig.audio);
+        g.input(
+            E::MouseButton {
+                left: false,
+                down: true,
+            },
+            &mut rig.audio,
+        );
+        g.input(E::MouseMove { x: 700, y: 400 }, &mut rig.audio);
+        g.input(
+            E::MouseButton {
+                left: false,
+                down: false,
+            },
+            &mut rig.audio,
+        );
+        rig.frame(g);
+        assert_ne!(
+            g.world.camera.angle, angle,
+            "the camera did not turn in the roll call"
+        );
+        let distance = g.world.camera.distance;
+        g.input(E::Wheel { up: false }, &mut rig.audio);
+        for _ in 0..8 {
+            rig.frame(g);
+        }
+        assert_ne!(
+            g.world.camera.distance, distance,
+            "the camera did not zoom in the roll call"
+        );
+        assert_eq!(g.ui.manager(), Some(Manager::RollCall));
+        g.input(
+            E::MouseMove {
+                x: SIZE.0 as i32 / 2,
+                y: SIZE.1 as i32 / 2,
+            },
+            &mut rig.audio,
+        );
+    }
     rig.frame(g);
     let fe = &g.ui.fe;
     let go = fe.find_atom("GoNowHyperspace").expect("GoNowHyperspace");
@@ -1265,4 +1312,72 @@ fn alt_focus_keeps_the_zoom() {
         (close - fit).abs() < fit * 0.02,
         "original Alt focus not at the framing distance {fit}: {close}"
     );
+}
+
+/// Mission 4: the genetics module infects the Clee-San and the Beast's infection beam
+/// (`eboltCascade.ebg`, its length kept at the source-to-target distance by
+/// `beastCascadeEffectUpdate`) is drawn from the module to the ship.
+#[test]
+fn mission_four_infection_beam() {
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(4, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    let beam = |g: &Game| {
+        let u = g.world.universe();
+        u.bullet_list.iter().copied().find(|&b| {
+            u.bullets.get(b).is_some_and(|b| {
+                b.weapon == hwc_sim::bullet::weapon::BEASTINFECT && b.time_lived > 0.0
+            })
+        })
+    };
+    rig.frames_until(g, 16 * 90, "the fleet arriving in mission 4", |g| {
+        g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE
+    });
+    // The Clee-San is escorted to the genetics module (a Beast mothership hulk), which then
+    // infects it (the script's "Switch": unlimited infection and SpecialOn the Clee-San).
+    // Escorting takes the player's fleet; here the Clee-San is put next to the module and
+    // the module told to infect it.
+    {
+        let u = g.world.universe_mut();
+        let find = |u: &hwc_sim::Universe, t| {
+            u.ships
+                .iter()
+                .find(|s| s.ship_type == t)
+                .map(|s| (s.id, s.posinfo.position))
+        };
+        let (module, mp) =
+            find(u, hwc_sim::statics::ShipType::dBeastMothership).expect("genetics module");
+        let (cs, old) = find(u, hwc_sim::statics::ShipType::dEcclesiam).expect("the Clee-San");
+        let new = hwc_math::Vector::new(mp.x + 2000.0, mp.y, mp.z);
+        u.ships.ship_mut(cs).posinfo.position = new;
+        hwc_sim::fow::move_viewer(u, cs, old, new);
+        hwc_sim::ships::beast::kas_set_infection_unlimited(u, &[module], true);
+        hwc_sim::ships::cl_special(u, &[module], &[cs]);
+        hwc_sim::ships::beast::kas_set_infection_unlimited(u, &[module], false);
+    }
+    rig.frames_until(g, 16 * 30, "the infection beam", |g| beam(g).is_some());
+    for i in 0..3 {
+        let Some(bid) = beam(g) else { break };
+        let b = g.world.universe().bullets.bullet(bid);
+        let p = Vec3::new(
+            b.posinfo.position.x,
+            b.posinfo.position.y,
+            b.posinfo.position.z,
+        );
+        let l = Vec3::new(b.length_vec.x, b.length_vec.y, b.length_vec.z);
+        g.world.follow_focus = false;
+        g.world.focus.clear();
+        g.world.camera.look_at = p + l * 0.5;
+        g.world.camera.distance = (l.length() * 1.2).max(800.0);
+        rig.frame(g);
+        rig.shot(g, &format!("12_m4_infection_beam_{i}"));
+        for _ in 0..8 {
+            rig.frame(g);
+        }
+    }
 }

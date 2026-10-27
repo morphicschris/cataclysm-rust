@@ -598,8 +598,15 @@ impl Game {
                 return;
             }
         }
+        // A camera drag ends wherever the button is let go (over the roll call too).
+        let ends_drag = self.right_down
+            && ev
+                == (InputEvent::MouseButton {
+                    left: false,
+                    down: false,
+                });
         let used = self.with_host(|ui, host| ui.handle_input(host, ev));
-        if used {
+        if used && !ends_drag {
             return;
         }
         // The sensors viewport takes nothing while it zooms (`smViewportProcess`).
@@ -641,7 +648,10 @@ impl Game {
                     if let Mode::Move(p) = &mut self.mode {
                         p.pause(false);
                     }
-                    if self.right_moved <= RIGHT_CLICK_LIMIT {
+                    // The roll call locks the orders out (`mrDisabled`): only the camera.
+                    if self.right_moved <= RIGHT_CLICK_LIMIT
+                        && self.ui.manager() != Some(hwc_ui::ingame::Manager::RollCall)
+                    {
                         self.right_click(audio);
                     }
                 }
@@ -1645,9 +1655,14 @@ impl Game {
         if self.paused || !self.world.run().game.hyper.player_can_hyperspace {
             return;
         }
-        if let Err(hwc_sim::campaign::HyperspaceRefused::ShipUnderConstruction) =
-            self.world.run_mut().hyperspace_button()
-        {
+        let r = self.world.run_mut().hyperspace_button();
+        if r.is_ok() {
+            // `ccFocusOnMyMothership`: the camera turns to the mothership for the jump.
+            if let Some(ms) = self.world.universe().base.players[PLAYER].mothership {
+                self.world.focus_on(vec![ms], false);
+            }
+        }
+        if let Err(hwc_sim::campaign::HyperspaceRefused::ShipUnderConstruction) = r {
             let text = self
                 .strings
                 .get("strShipsStillUnderConstruction")

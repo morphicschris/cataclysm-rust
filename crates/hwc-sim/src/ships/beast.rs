@@ -880,6 +880,8 @@ fn cascade_jump(u: &mut Universe, id: ShipId, source: ShipId, bullet: BulletId) 
 pub fn cascade_effect_update(u: &mut Universe, bid: BulletId) {
     let Some(b) = u.bullets.get_mut(bid) else { return };
     b.length_vec = Vector::new(0.1, 0.1, 0.1);
+    crate::effects::set_bullet_effect_length(u, bid, 0.1);
+    let Some(b) = u.bullets.get(bid) else { return };
     let (Some(owner), Some(gi)) = (b.owner, b.gun) else { return };
     let target = b.target;
     let Some(entry) = cascade(u, owner).and_then(|c| c.entries.iter().find(|e| e.bullet == Some(bid)).copied()) else { return };
@@ -902,6 +904,9 @@ pub fn cascade_effect_update(u: &mut Universe, bid: BulletId) {
     b.length_vec = len;
     b.heading = h;
     b.coordsys = hwc_math::Matrix::coord_sys_from_heading(h);
+    // The beam effect's length parameter is the distance to the target.
+    let d = (ld(len.x) * ld(len.x) + ld(len.y) * ld(len.y) + ld(len.z) * ld(len.z)).sqrt();
+    crate::effects::set_bullet_effect_length(u, bid, st(d));
 }
 
 // --- the module wrappers

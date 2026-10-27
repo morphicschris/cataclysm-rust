@@ -389,6 +389,13 @@ impl InGameUi {
                 self.fe.game.ig.manager.is_some()
             }
             InputEvent::MouseButton { left, down } => {
+                if !left && self.camera_passes_roll_call() {
+                    // The FE still sees the release of a press it had.
+                    if !down {
+                        self.fe.mouse_button(false, false);
+                    }
+                    return false;
+                }
                 if self.fe.game.ig.manager.is_some() {
                     if self.panel_click(left, down) {
                         return true;
@@ -423,6 +430,9 @@ impl InGameUi {
                     || overlay::mouse_button(&mut self.fe, left, down, x, y)
             }
             InputEvent::Wheel { up } => {
+                if self.camera_passes_roll_call() {
+                    return false;
+                }
                 if modern_build_manager::active(&self.fe) {
                     modern_build_manager::wheel(&mut self.fe, up);
                     return true;
@@ -511,6 +521,16 @@ impl InGameUi {
             overlay::modern_click(&mut self.fe, x, y);
         }
         true
+    }
+
+    /// The hyperspace roll call leaves the main view its mouse (`mrDisable` keeps
+    /// `RPM_MouseEvents`; only the orders check `mrDisabled`): off the roll call's own regions
+    /// the right button and the wheel still turn and zoom the camera. The left button stays
+    /// with the screen here.
+    fn camera_passes_roll_call(&self) -> bool {
+        let (x, y) = self.mouse;
+        self.fe.game.ig.manager == Some(Manager::RollCall)
+            && !self.fe.screen_contains(rollcall::SCREEN, x, y)
     }
 
     /// Shift/Alt/Ctrl held now, as binding modifier flags.

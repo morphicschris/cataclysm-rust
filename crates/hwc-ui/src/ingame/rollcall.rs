@@ -6,9 +6,10 @@
 //! (`AbortHyperspace`). Exactly one of the first two is disabled when the screen opens: quick
 //! docking while a ship of the player is in combat, otherwise the emergency jump.
 //!
-//! The game keeps running behind it; the main view takes no input while it is up
-//! (`mrDisable`). It closes when a button is pressed, or when the game's roll call ends by
-//! itself (every ship docked: the game reports no roll call any more).
+//! The game keeps running behind it; the main view takes no keys and no orders while it is up
+//! (`mrDisable`), but off the screen the right button and the wheel still move the camera
+//! (the main region keeps its mouse events). It closes when a button is pressed, or when the
+//! game's roll call ends by itself (every ship docked: the game reports no roll call any more).
 
 use crate::canvas::Rect;
 use crate::fer::Fer;

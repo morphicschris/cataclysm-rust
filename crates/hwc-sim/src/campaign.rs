@@ -421,6 +421,13 @@ pub fn go_now(u: &mut Universe, game: &mut Game) -> bool {
             join_parade(u, id);
         }
     }
+    // The capital ships are put at their parade slots at once (`GetMilitaryGroupAroundShip`,
+    // `setMilitaryParade`).
+    if let Some(ms) = u.base.players[HUMAN_PLAYER].mothership {
+        if let Some(p) = crate::command::military_group_around(u, ms).and_then(|c| u.commands.get(c)).and_then(|c| c.parade.clone()) {
+            crate::parade::set_parade(u, &p);
+        }
+    }
     game.hyper.rollcall_screen = false;
     game.log(LogKind::Flow, "hyperspace roll call: go now");
     true
