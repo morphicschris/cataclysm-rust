@@ -197,6 +197,51 @@ impl Facts {
     }
 }
 
+/// The ship a pick stands for: a component clamped to a ship (a mothership's module) picks
+/// its host (`selRectDragFunction`, `selSelectionClick`, `selShipUnderMouse`).
+pub fn stand_in(u: &Universe, id: ShipId) -> ShipId {
+    let component = u
+        .ship(id)
+        .and_then(|s| u.statics.ship(s.ship_type))
+        .is_some_and(|st| st.ship_class == Some(hwc_sim::statics::ShipClass::Component));
+    if !component {
+        return id;
+    }
+    hwc_sim::clamp::host_of(u, id)
+        .filter(|&h| u.ship(h).is_some())
+        .unwrap_or(id)
+}
+
+/// `selRectDragFunction`'s gathering: the ships inside the box that pass [`gathered`], each
+/// module standing for its host ([`stand_in`]) and every ship once. `facts` gives a host's
+/// facts.
+pub fn gather_inside(
+    inside: &[(ShipId, Facts)],
+    g: Gather,
+    stand_in: impl Fn(ShipId) -> ShipId,
+    facts: impl Fn(ShipId) -> Option<Facts>,
+) -> Vec<(ShipId, Facts)> {
+    let mut out: Vec<(ShipId, Facts)> = Vec::new();
+    for &(id, f) in inside {
+        if !gathered(&f, g) {
+            continue;
+        }
+        let host = stand_in(id);
+        let entry = if host == id {
+            (id, f)
+        } else {
+            match facts(host) {
+                Some(hf) => (host, hf),
+                None => continue,
+            }
+        };
+        if !out.iter().any(|(x, _)| *x == entry.0) {
+            out.push(entry);
+        }
+    }
+    out
+}
+
 /// `selRectDragFunction`'s test of one ship inside the box.
 pub fn gathered(f: &Facts, g: Gather) -> bool {
     if (!f.untargetable_type && (!f.targetable || f.hidden)) || !f.on_screen || f.dead {
@@ -335,8 +380,21 @@ fn special_keeps(f: &Facts, g: &SpecialGather) -> bool {
 }
 
 /// The "selecting" list while the box is dragged (`mrSelectHold`): the gathered ships the
-/// mode's filters keep. `inside` lists the ships in the box with their facts.
+/// mode's filters keep. `inside` lists the ships in the box with their facts; modules stand
+/// for their hosts as [`gather_inside`] picks them.
+#[cfg(test)]
 pub fn selecting(mode: Mode, inside: &[(ShipId, Facts)], sel: &Selected) -> Vec<ShipId> {
+    selecting_with(mode, inside, sel, |id| id, |_| None)
+}
+
+/// [`selecting`] with the hosts modules stand for and their facts.
+pub fn selecting_with(
+    mode: Mode,
+    inside: &[(ShipId, Facts)],
+    sel: &Selected,
+    stand_in: impl Fn(ShipId) -> ShipId,
+    facts: impl Fn(ShipId) -> Option<Facts>,
+) -> Vec<ShipId> {
     match mode {
         Mode::ForceAttack | Mode::Attack | Mode::Guard
             if !(if mode == Mode::Guard {
@@ -357,9 +415,8 @@ pub fn selecting(mode: Mode, inside: &[(ShipId, Facts)], sel: &Selected) -> Vec<
         (Mode::Special, Some(s)) => s.gather,
         _ => mode.gather(),
     };
-    inside
+    gather_inside(inside, g, stand_in, facts)
         .iter()
-        .filter(|(_, f)| gathered(f, g))
         .filter(|(id, f)| match mode {
             Mode::Attack => plain_attack_target(f),
             Mode::Guard => f.ally && !sel.ships.contains(id),
@@ -575,6 +632,32 @@ mod tests {
         assert_eq!(
             selecting(Mode::Special, &inside, &with(Some(friends))).len(),
             3
+        );
+    }
+    /// A box around the Kuun-Lan's modules picks the Kuun-Lan, once.
+    #[test]
+    fn modules_stand_for_their_mothership() {
+        let inside: Vec<(ShipId, Facts)> = [10u16, 11, 12, 20]
+            .iter()
+            .map(|&i| (ShipId(i), ship(true)))
+            .collect();
+        let host = |id: ShipId| {
+            if id.0 == 11 || id.0 == 12 {
+                ShipId(1)
+            } else {
+                id
+            }
+        };
+        let mine = [ShipId(10)];
+        let sel = Selected {
+            ships: &mine,
+            attack_capable: true,
+            hold_capable: true,
+            special: None,
+        };
+        assert_eq!(
+            selecting_with(Mode::Select, &inside, &sel, host, |_| Some(ship(true))),
+            vec![ShipId(10), ShipId(1), ShipId(20)]
         );
     }
 }

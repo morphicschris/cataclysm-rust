@@ -1176,7 +1176,19 @@ impl Game {
     /// manager the fog of war hides ships).
     /// Mines can be picked too (`selClickFromArray` takes any targetable object): in the
     /// sensors manager only those it shows.
+    /// A mothership's module picks the mothership (`selSelectionClick`).
     fn pick_ship(&self, size: (u32, u32), p: [f32; 2]) -> Option<ShipId> {
+        let u = self.world.universe();
+        self.pick_object(size, p).map(|id| {
+            if id.mine().is_some() {
+                id
+            } else {
+                bandbox::stand_in(u, id)
+            }
+        })
+    }
+
+    fn pick_object(&self, size: (u32, u32), p: [f32; 2]) -> Option<ShipId> {
         if self.sensors.is_open() {
             let u = self.world.universe();
             let fog = sensors::Fog::of(u);
@@ -1335,7 +1347,13 @@ impl Game {
             hold_capable: !bandbox::hold_capable(u, &self.selection).is_empty(),
             special: bandbox::special_gather(u, &self.selection),
         };
-        bandbox::selecting(mode, &inside, &sel)
+        bandbox::selecting_with(
+            mode,
+            &inside,
+            &sel,
+            |id| bandbox::stand_in(u, id),
+            |id| bandbox::Facts::of(u, id, PLAYER),
+        )
     }
 
     /// `mrBandBoxRelease`: the band box's order.
