@@ -370,6 +370,15 @@ pub struct Game {
     /// back from the log on load ([`MissionRun::after_load`]) so older saves still read.
     #[serde(skip, default)]
     pub show_mines_in_sensors: bool,
+    /// 0x91b6b0: the disguise menus `SetCurrentMimicItem` and `SetMCVItemIndex` fill (the
+    /// original saves them, `MimicSaveDisguiseTables`); here they come back from the log on load
+    /// ([`MissionRun::after_load`]) so older saves still read.
+    #[serde(skip, default)]
+    pub disguise_tables: crate::ships::mimic::DisguiseTables,
+    /// 0x91ce74: the disguise menu the "Select Mimic" submenu picked
+    /// (`MimicSetDisguiseTablesFlag`; not saved).
+    #[serde(skip, default)]
+    pub mimic_slot: usize,
     pub sensors_look_at: Vector,
     pub wide_screen: bool,
     /// The wide-screen (letterbox) calls in order, with their frame counts, for a front end
@@ -651,6 +660,11 @@ impl MissionRun {
             .rev()
             .find_map(|e| e.text.strip_prefix(SHOW_MINES_LOG))
             .is_some_and(|rest| !rest.starts_with("0)"));
+        let mut t = crate::ships::mimic::DisguiseTables::default();
+        for e in &self.game.log {
+            crate::kas_host::replay_disguise_log(&mut t, &e.text);
+        }
+        self.game.disguise_tables = t;
     }
 
     /// Sets up mission `config.mission` from `src` with the mission script `script`: the
@@ -1037,6 +1051,8 @@ pub(crate) fn empty_game(config: MissionConfig) -> Game {
         sensors_open: false,
         sensors_kas_flag: 0,
         show_mines_in_sensors: false,
+        disguise_tables: Default::default(),
+        mimic_slot: 0,
         sensors_look_at: Vector::ZERO,
         wide_screen: false,
         wide_screen_events: Vec::new(),

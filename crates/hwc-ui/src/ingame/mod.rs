@@ -877,6 +877,7 @@ pub fn command_of(a: Action) -> Option<host::Command> {
         LEECH => C::Leech,
         LINK => C::Link,
         UNLINK => C::Unlink,
+        CANCEL_MIMIC => C::UnMimic,
         CLOAK => C::Cloak,
         LAUNCH_SWARMERS => C::Swarmers,
         BIG_GUN_ATTACK => C::BigGun,

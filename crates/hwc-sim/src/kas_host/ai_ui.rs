@@ -27,13 +27,11 @@ pub(super) fn disguise_slot(item_type: i32) -> usize {
 
 /// `kasfSetCurrentMimicItem` on the disguise menus: `MimicAddDisguiseType(slot, type)`, the
 /// type being `StrToShipType` of the name (-1 when unknown). Slot 8 resets the asteroid list.
-#[cfg_attr(not(test), allow(dead_code))] // until the universe keeps the disguise tables
 pub(super) fn add_mimic_item(tables: &mut DisguiseTables, item_type: i32, ship_type: i32) {
     tables.add_type(disguise_slot(item_type), ship_type);
 }
 
 /// `kasfSetMCVItemIndex` on the disguise menus: `MimicSetDisguiseDefault(slot, index)`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn set_mcv_item_index(tables: &mut DisguiseTables, item_type: i32, index: i32) {
     tables.set_default(disguise_slot(item_type), index);
 }
@@ -129,20 +127,20 @@ macro_rules! ai_ui_methods {
         }
 
         /// `kasfSetCurrentMimicItem` (0x493530): adds the ship type to a disguise menu (item
-        /// type 0 the player's, 1 the computer's, 2 resets the asteroid list). The universe
-        /// keeps no disguise tables yet (see [`ai_ui::add_mimic_item`]): logged.
+        /// type 0 the player's, 1 the computer's, 2 resets the asteroid list). The log line
+        /// rebuilds the menus on load ([`replay_disguise_log`]).
         fn set_current_mimic_item(&mut self, _cx: &Cx, item_type: i32, ship_name: Str<'_>) {
             let name = Self::str_text(ship_name);
             let t = ShipType::from_name(&name).map_or(-1, |t| t.index() as i32);
-            let slot = ai_ui::disguise_slot(item_type);
-            self.log(LogKind::Flow, format!("SetCurrentMimicItem: disguise menu {slot} += {name:?} ({t}) (no disguise tables)"));
+            ai_ui::add_mimic_item(&mut self.g.disguise_tables, item_type, t);
+            self.log(LogKind::Flow, format!("{MIMIC_ITEM_LOG}{item_type}, {t}) {name:?}"));
         }
 
-        /// `kasfSetMCVItemIndex` (0x493590): the default entry of a disguise menu (see
-        /// [`ai_ui::set_mcv_item_index`]): logged, as for `SetCurrentMimicItem`.
+        /// `kasfSetMCVItemIndex` (0x493590): how many entries of a disguise menu a single Mimic
+        /// may take (see [`ai_ui::set_mcv_item_index`]).
         fn set_mcv_item_index(&mut self, _cx: &Cx, item_type: i32, index: i32) {
-            let slot = ai_ui::disguise_slot(item_type);
-            self.log(LogKind::Flow, format!("SetMCVItemIndex: disguise menu {slot} default = {index} (no disguise tables)"));
+            ai_ui::set_mcv_item_index(&mut self.g.disguise_tables, item_type, index);
+            self.log(LogKind::Flow, format!("{MCV_INDEX_LOG}{item_type}, {index})"));
         }
 
         // ---- objectives, pings, pointers -----------------------------------------------

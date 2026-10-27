@@ -374,7 +374,10 @@ fn mission2_workers_repair_the_bushan_re() {
             "the repair upgrade"
         );
         let p = target + Vector::new(-3000.0 - 400.0 * k as f32, 2500.0, 300.0 * k as f32);
+        // Moved by hand, so the fog grid is told (the script finds the Bushan-Re through it).
+        let old = u.ships.ship(w).posinfo.position;
         u.ships.ship_mut(w).posinfo.position = p;
+        hwc_sim::fow::move_viewer(u, w, old, p);
     }
     let mut n = 0;
     while g.world.run().game.objective("RepairDestroyer").is_none()

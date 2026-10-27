@@ -50,6 +50,24 @@ const NOT_PLAYER_CONTROLLED: u32 = 0x0010_0000;
 const LAUNCHING: u32 = 0x0100_0000;
 const LAUNCH_PENDING: u32 = 0x0080_0000;
 
+/// The log lines of `SetCurrentMimicItem` and `SetMCVItemIndex`: `<prefix><item type>, <value>)`.
+pub(crate) const MIMIC_ITEM_LOG: &str = "SetCurrentMimicItem(";
+pub(crate) const MCV_INDEX_LOG: &str = "SetMCVItemIndex(";
+
+/// Replays one log line onto the disguise menus (a saved game rebuilds them from its log).
+pub(crate) fn replay_disguise_log(t: &mut crate::ships::mimic::DisguiseTables, line: &str) {
+    let parse = |rest: &str| -> Option<(i32, i32)> {
+        let (a, b) = rest.split_once(", ")?;
+        let b = b.split(')').next()?;
+        Some((a.parse().ok()?, b.parse().ok()?))
+    };
+    if let Some((item, ty)) = line.strip_prefix(MIMIC_ITEM_LOG).and_then(parse) {
+        ai_ui::add_mimic_item(t, item, ty);
+    } else if let Some((item, index)) = line.strip_prefix(MCV_INDEX_LOG).and_then(parse) {
+        ai_ui::set_mcv_item_index(t, item, index);
+    }
+}
+
 /// The game side of one KAS run.
 pub struct SimHost<'a> {
     pub u: &'a mut Universe,
@@ -639,24 +657,15 @@ impl KasRuntime for SimHost<'_> {
         i32::from(idle)
     }
 
+    /// `kasfHasShipBeenDiscovered` (0x494b90): a ship of the selection that is not hidden lies in
+    /// a cell of the fog grid the human player's ships see now (`fowPointGetViewerCount > 0`),
+    /// the same test the sensors use to show it. Without a grid nothing is discovered.
     fn has_ship_been_discovered(&mut self, _cx: &Cx, ship: Ships) -> i32 {
-        // Fog of war is not modelled: a ship counts as discovered when it is not hidden and lies
-        // within the fog-of-war radius of one of the human player's visible ships.
         let v = self.ships(ship);
-        let viewers: Vec<(Vector, f32)> = self
-            .u
-            .ship_list
-            .iter()
-            .filter_map(|&id| self.u.ships.get(id))
-            .filter(|s| s.player == HUMAN_PLAYER && s.flags & HIDDEN_OR_DEAD == 0)
-            .map(|s| (s.posinfo.position, self.u.statics.ship(s.ship_type).map_or(0.0, |st| st.fow_radius)))
-            .collect();
+        let Some(grid) = self.u.fog.grids.get(HUMAN_PLAYER).and_then(Option::as_ref) else { return 0 };
         for id in v {
             let Some((pos, hidden)) = self.object_state(id) else { continue };
-            if hidden {
-                continue;
-            }
-            if viewers.iter().any(|&(p, r)| distance_squared(p, pos) <= ld(r) * ld(r)) {
+            if !hidden && grid.point_viewer_count(pos) > 0 {
                 return 1;
             }
         }
@@ -764,10 +773,14 @@ impl KasRuntime for SimHost<'_> {
         }
     }
 
-    fn upgrade_ships(&mut self, cx: &Cx, ships: Ships) {
-        // suShipApplyUpgrades: research upgrades are not modelled yet; the ships keep their
-        // base statistics.
-        let _ = (cx, ships);
+    /// `kasfShipsUpgrade` (0x494290): `suShipApplyUpgrades` on every ship of the selection
+    /// (Mission 2's Turanic corvettes take the disguise upgrade from `TECH_MIMIC` this way).
+    fn upgrade_ships(&mut self, _cx: &Cx, ships: Ships) {
+        for id in self.ships(ships) {
+            if self.u.ships.get(id).is_some() {
+                crate::upgrade::apply_upgrades(self.u, id);
+            }
+        }
     }
 
     fn delete_ships_when_mission_ends(&mut self, _cx: &Cx, shipstodelete: Ships) {

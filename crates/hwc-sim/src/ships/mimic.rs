@@ -1052,6 +1052,20 @@ pub fn render_state(u: &Universe, id: ShipId) -> Option<(f32, Option<ShipType>)>
     ))
 }
 
+/// The ship type and colour scheme a Mimic is drawn with: the disguise's once the morph is past
+/// half way (morph progress below 0.5), else `None` (its own). The morph itself is drawn as
+/// that switch.
+pub fn drawn_look(u: &Universe, id: ShipId) -> Option<(ShipType, usize)> {
+    let m = spec(u, id)?;
+    if m.state == state::NONE || 0.5 <= m.morph {
+        return None;
+    }
+    let t = usize::try_from(m.current.ship_type).ok().and_then(ShipType::from_index)?;
+    u.statics.ship(t)?;
+    let scheme = usize::try_from(m.current.colour).unwrap_or(u.ships.ship(id).color_scheme);
+    Some((t, scheme))
+}
+
 /// Disguise types the computer players pick from (0x8bab58..): per mimic type and race.
 const MIMIC_SOMTAAW: [usize; 4] = [0, 1, 3, 17];
 const MCV_SOMTAAW: [usize; 5] = [4, 14, 7, 6, 8];
@@ -1090,7 +1104,7 @@ pub struct DisguiseEntry {
 
 /// The disguise menus (`MimicInitDisguiseTables` 0x5b46c0 and friends, 0x91b6b0): per player
 /// (and slot 8, the asteroids) the types offered and the default one.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct DisguiseTables {
     pub entries: [Vec<DisguiseEntry>; 9],
     pub defaults: [i32; 9],
