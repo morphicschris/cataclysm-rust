@@ -27,7 +27,8 @@ use hwc_render::assets::{load_mad_clip, mothership_modules, read_script, AssetSo
 use hwc_render::effects::{EffectBatch, Line as FxLine, Sprite, FULL_UV};
 use hwc_render::lod::{screen_radius, LodKind, LodSelector, LodTable};
 use hwc_render::render_state::{
-    normalized_team_color, CollisionBox, ConstructionState, ShipTint, TintParams,
+    infection_progress, normalized_team_color, CollisionBox, ConstructionState, ShipTint,
+    TintParams,
 };
 use hwc_render::trails::{
     ShipTrailDef, ShipTrails, TeamTrailColors, TrailFrame, TrailGate, TrailTick, TrailTweaks,
@@ -131,6 +132,34 @@ fn drawn_look(u: &Universe, s: &hwc_sim::object::Ship) -> (ShipType, usize) {
     hwc_sim::ships::mimic::drawn_look(u, s.id).unwrap_or((s.ship_type, s.color_scheme))
 }
 
+/// `rndRenderObject`'s Beast infection state: while the infection timer runs (or is set at
+/// all during an NIS) the type the ship becomes is blended in over it, through the infection
+/// duration (`beastInfectDuration`; 4 s in an NIS).
+fn infection_look(u: &Universe, s: &hwc_sim::object::Ship) -> Option<(ShipType, f32)> {
+    let (timer, now) = (s.beast.timer, u.total_time_elapsed);
+    if !(now < timer || (timer != 0.0 && u.nis_running)) {
+        return None;
+    }
+    let stat = u.statics.ship(s.ship_type)?;
+    let to = hwc_sim::ships::beast::infection_stats(stat)?.2?;
+    let duration = if u.nis_running {
+        4.0
+    } else {
+        hwc_sim::ships::beast::infect_duration(u, s.ship_type) as f32
+    };
+    Some((to, infection_progress(now, timer, duration)))
+}
+
+/// `rndRenderObject`'s lightning state: the ship's flicker is on and within its window (not
+/// for a Mimic in disguise).
+fn lightning_on(u: &Universe, s: &hwc_sim::object::Ship) -> bool {
+    let (f, now) = (&s.flicker, u.total_time_elapsed);
+    f.state != 0
+        && f.next <= now
+        && now < f.end
+        && s.flags2 & hwc_sim::object::flags2::DISGUISED == 0
+}
+
 fn missile_key(m: &hwc_sim::missile::Missile) -> MissileKey {
     (m.race.index(), m.kind == hwc_sim::missile::kind::MINE)
 }
@@ -200,6 +229,11 @@ struct Item {
     time: f32,
     /// Under external construction: the build progress and the mesh-space collision box.
     construction: Option<ConstructionState>,
+    /// Beast infection: the type it becomes (drawn over the hull in its colour scheme) and
+    /// the progress, 0..1.
+    infection: Option<(ShipType, usize, f32)>,
+    /// Electric bolts crawl over the hull.
+    lightning: bool,
 }
 
 /// The mission's universe and everything needed to draw it.
@@ -631,7 +665,11 @@ impl World {
         let types: Vec<ShipType> = u
             .ships
             .iter()
-            .flat_map(|s| [s.ship_type, drawn_look(u, s).0])
+            .flat_map(|s| {
+                let infected = infection_look(u, s).map(|(t, _)| t);
+                [Some(s.ship_type), Some(drawn_look(u, s).0), infected]
+            })
+            .flatten()
             .collect();
         if types.iter().all(|t| self.art.contains_key(t)) && self.resource_kinds_loaded() {
             return Ok(());
@@ -776,7 +814,12 @@ impl World {
             .universe()
             .ships
             .iter()
-            .map(|s| drawn_look(self.universe(), s))
+            .flat_map(|s| {
+                let u = self.universe();
+                let infected = infection_look(u, s).map(|(t, _)| (t, s.color_scheme));
+                [Some(drawn_look(u, s)), infected]
+            })
+            .flatten()
             .collect();
         for (t, scheme) in needed {
             let Some(art) = self.art.get_mut(&t) else {
@@ -1531,6 +1574,8 @@ impl World {
                 tint,
                 time: now,
                 construction,
+                infection: infection_look(u, s).map(|(t, p)| (t, s.color_scheme, p)),
+                lightning: lightning_on(u, s),
             });
             frame.poses.push(pose);
             let mesh = art
@@ -1539,9 +1584,8 @@ impl World {
                 .and_then(|t| t.levels.get(nominal))
                 .is_none_or(|l| l.kind == LodKind::Mesh);
             frame.ids.push((Some(id), mesh));
-            // TODO(render states): cloak fade/wipe, phase blend, Beast infection and EMP
-            // lightning once the simulation exposes cloaking, phasing, infection and the
-            // Naggarok's EMP.
+            // TODO(render states): cloak fade/wipe, phase blend and the Naggarok's EMP
+            // lightning once the simulation exposes cloaking, phasing and the EMP.
         }
         // Dead hulls the Remastered death sequences keep in view.
         if let Some(h) = &self.hwr {
@@ -1564,6 +1608,8 @@ impl World {
                     tint: TintParams::default(),
                     time: now as f32,
                     construction: None,
+                    infection: None,
+                    lightning: false,
                 });
                 frame.poses.push(None);
                 frame.ids.push((None, true));
@@ -1594,6 +1640,8 @@ impl World {
                 tint: TintParams::default(),
                 time: now,
                 construction: None,
+                infection: None,
+                lightning: false,
             });
             frame.poses.push(None);
             frame.ids.push((None, false));
@@ -1640,6 +1688,8 @@ impl World {
                     tint: TintParams::default(),
                     time: now,
                     construction: None,
+                    infection: None,
+                    lightning: false,
                 });
                 frame.poses.push(None);
                 frame.ids.push((None, true));
@@ -1835,6 +1885,10 @@ impl World {
                 transform: item.transform,
                 age: item.age,
             });
+            let infection = item.infection.and_then(|(t, scheme, p)| {
+                let infected = self.art.get(&t).and_then(|a| a.gpu.get(&scheme))?;
+                Some((infected, p))
+            });
             states.push(ShipRenderState {
                 lod: item.lod,
                 pose: pose.as_deref(),
@@ -1842,6 +1896,8 @@ impl World {
                 tint: item.tint,
                 time: item.time,
                 construction: item.construction,
+                infection,
+                emp_lightning: item.lightning,
                 ..Default::default()
             });
         }

@@ -199,10 +199,10 @@ fn ship_just_disabled(u: &mut Universe, id: ShipId) {
 /// player (`univConvertShipToPlayer`). True when the ship is gone (it stops thinking).
 pub fn check_infection_complete(u: &mut Universe, id: ShipId) -> bool {
     let Some(s) = u.ships.get(id) else { return false };
-    if s.beast.timer == 0.0 {
+    // Not while an NIS runs: its `beastEffect` sets the timer for the look alone.
+    if s.beast.timer == 0.0 || u.nis_running {
         return false;
     }
-    // (Not during an in-game cinematic, which the simulation does not have.)
     if s.command.is_some() {
         crate::command::remove_ships_from_doing_stuff(u, &[id]);
     }
@@ -798,6 +798,8 @@ fn fire_at(u: &mut Universe, id: ShipId, target: ShipId) {
         }
     }
     let Some(bullet) = bullet else { return };
+    // The beam has no hit effect (`bullet->hitEffect` cleared).
+    crate::effects::clear_bullet_hit_effect(u, bullet);
     let player = u.ships.ship(id).player;
     let (old_infector, old_player) = {
         let t = u.ships.ship_mut(target);
@@ -859,6 +861,7 @@ fn cascade_jump(u: &mut Universe, id: ShipId, source: ShipId, bullet: BulletId) 
     let gun = u.bullets.get(bullet).and_then(|b| b.gun);
     let new_bullet = gun.and_then(|gi| crate::bullet::create(u, id, gi, Some(source), Some(next), 1.0));
     let Some(nb) = new_bullet else { return };
+    crate::effects::clear_bullet_hit_effect(u, nb);
     if attack_target(u, source, next, Some(nb)) {
         let points = u.ships.ship(source).beast.cascade_points;
         let cost = u.statics.ship(u.ships.ship(next).ship_type).map_or(0.0, |s| s.beast_attack_cascade_cost);

@@ -500,6 +500,7 @@ fn banked_nis_camera() {
     let mut frames = 0;
     let mut shot = false;
     let mut ejected_shot = false;
+    let mut beast_shot = false;
     let hangar = |g: &Game| {
         g.world
             .universe()
@@ -517,6 +518,20 @@ fn banked_nis_camera() {
         // housekeeping leaves it alone while an NIS plays (it used to explode at once).
         if n.kind.in_own_level() && time < 78.0 {
             assert!(hangar(g), "the hangar module died at {time:.1} s");
+        }
+        // At 43.7 s the Beast takes the hangar: electric bolts crawl over it (`ebolts`, for
+        // 2.5 s) and its infected look blends in over 4 s (`beastEffect`).
+        if !beast_shot && time > 45.0 {
+            let u = g.world.universe();
+            let h = u
+                .ships
+                .iter()
+                .find(|s| s.ship_type == hwc_sim::statics::ShipType::bSectMoship)
+                .expect("hangar");
+            assert!(h.beast.timer != 0.0, "beastEffect did not reach the hangar");
+            assert!(h.flicker.state != 0, "ebolts did not reach the hangar");
+            rig.shot(g, "10_nis_hangar_beast");
+            beast_shot = true;
         }
         if !ejected_shot && time > 64.0 {
             rig.shot(g, "10_nis_hangar_ejected");
