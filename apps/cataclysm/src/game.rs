@@ -442,6 +442,7 @@ impl Game {
         g.world.lens_flares = options.get("enableLensFlare") != 0;
         g.world.full_detail = options.get("hwcFullDetailShips") != 0;
         g.world.focus_zoom = options.get("hwcFocusZoom") != 0;
+        g.world.alt_focus_keeps_zoom = options.get("hwcAltFocusKeepsZoom") != 0;
         g.world.zoom_clear = options.get("hwcZoomClear") != 0;
         g.world.render_list = options.get("hwcRenderList") != 0;
         g.world.formation_focus_leader = options.get("hwcFormationFocusFire") != 0;
@@ -479,6 +480,7 @@ impl Game {
         self.letterbox.tall = options.get("hwcOriginalLetterbox") == 0;
         self.world.full_detail = options.get("hwcFullDetailShips") != 0;
         self.world.focus_zoom = options.get("hwcFocusZoom") != 0;
+        self.world.alt_focus_keeps_zoom = options.get("hwcAltFocusKeepsZoom") != 0;
         self.world.zoom_clear = options.get("hwcZoomClear") != 0;
         self.world.render_list = options.get("hwcRenderList") != 0;
         self.world.formation_focus_leader = options.get("hwcFormationFocusFire") != 0;

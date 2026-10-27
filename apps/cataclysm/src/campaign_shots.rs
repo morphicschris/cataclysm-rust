@@ -1179,3 +1179,71 @@ fn mission_three_mines() {
     });
     assert!(ordered, "no attack order on the boxed mines");
 }
+
+/// Mission 1 once the fleet is in: the Alt focus (`ccFocusClose`) recentres on a ship at the
+/// current zoom distance, also when repeated (`hwcAltFocusKeepsZoom`); with the original's
+/// behaviour it closes in to frame the ship.
+#[test]
+fn alt_focus_keeps_the_zoom() {
+    use hwc_sim::statics::ShipType;
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(1, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    rig.frames_until(g, 16 * 60, "the fleet arriving in mission 1", |g| {
+        g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE
+    });
+    let u = g.world.universe();
+    let workers: Vec<_> = u
+        .ship_list
+        .iter()
+        .copied()
+        .filter(|&id| {
+            u.ship(id)
+                .is_some_and(|s| s.player == 0 && s.ship_type == ShipType::sWorker)
+        })
+        .collect();
+    assert!(workers.len() >= 2, "two workers");
+    assert!(g.world.alt_focus_keeps_zoom, "on by default");
+    g.world.focus_on(vec![workers[0]], false);
+    for _ in 0..32 {
+        rig.frame(g);
+    }
+    let before = g.world.camera.distance;
+    g.world.focus_on(vec![workers[1]], true);
+    for _ in 0..32 {
+        rig.frame(g);
+    }
+    assert_eq!(g.world.focus, vec![workers[1]]);
+    let after = g.world.camera.distance;
+    assert!(
+        (after - before).abs() < 1.0,
+        "Alt focus zoomed: {before} -> {after}"
+    );
+    g.world.focus_on(vec![workers[1]], true);
+    for _ in 0..32 {
+        rig.frame(g);
+    }
+    let again = g.world.camera.distance;
+    assert!(
+        (again - before).abs() < 1.0,
+        "Alt focus again zoomed: {before} -> {again}"
+    );
+
+    g.world.alt_focus_keeps_zoom = false;
+    g.world.focus_on(vec![workers[0]], true);
+    for _ in 0..48 {
+        rig.frame(g);
+    }
+    let fit = g.world.focus_min_zoom();
+    let close = g.world.camera.distance;
+    eprintln!("kept: {before:.0}; original close-up: {close:.0} (framing {fit:.0})");
+    assert!(
+        (close - fit).abs() < fit * 0.02,
+        "original Alt focus not at the framing distance {fit}: {close}"
+    );
+}

@@ -151,6 +151,9 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // 1: focusing again on the ships already in focus zooms in to frame them (the
     // original's autozoom); 0: a repeated focus does nothing (`--focus-zoom`).
     ("hwcFocusZoom", 1),
+    // 1: the Alt focus recentres on the ships at the current zoom distance; 0: the
+    // original's close-up on them (`--alt-focus`).
+    ("hwcAltFocusKeepsZoom", 1),
     // 1: the closest zoom on focused ships also keeps the near clip plane outside their
     // hulls; 0: the original's limit alone (`--zoom-limit`).
     ("hwcZoomClear", 1),

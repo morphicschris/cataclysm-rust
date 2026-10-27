@@ -308,6 +308,10 @@ pub struct World {
     /// Focusing again on the ships already in focus zooms in on them (the original's
     /// "autozoom", on by default; `hwcFocusZoom = 0` turns it off).
     pub focus_zoom: bool,
+    /// The Alt focus (Alt+click, Alt+band box) recentres on the ships at the current zoom
+    /// distance instead of closing in on them (a user-requested change, on by default;
+    /// `hwcAltFocusKeepsZoom = 0` gives back the original's `ccFocusClose`).
+    pub alt_focus_keeps_zoom: bool,
     /// The closest zoom on focused ships also keeps the near clip plane outside their hulls (a
     /// user-requested addition, on by default; `hwcZoomClear = 0` leaves the original's limit).
     pub zoom_clear: bool,
@@ -443,6 +447,7 @@ impl World {
             render_list: true,
             focus_close: false,
             focus_zoom: true,
+            alt_focus_keeps_zoom: true,
             zoom_clear: true,
             formation_focus_leader: false,
             hwr: None,
@@ -1183,16 +1188,19 @@ impl World {
 
     /// `ccFocus` (`close` false) and `ccFocusClose` (`close` true, the Alt focus) on the main
     /// camera. The same ships again ask for the close-up (`zoomInCloseAsPossible`); new ones
-    /// become the focus, with the camera kept at least as far as frames them.
+    /// become the focus, with the camera kept at least as far as frames them. With
+    /// [`alt_focus_keeps_zoom`](Self::alt_focus_keeps_zoom) the Alt focus only recentres.
     pub fn focus_on(&mut self, ships: Vec<ShipId>, close: bool) {
         if ships.is_empty() {
             return;
         }
+        let recentre_only = close && self.alt_focus_keeps_zoom;
+        let close = close && !recentre_only;
         let same = !self.focus.is_empty()
             && ships.len() == self.focus.len()
             && ships.iter().all(|id| self.focus.contains(id));
         if same {
-            if close || self.focus_zoom {
+            if close || (self.focus_zoom && !recentre_only) {
                 self.focus_close = true;
             }
             return;

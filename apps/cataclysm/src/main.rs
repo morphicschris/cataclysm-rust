@@ -49,6 +49,8 @@ mod quality_shots;
 mod resui_shots;
 #[cfg(test)]
 mod save_checks;
+#[cfg(test)]
+mod m3_dock_probe;
 mod saves;
 #[cfg(test)]
 mod screen_shots;
@@ -155,6 +157,10 @@ options:
   --focus-zoom <on|off> on (default, as the original): focusing again on the ships already
                         in focus (F twice) eases the camera in to frame them; off: a
                         repeated focus does nothing. Options file: hwcFocusZoom = 1/0
+  --alt-focus <mode>    keep (default, a user-requested change: Alt+click and Alt+band box
+                        recentre on the ships at the current zoom distance) or original
+                        (the original's close-up on them); options file:
+                        hwcAltFocusKeepsZoom = 1/0
   --zoom-limit <mode>   hull (default, a user-requested addition: the closest zoom on the
                         focused ships also keeps the near clip plane outside their hulls) or
                         original (the original's limit from their collision size and minimum
@@ -270,6 +276,9 @@ pub struct Args {
     /// `--focus-zoom`, `--zoom-limit` (Some(true): hull), `--draw-distance` (Some(true):
     /// original); None: the options file.
     pub focus_zoom: Option<bool>,
+    /// `--alt-focus`: Some(true) keep (recentre at the current zoom), Some(false) the
+    /// original's close-up; None: the options file.
+    pub alt_focus_keeps_zoom: Option<bool>,
     pub zoom_clear: Option<bool>,
     pub render_list: Option<bool>,
     /// `--letterbox` (Some(true): tall); None: the options file.
@@ -312,6 +321,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
         health_brackets: None,
         smooth_zoom: None,
         focus_zoom: None,
+        alt_focus_keeps_zoom: None,
         zoom_clear: None,
         render_list: None,
         tall_letterbox: None,
@@ -420,6 +430,14 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
                     "off" => false,
                     v => return Err(format!("unknown --focus-zoom value {v}")),
                 })
+            }
+            "--alt-focus" => {
+                a.alt_focus_keeps_zoom =
+                    Some(match value("--alt-focus")?.to_ascii_lowercase().as_str() {
+                        "keep" => true,
+                        "original" => false,
+                        v => return Err(format!("unknown --alt-focus mode {v}")),
+                    })
             }
             "--zoom-limit" => {
                 a.zoom_clear = Some(match value("--zoom-limit")?.to_ascii_lowercase().as_str() {
