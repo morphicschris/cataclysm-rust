@@ -585,17 +585,7 @@ pub fn load_level(u: &mut Universe, src: &dyn DataSource, dir: &str, file: &str,
     u.world_bounds = Vector::new(st(ld(sm.universe_size.x) + 5000.0), st(ld(sm.universe_size.y) + 5000.0), st(ld(sm.universe_size.z) + 5000.0));
     state.sm = sm;
 
-    // levelPreInit: everything is needed, then the level's ExcludeShips / IncludeShips in file
-    // order (`MissionPreloadScriptTable`).
-    flag_everything_needed(u);
-    for (k, v) in &lines {
-        match k.to_ascii_lowercase().as_str() {
-            "excludeships" => exclude_ship(u, v, false, ctx),
-            "includeships" => exclude_ship(u, v, true, ctx),
-            _ => {}
-        }
-    }
-
+    ship_exclusions(u, &lines, ctx);
     for (k, v) in &lines {
         match k.to_ascii_lowercase().as_str() {
             "missionsphere" => mission_sphere(u, src, dir, v, ctx, state)?,
@@ -603,6 +593,28 @@ pub fn load_level(u: &mut Universe, src: &dyn DataSource, dir: &str, file: &str,
             _ => {}
         }
     }
+    Ok(())
+}
+
+/// levelPreInit: everything is needed, then the level's ExcludeShips / IncludeShips in file
+/// order (`MissionPreloadScriptTable`).
+fn ship_exclusions(u: &mut Universe, lines: &[(String, String)], ctx: &LevelContext) {
+    flag_everything_needed(u);
+    for (k, v) in lines {
+        match k.to_ascii_lowercase().as_str() {
+            "excludeships" => exclude_ship(u, v, false, ctx),
+            "includeships" => exclude_ship(u, v, true, ctx),
+            _ => {}
+        }
+    }
+}
+
+/// The level's ExcludeShips / IncludeShips again, for a saved game: the statics they change
+/// are not saved, and a loaded game links to statics fresh from the game files.
+pub fn reapply_ship_exclusions(u: &mut Universe, src: &dyn DataSource, dir: &str, file: &str, ctx: &LevelContext) -> Result<(), LevelError> {
+    let path = format!("{dir}{file}");
+    let lines = read_lines(src, &path).ok_or_else(|| LevelError(format!("{path}: not found")))?;
+    ship_exclusions(u, &lines, ctx);
     Ok(())
 }
 

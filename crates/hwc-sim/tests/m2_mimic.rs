@@ -100,7 +100,15 @@ fn mission3_player_mimic_takes_a_shape_from_the_disguise_menu() {
     run.run(16 * 4);
     assert!(mimic::is_disguised(&run.universe, id));
     assert_eq!(mimic::apparent_ship_type(&run.universe, id), Some(ShipType::sRecon));
+    // Looking like one of its own ships it still shows to the computer player.
+    assert!(hwc_sim::visibility::visible_to_player(&run.universe, id, 1));
     hwc_sim::player_orders::mr_mimic_undisguise(&mut run.universe, &[id]);
     run.run(16 * 4);
     assert!(!mimic::is_disguised(&run.universe, id));
+    // As a Turanic fighter ("Enemy Ships") it is hidden from the computer player, whose
+    // ShipsSelectEnemy and patrols then leave it out.
+    hwc_sim::player_orders::mimic_disguise_as(&mut run.universe, &t, 1, &[id], 0);
+    run.run(16 * 4);
+    assert_eq!(mimic::apparent_ship_type(&run.universe, id), Some(ShipType::p1Fighter));
+    assert!(!hwc_sim::visibility::visible_to_player(&run.universe, id, 1));
 }

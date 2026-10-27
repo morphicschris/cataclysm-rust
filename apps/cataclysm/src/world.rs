@@ -27,7 +27,8 @@ use hwc_render::assets::{load_mad_clip, mothership_modules, read_script, AssetSo
 use hwc_render::effects::{EffectBatch, Line as FxLine, Sprite, FULL_UV};
 use hwc_render::lod::{screen_radius, LodKind, LodSelector, LodTable};
 use hwc_render::render_state::{
-    normalized_team_color, CollisionBox, ConstructionState, ShipTint, TintParams,
+    infection_progress, normalized_team_color, CollisionBox, ConstructionState, ShipTint,
+    TintParams,
 };
 use hwc_render::trails::{
     ShipTrailDef, ShipTrails, TeamTrailColors, TrailFrame, TrailGate, TrailTick, TrailTweaks,
@@ -131,6 +132,34 @@ fn drawn_look(u: &Universe, s: &hwc_sim::object::Ship) -> (ShipType, usize) {
     hwc_sim::ships::mimic::drawn_look(u, s.id).unwrap_or((s.ship_type, s.color_scheme))
 }
 
+/// `rndRenderObject`'s Beast infection state: while the infection timer runs (or is set at
+/// all during an NIS) the type the ship becomes is blended in over it, through the infection
+/// duration (`beastInfectDuration`; 4 s in an NIS).
+fn infection_look(u: &Universe, s: &hwc_sim::object::Ship) -> Option<(ShipType, f32)> {
+    let (timer, now) = (s.beast.timer, u.total_time_elapsed);
+    if !(now < timer || (timer != 0.0 && u.nis_running)) {
+        return None;
+    }
+    let stat = u.statics.ship(s.ship_type)?;
+    let to = hwc_sim::ships::beast::infection_stats(stat)?.2?;
+    let duration = if u.nis_running {
+        4.0
+    } else {
+        hwc_sim::ships::beast::infect_duration(u, s.ship_type) as f32
+    };
+    Some((to, infection_progress(now, timer, duration)))
+}
+
+/// `rndRenderObject`'s lightning state: the ship's flicker is on and within its window (not
+/// for a Mimic in disguise).
+fn lightning_on(u: &Universe, s: &hwc_sim::object::Ship) -> bool {
+    let (f, now) = (&s.flicker, u.total_time_elapsed);
+    f.state != 0
+        && f.next <= now
+        && now < f.end
+        && s.flags2 & hwc_sim::object::flags2::DISGUISED == 0
+}
+
 fn missile_key(m: &hwc_sim::missile::Missile) -> MissileKey {
     (m.race.index(), m.kind == hwc_sim::missile::kind::MINE)
 }
@@ -200,6 +229,11 @@ struct Item {
     time: f32,
     /// Under external construction: the build progress and the mesh-space collision box.
     construction: Option<ConstructionState>,
+    /// Beast infection: the type it becomes (drawn over the hull in its colour scheme) and
+    /// the progress, 0..1.
+    infection: Option<(ShipType, usize, f32)>,
+    /// Electric bolts crawl over the hull.
+    lightning: bool,
 }
 
 /// The mission's universe and everything needed to draw it.
@@ -308,6 +342,10 @@ pub struct World {
     /// Focusing again on the ships already in focus zooms in on them (the original's
     /// "autozoom", on by default; `hwcFocusZoom = 0` turns it off).
     pub focus_zoom: bool,
+    /// The Alt focus (Alt+click, Alt+band box) recentres on the ships at the current zoom
+    /// distance instead of closing in on them (a user-requested change, on by default;
+    /// `hwcAltFocusKeepsZoom = 0` gives back the original's `ccFocusClose`).
+    pub alt_focus_keeps_zoom: bool,
     /// The closest zoom on focused ships also keeps the near clip plane outside their hulls (a
     /// user-requested addition, on by default; `hwcZoomClear = 0` leaves the original's limit).
     pub zoom_clear: bool,
@@ -443,6 +481,7 @@ impl World {
             render_list: true,
             focus_close: false,
             focus_zoom: true,
+            alt_focus_keeps_zoom: true,
             zoom_clear: true,
             formation_focus_leader: false,
             hwr: None,
@@ -626,7 +665,11 @@ impl World {
         let types: Vec<ShipType> = u
             .ships
             .iter()
-            .flat_map(|s| [s.ship_type, drawn_look(u, s).0])
+            .flat_map(|s| {
+                let infected = infection_look(u, s).map(|(t, _)| t);
+                [Some(s.ship_type), Some(drawn_look(u, s).0), infected]
+            })
+            .flatten()
             .collect();
         if types.iter().all(|t| self.art.contains_key(t)) && self.resource_kinds_loaded() {
             return Ok(());
@@ -771,7 +814,12 @@ impl World {
             .universe()
             .ships
             .iter()
-            .map(|s| drawn_look(self.universe(), s))
+            .flat_map(|s| {
+                let u = self.universe();
+                let infected = infection_look(u, s).map(|(t, _)| (t, s.color_scheme));
+                [Some(drawn_look(u, s)), infected]
+            })
+            .flatten()
             .collect();
         for (t, scheme) in needed {
             let Some(art) = self.art.get_mut(&t) else {
@@ -1183,16 +1231,19 @@ impl World {
 
     /// `ccFocus` (`close` false) and `ccFocusClose` (`close` true, the Alt focus) on the main
     /// camera. The same ships again ask for the close-up (`zoomInCloseAsPossible`); new ones
-    /// become the focus, with the camera kept at least as far as frames them.
+    /// become the focus, with the camera kept at least as far as frames them. With
+    /// [`alt_focus_keeps_zoom`](Self::alt_focus_keeps_zoom) the Alt focus only recentres.
     pub fn focus_on(&mut self, ships: Vec<ShipId>, close: bool) {
         if ships.is_empty() {
             return;
         }
+        let recentre_only = close && self.alt_focus_keeps_zoom;
+        let close = close && !recentre_only;
         let same = !self.focus.is_empty()
             && ships.len() == self.focus.len()
             && ships.iter().all(|id| self.focus.contains(id));
         if same {
-            if close || self.focus_zoom {
+            if close || (self.focus_zoom && !recentre_only) {
                 self.focus_close = true;
             }
             return;
@@ -1527,6 +1578,8 @@ impl World {
                 tint,
                 time: now,
                 construction,
+                infection: infection_look(u, s).map(|(t, p)| (t, s.color_scheme, p)),
+                lightning: lightning_on(u, s),
             });
             frame.poses.push(pose);
             let mesh = art
@@ -1535,9 +1588,8 @@ impl World {
                 .and_then(|t| t.levels.get(nominal))
                 .is_none_or(|l| l.kind == LodKind::Mesh);
             frame.ids.push((Some(id), mesh));
-            // TODO(render states): cloak fade/wipe, phase blend, Beast infection and EMP
-            // lightning once the simulation exposes cloaking, phasing, infection and the
-            // Naggarok's EMP.
+            // TODO(render states): cloak fade/wipe, phase blend and the Naggarok's EMP
+            // lightning once the simulation exposes cloaking, phasing and the EMP.
         }
         // Dead hulls the Remastered death sequences keep in view.
         if let Some(h) = &self.hwr {
@@ -1560,6 +1612,8 @@ impl World {
                     tint: TintParams::default(),
                     time: now as f32,
                     construction: None,
+                    infection: None,
+                    lightning: false,
                 });
                 frame.poses.push(None);
                 frame.ids.push((None, true));
@@ -1590,6 +1644,8 @@ impl World {
                 tint: TintParams::default(),
                 time: now,
                 construction: None,
+                infection: None,
+                lightning: false,
             });
             frame.poses.push(None);
             frame.ids.push((None, false));
@@ -1636,6 +1692,8 @@ impl World {
                     tint: TintParams::default(),
                     time: now,
                     construction: None,
+                    infection: None,
+                    lightning: false,
                 });
                 frame.poses.push(None);
                 frame.ids.push((None, true));
@@ -1831,6 +1889,10 @@ impl World {
                 transform: item.transform,
                 age: item.age,
             });
+            let infection = item.infection.and_then(|(t, scheme, p)| {
+                let infected = self.art.get(&t).and_then(|a| a.gpu.get(&scheme))?;
+                Some((infected, p))
+            });
             states.push(ShipRenderState {
                 lod: item.lod,
                 pose: pose.as_deref(),
@@ -1838,6 +1900,8 @@ impl World {
                 tint: item.tint,
                 time: item.time,
                 construction: item.construction,
+                infection,
+                emp_lightning: item.lightning,
                 ..Default::default()
             });
         }
@@ -2034,9 +2098,27 @@ impl World {
             .universe()
             .statics
             .ship(s.ship_type)
-            .map_or(50.0, |st| st.header.coll.coll_sphere_size)
-            .max(20.0);
-        let c = v3(s.coll.coll_position);
+            .map_or(50.0, |st| st.header.coll.coll_sphere_size);
+        self.sphere_box(size, v3(s.coll.coll_position), r)
+    }
+
+    /// Screen box of a live mine (`id` is its selection id) that is drawn in the main view.
+    pub fn mine_box(&self, size: (u32, u32), id: ShipId) -> Option<([f32; 2], [f32; 2])> {
+        let u = self.universe();
+        let m = u.missiles.get(hwc_sim::target::live_mine(u, id)?)?;
+        if m.flags & hwc_sim::object::sof::HIDE != 0
+            || !self.object_in_view(v3(m.posinfo.position), false)
+        {
+            return None;
+        }
+        let r =
+            hwc_sim::missile::statics_of(u, m).map_or(50.0, |st| st.header.coll.coll_sphere_size);
+        self.sphere_box(size, v3(m.coll.coll_position), r)
+    }
+
+    /// Screen box of a sphere of radius `r` (at least 20) about `c`.
+    fn sphere_box(&self, size: (u32, u32), c: Vec3, r: f32) -> Option<([f32; 2], [f32; 2])> {
+        let r = r.max(20.0);
         let p = self.project(size, c)?;
         let right = self.camera.view().row(0).truncate();
         let q = self.project(size, c + right * r)?;
@@ -2044,6 +2126,43 @@ impl World {
             .sqrt()
             .max(6.0);
         Some(([p[0] - rad, p[1] - rad], [p[0] + rad, p[1] + rad]))
+    }
+
+    /// The nearest object under the point among the ships `keep` lets through and the mines
+    /// `keep_mine` does (a mine is given by its selection id).
+    pub fn object_at_where(
+        &self,
+        size: (u32, u32),
+        px: [f32; 2],
+        keep: impl Fn(ShipId) -> bool,
+        keep_mine: impl Fn(ShipId) -> bool,
+    ) -> Option<ShipId> {
+        let ship = self.ship_at_where(size, px, keep);
+        let eye = self.camera.eye();
+        let u = self.universe();
+        let dist = |id: ShipId| {
+            hwc_sim::target::get(u, id)
+                .map_or(f32::MAX, |t| (v3(t.posinfo.position) - eye).length())
+        };
+        let mut best = ship.map(|id| (dist(id), id));
+        for &mid in &u.missile_list {
+            let Some(id) = ShipId::from_mine(mid) else {
+                continue;
+            };
+            if !keep_mine(id) {
+                continue;
+            }
+            let Some((lo, hi)) = self.mine_box(size, id) else {
+                continue;
+            };
+            if px[0] >= lo[0] && px[0] <= hi[0] && px[1] >= lo[1] && px[1] <= hi[1] {
+                let d = dist(id);
+                if best.is_none_or(|b| d < b.0) {
+                    best = Some((d, id));
+                }
+            }
+        }
+        best.map(|b| b.1)
     }
 
     /// The nearest visible ship whose screen box contains the point.

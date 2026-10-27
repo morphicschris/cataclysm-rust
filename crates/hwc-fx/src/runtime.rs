@@ -394,6 +394,14 @@ impl FxWorld {
         self.effects.iter().find(|e| e.id == id)
     }
 
+    /// Write word `index` of the effect's variable block (`effect->variable`, where its
+    /// parameters start), as game code does to steer a running effect.
+    pub fn set_variable(&mut self, id: EffectId, index: usize, v: u32) {
+        if let Some(slot) = self.effects.iter_mut().find(|e| e.id == id).and_then(|e| e.variables.get_mut(index)) {
+            *slot = v;
+        }
+    }
+
     /// The particle system behind a handle.
     pub fn system(&self, handle: u32) -> Option<&PartSystem> {
         self.systems.get((handle as usize).wrapping_sub(1))?.as_ref()

@@ -21,6 +21,7 @@ use hwc_formats::script::ScriptFile;
 use hwc_render::effects::PixelTriangle;
 use hwc_render::OrbitCamera;
 use hwc_sim::fow::{FowGrid, OUTSIDE};
+use hwc_sim::harness::group_centre;
 use hwc_sim::level::SmTweaks;
 use hwc_sim::object::sof;
 use hwc_sim::statics::ShipClass;
@@ -434,6 +435,10 @@ struct Open {
     focus: Option<Vec<ShipId>>,
     /// The zoom back reached the main view (`smFocusTransition`).
     transition: bool,
+    /// Ships the sensors camera keeps following (a user-requested addition; the original's
+    /// sensors camera never follows anything), and whether it has caught up with them.
+    follow: Option<Vec<ShipId>>,
+    locked: bool,
 }
 
 /// The sensors manager.
@@ -445,6 +450,14 @@ pub struct Sensors {
     initial_distance: Option<f32>,
     /// `smInstantTransition`.
     pub instant: bool,
+    /// Opening over a main view that follows its focus keeps following it in the sensors
+    /// view (a user-requested addition, on by default; `hwcSensorsFollow = 0` leaves the
+    /// original's camera that stays where it opened).
+    pub follow_focus: bool,
+    /// The focus key in the sensors view centres the sensors camera on the selection and
+    /// follows it (a user-requested change, on by default; `hwcSensorsFocusStays = 0` gives
+    /// back the original's `smCullAndFocusSelecting`, which closes onto them).
+    pub focus_stays: bool,
     open: Option<Open>,
 }
 
@@ -515,6 +528,8 @@ impl Sensors {
             icons,
             initial_distance: None,
             instant: false,
+            follow_focus: true,
+            focus_stays: true,
             open: None,
         }
     }
@@ -592,6 +607,8 @@ impl Sensors {
         let dir = (eye - look).normalize_or(Vec3::X);
         let mut cam = sensors_camera(&main, &sm, &self.tweaks, initial);
         place(&mut cam, eye, look);
+        let follow = (self.follow_focus && world.follow_focus && !world.focus.is_empty())
+            .then(|| world.focus.clone());
         world.camera = cam;
         world.follow_focus = false;
         self.open = Some(Open {
@@ -608,6 +625,8 @@ impl Sensors {
             pan_velocity: Vec3::ZERO,
             focus: None,
             transition: false,
+            locked: follow.is_some(),
+            follow,
         });
         world.run_mut().game.sensors_open = true;
         Some(SOUND_INTRO)
@@ -657,27 +676,10 @@ impl Sensors {
     /// `smCullAndFocusSelecting`: close onto these ships (those within the focus radius of
     /// their mean). Returns the sound, or None when nothing could be focused.
     pub fn close_on(&mut self, world: &World, ships: &[ShipId]) -> Option<u32> {
-        if self.zooming() || ships.is_empty() {
+        if self.zooming() {
             return None;
         }
-        let u = world.universe();
-        let pos = |id: ShipId| u.ship(id).map(|s| v3(s.posinfo.position));
-        let pts: Vec<(ShipId, Vec3)> = ships
-            .iter()
-            .filter_map(|&id| Some((id, pos(id)?)))
-            .collect();
-        if pts.is_empty() {
-            return None;
-        }
-        let mean = pts.iter().map(|p| p.1).sum::<Vec3>() / pts.len() as f32;
-        let r2 = self.tweaks.focus_radius * self.tweaks.focus_radius;
-        let kept: Vec<(ShipId, Vec3)> = pts
-            .into_iter()
-            .filter(|p| (p.1 - mean).length_squared() <= r2)
-            .collect();
-        if kept.is_empty() {
-            return None;
-        }
+        let kept = self.cull(world, ships)?;
         let centre = kept.iter().map(|p| p.1).sum::<Vec3>() / kept.len() as f32;
         let far = self.tweaks.focus_far_distance;
         let o = self.open.as_mut()?;
@@ -696,6 +698,45 @@ impl Sensors {
         Some(SOUND_EXIT)
     }
 
+    /// The modern focus in the sensors view: the sensors camera glides onto these ships (those
+    /// `smCullAndFocusSelecting` would keep) and follows them, and they become the main
+    /// view's focus for when the manager closes. False when nothing could be focused.
+    pub fn focus_here(&mut self, world: &mut World, ships: &[ShipId]) -> bool {
+        if self.zooming() || self.open.is_none() {
+            return false;
+        }
+        let Some(kept) = self.cull(world, ships) else {
+            return false;
+        };
+        let ids: Vec<ShipId> = kept.into_iter().map(|p| p.0).collect();
+        let o = self.open.as_mut().unwrap();
+        o.follow = Some(ids.clone());
+        o.locked = false;
+        world.focus = ids;
+        true
+    }
+
+    /// The ships within the focus radius of the mean of those that exist, with their
+    /// positions (`ccFocusCullRadiusMean`).
+    fn cull(&self, world: &World, ships: &[ShipId]) -> Option<Vec<(ShipId, Vec3)>> {
+        let u = world.universe();
+        let pos = |id: ShipId| u.ship(id).map(|s| v3(s.posinfo.position));
+        let pts: Vec<(ShipId, Vec3)> = ships
+            .iter()
+            .filter_map(|&id| Some((id, pos(id)?)))
+            .collect();
+        if pts.is_empty() {
+            return None;
+        }
+        let mean = pts.iter().map(|p| p.1).sum::<Vec3>() / pts.len() as f32;
+        let r2 = self.tweaks.focus_radius * self.tweaks.focus_radius;
+        let kept: Vec<(ShipId, Vec3)> = pts
+            .into_iter()
+            .filter(|p| (p.1 - mean).length_squared() <= r2)
+            .collect();
+        (!kept.is_empty()).then_some(kept)
+    }
+
     /// One frame (`smViewportRender`'s update part): the zoom, then panning. `pan` is the
     /// held pan directions (left, right, up, down). Returns the sounds to play.
     pub fn update(
@@ -711,8 +752,25 @@ impl Sensors {
         };
         let ticks = ((dt * TICKS_PER_SECOND).round() as i32).clamp(0, self.tweaks.max_frame_ticks);
         let step = ticks as f32 / TICKS_PER_SECOND;
+        // The ships followed: those still alive, and where their centre is.
+        let followed = o.follow.as_mut().and_then(|f| {
+            let u = world.universe();
+            f.retain(|&id| u.ship(id).is_some());
+            (!f.is_empty()).then(|| v3(group_centre(u, f)))
+        });
+        if followed.is_none() {
+            o.follow = None;
+        }
         match o.zoom {
             Zoom::Out => {
+                // Pulling back over a moving focus: both ends of the zoom move with it.
+                if let Some(c) = followed {
+                    let d = c - o.look_end;
+                    o.look_start += d;
+                    o.look_end += d;
+                    o.eye_start += d;
+                    o.eye_end += d;
+                }
                 o.time += step;
                 let f = (o.time / o.length).clamp(0.0, 1.0);
                 blend_camera(&mut world.camera, o, f);
@@ -776,8 +834,20 @@ impl Sensors {
             let right = Vec3::new(fwd.y, -fwd.x, 0.0);
             o.pan_target += -(dy as f32) * fwd + dx as f32 * right;
             o.pan_target = clip_to_universe(o.pan_target, v3(size));
+            // Panning away lets go of the ships followed.
+            o.follow = None;
+        } else if let (Some(c), Some(_)) = (followed, &o.follow) {
+            o.pan_target = clip_to_universe(c, v3(size));
+            if o.locked {
+                // Caught up: stay on them (`ccLockOnTargetNow` for the sensors camera).
+                cam.look_at = o.pan_target;
+                o.pan_velocity = Vec3::ZERO;
+            }
         }
         let d = (cam.look_at - o.pan_target).abs();
+        if o.follow.is_some() && !o.locked && d.x + d.y + d.z <= self.tweaks.pan_eval_threshold {
+            o.locked = true;
+        }
         if d.x + d.y + d.z > self.tweaks.pan_eval_threshold {
             let t = self.tweaks.pan_track;
             let k = self.tweaks.cubic_tweak;

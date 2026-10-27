@@ -45,10 +45,10 @@ pub fn create(u: &mut Universe, id: ShipId, gi: usize, source: Option<ShipId>, t
     let g = s.guns[gi];
     let burst = s.special_flags & 0x40 != 0;
     let up = gun::upgraded(&g, gs);
-    let target_ship = target.and_then(|t| u.ships.get(t));
+    let target_ship = target.and_then(|t| crate::target::get(u, t));
 
     // Heading: the barrel in world space, or source to target.
-    let heading = match (source.and_then(|x| u.ships.get(x)), target_ship) {
+    let heading = match (source.and_then(|x| u.ships.get(x)), target_ship.as_ref()) {
         (Some(src), Some(t)) => {
             let mut h = Vector::new(t.posinfo.position.x - src.posinfo.position.x, t.posinfo.position.y - src.posinfo.position.y, t.posinfo.position.z - src.posinfo.position.z);
             h.normalize();
@@ -124,7 +124,7 @@ pub fn create(u: &mut Universe, id: ShipId, gi: usize, source: Option<ShipId>, t
     };
     let _ = speed;
     let bid = u.bullets.insert(bullet);
-    let target_blob = target.and_then(|t| u.ships.get(t)).and_then(|t| t.coll_my_blob);
+    let target_blob = target_ship.as_ref().and_then(|t| t.coll_my_blob);
     let mut objs = Objects { ships: &mut u.ships, bullets: &mut u.bullets, missiles: &mut u.missiles };
     match target_blob {
         Some(b) => u.blobs.add_to_specific(b, ObjRef::Bullet(bid), &mut objs, &statics),
@@ -145,11 +145,11 @@ pub fn create(u: &mut Universe, id: ShipId, gi: usize, source: Option<ShipId>, t
 /// leading it when close, and matches its velocity at very short range.
 fn energy_homing(u: &mut Universe, bid: BulletId) {
     let b = u.bullets.bullet(bid).clone();
-    let Some(t) = b.target.and_then(|t| u.ships.get(t)).cloned() else { return };
+    let Some(t) = b.target.and_then(|t| crate::target::get(u, t)) else { return };
     if !(ld(b.time_lived) > ld(0.5f32)) {
         return;
     }
-    if matches!(t.ship_type, crate::statics::ShipType::sSwarmer | crate::statics::ShipType::bSwarmer) {
+    if matches!(t.ship_type, Some(crate::statics::ShipType::sSwarmer | crate::statics::ShipType::bSwarmer)) {
         return;
     }
     let tp = t.coll.coll_position;
@@ -186,7 +186,7 @@ fn energy_homing(u: &mut Universe, bid: BulletId) {
     bm.posinfo.velocity = Vector::new(st(ld(n.x) * ld(speed)), st(ld(n.y) * ld(speed)), st(ld(n.z) * ld(speed)));
     bm.heading = n;
     if ld(dist_sq) < 10_000.0 {
-        if !matches!(t.ship_type, crate::statics::ShipType::sSwarmer | crate::statics::ShipType::bSwarmer) {
+        if !matches!(t.ship_type, Some(crate::statics::ShipType::sSwarmer | crate::statics::ShipType::bSwarmer)) {
             if ld(speed) > 150.0 {
                 speed = st(ld(speed) / 2.0);
             }
@@ -219,7 +219,7 @@ pub fn update_pos_vel(u: &mut Universe, bid: BulletId) -> bool {
                         .ship(u.ships.ship(owner).ship_type)
                         .and_then(|st| st.guns.as_ref()?.get(gi).map(|g| g.gun_type));
                     if let Some(t) = b.target {
-                        if matches!(gt, Some(Some(crate::statics::GunType::Gimble | crate::statics::GunType::NewGimble))) && u.ships.get(t).is_some() {
+                        if matches!(gt, Some(Some(crate::statics::GunType::Gimble | crate::statics::GunType::NewGimble))) && crate::target::exists(u, t) {
                             gun::orient_gimble(u, owner, gi, t);
                         }
                     }

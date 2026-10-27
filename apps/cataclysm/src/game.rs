@@ -334,6 +334,8 @@ impl Game {
         let ping_blobs = pings::blob_properties(source.as_ref());
         let mut sensors = Sensors::new(tweaks, sensors::Toggles::from_options(&options), icons);
         sensors.instant = options.get("InstantTransition") != 0;
+        sensors.follow_focus = options.get("hwcSensorsFollow") != 0;
+        sensors.focus_stays = options.get("hwcSensorsFocusStays") != 0;
         let pointer = Pointer::new(hwc_ui::Resources::new(source.clone()));
         let mut res = hwc_ui::Resources::new(source);
         res.set_language(hwc_ui::Language::from_index(options.get("language") as u32));
@@ -442,6 +444,7 @@ impl Game {
         g.world.lens_flares = options.get("enableLensFlare") != 0;
         g.world.full_detail = options.get("hwcFullDetailShips") != 0;
         g.world.focus_zoom = options.get("hwcFocusZoom") != 0;
+        g.world.alt_focus_keeps_zoom = options.get("hwcAltFocusKeepsZoom") != 0;
         g.world.zoom_clear = options.get("hwcZoomClear") != 0;
         g.world.render_list = options.get("hwcRenderList") != 0;
         g.world.formation_focus_leader = options.get("hwcFormationFocusFire") != 0;
@@ -476,9 +479,12 @@ impl Game {
         self.order_lines = options.get("hwcOrderLines") != 0;
         self.ship_icons = tactical::IconMode::from_option(options.get("hwcShipIcons"));
         self.health_brackets = options.get("hwcHealthBrackets") != 0;
+        self.sensors.follow_focus = options.get("hwcSensorsFollow") != 0;
+        self.sensors.focus_stays = options.get("hwcSensorsFocusStays") != 0;
         self.letterbox.tall = options.get("hwcOriginalLetterbox") == 0;
         self.world.full_detail = options.get("hwcFullDetailShips") != 0;
         self.world.focus_zoom = options.get("hwcFocusZoom") != 0;
+        self.world.alt_focus_keeps_zoom = options.get("hwcAltFocusKeepsZoom") != 0;
         self.world.zoom_clear = options.get("hwcZoomClear") != 0;
         self.world.render_list = options.get("hwcRenderList") != 0;
         self.world.formation_focus_leader = options.get("hwcFormationFocusFire") != 0;
@@ -592,8 +598,15 @@ impl Game {
                 return;
             }
         }
+        // A camera drag ends wherever the button is let go (over the roll call too).
+        let ends_drag = self.right_down
+            && ev
+                == (InputEvent::MouseButton {
+                    left: false,
+                    down: false,
+                });
         let used = self.with_host(|ui, host| ui.handle_input(host, ev));
-        if used {
+        if used && !ends_drag {
             return;
         }
         // The sensors viewport takes nothing while it zooms (`smViewportProcess`).
@@ -635,7 +648,10 @@ impl Game {
                     if let Mode::Move(p) = &mut self.mode {
                         p.pause(false);
                     }
-                    if self.right_moved <= RIGHT_CLICK_LIMIT {
+                    // The roll call locks the orders out (`mrDisabled`): only the camera.
+                    if self.right_moved <= RIGHT_CLICK_LIMIT
+                        && self.ui.manager() != Some(hwc_ui::ingame::Manager::RollCall)
+                    {
                         self.right_click(audio);
                     }
                 }
@@ -739,6 +755,13 @@ impl Game {
 
     /// `mrObjectClick`.
     fn object_click(&mut self, id: ShipId, audio: &mut Option<Audio>) {
+        // A mine: clicking it with ships selected attacks it (it is never the player's).
+        if id.mine().is_some() {
+            if !self.ui.action_held(keys::BANDBOX_FOCUS) && !self.selection.is_empty() {
+                self.attack(&[id]);
+            }
+            return;
+        }
         let u = self.world.universe();
         let Some(s) = u.ship(id) else { return };
         let own = s.player == PLAYER;
@@ -1151,22 +1174,68 @@ impl Game {
 
     /// The ship under the pointer among those the local player can see (in the sensors
     /// manager the fog of war hides ships).
+    /// Mines can be picked too (`selClickFromArray` takes any targetable object): in the
+    /// sensors manager only those it shows.
+    /// A mothership's module picks the mothership (`selSelectionClick`).
     fn pick_ship(&self, size: (u32, u32), p: [f32; 2]) -> Option<ShipId> {
+        let u = self.world.universe();
+        self.pick_object(size, p).map(|id| {
+            if id.mine().is_some() {
+                id
+            } else {
+                bandbox::stand_in(u, id)
+            }
+        })
+    }
+
+    fn pick_object(&self, size: (u32, u32), p: [f32; 2]) -> Option<ShipId> {
         if self.sensors.is_open() {
             let u = self.world.universe();
             let fog = sensors::Fog::of(u);
-            self.world
-                .ship_at_where(size, p, |id| sensors::ship_visible(u, &fog, id))
+            self.world.object_at_where(
+                size,
+                p,
+                |id| sensors::ship_visible(u, &fog, id),
+                |id| {
+                    self.mine_facts(id)
+                        .is_some_and(|f| !f.hidden && !f.cloaked_unseen)
+                },
+            )
         } else {
-            self.world.ship_at(size, p)
+            self.world.object_at_where(size, p, |_| true, |_| true)
+        }
+    }
+
+    /// The band-box facts of a mine (`id` is its selection id) as the local player sees it
+    /// now.
+    fn mine_facts(&self, id: ShipId) -> Option<bandbox::Facts> {
+        let u = self.world.universe();
+        let t = hwc_sim::target::get(u, id)?;
+        let shown = self
+            .world
+            .mission_run()
+            .is_some_and(|r| r.game.show_mines_in_sensors);
+        let fog_hidden = sensors::Fog::of(u).point_hidden(t.posinfo.position);
+        bandbox::Facts::of_mine(u, id, self.sensors.is_open(), shown, fog_hidden)
+    }
+
+    /// The band-box facts of a ship or a mine.
+    fn object_facts(&self, id: ShipId) -> Option<bandbox::Facts> {
+        if id.mine().is_some() {
+            self.mine_facts(id)
+        } else {
+            bandbox::Facts::of(self.world.universe(), id, PLAYER)
         }
     }
 
     /// Focus on ships (`ccFocus`, or `ccFocusClose` with `close`: the Alt focus): in the
-    /// sensors manager, zoom back onto them.
+    /// sensors manager, zoom back onto them, or (the modern focus key) centre the sensors
+    /// camera on them.
     fn focus_on(&mut self, ships: Vec<ShipId>, close: bool, audio: &mut Option<Audio>) {
         if self.sensors.is_open() {
-            if let Some(e) = self.sensors.close_on(&self.world, &ships) {
+            if !close && self.sensors.focus_stays {
+                self.sensors.focus_here(&mut self.world, &ships);
+            } else if let Some(e) = self.sensors.close_on(&self.world, &ships) {
                 sound(audio, e);
             }
         } else {
@@ -1220,18 +1289,57 @@ impl Game {
         bandbox::Mode::from_held(|a| self.ui.action_held(a))
     }
 
-    /// Ships inside the box with their facts for the local player.
-    fn band_box_inside(&self, a: [f32; 2], b: [f32; 2]) -> Vec<(ShipId, bandbox::Facts)> {
+    /// Ships inside the box with their facts for the local player; an attack box also finds
+    /// mines (`selRectDragFunction` with its "anything" option).
+    fn band_box_inside(
+        &self,
+        mode: bandbox::Mode,
+        a: [f32; 2],
+        b: [f32; 2],
+    ) -> Vec<(ShipId, bandbox::Facts)> {
         let u = self.world.universe();
-        self.ships_in_box(a, b)
+        let mut inside: Vec<(ShipId, bandbox::Facts)> = self
+            .ships_in_box(a, b)
             .into_iter()
             .filter_map(|id| Some((id, bandbox::Facts::of(u, id, PLAYER)?)))
+            .collect();
+        if matches!(mode, bandbox::Mode::Attack | bandbox::Mode::ForceAttack) {
+            inside.extend(
+                self.mines_in_box(a, b)
+                    .into_iter()
+                    .filter_map(|id| Some((id, self.mine_facts(id)?))),
+            );
+        }
+        inside
+    }
+
+    /// Mines (by selection id) whose centres project inside the band box.
+    fn mines_in_box(&self, a: [f32; 2], b: [f32; 2]) -> Vec<ShipId> {
+        let size = self.size();
+        let (lo, hi) = (
+            [a[0].min(b[0]), a[1].min(b[1])],
+            [a[0].max(b[0]), a[1].max(b[1])],
+        );
+        let u = self.world.universe();
+        u.missile_list
+            .iter()
+            .filter_map(|&mid| ShipId::from_mine(mid))
+            .filter(|&id| {
+                self.world.mine_box(size, id).is_some()
+                    && hwc_sim::target::get(u, id).is_some_and(|t| {
+                        self.world
+                            .project(size, v3(t.posinfo.position))
+                            .is_some_and(|p| {
+                                p[0] >= lo[0] && p[0] <= hi[0] && p[1] >= lo[1] && p[1] <= hi[1]
+                            })
+                    })
+            })
             .collect()
     }
 
     /// The "selecting" list of a band box being dragged (`mrSelectHold`).
     fn band_box_selecting(&self, mode: bandbox::Mode, a: [f32; 2], b: [f32; 2]) -> Vec<ShipId> {
-        let inside = self.band_box_inside(a, b);
+        let inside = self.band_box_inside(mode, a, b);
         let u = self.world.universe();
         let sel = bandbox::Selected {
             ships: &self.selection,
@@ -1239,7 +1347,13 @@ impl Game {
             hold_capable: !bandbox::hold_capable(u, &self.selection).is_empty(),
             special: bandbox::special_gather(u, &self.selection),
         };
-        bandbox::selecting(mode, &inside, &sel)
+        bandbox::selecting_with(
+            mode,
+            &inside,
+            &sel,
+            |id| bandbox::stand_in(u, id),
+            |id| bandbox::Facts::of(u, id, PLAYER),
+        )
     }
 
     /// `mrBandBoxRelease`: the band box's order.
@@ -1258,13 +1372,10 @@ impl Game {
                 if attackers.is_empty() {
                     return;
                 }
-                let facts: Vec<(ShipId, bandbox::Facts)> = {
-                    let u = self.world.universe();
-                    selecting
-                        .iter()
-                        .filter_map(|&id| Some((id, bandbox::Facts::of(u, id, PLAYER)?)))
-                        .collect()
-                };
+                let facts: Vec<(ShipId, bandbox::Facts)> = selecting
+                    .iter()
+                    .filter_map(|&id| Some((id, self.object_facts(id)?)))
+                    .collect();
                 let targets =
                     bandbox::attack_targets(&facts, &attackers, mode == Mode::ForceAttack);
                 if !targets.is_empty() {
@@ -1533,7 +1644,9 @@ impl Game {
             GameRequest::CycleShipIcons => {
                 self.ship_icons = self.ship_icons.next();
                 let v = self.ship_icons.to_option();
-                self.ui.fe.game.options.set("hwcShipIcons", v);
+                // Kept and saved at once, so a loaded game, the next mission and the next run
+                // start with it.
+                self.ui.fe.game.set_option_now("hwcShipIcons", v);
                 self.post(self.ship_icons.message());
             }
             GameRequest::SkipFleetIntel => {
@@ -1560,9 +1673,14 @@ impl Game {
         if self.paused || !self.world.run().game.hyper.player_can_hyperspace {
             return;
         }
-        if let Err(hwc_sim::campaign::HyperspaceRefused::ShipUnderConstruction) =
-            self.world.run_mut().hyperspace_button()
-        {
+        let r = self.world.run_mut().hyperspace_button();
+        if r.is_ok() {
+            // `ccFocusOnMyMothership`: the camera turns to the mothership for the jump.
+            if let Some(ms) = self.world.universe().base.players[PLAYER].mothership {
+                self.world.focus_on(vec![ms], false);
+            }
+        }
+        if let Err(hwc_sim::campaign::HyperspaceRefused::ShipUnderConstruction) = r {
             let text = self
                 .strings
                 .get("strShipsStillUnderConstruction")
@@ -3373,11 +3491,14 @@ impl Game {
         // `selSelectingDraw`: the band box's gathered ships are outlined, not given bars.
         let mut outlines = Vec::new();
         for &id in selecting {
-            let Some(s) = u.ship(id) else { continue };
-            if s.flags & hwc_sim::object::sof::DEAD != 0 {
-                continue;
-            }
-            if let Some((lo, hi)) = self.world.screen_box(size, s) {
+            let boxed = match u.ship(id) {
+                Some(s) if s.flags & hwc_sim::object::sof::DEAD == 0 => {
+                    self.world.screen_box(size, s)
+                }
+                Some(_) => None,
+                None => self.world.mine_box(size, id),
+            };
+            if let Some((lo, hi)) = boxed {
                 outlines.push(Rect::new(
                     lo[0] as i32,
                     lo[1] as i32,

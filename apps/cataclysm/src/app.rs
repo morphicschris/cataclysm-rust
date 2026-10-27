@@ -137,12 +137,17 @@ struct App {
     fxaa: Option<bool>,
     scene_at_window: Option<bool>,
     smooth_zoom: Option<bool>,
-    /// `--focus-zoom`, `--zoom-limit`, `--draw-distance` (None: the options file).
+    /// `--focus-zoom`, `--alt-focus`, `--zoom-limit`, `--draw-distance` (None: the options
+    /// file).
     focus_zoom: Option<bool>,
+    alt_focus_keeps_zoom: Option<bool>,
     zoom_clear: Option<bool>,
     render_list: Option<bool>,
     /// `--letterbox` (None: the options file).
     tall_letterbox: Option<bool>,
+    /// `--sensors-follow`, `--sensors-focus` (None: the options file).
+    sensors_follow: Option<bool>,
+    sensors_focus_stays: Option<bool>,
     /// `--no-vsync`.
     no_vsync: bool,
     /// `--frame-times`: the 3D frame's draw times, printed every few seconds.
@@ -275,9 +280,12 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         scene_at_window: args.scene_at_window,
         smooth_zoom: args.smooth_zoom,
         focus_zoom: args.focus_zoom,
+        alt_focus_keeps_zoom: args.alt_focus_keeps_zoom,
         zoom_clear: args.zoom_clear,
         render_list: args.render_list,
         tall_letterbox: args.tall_letterbox,
+        sensors_follow: args.sensors_follow,
+        sensors_focus_stays: args.sensors_focus_stays,
         no_vsync: args.no_vsync,
         frame_times: args.frame_times.then(FrameTimes::default),
     };
@@ -619,9 +627,12 @@ struct Overrides {
     scene_at_window: Option<bool>,
     smooth_zoom: Option<bool>,
     focus_zoom: Option<bool>,
+    alt_focus_keeps_zoom: Option<bool>,
     zoom_clear: Option<bool>,
     render_list: Option<bool>,
     tall_letterbox: Option<bool>,
+    sensors_follow: Option<bool>,
+    sensors_focus_stays: Option<bool>,
 }
 
 impl Overrides {
@@ -660,6 +671,9 @@ impl Overrides {
         if let Some(v) = self.focus_zoom {
             game.world.focus_zoom = v;
         }
+        if let Some(v) = self.alt_focus_keeps_zoom {
+            game.world.alt_focus_keeps_zoom = v;
+        }
         if let Some(v) = self.zoom_clear {
             game.world.zoom_clear = v;
         }
@@ -668,6 +682,12 @@ impl Overrides {
         }
         if let Some(v) = self.tall_letterbox {
             game.letterbox.tall = v;
+        }
+        if let Some(v) = self.sensors_follow {
+            game.sensors.follow_focus = v;
+        }
+        if let Some(v) = self.sensors_focus_stays {
+            game.sensors.focus_stays = v;
         }
     }
 
@@ -691,9 +711,12 @@ impl Overrides {
             ("hwcSceneAtWindow", self.scene_at_window.map(b)),
             ("hwcSmoothZoom", self.smooth_zoom.map(b)),
             ("hwcFocusZoom", self.focus_zoom.map(b)),
+            ("hwcAltFocusKeepsZoom", self.alt_focus_keeps_zoom.map(b)),
             ("hwcZoomClear", self.zoom_clear.map(b)),
             ("hwcRenderList", self.render_list.map(b)),
             ("hwcOriginalLetterbox", self.tall_letterbox.map(|t| b(!t))),
+            ("hwcSensorsFollow", self.sensors_follow.map(b)),
+            ("hwcSensorsFocusStays", self.sensors_focus_stays.map(b)),
         ];
         for (key, v) in locks {
             if let Some(v) = v {
@@ -717,9 +740,12 @@ impl App {
             scene_at_window: self.scene_at_window,
             smooth_zoom: self.smooth_zoom,
             focus_zoom: self.focus_zoom,
+            alt_focus_keeps_zoom: self.alt_focus_keeps_zoom,
             zoom_clear: self.zoom_clear,
             render_list: self.render_list,
             tall_letterbox: self.tall_letterbox,
+            sensors_follow: self.sensors_follow,
+            sensors_focus_stays: self.sensors_focus_stays,
         }
     }
 

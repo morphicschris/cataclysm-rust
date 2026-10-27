@@ -243,7 +243,7 @@ pub fn orient_gimble(u: &mut Universe, id: ShipId, gi: usize, target: ShipId) ->
     let statics = u.statics.clone();
     let dt = u.phys_time_elapsed;
     let below = u.tweaks.combat.dont_use_velocity_pred_if_below;
-    let Some(t) = u.ships.get(target).cloned() else { return false };
+    let Some(t) = crate::target::get(u, target) else { return false };
     let s = u.ships.ship(id);
     let Some(stat) = statics.ship(s.ship_type) else { return false };
     let Some(gs) = gun_static(stat, gi) else { return false };
@@ -360,12 +360,11 @@ pub fn orient_gimble(u: &mut Universe, id: ShipId, gi: usize, target: ShipId) ->
 pub fn fixed_can_hit(u: &Universe, id: ShipId, gi: usize, target: ShipId, use_gun_heading: bool) -> bool {
     let statics = &u.statics;
     let below = u.tweaks.combat.dont_use_velocity_pred_if_below;
-    let (Some(s), Some(t)) = (u.ships.get(id), u.ships.get(target)) else { return false };
+    let (Some(s), Some(t)) = (u.ships.get(id), crate::target::get(u, target)) else { return false };
     let Some(stat) = statics.ship(s.ship_type) else { return false };
     let Some(gs) = gun_static(stat, gi) else { return false };
-    let Some(tstat) = statics.ship(t.ship_type) else { return false };
     let speed = bullet_speed(&s.guns[gi], gs);
-    let traj = aiship::trajectory_with_vel_prediction(s, t, speed, below);
+    let traj = aiship::trajectory_with_vel_prediction(s, &t, speed, below);
     let gp = s.rotinfo.coordsys.mul_vec(gs.position);
     let d = Vector::new(traj.x - gp.x, traj.y - gp.y, traj.z - gp.z);
     let dir_local = if use_gun_heading { s.guns[gi].heading } else { s.heading() };
@@ -382,7 +381,7 @@ pub fn fixed_can_hit(u: &Universe, id: ShipId, gi: usize, target: ShipId, use_gu
         dot = 1.0;
     }
     let perp = fsqrt(1.0 - dot * dot) * ld(mag);
-    perp < ld(tstat.header.coll.coll_sphere_size) * ld(0.75f32)
+    perp < ld(t.coll_header.coll_sphere_size) * ld(0.75f32)
 }
 
 /// `gunShoot` (0x486bd0): line-of-sight check for capital ships, then a bullet with the ship's
@@ -393,8 +392,9 @@ pub fn shoot(u: &mut Universe, id: ShipId, gi: usize, target: Option<ShipId>) ->
     let Some(stat) = statics.ship(s.ship_type) else { return false };
     let Some(gs) = gun_static(stat, gi) else { return false };
     if let Some(tid) = target {
-        let Some(t) = u.ships.get(tid) else { return false };
-        let _ = t;
+        if !crate::target::exists(u, tid) {
+            return false;
+        }
         let class = stat.ship_class.map_or(0, |c| c.index());
         if class < ShipClass::Corvette.index() && static_bullet_type(gs, false) != 0x12 {
             let cs = s.rotinfo.coordsys;
@@ -515,7 +515,7 @@ pub fn shoot_guns_at_multiple_targets(u: &mut Universe, id: ShipId) -> bool {
             continue;
         }
         let Some(Some(target)) = targets.get(gi).copied() else { continue };
-        if u.ships.get(target).is_none() {
+        if !crate::target::exists(u, target) {
             continue;
         }
         match gs.gun_type {

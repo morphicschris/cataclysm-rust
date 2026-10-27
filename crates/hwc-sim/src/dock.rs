@@ -831,7 +831,19 @@ fn fly_to_cone_origin(u: &mut Universe, ship: ShipId, dw: ShipId, tolerance: f32
     let dt = u.phys_time_elapsed;
     let aligned = {
         let sh = u.ships.ship_mut(ship);
-        aitrack::heading_and_up(sh, sstat, dt, heading, up, f32::from_bits(0x3f7e_b852))
+        if sh.ship_type == ShipType::dEcclesiam {
+            // The Clee-San goes in once its heading is within 0.995 and its up within 0.78 of
+            // the point's (taken before this turn), whatever `aitrackHeadingAndUp` says: its
+            // `up` is not unit length, so at a point whose up is not square to the cone it could
+            // never reach 0.995 (Mission 3's Kuun-Lan dock, 0.805).
+            let (h, su) = (sh.heading(), sh.up());
+            let hd = st(ld(h.x) * ld(heading.x) + ld(h.y) * ld(heading.y) + ld(h.z) * ld(heading.z));
+            let ud = st(ld(su.x) * ld(up.x) + ld(su.y) * ld(up.y) + ld(su.z) * ld(up.z));
+            aitrack::heading_and_up(sh, sstat, dt, heading, up, f32::from_bits(0x3f7e_b852));
+            !(ld(hd) < 0.995 || ld(ud) < 0.78)
+        } else {
+            aitrack::heading_and_up(sh, sstat, dt, heading, up, f32::from_bits(0x3f7e_b852))
+        }
     };
     if ld(cosang) < 0.0 {
         return true;

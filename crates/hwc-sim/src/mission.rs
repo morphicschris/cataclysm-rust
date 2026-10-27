@@ -667,6 +667,26 @@ impl MissionRun {
         self.game.disguise_tables = t;
     }
 
+    /// Restores what the build manager may offer in a loaded game, which lives in the statics a
+    /// saved game does not hold: the level's ExcludeShips / IncludeShips, the fleet that came
+    /// through hyperspace, then the mission's `EnableShipConstruction` calls in order.
+    pub fn restore_ship_availability(&mut self, src: &dyn DataSource) -> Result<(), MissionError> {
+        let mission = self.game.config.mission;
+        let fleet_modifier = fleet_modifier(&self.game, &self.universe.statics, mission);
+        let ctx = LevelContext { single_player: true, mission, fleet_modifier, resources: ResourceTweaks::load(src) };
+        let (dir, file) = level::mission_paths(mission, None);
+        level::reapply_ship_exclusions(&mut self.universe, src, &dir, &file, &ctx)?;
+        for f in &self.game.fleet {
+            level::flag_ship_needed(&mut self.universe, f.ship_type, true);
+        }
+        for (t, r, enabled) in &self.game.construction {
+            if let (Some(ty), Some(race)) = (ShipType::from_name(t), ShipRace::from_name(r)) {
+                level::enable_ship(&mut self.universe, race.index(), ty, *enabled != 0);
+            }
+        }
+        Ok(())
+    }
+
     /// Sets up mission `config.mission` from `src` with the mission script `script`: the
     /// player's fleet (from the opening NIS for mission 1) goes into hyperspace and the level is
     /// loaded; the KAS mission starts on the first [`step`](Self::step).
@@ -1141,6 +1161,12 @@ fn single_player_update(u: &mut Universe, kas: &mut Interpreter, game: &mut Game
             }
             let mut host = crate::kas_host::SimHost { u, g: game };
             kas.start(&mut host);
+            // The mission starts with the bars counted as in (until its first `wideScreenOut`);
+            // Mission 1's stay in when its opening NIS ends.
+            u.letterbox.fully = true;
+            if game.config.mission == 1 {
+                u.letterbox.keep_after_nis = true;
+            }
         }
         sp_state::ARRIVING => arrival_update(u, kas, game),
         sp_state::WAITING_ROLLCALL | sp_state::WAITING_FLEET_COMMAND | sp_state::SHIPS_LEAVING | sp_state::WHITEOUT | sp_state::FAILED => {
@@ -1569,9 +1595,15 @@ pub struct IntelEnd {
 
 impl Game {
     /// Records a wide-screen call (sets [`Game::wide_screen`] and queues the event).
-    pub fn wide_screen_call(&mut self, kind: WideScreenKind, frames: i32, time: f32) {
+    /// The universe's letterbox ([`Universe::letterbox`]) starts moving too.
+    pub fn wide_screen_call(&mut self, u: &mut Universe, kind: WideScreenKind, frames: i32) {
+        if kind == WideScreenKind::Out {
+            u.letterbox.wide_screen_out(frames);
+        } else {
+            u.letterbox.wide_screen_in(frames);
+        }
         self.wide_screen = kind != WideScreenKind::Out;
-        self.wide_screen_events.push(WideScreenEvent { kind, frames, time });
+        self.wide_screen_events.push(WideScreenEvent { kind, frames, time: u.total_time_elapsed });
     }
 }
 

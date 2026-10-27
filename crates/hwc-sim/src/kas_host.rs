@@ -61,10 +61,57 @@ pub(crate) fn replay_disguise_log(t: &mut crate::ships::mimic::DisguiseTables, l
         let b = b.split(')').next()?;
         Some((a.parse().ok()?, b.parse().ok()?))
     };
+    // Saves made before the menus were kept logged the slot instead (8 for the asteroids):
+    // `SetCurrentMimicItem: disguise menu <slot> += "<name>" (<type>) ...` and
+    // `SetMCVItemIndex: disguise menu <slot> default = <index> ...`.
+    let old_item = |slot: i32| if slot == 8 { 2 } else { slot };
     if let Some((item, ty)) = line.strip_prefix(MIMIC_ITEM_LOG).and_then(parse) {
         ai_ui::add_mimic_item(t, item, ty);
     } else if let Some((item, index)) = line.strip_prefix(MCV_INDEX_LOG).and_then(parse) {
         ai_ui::set_mcv_item_index(t, item, index);
+    } else if let Some(rest) = line.strip_prefix("SetCurrentMimicItem: disguise menu ") {
+        let slot = rest.split(' ').next().and_then(|x| x.parse().ok());
+        let ty = rest.rsplit_once(" (no disguise").and_then(|(a, _)| a.rsplit_once('(')).and_then(|(_, b)| b.trim_end_matches(')').parse().ok());
+        if let (Some(slot), Some(ty)) = (slot, ty) {
+            ai_ui::add_mimic_item(t, old_item(slot), ty);
+        }
+    } else if let Some(rest) = line.strip_prefix("SetMCVItemIndex: disguise menu ") {
+        let mut w = rest.split(' ');
+        let slot = w.next().and_then(|x| x.parse().ok());
+        let index = w.nth(2).and_then(|x| x.parse().ok());
+        if let (Some(slot), Some(index)) = (slot, index) {
+            ai_ui::set_mcv_item_index(t, old_item(slot), index);
+        }
+    }
+}
+
+#[cfg(test)]
+mod disguise_log_tests {
+    use super::replay_disguise_log;
+    use crate::ships::mimic::DisguiseTables;
+
+    #[test]
+    fn old_and_new_log_lines_rebuild_the_menus() {
+        let mut a = DisguiseTables::default();
+        for l in [
+            "SetCurrentMimicItem(0, 4) \"sRecon\"",
+            "SetMCVItemIndex(0, 1)",
+            "SetCurrentMimicItem(2, -1) \"Asteroids\"",
+        ] {
+            replay_disguise_log(&mut a, l);
+        }
+        let mut b = DisguiseTables::default();
+        for l in [
+            "SetCurrentMimicItem: disguise menu 0 += \"sRecon\" (4) (no disguise tables)",
+            "SetMCVItemIndex: disguise menu 0 default = 1 (no disguise tables)",
+            "SetCurrentMimicItem: disguise menu 8 += \"Asteroids\" (-1) (no disguise tables)",
+        ] {
+            replay_disguise_log(&mut b, l);
+        }
+        assert_eq!(a, b);
+        assert_eq!(a.entries[0].len(), 1);
+        assert_eq!(a.defaults[0], 1);
+        assert_eq!(a.entries[8].len(), 4);
     }
 }
 
@@ -212,8 +259,13 @@ impl SimHost<'_> {
         if friendly {
             s.player != HUMAN_PLAYER && !matches!(s.ship_type, ShipType::sSwarmer | ShipType::dNomadMoon | ShipType::dNomadFieldEmitter)
         } else {
-            // (Visibility to the computer player and Mimic disguises are not modelled.)
-            s.player == HUMAN_PLAYER && s.ship_type != ShipType::sSwarmer
+            // `kasPredShipEnemy`: the human player's ships the computer player (1) sees; a
+            // disguised Mimic, cloaked ship or undetected Leech is left out. (The original also
+            // drops Mimics disguised as player 4's ships, which a single-player game has none of.)
+            s.player == HUMAN_PLAYER
+                && crate::visibility::visible_to_player(self.u, id, 1)
+                && !crate::ships::mimic::is_disguised_as_player(self.u, id, 4)
+                && s.ship_type != ShipType::sSwarmer
         }
     }
 
@@ -1269,13 +1321,11 @@ impl KasRuntime for SimHost<'_> {
     }
 
     fn wide_screen_in_dont_close_sensors(&mut self, _cx: &Cx, frames: i32) {
-        let t = self.u.total_time_elapsed;
-        self.g.wide_screen_call(crate::mission::WideScreenKind::InDontCloseSensors, frames, t);
+        self.g.wide_screen_call(self.u, crate::mission::WideScreenKind::InDontCloseSensors, frames);
     }
 
     fn wide_screen_out(&mut self, _cx: &Cx, frames: i32) {
-        let t = self.u.total_time_elapsed;
-        self.g.wide_screen_call(crate::mission::WideScreenKind::Out, frames, t);
+        self.g.wide_screen_call(self.u, crate::mission::WideScreenKind::Out, frames);
     }
 
     fn camera_focus(&mut self, _cx: &Cx, ships: Ships) {

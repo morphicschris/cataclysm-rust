@@ -80,6 +80,47 @@ pub fn bullet_collided_with_target(u: &mut Universe, apply: bool, tid: ShipId, b
     }
 }
 
+/// `univBulletCollidedWithTarget` (0x541ac0) for a mine: the hit rocks it unless it is
+/// immobile or unbumpable, and it takes the bullet's damage against no armour (no side,
+/// friendly-fire or armour-piercing modifiers).
+pub fn bullet_collided_with_mine(u: &mut Universe, apply: bool, mid: crate::object::MissileId, bid: crate::object::BulletId, t: f32, _side: i32) {
+    const NO_DAMAGE: u32 = 0x3f80_0000;
+    let Some(b) = u.bullets.get(bid).cloned() else { return };
+    if b.bullet_type == crate::ships::mothership::BIG_GUN_BULLET_TYPE {
+        crate::ships::mothership::big_gun_bullet_hit(u, bid, b.posinfo.position);
+    }
+    let damage = st(ld(weapon_damage(b.bullet_type, 0)) * ld(b.damage));
+    let Some(m) = u.missiles.get(mid) else { return };
+    let Some(mst) = crate::missile::statics_of(u, m) else { return };
+    let immobile = mst.header.immobile;
+    let fatal = if apply {
+        if !immobile && m.flags & sof::NOT_BUMPABLE == 0 {
+            let tw = u.tweaks.combat.clone();
+            let k = ld(b.mass) / ld(u.phys_time_elapsed);
+            let v = b.posinfo.velocity;
+            let push = Vector::new(st(ld(v.x) * k), st(ld(v.y) * k), st(ld(v.z) * k));
+            let mass = ld(b.mass);
+            let r0 = u.randy.frandom_between_ext(RAN_GAME, tw.bullet_rock[0][0], tw.bullet_rock[0][1]);
+            let m = u.missiles.missile_mut(mid);
+            m.rotinfo.torque.x = st(r0 * mass + ld(m.rotinfo.torque.x));
+            let r1 = u.randy.frandom_between_ext(RAN_GAME, tw.bullet_rock[1][0], tw.bullet_rock[1][1]);
+            let m = u.missiles.missile_mut(mid);
+            m.rotinfo.torque.y = st(r1 * mass + ld(m.rotinfo.torque.y));
+            let r2 = u.randy.frandom_between_ext(RAN_GAME, tw.bullet_rock[2][0], tw.bullet_rock[2][1]);
+            let m = u.missiles.missile_mut(mid);
+            m.rotinfo.torque.z = st(r2 * mass + ld(m.rotinfo.torque.z));
+            let f = &mut m.posinfo.force;
+            f.x = st(ld(push.x) + ld(f.x));
+            f.y = st(ld(push.y) + ld(f.y));
+            f.z = st(ld(push.z) + ld(f.z));
+        }
+        u32::from(crate::missile::apply_damage(u, mid, damage, b.bullet_type as i32))
+    } else {
+        NO_DAMAGE
+    };
+    crate::effects::bullet_hit(u, bid, ObjRef::Missile(mid), t, damage, fatal);
+}
+
 /// [`bullet_collided_with_target`] without the effect; returns the effect's damage and
 /// "fatal" parameters (`None`: the ship or bullet is gone).
 fn bullet_collided_inner(u: &mut Universe, apply: bool, tid: ShipId, bid: crate::object::BulletId, t: f32, side: i32) -> Option<(f32, u32)> {
@@ -157,6 +198,18 @@ fn bullet_collided_inner(u: &mut Universe, apply: bool, tid: ShipId, bid: crate:
 /// ship died now.
 pub fn apply_damage_to_target(u: &mut Universe, tid: ShipId, damage: f32, bullet_type: i32, how: i32, who: i32, killer: Option<ShipId>) -> bool {
     let statics = u.statics.clone();
+    // A mothership's own module (a component flagged `SOF_MODULE`) passes the damage to the
+    // ship it is clamped to: the modules a mothership starts with never die on their own.
+    let tid = match u.ships.get(tid) {
+        Some(s) if s.flags & crate::base::SOF_MODULE != 0 && statics.ship(s.ship_type).is_some_and(|st| st.ship_class == Some(ShipClass::Component)) => {
+            crate::clamp::host_of(u, tid).filter(|&h| u.ships.get(h).is_some()).unwrap_or(tid)
+        }
+        _ => tid,
+    };
+    // No ship is hurt while an NIS plays (`nisIsRunning`).
+    if u.nis_running {
+        return false;
+    }
     let Some(s) = u.ships.get_mut(tid) else { return false };
     let Some(stat) = statics.ship(s.ship_type) else { return false };
     let old = s.health;
@@ -165,6 +218,11 @@ pub fn apply_damage_to_target(u: &mut Universe, tid: ShipId, damage: f32, bullet
     if s.flags2 & 4 != 0 {
         return false;
     }
+    // Nor while the letterbox is in, unless the mission lets this ship be hurt then.
+    if crate::letterbox::shields(u, u.ships.ship(tid)) {
+        return false;
+    }
+    let Some(s) = u.ships.get_mut(tid) else { return false };
     s.health = st(ld(s.health) - ld(damage));
     let max = ld(stat.health.max_health);
     if 0.25 <= ld(old) / max && ld(s.health) / max < 0.25 {

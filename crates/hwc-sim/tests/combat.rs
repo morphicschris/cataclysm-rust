@@ -181,3 +181,59 @@ fn formation_keeps_formation_when_ordered_to_attack() {
     assert!(approached > 100, "the formation closed on the target in formation ({approached} updates)");
     assert!(ended_in_formation, "the attack ended and the ships are back in their formation");
 }
+
+/// Retaliation by tactics (`univCheckShipState` / `tacticsDelegateAttackCommand`): idle ships
+/// that are shot at fire back in Neutral and Aggressive, whatever they were doing before
+/// (nothing, a finished move, a halt, a formation), with the player's fog of war on.
+#[test]
+fn idle_ships_return_fire_by_tactics() {
+    use hwc_math::Vector;
+    use hwc_sim::harness::{Order, Scenario, Spawn};
+    use hwc_sim::object::tactics;
+    use hwc_sim::statics::{ShipRace, ShipType};
+    let Some(d) = data() else { return };
+    let pairs = [
+        (ShipType::sAcolyte, ShipType::tMultiGunCorvette, 1600.0),
+        (ShipType::sMultiBeamFrigate, ShipType::tIonCannonFrigate, 2500.0),
+        (ShipType::sACV, ShipType::tHeavyInterceptor, 2500.0),
+    ];
+    let setups = ["idle", "moved", "halted", "formation", "fog"];
+    let mut failures = Vec::new();
+    for (ours, theirs, dist) in pairs {
+        for t in [tactics::NEUTRAL, tactics::AGGRESSIVE] {
+            for setup in setups {
+                let mine: Vec<usize> = (0..3).collect();
+                let mut spawns: Vec<Spawn> = (0..3).map(|i| Spawn { ship_type: ours, player: 0, position: Vector::new(0.0, i as f32 * 300.0, 0.0) }).collect();
+                spawns.push(Spawn { ship_type: theirs, player: 1, position: Vector::new(dist, 0.0, 0.0) });
+                let mut orders = vec![(0, Order::Tactics { ships: mine.clone(), tactics: t })];
+                match setup {
+                    "moved" => orders.push((0, Order::Move { ships: mine.clone(), mode: 0, waypoints: vec![Vector::new(-300.0, 0.0, 0.0)] })),
+                    "halted" => orders.push((0, Order::Halt { ships: mine.clone() })),
+                    "formation" => orders.push((0, Order::Formation { ships: mine.clone(), formation_type: hwc_sim::formation::kind::DELTA })),
+                    "fog" => orders.push((0, Order::FogOfWar { player: 0 })),
+                    _ => {}
+                }
+                orders.push((320, Order::Attack { ships: vec![3], targets: vec![0] }));
+                let sc = Scenario { name: "retaliation", players: vec![ShipRace::Somtaaw, ShipRace::Taiidan], spawns, orders, resources: Vec::new(), resource_units: Vec::new() };
+                let mut run = Run::new(d.statics.clone(), d.tweaks.clone(), sc).unwrap();
+                let ids = run.ids.clone();
+                let (mut fired, mut hit) = (0, 0);
+                for _ in 0..16 * 40 {
+                    run.step();
+                    for e in &run.universe.events {
+                        match e {
+                            SimEvent::GunFired { ship, .. } if ids[..3].contains(ship) => fired += 1,
+                            SimEvent::BulletHit { ship, .. } if ids[..3].contains(ship) => hit += 1,
+                            _ => {}
+                        }
+                    }
+                }
+                println!("{ours:?} vs {theirs:?} tactics {t} {setup}: hit {hit} times, fired {fired}");
+                if hit > 0 && fired == 0 {
+                    failures.push(format!("{ours:?} vs {theirs:?} tactics {t} {setup}"));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "ships that did not fire back: {failures:?}");
+}

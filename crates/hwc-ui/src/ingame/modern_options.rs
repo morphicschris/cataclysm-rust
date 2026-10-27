@@ -140,8 +140,26 @@ pub const ENTRIES: &[Entry] = &[
     entry("hwcSmoothZoom", "SMOOTH WHEEL ZOOM", 1, Control::Toggle),
     entry("hwcFocusZoom", "FOCUS AGAIN ZOOMS IN", 1, Control::Toggle),
     entry(
+        "hwcAltFocusKeepsZoom",
+        "ALT FOCUS KEEPS THE ZOOM",
+        1,
+        Control::Toggle,
+    ),
+    entry(
         "hwcZoomClear",
         "KEEP THE CAMERA OUT OF HULLS",
+        1,
+        Control::Toggle,
+    ),
+    entry(
+        "hwcSensorsFollow",
+        "SENSORS CAMERA FOLLOWS THE FOCUS",
+        1,
+        Control::Toggle,
+    ),
+    entry(
+        "hwcSensorsFocusStays",
+        "FOCUS IN SENSORS STAYS IN SENSORS",
         1,
         Control::Toggle,
     ),

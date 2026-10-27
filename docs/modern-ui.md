@@ -323,7 +323,10 @@ own options, each an options-file key that a command-line switch can also set:
 | | DRAW DISTANCE: ORIGINAL / FAR | `hwcRenderList` | `--draw-distance` |
 | | SMOOTH WHEEL ZOOM | `hwcSmoothZoom` | `--zoom` |
 | | FOCUS AGAIN ZOOMS IN | `hwcFocusZoom` | `--focus-zoom` |
+| | ALT FOCUS KEEPS THE ZOOM | `hwcAltFocusKeepsZoom` | `--alt-focus` |
 | | KEEP THE CAMERA OUT OF HULLS | `hwcZoomClear` | `--zoom-limit` |
+| | SENSORS CAMERA FOLLOWS THE FOCUS | `hwcSensorsFollow` | `--sensors-follow` |
+| | FOCUS IN SENSORS STAYS IN SENSORS | `hwcSensorsFocusStays` | `--sensors-focus` |
 | CONTROLS | RIGHT CLICK OPENS THE MOVE PLATE | `hwcRightClickMove` | `--right-click` |
 | | DOUBLE CLICK SELECTS ALL OF A TYPE | `hwcDoubleClickSelectType` | |
 | INTERFACE | MODERN HUD | `hwcModernHud` | `--hud` |

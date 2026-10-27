@@ -65,6 +65,55 @@ fn mothership_comes_with_its_modules() {
     assert!(u.base.factories.iter().any(|f| f.ship == Some(ms)));
 }
 
+/// `ShipModuleHouseKeep`: a module with no host breaks away and explodes a couple of seconds
+/// later, but not while an NIS plays (n02 flies the Kuun-Lan's hangar, `bSectMoship`, free).
+#[test]
+fn hostless_module_waits_for_the_nis_to_end() {
+    for nis in [false, true] {
+        let Some(mut run) = start(scenario("base").unwrap()) else { return };
+        run.universe.nis_running = nis;
+        let id = hwc_sim::base::create_ship(&mut run.universe, ShipType::bSectMoship, 0, Vector::new(5000.0, 0.0, 0.0), Default::default()).unwrap();
+        let died = run_until(&mut run, 16 * 10, |r| r.universe.ships.get(id).is_none());
+        assert_eq!(died.is_some(), !nis, "nis running {nis}");
+    }
+}
+
+/// `ApplyDamageToTarget`: a hit on one of the mothership's own modules hurts the mothership,
+/// and nothing is hurt while an NIS plays.
+#[test]
+fn module_damage_goes_to_the_mothership() {
+    let Some(mut run) = start(scenario("base").unwrap()) else { return };
+    let ms = run.ids[0];
+    let u = &mut run.universe;
+    let module = u.ships.iter().find(|s| s.base.clamp.as_ref().and_then(|c| c.host) == Some(ms)).map(|s| s.id).unwrap();
+    let (mh, ph) = (u.ships.ship(module).health, u.ships.ship(ms).health);
+    let killed = hwc_sim::damage::apply_damage_to_target(u, module, mh * 2.0, 0, 0, 99, None);
+    assert!(!killed);
+    assert_eq!(u.ships.ship(module).health, mh);
+    assert!(u.ships.ship(ms).health < ph);
+    let ph = u.ships.ship(ms).health;
+    u.nis_running = true;
+    hwc_sim::damage::apply_damage_to_target(u, ms, 100.0, 0, 0, 99, None);
+    assert_eq!(u.ships.ship(ms).health, ph);
+    u.nis_running = false;
+    // While the letterbox is in, only ships the mission marked vulnerable in wide screen.
+    u.letterbox.wide_screen_in(30);
+    for _ in 0..17 {
+        u.letterbox.tick();
+    }
+    assert!(u.letterbox.fully);
+    hwc_sim::damage::apply_damage_to_target(u, ms, 100.0, 0, 0, 99, None);
+    assert_eq!(u.ships.ship(ms).health, ph);
+    u.ships.ship_mut(ms).special_flags2 |= 0x0100_0000;
+    hwc_sim::damage::apply_damage_to_target(u, ms, 100.0, 0, 0, 99, None);
+    assert!(u.ships.ship(ms).health < ph);
+    // The bars stop counting as in on the first step out.
+    u.ships.ship_mut(ms).special_flags2 &= !0x0100_0000;
+    u.letterbox.wide_screen_out(30);
+    u.letterbox.tick();
+    assert!(!u.letterbox.fully);
+}
+
 #[test]
 fn build_a_ship_and_launch_it() {
     let Some(mut run) = start(scenario("base").unwrap()) else { return };

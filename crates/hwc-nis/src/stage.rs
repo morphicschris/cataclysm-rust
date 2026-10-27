@@ -90,6 +90,13 @@ pub fn asteroid_kind(name: &str) -> Option<u8> {
     l.strip_prefix("asteroid")?.parse().ok()
 }
 
+/// The on/off argument of `ebolts` / `beastEffect` (`sscanf "%d"`: a leading integer, else 0).
+fn flag_arg(arg: &str) -> i32 {
+    let t = arg.trim_start();
+    let end = t.char_indices().find(|&(i, c)| !(c.is_ascii_digit() || (i == 0 && (c == '-' || c == '+')))).map_or(t.len(), |(i, _)| i);
+    t[..end].parse().unwrap_or(0)
+}
+
 fn is_ship(u: &Universe, h: Handle) -> Option<ShipId> {
     match h {
         Handle::Ship(id) if u.ships.get(id).is_some() => Some(id),
@@ -104,6 +111,8 @@ impl Stage {
     /// ([`nis_support::hyperspace_ship_types_attached_to_mothership`], empty for the opening).
     pub fn create(u: &mut Universe, player: &NisPlayer, mission: u32, module_types: &[ShipType]) -> Stage {
         let mut stage = Stage::default();
+        // `nisStart` sets `nisIsRunning` before it creates the objects.
+        u.nis_running = true;
         let local_race = u.players.first().map(|p| p.race);
         for (i, path) in player.data.objects.iter().enumerate() {
             let state = &player.objects[i];
@@ -371,6 +380,30 @@ impl Stage {
                         hwc_sim::ships::cl_special(u, &[a], &[t]);
                     }
                 }
+                Action::EBolts(arg) => {
+                    // `nisEBolts` (0x4cbc80): electric bolts over the hull (the ship's flicker:
+                    // on now for 2.5 s), or off.
+                    if let Some(id) = ship {
+                        let now = u.total_time_elapsed;
+                        let s = u.ships.ship_mut(id);
+                        if flag_arg(arg) != 0 {
+                            s.flicker.next = now;
+                            s.flicker.delay = -1.0;
+                            s.flicker.state = 1;
+                            s.flicker.end = st(ld(now) + 2.5);
+                        } else {
+                            s.flicker.state = 0;
+                        }
+                    }
+                }
+                Action::BeastEffect(arg) => {
+                    // `nisBeastEffect` (0x4cbce0): the Beast infection look, over 4 s (the
+                    // infection timer, which does not complete while the NIS runs), or off.
+                    if let Some(id) = ship {
+                        let now = u.total_time_elapsed;
+                        u.ships.ship_mut(id).beast.timer = if flag_arg(arg) != 0 { st(ld(now) + 4.0) } else { 0.0 };
+                    }
+                }
                 Action::HaltAttack => {
                     if let Some(id) = ship {
                         hwc_sim::command::remove_ships_from_doing_stuff(u, &[id]);
@@ -422,6 +455,8 @@ impl Stage {
     /// they keep moving, vincible, counted by the unit caps), the others, the extra modules and
     /// the effects leave the universe. A hidden universe is shown again.
     pub fn stop(&mut self, u: &mut Universe, report: &StopReport) {
+        u.nis_running = false;
+        u.letterbox.nis_ended();
         for id in self.extra_ships.drain(..) {
             if u.ships.get(id).is_some() {
                 hwc_sim::damage::really_delete_ship(u, id);

@@ -334,6 +334,53 @@ fn mission_three_roll_call() {
         h.rollcall_docked, h.rollcall_remaining
     );
     rig.shot(g, "07_m3_roll_call");
+    // Off the screen the camera still turns (right drag) and zooms (wheel); the screen stays.
+    {
+        use hwc_ui::ingame::InputEvent as E;
+        assert!(!g
+            .ui
+            .fe
+            .screen_contains(hwc_ui::ingame::rollcall::SCREEN, 600, 400));
+        let angle = g.world.camera.angle;
+        g.input(E::MouseMove { x: 600, y: 400 }, &mut rig.audio);
+        g.input(
+            E::MouseButton {
+                left: false,
+                down: true,
+            },
+            &mut rig.audio,
+        );
+        g.input(E::MouseMove { x: 700, y: 400 }, &mut rig.audio);
+        g.input(
+            E::MouseButton {
+                left: false,
+                down: false,
+            },
+            &mut rig.audio,
+        );
+        rig.frame(g);
+        assert_ne!(
+            g.world.camera.angle, angle,
+            "the camera did not turn in the roll call"
+        );
+        let distance = g.world.camera.distance;
+        g.input(E::Wheel { up: false }, &mut rig.audio);
+        for _ in 0..8 {
+            rig.frame(g);
+        }
+        assert_ne!(
+            g.world.camera.distance, distance,
+            "the camera did not zoom in the roll call"
+        );
+        assert_eq!(g.ui.manager(), Some(Manager::RollCall));
+        g.input(
+            E::MouseMove {
+                x: SIZE.0 as i32 / 2,
+                y: SIZE.1 as i32 / 2,
+            },
+            &mut rig.audio,
+        );
+    }
     rig.frame(g);
     let fe = &g.ui.fe;
     let go = fe.find_atom("GoNowHyperspace").expect("GoNowHyperspace");
@@ -452,11 +499,45 @@ fn banked_nis_camera() {
     let mut done = false;
     let mut frames = 0;
     let mut shot = false;
+    let mut ejected_shot = false;
+    let mut beast_shot = false;
+    let hangar = |g: &Game| {
+        g.world
+            .universe()
+            .ships
+            .iter()
+            .any(|s| s.ship_type == hwc_sim::statics::ShipType::bSectMoship)
+    };
+    assert!(hangar(g), "NIS 2 has no hangar module");
     while g.nis.as_ref().is_some_and(|n| n.kind.in_own_level()) {
         done |= rig.frame(g).contains(&Outcome::NisLevelDone);
         frames += 1;
         let Some(n) = g.nis.as_ref() else { break };
         let time = n.player.time;
+        // The hangar module is ejected at 60.5 s and tumbles away to the end; the module
+        // housekeeping leaves it alone while an NIS plays (it used to explode at once).
+        if n.kind.in_own_level() && time < 78.0 {
+            assert!(hangar(g), "the hangar module died at {time:.1} s");
+        }
+        // At 43.7 s the Beast takes the hangar: electric bolts crawl over it (`ebolts`, for
+        // 2.5 s) and its infected look blends in over 4 s (`beastEffect`).
+        if !beast_shot && time > 45.0 {
+            let u = g.world.universe();
+            let h = u
+                .ships
+                .iter()
+                .find(|s| s.ship_type == hwc_sim::statics::ShipType::bSectMoship)
+                .expect("hangar");
+            assert!(h.beast.timer != 0.0, "beastEffect did not reach the hangar");
+            assert!(h.flicker.state != 0, "ebolts did not reach the hangar");
+            rig.shot(g, "10_nis_hangar_beast");
+            beast_shot = true;
+        }
+        if !ejected_shot && time > 64.0 {
+            rig.shot(g, "10_nis_hangar_ejected");
+            ejected_shot = true;
+        }
+        let Some(n) = g.nis.as_ref() else { break };
         let c = n.player.camera;
         let f = Vec3::new(
             c.look_at.x - c.eye.x,
@@ -1116,4 +1197,202 @@ fn mission_three_mines() {
         rig.frame(g);
     }
     rig.shot(g, "10b_m3_minefield");
+
+    // The player's ships that can attack are selected; a Ctrl band box over the whole view
+    // gathers the mines in it (the main view does not hide them), and its release orders the
+    // attack on them.
+    let fleet: Vec<hwc_sim::ShipId> = {
+        let u = g.world.universe();
+        let own: Vec<_> = u
+            .ship_list
+            .iter()
+            .copied()
+            .filter(|&id| crate::host::selectable(u, id))
+            .collect();
+        hwc_sim::command::attack_capable(u, &own)
+    };
+    assert!(!fleet.is_empty(), "nothing of the fleet can attack");
+    g.selection = fleet.clone();
+    g.input(InputEvent::KeyDown(0x11), &mut rig.audio);
+    g.input(InputEvent::MouseMove { x: 2, y: 2 }, &mut rig.audio);
+    g.input(
+        InputEvent::MouseButton {
+            left: true,
+            down: true,
+        },
+        &mut rig.audio,
+    );
+    g.input(
+        InputEvent::MouseMove {
+            x: SIZE.0 - 3,
+            y: SIZE.1 - 3,
+        },
+        &mut rig.audio,
+    );
+    rig.frame(g);
+    let gathered = g.selecting.clone();
+    rig.shot(g, "10c_m3_mines_band_box");
+    g.input(
+        InputEvent::MouseButton {
+            left: true,
+            down: false,
+        },
+        &mut rig.audio,
+    );
+    g.input(InputEvent::KeyUp(0x11), &mut rig.audio);
+    rig.frame(g);
+    let boxed: Vec<_> = gathered
+        .iter()
+        .filter(|id| id.mine().is_some())
+        .copied()
+        .collect();
+    eprintln!("the Ctrl band box gathered {} mines", boxed.len());
+    assert!(
+        !boxed.is_empty(),
+        "the Ctrl band box found no mine: {gathered:?}"
+    );
+    let u = g.world.universe();
+    let ordered = g.selection.iter().any(|&id| {
+        u.ship(id)
+            .and_then(|s| s.command)
+            .and_then(|c| u.commands.get(c))
+            .is_some_and(|c| c.attack_targets.iter().any(|t| boxed.contains(t)))
+    });
+    assert!(ordered, "no attack order on the boxed mines");
+}
+
+/// Mission 1 once the fleet is in: the Alt focus (`ccFocusClose`) recentres on a ship at the
+/// current zoom distance, also when repeated (`hwcAltFocusKeepsZoom`); with the original's
+/// behaviour it closes in to frame the ship.
+#[test]
+fn alt_focus_keeps_the_zoom() {
+    use hwc_sim::statics::ShipType;
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(1, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    rig.frames_until(g, 16 * 60, "the fleet arriving in mission 1", |g| {
+        g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE
+    });
+    let u = g.world.universe();
+    let workers: Vec<_> = u
+        .ship_list
+        .iter()
+        .copied()
+        .filter(|&id| {
+            u.ship(id)
+                .is_some_and(|s| s.player == 0 && s.ship_type == ShipType::sWorker)
+        })
+        .collect();
+    assert!(workers.len() >= 2, "two workers");
+    assert!(g.world.alt_focus_keeps_zoom, "on by default");
+    g.world.focus_on(vec![workers[0]], false);
+    for _ in 0..32 {
+        rig.frame(g);
+    }
+    let before = g.world.camera.distance;
+    g.world.focus_on(vec![workers[1]], true);
+    for _ in 0..32 {
+        rig.frame(g);
+    }
+    assert_eq!(g.world.focus, vec![workers[1]]);
+    let after = g.world.camera.distance;
+    assert!(
+        (after - before).abs() < 1.0,
+        "Alt focus zoomed: {before} -> {after}"
+    );
+    g.world.focus_on(vec![workers[1]], true);
+    for _ in 0..32 {
+        rig.frame(g);
+    }
+    let again = g.world.camera.distance;
+    assert!(
+        (again - before).abs() < 1.0,
+        "Alt focus again zoomed: {before} -> {again}"
+    );
+
+    g.world.alt_focus_keeps_zoom = false;
+    g.world.focus_on(vec![workers[0]], true);
+    for _ in 0..48 {
+        rig.frame(g);
+    }
+    let fit = g.world.focus_min_zoom();
+    let close = g.world.camera.distance;
+    eprintln!("kept: {before:.0}; original close-up: {close:.0} (framing {fit:.0})");
+    assert!(
+        (close - fit).abs() < fit * 0.02,
+        "original Alt focus not at the framing distance {fit}: {close}"
+    );
+}
+
+/// Mission 4: the genetics module infects the Clee-San and the Beast's infection beam
+/// (`eboltCascade.ebg`, its length kept at the source-to-target distance by
+/// `beastCascadeEffectUpdate`) is drawn from the module to the ship.
+#[test]
+fn mission_four_infection_beam() {
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(4, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    let beam = |g: &Game| {
+        let u = g.world.universe();
+        u.bullet_list.iter().copied().find(|&b| {
+            u.bullets.get(b).is_some_and(|b| {
+                b.weapon == hwc_sim::bullet::weapon::BEASTINFECT && b.time_lived > 0.0
+            })
+        })
+    };
+    rig.frames_until(g, 16 * 90, "the fleet arriving in mission 4", |g| {
+        g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE
+    });
+    // The Clee-San is escorted to the genetics module (a Beast mothership hulk), which then
+    // infects it (the script's "Switch": unlimited infection and SpecialOn the Clee-San).
+    // Escorting takes the player's fleet; here the Clee-San is put next to the module and
+    // the module told to infect it.
+    {
+        let u = g.world.universe_mut();
+        let find = |u: &hwc_sim::Universe, t| {
+            u.ships
+                .iter()
+                .find(|s| s.ship_type == t)
+                .map(|s| (s.id, s.posinfo.position))
+        };
+        let (module, mp) =
+            find(u, hwc_sim::statics::ShipType::dBeastMothership).expect("genetics module");
+        let (cs, old) = find(u, hwc_sim::statics::ShipType::dEcclesiam).expect("the Clee-San");
+        let new = hwc_math::Vector::new(mp.x + 2000.0, mp.y, mp.z);
+        u.ships.ship_mut(cs).posinfo.position = new;
+        hwc_sim::fow::move_viewer(u, cs, old, new);
+        hwc_sim::ships::beast::kas_set_infection_unlimited(u, &[module], true);
+        hwc_sim::ships::cl_special(u, &[module], &[cs]);
+        hwc_sim::ships::beast::kas_set_infection_unlimited(u, &[module], false);
+    }
+    rig.frames_until(g, 16 * 30, "the infection beam", |g| beam(g).is_some());
+    for i in 0..3 {
+        let Some(bid) = beam(g) else { break };
+        let b = g.world.universe().bullets.bullet(bid);
+        let p = Vec3::new(
+            b.posinfo.position.x,
+            b.posinfo.position.y,
+            b.posinfo.position.z,
+        );
+        let l = Vec3::new(b.length_vec.x, b.length_vec.y, b.length_vec.z);
+        g.world.follow_focus = false;
+        g.world.focus.clear();
+        g.world.camera.look_at = p + l * 0.5;
+        g.world.camera.distance = (l.length() * 1.2).max(800.0);
+        rig.frame(g);
+        rig.shot(g, &format!("12_m4_infection_beam_{i}"));
+        for _ in 0..8 {
+            rig.frame(g);
+        }
+    }
 }

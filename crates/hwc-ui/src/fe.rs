@@ -569,6 +569,30 @@ impl<G> FrontEnd<G> {
         self.screens.iter().position(|s| s.name == name)
     }
 
+    /// Whether (`x`, `y`) is on a started screen named `name`: inside its base region or one
+    /// of the regions under it (what the region system would hand the event to).
+    pub fn screen_contains(&self, name: &str, x: i32, y: i32) -> bool {
+        let Some(screen) = self.find_screen(name) else {
+            return false;
+        };
+        let mut todo: Vec<RegionId> = self
+            .stack
+            .iter()
+            .filter(|e| e.screen == Some(screen))
+            .map(|e| e.base)
+            .collect();
+        while let Some(id) = todo.pop() {
+            let Some(r) = self.regions.get(id) else {
+                continue;
+            };
+            if r.rect.contains(x, y) {
+                return true;
+            }
+            todo.extend(r.children.iter().copied());
+        }
+        false
+    }
+
     /// Moves a screen that keeps its 640x480 coordinates (the menus and the roll call) by
     /// (`dx`, `dy`) from where the file puts it. Not something the original does; used for
     /// opt-in layout changes. Takes effect the next time the screen starts.

@@ -155,6 +155,10 @@ options:
   --focus-zoom <on|off> on (default, as the original): focusing again on the ships already
                         in focus (F twice) eases the camera in to frame them; off: a
                         repeated focus does nothing. Options file: hwcFocusZoom = 1/0
+  --alt-focus <mode>    keep (default, a user-requested change: Alt+click and Alt+band box
+                        recentre on the ships at the current zoom distance) or original
+                        (the original's close-up on them); options file:
+                        hwcAltFocusKeepsZoom = 1/0
   --zoom-limit <mode>   hull (default, a user-requested addition: the closest zoom on the
                         focused ships also keeps the near clip plane outside their hulls) or
                         original (the original's limit from their collision size and minimum
@@ -164,6 +168,16 @@ options:
                         render list) or far (everything within the far clip distance of the
                         eye); both are radial, the same at any camera angle. Options file:
                         hwcRenderList = 1/0
+  --sensors-follow <on|off>
+                        on (default, a user-requested addition: opening the sensors manager
+                        while the camera follows ships keeps the sensors camera following
+                        them until you pan) or off (the original's camera stays where it
+                        opened); options file: hwcSensorsFollow = 1/0
+  --sensors-focus <mode>
+                        stay (default, a user-requested change: F in the sensors manager
+                        centres the sensors camera on the selection and follows it) or
+                        original (F closes the sensors manager onto the selection); options
+                        file: hwcSensorsFocusStays = 1/0
   Formation focus fire  hwcFormationFocusFire = 1 in the options file (a user-requested
                         change, off by default, also on the ENHANCEMENTS screen): in a
                         formation attack the wingmen always fire at the leader's target
@@ -270,10 +284,16 @@ pub struct Args {
     /// `--focus-zoom`, `--zoom-limit` (Some(true): hull), `--draw-distance` (Some(true):
     /// original); None: the options file.
     pub focus_zoom: Option<bool>,
+    /// `--alt-focus`: Some(true) keep (recentre at the current zoom), Some(false) the
+    /// original's close-up; None: the options file.
+    pub alt_focus_keeps_zoom: Option<bool>,
     pub zoom_clear: Option<bool>,
     pub render_list: Option<bool>,
     /// `--letterbox` (Some(true): tall); None: the options file.
     pub tall_letterbox: Option<bool>,
+    /// `--sensors-follow`, `--sensors-focus` (Some(true): stay); None: the options file.
+    pub sensors_follow: Option<bool>,
+    pub sensors_focus_stays: Option<bool>,
     /// `--render-scale`, `--msaa`, `--fxaa`, `--scene-res` (None: the options file).
     pub render_scale: Option<f32>,
     pub msaa: Option<u32>,
@@ -312,9 +332,12 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
         health_brackets: None,
         smooth_zoom: None,
         focus_zoom: None,
+        alt_focus_keeps_zoom: None,
         zoom_clear: None,
         render_list: None,
         tall_letterbox: None,
+        sensors_follow: None,
+        sensors_focus_stays: None,
         render_scale: None,
         msaa: None,
         fxaa: None,
@@ -421,6 +444,14 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
                     v => return Err(format!("unknown --focus-zoom value {v}")),
                 })
             }
+            "--alt-focus" => {
+                a.alt_focus_keeps_zoom =
+                    Some(match value("--alt-focus")?.to_ascii_lowercase().as_str() {
+                        "keep" => true,
+                        "original" => false,
+                        v => return Err(format!("unknown --alt-focus mode {v}")),
+                    })
+            }
             "--zoom-limit" => {
                 a.zoom_clear = Some(match value("--zoom-limit")?.to_ascii_lowercase().as_str() {
                     "hull" => true,
@@ -443,6 +474,24 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
                     "original" => false,
                     v => return Err(format!("unknown --letterbox mode {v}")),
                 })
+            }
+            "--sensors-follow" => {
+                a.sensors_follow = Some(
+                    match value("--sensors-follow")?.to_ascii_lowercase().as_str() {
+                        "on" => true,
+                        "off" => false,
+                        v => return Err(format!("unknown --sensors-follow value {v}")),
+                    },
+                )
+            }
+            "--sensors-focus" => {
+                a.sensors_focus_stays = Some(
+                    match value("--sensors-focus")?.to_ascii_lowercase().as_str() {
+                        "stay" => true,
+                        "original" => false,
+                        v => return Err(format!("unknown --sensors-focus mode {v}")),
+                    },
+                )
             }
             "--build-ui" => {
                 let v = value("--build-ui")?;
