@@ -260,6 +260,75 @@ fn ring(
 }
 
 /// The order lines of the selected ships (main view), drawn under the health bars.
+/// Ships in a group are this close (world units) to the group's first ship, and their targets
+/// to its target, to share one order line.
+pub const GROUP_REACH: f32 = 800.0;
+
+/// One order line: its order, where it ends, and the ships' centre and the target's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderGroup {
+    pub kind: OrderKind,
+    pub target: OrderTarget,
+    pub from: Vec3,
+    pub to: Vec3,
+    /// How far the targets spread from `to` (the ring grows to cover them).
+    pub spread: f32,
+    count: usize,
+    first_from: Vec3,
+    first_to: Vec3,
+}
+
+/// Puts the ships' order lines together: lines of the same order whose ships are near each
+/// other and whose ends are near each other (the same ship, or points within
+/// [`GROUP_REACH`]) become one, from the ships' centre to the targets' centre. Eight fighters
+/// moving in formation give one line and one ring.
+pub fn group_orders(lines: &[(OrderKind, OrderTarget, Vec3, Vec3)]) -> Vec<OrderGroup> {
+    let mut groups: Vec<OrderGroup> = Vec::new();
+    let mut members: Vec<Vec<Vec3>> = Vec::new();
+    for &(kind, target, from, to) in lines {
+        let joins = |g: &OrderGroup| {
+            g.kind == kind
+                && (from - g.first_from).length() <= GROUP_REACH
+                && match (g.target, target) {
+                    (OrderTarget::Ship(a), OrderTarget::Ship(b)) => a == b,
+                    (OrderTarget::Ship(_), _) | (_, OrderTarget::Ship(_)) => false,
+                    _ => (to - g.first_to).length() <= GROUP_REACH,
+                }
+        };
+        match groups.iter().position(joins) {
+            Some(i) => {
+                let g = &mut groups[i];
+                let n = g.count as f32;
+                g.from = (g.from * n + from) / (n + 1.0);
+                g.to = (g.to * n + to) / (n + 1.0);
+                g.count += 1;
+                members[i].push(to);
+            }
+            None => {
+                groups.push(OrderGroup {
+                    kind,
+                    target,
+                    from,
+                    to,
+                    spread: 0.0,
+                    count: 1,
+                    first_from: from,
+                    first_to: to,
+                });
+                members.push(vec![to]);
+            }
+        }
+    }
+    for (g, ends) in groups.iter_mut().zip(&members) {
+        g.spread = ends
+            .iter()
+            .map(|&e| (e - g.to).length())
+            .fold(0.0, f32::max);
+    }
+    groups
+}
+
+/// The order lines of the selected ships (main view), drawn under the health bars.
 pub fn draw_order_lines(
     canvas: &mut Canvas,
     world: &World,
@@ -269,7 +338,7 @@ pub fn draw_order_lines(
     let u = world.universe();
     let min_px = (size.1 as f32 / 1080.0 * 7.0).max(5.0);
     let fog = Fog::of(u);
-    let mut ends: Vec<(OrderKind, OrderTarget)> = Vec::new();
+    let mut lines = Vec::new();
     for &id in selection {
         let Some(s) = u.ship(id) else { continue };
         if s.player != PLAYER || s.flags & (sof::DEAD | sof::HIDE) != 0 {
@@ -288,34 +357,28 @@ pub fn draw_order_lines(
             OrderTarget::Point(p) | OrderTarget::Resource(p) => p,
             OrderTarget::Ship(t) => v3(u.ship(t).expect("alive").posinfo.position),
         };
-        let from = v3(s.posinfo.position);
-        let (Some(a), Some(b)) = (world.project(size, from), world.project(size, to)) else {
+        lines.push((kind, target, v3(s.posinfo.position), to));
+    }
+    for g in group_orders(&lines) {
+        let (Some(a), Some(b)) = (world.project(size, g.from), world.project(size, g.to)) else {
             continue;
         };
-        let mut c = kind.color();
+        let mut c = g.kind.color();
         c[3] = 170;
         order_line(canvas, a, b, c);
-        if !ends.contains(&(kind, target)) {
-            ends.push((kind, target));
-        }
-    }
-    // One ring per target, however many ships go there.
-    for (kind, target) in ends {
-        let mut c = kind.color();
         c[3] = 230;
-        let (p, radius) = match target {
-            OrderTarget::Point(p) => (p, 120.0),
-            OrderTarget::Resource(p) => (p, 160.0),
+        let radius = match g.target {
+            OrderTarget::Point(_) => 120.0,
+            OrderTarget::Resource(_) => 160.0,
             OrderTarget::Ship(t) => {
-                let Some(s) = u.ship(t) else { continue };
                 let r = u
-                    .statics
-                    .ship(s.ship_type)
+                    .ship(t)
+                    .and_then(|s| u.statics.ship(s.ship_type))
                     .map_or(50.0, |st| st.header.coll.coll_sphere_size);
-                (v3(s.posinfo.position), r * 1.3)
+                r * 1.3
             }
         };
-        ring(canvas, world, size, p, radius, min_px, c);
+        ring(canvas, world, size, g.to, radius + g.spread, min_px, c);
     }
 }
 
@@ -451,6 +514,33 @@ mod tests {
         assert!((far_fade((FAR_HIDDEN + FAR_FULL) * 0.5) - 0.5).abs() < 1e-6);
         assert_eq!(far_fade(FAR_FULL), 1.0);
         assert_eq!(far_fade(1e6), 1.0);
+    }
+
+    #[test]
+    fn a_formation_moving_to_a_point_gives_one_line() {
+        let to = Vec3::new(5000.0, 0.0, 0.0);
+        let mut lines: Vec<_> = (0..8)
+            .map(|i| {
+                let off = Vec3::new(0.0, i as f32 * 60.0, 0.0);
+                (OrderKind::Move, OrderTarget::Point(to + off), off, to + off)
+            })
+            .collect();
+        // Far away, another group with the same order; and an attack from the formation.
+        let far = Vec3::new(0.0, 20000.0, 0.0);
+        lines.push((OrderKind::Move, OrderTarget::Point(to), far, to));
+        lines.push((
+            OrderKind::Attack,
+            OrderTarget::Ship(ShipId(3)),
+            Vec3::ZERO,
+            to,
+        ));
+        let g = group_orders(&lines);
+        assert_eq!(g.len(), 3);
+        assert_eq!(g[0].count, 8);
+        assert!((g[0].from - Vec3::new(0.0, 210.0, 0.0)).length() < 1e-3);
+        assert!((g[0].spread - 210.0).abs() < 1e-3);
+        assert_eq!(g[1].count, 1);
+        assert_eq!(g[2].kind, OrderKind::Attack);
     }
 
     #[test]
