@@ -301,3 +301,79 @@ fn remastered_trails_draw() {
         }
     }
 }
+
+/// Frames for a comparison video (`--ignored`): `HWC_HWR_FRAMES/<scene>-<stock|hwr>/NNNN.png` at
+/// 30 frames a second, a group of fighters and then the biggest ship destroyed.
+#[test]
+#[ignore]
+fn remastered_death_video_frames() {
+    let size = (960, 540);
+    let Some(mut rig) = rig(size) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let Some(out) = std::env::var_os("HWC_HWR_FRAMES").map(PathBuf::from) else {
+        eprintln!("skipped: set HWC_HWR_FRAMES");
+        return;
+    };
+    const FPS: f32 = 30.0;
+    for scene in ["fighters", "capital"] {
+        for hwr in [false, true] {
+            let mut game = mission_one(&mut rig, size);
+            let g = &mut *game;
+            g.world.set_remastered_fx(hwr);
+            g.world.interpolate = true;
+            for _ in 0..32 {
+                g.update(DT, &mut None);
+            }
+            let ids = if scene == "fighters" {
+                victims(g).0
+            } else {
+                big_victim(g).into_iter().collect()
+            };
+            let (p, r) = {
+                let u = g.world.universe();
+                let s = u.ship(ids[0]).unwrap();
+                (
+                    s.posinfo.position,
+                    u.statics
+                        .ship(s.ship_type)
+                        .unwrap()
+                        .header
+                        .coll
+                        .coll_sphere_size,
+                )
+            };
+            g.world.follow_focus = false;
+            g.world.camera.look_at = glam::Vec3::new(p.x, p.y, p.z);
+            g.world.camera.distance = if scene == "fighters" { 650.0 } else { r * 5.0 };
+            g.world.camera.declination = (-20f32).to_radians();
+            let dir = out.join(format!("{scene}-{}", if hwr { "hwr" } else { "stock" }));
+            std::fs::create_dir_all(&dir).unwrap();
+            let seconds = if scene == "fighters" { 6.0 } else { 12.0 };
+            let frames = (seconds * FPS) as usize;
+            for f in 0..frames {
+                // The fighters die one after another from half a second in, the capital ship at once.
+                let at = |k: usize| (0.5 + 0.4 * k as f32) * FPS;
+                for (k, &id) in ids.iter().enumerate() {
+                    if f == at(k) as usize || (scene == "capital" && f == 15 && k == 0) {
+                        hwc_sim::damage::apply_damage_to_target(
+                            g.world.universe_mut(),
+                            id,
+                            1.0e9,
+                            0,
+                            0,
+                            0,
+                            None,
+                        );
+                    }
+                }
+                g.update(1.0 / FPS, &mut None);
+                g.render(&mut rig.renderer, size).expect("render");
+                g.canvas()
+                    .save_png(&dir.join(format!("{f:04}.png")))
+                    .expect("png");
+            }
+        }
+    }
+}
