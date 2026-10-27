@@ -476,6 +476,8 @@ pub enum GameRequest {
     /// A key that skips the fleet intel event while the mission's sensors lockout is on
     /// (`smSensorsSkip`, from Escape or Skip_Sensors).
     SkipFleetIntel,
+    /// Tab with `hwcTabShipIcons` (a user-requested change): the next ship-icon mode.
+    CycleShipIcons,
     /// A UI sound event (`soundEventPlay(NULL, event)`).
     Sound(u32),
     /// A speech event (`speechEventFleet` / `speechEventQueue`), with its parameter (ship type)

@@ -541,6 +541,13 @@ impl InGameUi {
         if popup::process_key(&mut self.fe, code) {
             return true;
         }
+        if let Some(a) = self.tab_ship_icons(code, mods) {
+            match a {
+                Some(a) => execute_action(&mut self.fe, a, true),
+                None => self.fe.game.ig.request(GameRequest::CycleShipIcons),
+            }
+            return true;
+        }
         let actions = self.fe.game.ig.keys.actions_for(code, mods);
         if self.fleet_intel {
             if actions
@@ -557,6 +564,28 @@ impl InGameUi {
             }
         }
         !actions.is_empty()
+    }
+
+    /// A user-requested change (`hwcTabShipIcons`): Tab cycles the ship icons (`None`) and
+    /// Shift+Tab does what Tab did (Toggle_Ship_Info), while Tab is bound to nothing else and
+    /// Shift+Tab to nothing at all.
+    fn tab_ship_icons(&self, code: u16, mods: u8) -> Option<Option<Action>> {
+        if code != key::TAB || self.fleet_intel || self.fe.game.options.get("hwcTabShipIcons") == 0
+        {
+            return None;
+        }
+        let kb = &self.fe.game.ig.keys;
+        let plain = kb.actions_for(key::TAB, 0);
+        if plain.iter().any(|&a| a != keys::TOGGLE_SHIP_INFO) {
+            return None;
+        }
+        match mods {
+            0 => Some(None),
+            keys::MOD_SHIFT if kb.actions_for(key::TAB, keys::MOD_SHIFT).is_empty() => {
+                Some(plain.first().copied())
+            }
+            _ => None,
+        }
     }
 
     /// `kbProcessKeyUp`: the up handlers of actions using the key.

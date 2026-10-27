@@ -256,13 +256,43 @@ impl Canvas {
     /// A line drawn through a 16-pixel stipple pattern like `glLineStipple(1, pattern)`: the
     /// n-th pixel from the start is drawn when bit `n % 16` of the pattern is set.
     pub fn line_stippled(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, c: Color, pattern: u16) {
+        self.line_with(x0, y0, x1, y1, pattern, |cv, x, y| cv.put(x, y, c));
+    }
+
+    /// Non-antialiased line blended with straight alpha (both endpoints drawn).
+    pub fn line_blend(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, c: Color) {
+        self.line_with(x0, y0, x1, y1, 0xffff, |cv, x, y| cv.blend(x, y, c));
+    }
+
+    /// [`line_blend`](Self::line_blend) through a 16-pixel stipple pattern.
+    pub fn line_blend_stippled(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        c: Color,
+        pattern: u16,
+    ) {
+        self.line_with(x0, y0, x1, y1, pattern, |cv, x, y| cv.blend(x, y, c));
+    }
+
+    fn line_with(
+        &mut self,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+        pattern: u16,
+        mut plot: impl FnMut(&mut Self, i32, i32),
+    ) {
         let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
         let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
         let (mut x, mut y, mut err) = (x0, y0, dx + dy);
         let mut n = 0u32;
         loop {
             if pattern & (1 << (n % 16)) != 0 {
-                self.put(x, y, c);
+                plot(self, x, y);
             }
             n += 1;
             if x == x1 && y == y1 {

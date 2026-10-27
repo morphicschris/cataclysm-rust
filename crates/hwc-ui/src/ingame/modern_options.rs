@@ -139,7 +139,26 @@ pub const ENTRIES: &[Entry] = &[
         2,
         Control::Toggle,
     ),
+    entry(
+        "hwcTabShipIcons",
+        "TAB CYCLES SHIP ICONS",
+        2,
+        Control::Toggle,
+    ),
     entry(modern_hud::OPTION_KEY, "MODERN HUD", 3, Control::Toggle),
+    entry("hwcOrderLines", "ORDER LINES", 3, Control::Toggle),
+    entry(
+        "hwcShipIcons",
+        "SHIP ICONS",
+        3,
+        Control::Choice(&[("ALL", 2), ("NEARBY", 1), ("OFF", 0)]),
+    ),
+    entry(
+        "hwcHealthBrackets",
+        "BRACKETED HEALTH BARS",
+        3,
+        Control::Toggle,
+    ),
     Entry {
         needs_hud: true,
         ..entry(

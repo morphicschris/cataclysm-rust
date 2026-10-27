@@ -127,6 +127,10 @@ struct App {
     /// `--lod` and `--right-click` (None: the options file decides).
     full_detail: Option<bool>,
     right_click_move: Option<bool>,
+    /// `--order-lines`, `--ship-icons`, `--health-bars` (None: the options file decides).
+    order_lines: Option<bool>,
+    ship_icons: Option<i32>,
+    health_brackets: Option<bool>,
     /// `--render-scale`, `--msaa`, `--fxaa`, `--scene-res`, `--zoom` (None: the options file).
     render_scale: Option<f32>,
     msaa: Option<u32>,
@@ -262,6 +266,9 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         autoplay: args.autoplay,
         full_detail: args.full_detail,
         right_click_move: args.right_click_move,
+        order_lines: args.order_lines,
+        ship_icons: args.ship_icons,
+        health_brackets: args.health_brackets,
         render_scale: args.render_scale,
         msaa: args.msaa,
         fxaa: args.fxaa,
@@ -603,6 +610,9 @@ fn key_code(k: &Key) -> Option<u16> {
 struct Overrides {
     full_detail: Option<bool>,
     right_click_move: Option<bool>,
+    order_lines: Option<bool>,
+    ship_icons: Option<i32>,
+    health_brackets: Option<bool>,
     render_scale: Option<f32>,
     msaa: Option<u32>,
     fxaa: Option<bool>,
@@ -622,6 +632,15 @@ impl Overrides {
         }
         if let Some(v) = self.right_click_move {
             game.right_click_move = v;
+        }
+        if let Some(v) = self.order_lines {
+            game.order_lines = v;
+        }
+        if let Some(v) = self.ship_icons {
+            game.ship_icons = crate::tactical::IconMode::from_option(v);
+        }
+        if let Some(v) = self.health_brackets {
+            game.health_brackets = v;
         }
         if let Some(s) = self.render_scale {
             game.quality.scale = hwc_render::quality::clamp_scale(s);
@@ -660,6 +679,9 @@ impl Overrides {
         let locks = [
             ("hwcFullDetailShips", self.full_detail.map(b)),
             ("hwcRightClickMove", self.right_click_move.map(b)),
+            ("hwcOrderLines", self.order_lines.map(b)),
+            ("hwcShipIcons", self.ship_icons),
+            ("hwcHealthBrackets", self.health_brackets.map(b)),
             (
                 "hwcRenderScale",
                 self.render_scale.map(|s| (s * 100.0).round() as i32),
@@ -686,6 +708,9 @@ impl App {
         Overrides {
             full_detail: self.full_detail,
             right_click_move: self.right_click_move,
+            order_lines: self.order_lines,
+            ship_icons: self.ship_icons,
+            health_brackets: self.health_brackets,
             render_scale: self.render_scale,
             msaa: self.msaa,
             fxaa: self.fxaa,

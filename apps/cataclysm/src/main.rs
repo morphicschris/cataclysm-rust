@@ -55,6 +55,7 @@ mod smoke;
 mod special_actions;
 #[cfg(test)]
 mod speech;
+mod tactical;
 #[cfg(test)]
 mod test_gpu;
 mod tour;
@@ -128,6 +129,19 @@ options:
                         (double-clicking one of your ships selects all your ships of that
                         type on screen, a user-requested change; options file:
                         hwcDoubleClickSelectType = 1/0)
+  --order-lines <mode>  modern (default, a user-requested change: lines from the selected
+                        ships to what they were ordered to, with a circle there, coloured by
+                        the order: green move, red attack, yellow harvest, blue dock, light
+                        blue guard, purple special) or original (none); options file:
+                        hwcOrderLines = 1/0
+  --ship-icons <mode>   all (default, a user-requested change: class icons over every ship),
+                        near (over the ships near the camera, fading out with distance) or
+                        none (the original); Tab cycles them in the game and Shift+Tab is
+                        then Toggle Ship Info (options file: hwcShipIcons = 2/1/0,
+                        hwcTabShipIcons = 1/0 to give Tab back to Toggle Ship Info)
+  --health-bars <mode>  modern (default, a user-requested change: a selected ship's health
+                        bar has a thin black outline and white [ ] brackets) or original;
+                        options file: hwcHealthBrackets = 1/0
   --zoom <mode>         smooth (default, a user-requested change: each mouse-wheel notch
                         eases the camera to its distance) or original (the original's
                         immediate step); options file: hwcSmoothZoom = 1/0
@@ -231,6 +245,11 @@ pub struct Args {
     /// `--right-click`: Some(true) modern, Some(false) original, None the options file's
     /// `hwcRightClickMove`.
     pub right_click_move: Option<bool>,
+    /// `--order-lines`, `--ship-icons` (the `hwcShipIcons` value), `--health-bars`; None: the
+    /// options file.
+    pub order_lines: Option<bool>,
+    pub ship_icons: Option<i32>,
+    pub health_brackets: Option<bool>,
     /// `--zoom`: Some(true) smooth, Some(false) the original's step, None the options file.
     pub smooth_zoom: Option<bool>,
     /// `--focus-zoom`, `--zoom-limit` (Some(true): hull), `--draw-distance` (Some(true):
@@ -273,6 +292,9 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
         autoplay: false,
         full_detail: None,
         right_click_move: None,
+        order_lines: None,
+        ship_icons: None,
+        health_brackets: None,
         smooth_zoom: None,
         focus_zoom: None,
         zoom_clear: None,
@@ -341,6 +363,32 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
                         "modern" => true,
                         "original" => false,
                         v => return Err(format!("unknown --right-click mode {v}")),
+                    },
+                )
+            }
+            "--order-lines" => {
+                a.order_lines = Some(
+                    match value("--order-lines")?.to_ascii_lowercase().as_str() {
+                        "modern" => true,
+                        "original" => false,
+                        v => return Err(format!("unknown --order-lines mode {v}")),
+                    },
+                )
+            }
+            "--ship-icons" => {
+                a.ship_icons = Some(match value("--ship-icons")?.to_ascii_lowercase().as_str() {
+                    "all" => 2,
+                    "near" => 1,
+                    "none" | "original" => 0,
+                    v => return Err(format!("unknown --ship-icons mode {v}")),
+                })
+            }
+            "--health-bars" => {
+                a.health_brackets = Some(
+                    match value("--health-bars")?.to_ascii_lowercase().as_str() {
+                        "modern" => true,
+                        "original" => false,
+                        v => return Err(format!("unknown --health-bars mode {v}")),
                     },
                 )
             }
