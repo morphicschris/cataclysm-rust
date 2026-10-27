@@ -649,6 +649,58 @@ impl GameUiHost for SimHost<'_> {
             .then(|| self.mission_end_label())
     }
 
+    /// `pmBuildMenuItems`' Mimic submenus: the valid disguise menus
+    /// (`MimicIsValidDisguisePlayer`, named by `MimicGetDisguisePlayerData`) and the picked
+    /// one's entries the selection may take (`MimicGetDisguiseTypeNiceName`).
+    fn mimic_menus(&self) -> hwc_ui::ingame::host::MimicMenus {
+        let Some(g) = self.game() else {
+            return Default::default();
+        };
+        let u = self.u();
+        let t = &g.disguise_tables;
+        // Slot 9 is valid in the single-player game too but never filled; it is left out.
+        let types = (0..9u8)
+            .filter(|&p| hwc_sim::ships::mimic::DisguiseTables::is_valid_player(u, p.into()))
+            .map(|p| {
+                let key = match (p, u.single_player) {
+                    (8, _) => "strMimicTypeObjects".to_string(),
+                    (0, true) => "strMimicTypeCurrentPlayer".to_string(),
+                    (1, true) => "strMimicTypeComputerPlayer".to_string(),
+                    (p, _) => format!("strMimicTypePlayer{}", p + 1),
+                };
+                (p, self.text(&key).trim().to_string())
+            })
+            .collect();
+        let slot = g.mimic_slot;
+        let mcv = hwc_sim::player_orders::selection_has_mcv(u, self.selection);
+        let n = hwc_sim::player_orders::mimic_entry_count(t, slot, mcv);
+        let items = t.entries[slot]
+            .iter()
+            .take(n)
+            .map(|e| {
+                if slot == 8 {
+                    let key = match e.asteroid {
+                        1 => "strMimicItemSmallAsteroid",
+                        2 => "strMimicItemMediumAsteroid",
+                        3 => "strMimicItemLargeAsteroid",
+                        _ => "strMimicItemRandomAsteroid",
+                    };
+                    self.text(key).trim().to_string()
+                } else {
+                    usize::try_from(e.ship_type)
+                        .ok()
+                        .and_then(ShipType::from_index)
+                        .map_or_else(String::new, |t| self.ship_name(t))
+                }
+            })
+            .collect();
+        hwc_ui::ingame::host::MimicMenus {
+            types,
+            current: slot as u8,
+            items,
+        }
+    }
+
     fn roll_call(&self) -> Option<hwc_ui::ingame::host::RollCall> {
         let game = self.game()?;
         let h = &game.hyper;
@@ -683,8 +735,8 @@ impl GameUiHost for SimHost<'_> {
 }
 
 /// The menu command of a special-action item the game carries out (`None` for the items the
-/// menu has no command for yet: the Mimic, force-field and siege-cannon items and the
-/// cancel items).
+/// menu has no command for yet: the force-field and siege-cannon items and the cancel
+/// items). Both Mimic submenus show for [`Command::Mimic`].
 pub fn special_command(item: hwc_sim::player_orders::SpecialItem) -> Option<Command> {
     use hwc_sim::player_orders::SpecialItem as I;
     Some(match item {
@@ -694,6 +746,8 @@ pub fn special_command(item: hwc_sim::player_orders::SpecialItem) -> Option<Comm
         I::Leech => Command::Leech,
         I::Link => Command::Link,
         I::Unlink => Command::Unlink,
+        I::SelectMimic | I::MimicItem => Command::Mimic,
+        I::UnMimic => Command::UnMimic,
         I::Cloak => Command::Cloak,
         I::Swarm => Command::Swarmers,
         I::Infect => Command::BeastAttack,

@@ -34,6 +34,10 @@ pub enum Submenu {
     Formations,
     Sensors,
     Leech,
+    /// "Select Mimic": the disguise menus.
+    MimicType,
+    /// "Mimic": the entries of the picked disguise menu.
+    MimicItem,
     Focus,
     View,
     WaypointMode,
@@ -44,6 +48,8 @@ pub struct Item {
     pub label: String,
     pub action: Option<Action>,
     pub submenu: Option<Submenu>,
+    /// What the item asks of the game when it has no key action (the Mimic submenus' picks).
+    pub request: Option<GameRequest>,
     pub group: u8,
     pub greyed: bool,
     pub checked: bool,
@@ -59,6 +65,7 @@ fn item(label: &str, action: Option<Action>, group: u8) -> Item {
         label: label.into(),
         action,
         submenu: None,
+        request: None,
         group,
         greyed: false,
         checked: false,
@@ -212,14 +219,13 @@ fn main_items(fe: &Fe) -> Vec<Item> {
 fn special_items(fe: &Fe) -> Vec<Item> {
     let view = &fe.game.ig.view;
     let mut v = Vec::new();
-    let specials: [(Command, &str, Action, u8); 17] = [
+    let specials: [(Command, &str, Action, u8); 16] = [
         (Command::Harvest, "Harvest", keys::HARVEST, 12),
         (Command::Repair, "Repair", keys::REPAIR, 12),
         (Command::Salvage, "Salvage", keys::SALVAGE, 12),
         (Command::Leech, "Leech", keys::LEECH, 13),
         (Command::Link, "Link", keys::LINK, 14),
         (Command::Unlink, "Unlink", keys::UNLINK, 14),
-        (Command::Mimic, "Mimic", keys::SELECT_MIMIC_TYPE, 15),
         (
             Command::ForceField,
             "Force Field",
@@ -247,6 +253,16 @@ fn special_items(fe: &Fe) -> Vec<Item> {
                 v.push(sub("Select Leech", Submenu::Leech, g));
             }
             v.push(item(label, Some(a), g));
+        }
+        // `pmBuildMenuItems`: the Mimic items come after the link items.
+        if c == Command::Unlink {
+            if has(view, Command::Mimic) {
+                v.push(sub("Select Mimic", Submenu::MimicType, 15));
+                v.push(sub("Mimic", Submenu::MimicItem, 15));
+            }
+            if has(view, Command::UnMimic) {
+                v.push(item("UnMimic", Some(keys::CANCEL_MIMIC), 15));
+            }
         }
     }
     if v.is_empty() {
@@ -316,6 +332,29 @@ fn submenu_items(fe: &Fe, s: Submenu) -> Vec<Item> {
         .iter()
         .map(|(l, a)| item(l, Some(*a), 0))
         .collect(),
+        // `"%d. %s"` of the slot or the entry and its name (`pmBuildMenuItems`).
+        Submenu::MimicType => view
+            .mimic
+            .types
+            .iter()
+            .map(|(slot, name)| Item {
+                request: Some(GameRequest::MimicType(*slot)),
+                ..checked(
+                    item(&format!("{slot}. {name}"), None, 0),
+                    *slot == view.mimic.current,
+                )
+            })
+            .collect(),
+        Submenu::MimicItem => view
+            .mimic
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, name)| Item {
+                request: Some(GameRequest::MimicItem(i)),
+                ..item(&format!("{i}. {name}"), None, 0)
+            })
+            .collect(),
         Submenu::Focus => vec![
             Item {
                 greyed: view.selection.is_empty(),
@@ -366,6 +405,7 @@ fn reserves_checks(s: Option<Submenu>) -> bool {
             Submenu::Tactics
                 | Submenu::Formations
                 | Submenu::Leech
+                | Submenu::MimicType
                 | Submenu::Sensors
                 | Submenu::View
         )
@@ -588,6 +628,11 @@ pub fn execute_highlighted(fe: &mut Fe) {
             .as_ref()
             .and_then(|(parent, _)| p.items.get(*parent))
             .is_some_and(|i| i.submenu == Some(Submenu::Sensors));
+    if let Some(r) = it.request.clone() {
+        close(fe);
+        fe.game.ig.request(r);
+        return;
+    }
     let Some(a) = it.action else {
         return;
     };

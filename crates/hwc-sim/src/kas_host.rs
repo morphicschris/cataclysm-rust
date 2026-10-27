@@ -50,6 +50,24 @@ const NOT_PLAYER_CONTROLLED: u32 = 0x0010_0000;
 const LAUNCHING: u32 = 0x0100_0000;
 const LAUNCH_PENDING: u32 = 0x0080_0000;
 
+/// The log lines of `SetCurrentMimicItem` and `SetMCVItemIndex`: `<prefix><item type>, <value>)`.
+pub(crate) const MIMIC_ITEM_LOG: &str = "SetCurrentMimicItem(";
+pub(crate) const MCV_INDEX_LOG: &str = "SetMCVItemIndex(";
+
+/// Replays one log line onto the disguise menus (a saved game rebuilds them from its log).
+pub(crate) fn replay_disguise_log(t: &mut crate::ships::mimic::DisguiseTables, line: &str) {
+    let parse = |rest: &str| -> Option<(i32, i32)> {
+        let (a, b) = rest.split_once(", ")?;
+        let b = b.split(')').next()?;
+        Some((a.parse().ok()?, b.parse().ok()?))
+    };
+    if let Some((item, ty)) = line.strip_prefix(MIMIC_ITEM_LOG).and_then(parse) {
+        ai_ui::add_mimic_item(t, item, ty);
+    } else if let Some((item, index)) = line.strip_prefix(MCV_INDEX_LOG).and_then(parse) {
+        ai_ui::set_mcv_item_index(t, item, index);
+    }
+}
+
 /// The game side of one KAS run.
 pub struct SimHost<'a> {
     pub u: &'a mut Universe,

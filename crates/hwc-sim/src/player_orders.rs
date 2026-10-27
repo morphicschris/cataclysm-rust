@@ -684,11 +684,114 @@ pub fn execute_special(u: &mut Universe, player: usize, selection: &[ShipId], it
         I::Ram => special_target_order(u, player, selection, t, TargetOrder::Ram),
         I::Repulse => mr_repulse(u, selection),
         I::FireMissiles => special_target_order(u, player, selection, t, TargetOrder::LinkMissiles),
-        I::SelectLeech | I::Unleech | I::SelectMimic | I::MimicItem | I::UnMimic | I::ForceField | I::UnlinkForceField | I::BigGun | I::CancelBigGun => {
+        I::UnMimic => mr_mimic_undisguise(u, selection),
+        I::SelectLeech | I::Unleech | I::SelectMimic | I::MimicItem | I::ForceField | I::UnlinkForceField | I::BigGun | I::CancelBigGun => {
             return false;
         }
     }
     true
+}
+
+/// How many entries of disguise menu `slot` the selection may pick (`MimicGetDisguiseTypeCount`):
+/// all of them with an MCV selected, else the first `defaults[slot]` (`SetMCVItemIndex`: the
+/// larger shapes need two linked Mimics).
+pub fn mimic_entry_count(t: &mimic::DisguiseTables, slot: usize, mcv: bool) -> usize {
+    let n = t.entries.get(slot).map_or(0, Vec::len);
+    if mcv {
+        n
+    } else {
+        usize::try_from(t.defaults.get(slot).copied().unwrap_or(0)).unwrap_or(0).min(n)
+    }
+}
+
+/// Whether the selection holds an MCV (`selGetCommandAvailability`'s 0x17 entry).
+pub fn selection_has_mcv(u: &Universe, selection: &[ShipId]) -> bool {
+    selection.iter().any(|&id| u.ships.get(id).is_some_and(|s| s.ship_type == ShipType::sMCV && has_upgrade(s, 0x20)))
+}
+
+/// `pmMimicDisguiseAs` (0x4e8d40): the selection's Mimics and MCVs that are not disabled take
+/// entry `index` of disguise menu `slot` (a ship type of that player, or for slot 8 an
+/// asteroid); single Mimics only the entries below the menu's MCV index.
+pub fn mimic_disguise_as(u: &mut Universe, t: &mimic::DisguiseTables, slot: usize, selection: &[ShipId], index: usize) {
+    let Some(&e) = t.entries.get(slot).and_then(|l| l.get(index)) else { return };
+    let single = mimic_entry_count(t, slot, false);
+    let sel: Vec<ShipId> = selection
+        .iter()
+        .copied()
+        .filter(|&id| {
+            u.ships.get(id).is_some_and(|s| {
+                !s.base.disabled && (s.ship_type == ShipType::sMCV || (s.ship_type == ShipType::sMimic && index < single))
+            })
+        })
+        .collect();
+    if sel.is_empty() {
+        return;
+    }
+    let o = mimic::DisguiseOrder {
+        kind: if slot == 8 { 2 } else { 1 },
+        ship_type: e.ship_type,
+        player: slot as i32,
+        asteroid: e.asteroid,
+    };
+    mimic::cl_disguise(u, &sel, o);
+}
+
+/// `mrMimicUndisguise` (0x560120): the disguised ships of the selection with the disguise
+/// upgrade, not disabled, drop their disguise.
+pub fn mr_mimic_undisguise(u: &mut Universe, selection: &[ShipId]) {
+    let mut sel: Vec<ShipId> = selection
+        .iter()
+        .copied()
+        .filter(|&id| u.ships.get(id).is_some_and(|s| has_upgrade(s, 0x20)) && mimic::is_disguised(u, id))
+        .collect();
+    not_disabled(u, &mut sel);
+    if !sel.is_empty() {
+        mimic::cl_disguise(u, &sel, mimic::DisguiseOrder { kind: 0, ship_type: 0, player: 0, asteroid: 0 });
+    }
+}
+
+/// What a Mimic order clicked on takes the shape of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MimicTarget {
+    Ship(ShipId),
+    Asteroid,
+}
+
+/// Whether the selection's Mimics can take the shape of the object under the pointer
+/// (`mouseCursorActionClassify`'s Mimic case): an asteroid, or a ship whose type its owner's
+/// disguise menu offers them.
+pub fn mimic_can_take_shape(u: &Universe, t: &mimic::DisguiseTables, selection: &[ShipId], target: MimicTarget) -> bool {
+    match target {
+        MimicTarget::Asteroid => true,
+        MimicTarget::Ship(id) => {
+            let Some(s) = u.ships.get(id) else { return false };
+            let n = mimic_entry_count(t, s.player, selection_has_mcv(u, selection));
+            t.entries.get(s.player).is_some_and(|l| l.iter().take(n).any(|e| e.ship_type == s.ship_type.index() as i32))
+        }
+    }
+}
+
+/// `mrMimicDisguiseAsTarget` (0x562200): the selection takes the shape of the clicked ship (its
+/// type, as one of its owner's), or each ship that of an asteroid (an MCV a large one, a Mimic a
+/// small one).
+pub fn mr_mimic_disguise_as_target(u: &mut Universe, selection: &[ShipId], target: MimicTarget) {
+    let sel: Vec<ShipId> = selection.iter().copied().filter(|&id| u.ships.get(id).is_some()).collect();
+    if sel.is_empty() {
+        return;
+    }
+    match target {
+        MimicTarget::Ship(t) => {
+            let Some(s) = u.ships.get(t) else { return };
+            let o = mimic::DisguiseOrder { kind: 1, ship_type: s.ship_type.index() as i32, player: s.player as i32, asteroid: 0 };
+            mimic::cl_disguise(u, &sel, o);
+        }
+        MimicTarget::Asteroid => {
+            for id in sel {
+                let k = if u.ships.ship(id).ship_type == ShipType::sMCV { 3 } else { 1 };
+                mimic::cl_disguise(u, &[id], mimic::DisguiseOrder { kind: 2, ship_type: 0, player: 8, asteroid: k });
+            }
+        }
+    }
 }
 
 /// `MakeShipsSpecialTargetCapable(selection, 0, TRUE)` (0x50d4d0): ships with a special-target

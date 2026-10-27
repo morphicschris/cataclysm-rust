@@ -857,7 +857,31 @@ impl Game {
     }
 
     /// Carries out the right-click action on an object; false opens the menu instead.
+    /// What a Mimic order on the object takes the shape of: a ship, or an asteroid (not a dust
+    /// cloud or nebula).
+    fn mimic_target(&self, h: Hover) -> Option<hwc_sim::player_orders::MimicTarget> {
+        use hwc_sim::player_orders::MimicTarget;
+        match h {
+            Hover::Ship(id) => Some(MimicTarget::Ship(id)),
+            Hover::Resource(r) => {
+                let res = self.world.universe().base.resources.get(r)?;
+                matches!(res.kind, hwc_sim::resource::ResourceKind::Asteroid(_))
+                    .then_some(MimicTarget::Asteroid)
+            }
+        }
+    }
+
     fn smart_order(&mut self, h: Hover) -> bool {
+        if self.classify(h) == PointerAction::Mimic {
+            // `mrMimicDisguiseAsTarget`.
+            if let Some(m) = self.mimic_target(h) {
+                let mut sel = self.selection.clone();
+                let u = self.world.universe_mut();
+                hwc_sim::player_orders::with_upgrade(u, &mut sel, 0x20);
+                hwc_sim::player_orders::mr_mimic_disguise_as_target(u, &sel, m);
+                return true;
+            }
+        }
         match (self.classify(h), h) {
             (PointerAction::Harvest, Hover::Resource(r)) => {
                 let sel = self.selection.clone();
@@ -1070,9 +1094,20 @@ impl Game {
     fn target_facts(&self, h: Hover) -> (Availability, cursor::TargetFacts) {
         let mut facts = cursor::TargetFacts::default();
         match h {
-            Hover::Resource(_) => {
+            Hover::Resource(r) => {
                 let mut t = [false; avail::LEN];
                 t[avail::RESOURCE] = true;
+                facts.mimic_shape = self.mimic_target(h).is_some_and(|m| {
+                    let u = self.world.universe();
+                    self.world.mission_run().is_some_and(|run| {
+                        hwc_sim::player_orders::mimic_can_take_shape(
+                            u,
+                            &run.game.disguise_tables,
+                            &self.selection,
+                            m,
+                        )
+                    })
+                }) && self.world.universe().base.resources.get(r).is_some();
                 (t, facts)
             }
             Hover::Ship(id) => {
@@ -1092,6 +1127,14 @@ impl Game {
                                 hwc_sim::upgrade::has_upgrade(x, 0x8) && x.ship_type == s.ship_type
                             })
                         });
+                    facts.mimic_shape = self.world.mission_run().is_some_and(|run| {
+                        hwc_sim::player_orders::mimic_can_take_shape(
+                            u,
+                            &run.game.disguise_tables,
+                            &self.selection,
+                            hwc_sim::player_orders::MimicTarget::Ship(id),
+                        )
+                    });
                 }
                 (t, facts)
             }
@@ -1441,6 +1484,18 @@ impl Game {
                         !types.iter().any(|(t, _)| *t == s.ship_type.index() as u32)
                     })
                 });
+            }
+            GameRequest::MimicType(slot) => {
+                if let Some(r) = self.world.mission_run_mut() {
+                    r.game.mimic_slot = usize::from(slot).min(8);
+                }
+            }
+            GameRequest::MimicItem(i) => {
+                let sel = self.selection.clone();
+                if let Some(r) = self.world.mission_run_mut() {
+                    let (t, slot) = (r.game.disguise_tables.clone(), r.game.mimic_slot);
+                    hwc_sim::player_orders::mimic_disguise_as(&mut r.universe, &t, slot, &sel, i);
+                }
             }
             GameRequest::FocusShip(id) => {
                 let id = sim_id(id);

@@ -364,7 +364,10 @@ pub enum Command {
     Link,
     Unlink,
     Leech,
+    /// The "Select Mimic" and "Mimic" submenus (the disguise upgrade).
     Mimic,
+    /// Drop the disguise (`mrMimicUndisguise`).
+    UnMimic,
     ForceField,
     Cloak,
     Swarmers,
@@ -457,6 +460,10 @@ pub enum GameRequest {
     DeselectTypes(Vec<(ShipType, Owner)>),
     /// Select one ship and focus the camera on it (clicking a message).
     FocusShip(ShipId),
+    /// "Select Mimic": the disguise menu the "Mimic" submenu shows (`MimicSetDisguiseTablesFlag`).
+    MimicType(u8),
+    /// "Mimic": the selection takes this entry of the picked menu (`pmMimicDisguiseAs`).
+    MimicItem(usize),
     /// A key action the game itself handles (camera, selection, time, sensors...), on press
     /// (`down == true`) or release.
     Action {
@@ -578,6 +585,22 @@ pub trait GameUiHost {
     fn roll_call(&self) -> Option<RollCall> {
         None
     }
+
+    /// The Mimic submenus' contents.
+    fn mimic_menus(&self) -> MimicMenus {
+        MimicMenus::default()
+    }
+}
+
+/// The disguise menus the special-action menu offers (`pmBuildMenuItems`, items 0x21 / 0x22).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MimicMenus {
+    /// "Select Mimic": the disguise menus (slot, name), one per valid player and the asteroids.
+    pub types: Vec<(u8, String)>,
+    /// The menu picked (`MimicGetDisguiseTablesFlag`).
+    pub current: u8,
+    /// "Mimic": the picked menu's entries the selection may take.
+    pub items: Vec<String>,
 }
 
 /// A copy of what the host showed this frame.
@@ -609,6 +632,7 @@ pub struct HostView {
     pub ship_positions: Vec<(ShipId, i32, i32, i32)>,
     pub hyperspace_label: Option<String>,
     pub roll_call: Option<RollCall>,
+    pub mimic: MimicMenus,
 }
 
 impl HostView {
@@ -651,6 +675,7 @@ impl HostView {
             ship_positions,
             hyperspace_label: host.hyperspace_label(),
             roll_call: host.roll_call(),
+            mimic: host.mimic_menus(),
         }
     }
 

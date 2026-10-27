@@ -1104,7 +1104,7 @@ pub struct DisguiseEntry {
 
 /// The disguise menus (`MimicInitDisguiseTables` 0x5b46c0 and friends, 0x91b6b0): per player
 /// (and slot 8, the asteroids) the types offered and the default one.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct DisguiseTables {
     pub entries: [Vec<DisguiseEntry>; 9],
     pub defaults: [i32; 9],
