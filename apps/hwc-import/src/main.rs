@@ -8,8 +8,9 @@ use std::time::Instant;
 use hwc_import::{import, verify, ImportOptions, Progress, Stage, VerifyOptions, VerifyReport};
 
 const USAGE: &str = "\
-usage: hwc-import <original install dir> <output data dir> [--verify] [--force]
+usage: hwc-import <original install dir> <output data dir> [--verify] [--force] [--hwr <dir>]
        hwc-import --verify-only <output data dir>
+       hwc-import --hwr <Homeworld Remastered install dir> <output data dir>
 
   Builds this game's data directory from your own Homeworld: Cataclysm install. The install is
   only read, never modified. Re-running only copies what changed.
@@ -17,6 +18,8 @@ usage: hwc-import <original install dir> <output data dir> [--verify] [--force]
   --verify       after importing, re-hash every output and parse-check every asset
   --force        re-copy everything; allow a non-empty output folder without a manifest
   --verify-only  verify an existing data directory without importing
+  --hwr <dir>    also import the optional Homeworld Remastered explosions and engine trails from
+                 your own Remastered install (steamapps/common/Homeworld) into hwr/
   -q, --quiet    no progress output";
 
 struct Printer {
@@ -108,8 +111,17 @@ fn print_verify(r: &VerifyReport) {
 fn main() -> ExitCode {
     let mut positional: Vec<PathBuf> = Vec::new();
     let (mut do_verify, mut force, mut verify_only, mut quiet) = (false, false, false, false);
-    for arg in std::env::args_os().skip(1) {
+    let mut hwr: Option<PathBuf> = None;
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--hwr") => match args.next() {
+                Some(v) => hwr = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("--hwr wants the Homeworld Remastered install folder\n\n{USAGE}");
+                    return ExitCode::from(2);
+                }
+            },
             Some("--verify") => do_verify = true,
             Some("--force") => force = true,
             Some("--verify-only") => verify_only = true,
@@ -129,6 +141,7 @@ fn main() -> ExitCode {
 
     let out_dir = match (verify_only, positional.as_slice()) {
         (true, [out]) => out.clone(),
+        (false, [out]) if hwr.is_some() => out.clone(),
         (false, [install, out]) => {
             match import(install, out, ImportOptions { force }, &mut |p| printer.handle(p)) {
                 Ok(r) => {
@@ -168,6 +181,30 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    if let Some(src) = &hwr {
+        let dest = out_dir.join(hwc_hwr::import::DATA_DIR);
+        printer.line("Importing Homeworld Remastered effects...");
+        match hwc_hwr::import::import(src, &dest) {
+            Ok(r) => {
+                println!(
+                    "hwr: {} ships, {} effects, {} textures ({:.1} MB) into {}",
+                    r.ships,
+                    r.effects,
+                    r.textures,
+                    r.bytes as f64 / 1e6,
+                    dest.display()
+                );
+                if !r.missing.is_empty() {
+                    println!("  effects named but not in the archive: {}", r.missing.join(", "));
+                }
+            }
+            Err(e) => {
+                eprintln!("error: Homeworld Remastered import: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
 
     if do_verify || verify_only {
         match verify(&out_dir, VerifyOptions::default(), &mut |p| printer.handle(p)) {

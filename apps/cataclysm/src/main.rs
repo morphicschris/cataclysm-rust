@@ -20,6 +20,9 @@ mod host;
 mod hotkeys;
 #[cfg(test)]
 mod hud_shots;
+mod hwr_fx;
+#[cfg(test)]
+mod hwr_shots;
 mod intel_trace;
 mod intro;
 mod loading;
@@ -143,6 +146,11 @@ options:
                         render list) or far (everything within the far clip distance of the
                         eye); both are radial, the same at any camera angle. Options file:
                         hwcRenderList = 1/0
+  Remastered effects    hwcRemasteredFx = 1 in the options file (a user-requested addition,
+                        off by default, also on the ENHANCEMENTS screen): ship deaths and
+                        engine trails use Homeworld Remastered's effects, imported from your
+                        own Remastered install with hwc-import --hwr (looked for in
+                        $HWC_HWR_DIR, then hwr/ in the data folder, then next to the game)
   --hud <mode>          modern (default, a user-requested change: RU and SU bars in the
                         top-right corner, in the style of the later Homeworld games) or
                         original (the SU / RU / time box, bottom right); options file:

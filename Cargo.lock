@@ -267,6 +267,7 @@ dependencies = [
  "hwc-audio",
  "hwc-formats",
  "hwc-fx",
+ "hwc-hwr",
  "hwc-kas",
  "hwc-math",
  "hwc-nis",
@@ -790,10 +791,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hwc-hwr"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "glam",
+]
+
+[[package]]
 name = "hwc-import"
 version = "0.1.0"
 dependencies = [
  "hwc-formats",
+ "hwc-hwr",
  "hwc-kas",
  "hwc-video",
  "serde",

@@ -18,6 +18,7 @@ hwc-video = { path = "../../crates/hwc-video" }
 hwc-render = { path = "../../crates/hwc-render" }
 hwc-sim = { path = "../../crates/hwc-sim" }
 hwc-fx = { path = "../../crates/hwc-fx" }
+hwc-hwr = { path = "../../crates/hwc-hwr" }
 hwc-kas = { path = "../../crates/hwc-kas" }
 hwc-math = { path = "../../crates/hwc-math" }
 hwc-nis = { path = "../../crates/hwc-nis" }

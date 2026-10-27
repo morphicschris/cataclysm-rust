@@ -153,6 +153,10 @@ pub struct Effect {
     pub n_particle_blocks: u32,
     /// Particle system handles, in creation order (`particleBlock[0..iParticleBlock]`).
     pub blocks: Vec<u32>,
+    /// The effect that started this one's line (through spawns and `createEffects`), `None`
+    /// for an effect started by the game. Presentation only (not in the original, not saved).
+    #[serde(skip)]
+    pub family: Option<EffectId>,
 }
 
 /// Spawn parameters set by `setEff*` (`etgEffOffset`).
@@ -420,6 +424,7 @@ impl FxWorld {
             current_lod: 0,
             camera_distance_sq: f32::from_bits(REALLY_BIG_BITS),
             n_spawned_attached: 0,
+            family: None,
             variables: Vec::new(),
             rates: Vec::new(),
             effector_ids: Vec::new(),
@@ -1759,6 +1764,7 @@ impl FxWorld {
         let off = self.eff_offset;
         let parent = self.effects[ei].clone();
         let mut e = self.new_effect(stat);
+        e.family = Some(parent.family.unwrap_or(parent.id));
         if off.attach_parent != 0 && parent.owner.is_some() {
             e.flags = sof::ROTATABLE | sof::ATTACH_POSITION | sof::ATTACH_VELOCITY;
             e.owner = parent.owner;
@@ -1849,6 +1855,7 @@ impl FxWorld {
                 continue;
             }
             let mut e = self.new_effect(stat);
+            e.family = Some(parent.family.unwrap_or(parent.id));
             e.current_lod = parent.current_lod;
             e.camera_distance_sq = parent.camera_distance_sq;
             e.time_elapsed = -p.waitspan;
@@ -1956,6 +1963,21 @@ impl FxWorld {
             self.systems[idx] = Some(sys);
         }
         self.effects[ei].effect_flags |= EF_RENDERED;
+    }
+
+    /// [`draw`](Self::draw), with the effects `hide` picks drawn into a scratch list and
+    /// dropped: they run exactly as they would when drawn (drawing advances the particle
+    /// systems), only their primitives are left out of `out`.
+    pub fn draw_except(&mut self, out: &mut crate::render::RenderList, hide: impl Fn(&Effect) -> bool) {
+        let mut scratch = crate::render::RenderList::default();
+        for ei in 0..self.effects.len() {
+            if hide(&self.effects[ei]) {
+                scratch.clear();
+                self.draw_effect(ei, Some(&mut scratch));
+            } else {
+                self.draw_effect(ei, Some(out));
+            }
+        }
     }
 
     /// One universe update followed by one draw (the usual headless loop).

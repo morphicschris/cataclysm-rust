@@ -914,6 +914,18 @@ pub fn draw(u: &mut Universe, out: &mut RenderList) {
     }
 }
 
+/// [`draw`] leaving out what `hide` picks (they still run as if drawn; see
+/// [`FxWorld::draw_except`](hwc_fx::FxWorld::draw_except)). Presentation only.
+pub fn draw_except(u: &mut Universe, out: &mut RenderList, hide: impl Fn(&hwc_fx::runtime::Effect) -> bool) {
+    if u.effects.is_none() {
+        return;
+    }
+    sync_owners(u);
+    if let Some(fx) = u.effects.as_mut() {
+        fx.world.draw_except(out, hide);
+    }
+}
+
 /// The requests the effect scripts made during the last update (sounds, chatter...).
 pub fn events(u: &Universe) -> &[FxEvent] {
     u.effects.as_ref().map_or(&[], |fx| fx.events.as_slice())

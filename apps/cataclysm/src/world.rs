@@ -284,6 +284,9 @@ pub struct World {
     /// The closest zoom on focused ships also keeps the near clip plane outside their hulls (a
     /// user-requested addition, on by default; `hwcZoomClear = 0` leaves the original's limit).
     pub zoom_clear: bool,
+    /// The optional Homeworld Remastered deaths and engine trails (`hwcRemasteredFx`), when on
+    /// and imported.
+    hwr: Option<crate::hwr_fx::HwrFx>,
 }
 
 /// The main camera and what it follows, as saved with a game ([`World::view_state`]).
@@ -410,6 +413,7 @@ impl World {
             focus_close: false,
             focus_zoom: true,
             zoom_clear: true,
+            hwr: None,
         };
         if let Ok(t) = read_script(&w.src, "tweak.script") {
             w.render_limits = RenderLimits::from_script(&t);
@@ -437,6 +441,32 @@ impl World {
         }
         hwc_sim::effects::attach(self.universe_mut(), &data);
         self.effects_on = true;
+    }
+
+    /// Turns the Homeworld Remastered deaths and engine trails on or off. On needs the imported
+    /// effects (`hwc-import --hwr`); returns whether they are now in use.
+    pub fn set_remastered_fx(&mut self, on: bool) -> bool {
+        if !on {
+            self.hwr = None;
+            return false;
+        }
+        if self.hwr.is_some() {
+            return true;
+        }
+        let Some(dir) = crate::hwr_fx::find_dir(self.src.data().root()) else {
+            eprintln!("note: Remastered effects are on but not imported (hwc-import --hwr <Homeworld Remastered folder> <data folder>)");
+            return false;
+        };
+        match crate::hwr_fx::HwrFx::load(&dir) {
+            Ok(h) => {
+                self.hwr = Some(h);
+                true
+            }
+            Err(e) => {
+                eprintln!("warning: Remastered effects in {}: {e}", dir.display());
+                false
+            }
+        }
     }
 
     /// Team colour schemes (base, stripe); scheme 0 is the local player's.
@@ -639,6 +669,9 @@ impl World {
         if self.engine_fx.is_none() {
             self.engine_fx = Some(renderer.load_engine_effects(&self.src));
         }
+        if let Some(h) = &mut self.hwr {
+            h.prepare(renderer);
+        }
         let needed: Vec<(ShipType, usize)> = self
             .universe()
             .ships
@@ -781,6 +814,9 @@ impl World {
             }
         }
         self.update_ship_fx();
+        if let Some(h) = &mut self.hwr {
+            h.after_update(self.sim.universe());
+        }
         let u = self.sim.universe();
         self.focus.retain(|id| u.ship(*id).is_some());
         self.camera_start();
@@ -1298,7 +1334,11 @@ impl World {
                 suppressed: s.base.clamp.is_some() || s.flags & hwc_sim::base::SOF_MODULE != 0,
                 idle_dodge: s.is_dodging && s.ship_idle,
             };
-            fx.trails.draw(
+            let ribbon = self
+                .hwr
+                .as_mut()
+                .and_then(|h| h.ribbon(u, t, art.trail.collision_radius));
+            fx.trails.draw_styled(
                 &art.trail,
                 &self.trail_tweaks,
                 &TrailFrame {
@@ -1316,6 +1356,7 @@ impl World {
                     fade: 1.0,
                     glow_texture,
                 },
+                ribbon.as_ref(),
                 &mut frame.effects,
             );
             let tint = fx
@@ -1373,8 +1414,20 @@ impl World {
             frame.ids.push((None, false));
         }
         self.combat_effects(&mut frame.effects, glow_texture);
-        if self.effects_on {
+        if let Some(mut h) = self.hwr.take() {
+            let u = self.sim.universe();
+            let now = f64::from(u.total_time_elapsed) + f64::from(self.alpha()) * f64::from(TICK);
+            h.draw(u, now, &mut frame.effects);
+            if self.effects_on {
+                hwc_sim::effects::draw_except(self.sim.universe_mut(), &mut frame.fx_list, |e| {
+                    h.hides(e)
+                });
+            }
+            self.hwr = Some(h);
+        } else if self.effects_on {
             hwc_sim::effects::draw(self.universe_mut(), &mut frame.fx_list);
+        }
+        if self.effects_on {
             // Effects are objects of the render list too.
             let (sensors, render_list, limits, look_at, eye, far) = (
                 self.sensors_open,

@@ -20,7 +20,7 @@ use hwc_formats::script::{ScriptFile, ShipStats};
 
 use crate::assets::EngineNozzle;
 use crate::effects::{
-    Blend, EffectBatch, EffectTexture, GlowMeshDraw, GlowMeshKind, Line, Sprite, FULL_UV,
+    Blend, EffectBatch, EffectTexture, GlowMeshDraw, GlowMeshKind, Line, Sprite, Strip, FULL_UV,
 };
 
 /// Most trail slots a ship has (`Eng0`..`Eng3`).
@@ -909,6 +909,19 @@ impl ShipTrails {
         frame: &TrailFrame<'_>,
         out: &mut EffectBatch,
     ) {
+        self.draw_styled(def, tweaks, frame, None, out);
+    }
+
+    /// [`draw`](Self::draw) with ribbon trails drawn in `style` instead of the original's
+    /// ribbons (capital glows are unchanged).
+    pub fn draw_styled(
+        &mut self,
+        def: &ShipTrailDef,
+        tweaks: &TrailTweaks,
+        frame: &TrailFrame<'_>,
+        style: Option<&RibbonStyle>,
+        out: &mut EffectBatch,
+    ) {
         let draw = frame.gate.allows_trail();
         for i in 0..self.trails.len() {
             if self.trails[i].is_glow() {
@@ -942,11 +955,120 @@ impl ShipTrails {
                     self.trails[i].zero_length();
                     continue;
                 }
-                let mut rng = self.rng;
-                draw_ribbon(def, tweaks, &mut self.trails[i], frame, &mut rng, out);
-                self.rng = rng;
+                match style {
+                    Some(st) => draw_styled_ribbon(def, tweaks, &self.trails[i], frame, st, out),
+                    None => {
+                        let mut rng = self.rng;
+                        draw_ribbon(def, tweaks, &mut self.trails[i], frame, &mut rng, out);
+                        self.rng = rng;
+                    }
+                }
             }
         }
+    }
+}
+
+/// A replacement look for ribbon trails (the optional Homeworld Remastered trails): a textured
+/// camera-facing ribbon through the recorded nozzle positions in the team's trail colour,
+/// shaded along its length by `ramp`, with an optional glow sprite at the nozzle.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RibbonStyle {
+    pub texture: EffectTexture,
+    /// Full width in world units.
+    pub width: f32,
+    /// Brightness from the nozzle (first) to the end of the trail (last), 0..1.
+    pub ramp: Vec<f32>,
+    /// Most recorded positions drawn.
+    pub max_points: usize,
+    /// Nozzle glow: texture and radius.
+    pub glow: Option<(EffectTexture, f32)>,
+    /// How much the bright part of the trail is whitened (a hot core), 0..1.
+    pub hot: f32,
+    pub blend: Blend,
+}
+
+fn draw_styled_ribbon(
+    def: &ShipTrailDef,
+    tw: &TrailTweaks,
+    trail: &ShipTrail,
+    frame: &TrailFrame<'_>,
+    style: &RibbonStyle,
+    out: &mut EffectBatch,
+) {
+    if def.ramp.is_none() {
+        return;
+    }
+    let rotation = Mat3::from_mat4(frame.transform);
+    let translation = frame.transform.w_axis.truncate();
+    let mut nozzle = nozzle_offset(def, trail.slot, frame.objects);
+    nozzle.z -= 0.3 * tw.xadj;
+    let current = rotation * (nozzle * frame.scale) + translation;
+    let speed = frame.velocity.length();
+    let color = |k: f32, a: f32| {
+        let w = style.hot * k;
+        let c = frame.team_color.map(|v| (v + (1.0 - v) * w) * k);
+        [c[0], c[1], c[2], a * frame.fade]
+    };
+    if let Some((tex, radius)) = style.glow {
+        let velratio = speed / frame.max_velocity.max(1e-6);
+        if velratio >= tw.velratio_thresh && frame.lod < 3 {
+            out.sprites.push(Sprite {
+                position: current,
+                half_size: Vec2::splat(radius * (0.6 + 0.4 * velratio.min(1.0))),
+                rotation: 0.0,
+                color: color(1.0, 1.0),
+                uv: FULL_UV,
+                texture: tex,
+                blend: Blend::Additive,
+            });
+        }
+    }
+    if speed < 0.001 || trail.length <= 3 {
+        return;
+    }
+    let n_seg = trail.segments.len();
+    let n = trail.length.min(style.max_points.max(2));
+    let mut points = Vec::with_capacity(n + 1);
+    points.push(current);
+    let mut index = if trail.head == 0 { n_seg - 1 } else { trail.head - 1 };
+    for _ in 0..n {
+        let p = trail.segments[index].position;
+        if !p.is_finite() {
+            break;
+        }
+        points.push(p);
+        index = if index <= 1 { n_seg - 1 } else { index - 1 };
+    }
+    if points.len() < 2 {
+        return;
+    }
+    // One strip per run of the ramp, so the brightness follows it along the trail.
+    let runs = style.ramp.len().saturating_sub(1).clamp(1, 8);
+    let last = points.len() - 1;
+    let ramp_at = |t: f32| {
+        if style.ramp.is_empty() {
+            return 1.0 - t;
+        }
+        let x = t.clamp(0.0, 1.0) * (style.ramp.len() - 1) as f32;
+        let i = (x as usize).min(style.ramp.len() - 1);
+        let j = (i + 1).min(style.ramp.len() - 1);
+        style.ramp[i] + (style.ramp[j] - style.ramp[i]) * (x - i as f32)
+    };
+    for r in 0..runs {
+        let a = r * last / runs;
+        let b = ((r + 1) * last / runs).max(a + 1).min(last);
+        if b <= a {
+            continue;
+        }
+        let (ta, tb) = (a as f32 / last as f32, b as f32 / last as f32);
+        out.strips.push(Strip {
+            points: points[a..=b].to_vec(),
+            width: style.width * frame.scale,
+            start_color: color(ramp_at(ta), 1.0),
+            end_color: color(ramp_at(tb), 1.0),
+            texture: style.texture,
+            blend: style.blend,
+        });
     }
 }
 

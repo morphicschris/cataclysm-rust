@@ -139,6 +139,10 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // radial distance of the look-at point); 0: everything within the far clip distance
     // of the eye (`--draw-distance`).
     ("hwcRenderList", 1),
+    // 1: ship deaths and engine trails use the Homeworld Remastered effects imported from the
+    // player's own Remastered install (`hwc-import --hwr`; a user-requested addition); 0 or
+    // nothing imported: the original's.
+    ("hwcRemasteredFx", 0),
     // The 3D view's internal render scale in percent, 50..200 (100: the original, drawn at
     // the screen's pixels; above 100 supersampled; `--render-scale`).
     ("hwcRenderScale", 100),
