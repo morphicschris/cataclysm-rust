@@ -259,8 +259,13 @@ impl SimHost<'_> {
         if friendly {
             s.player != HUMAN_PLAYER && !matches!(s.ship_type, ShipType::sSwarmer | ShipType::dNomadMoon | ShipType::dNomadFieldEmitter)
         } else {
-            // (Visibility to the computer player and Mimic disguises are not modelled.)
-            s.player == HUMAN_PLAYER && s.ship_type != ShipType::sSwarmer
+            // `kasPredShipEnemy`: the human player's ships the computer player (1) sees; a
+            // disguised Mimic, cloaked ship or undetected Leech is left out. (The original also
+            // drops Mimics disguised as player 4's ships, which a single-player game has none of.)
+            s.player == HUMAN_PLAYER
+                && crate::visibility::visible_to_player(self.u, id, 1)
+                && !crate::ships::mimic::is_disguised_as_player(self.u, id, 4)
+                && s.ship_type != ShipType::sSwarmer
         }
     }
 
