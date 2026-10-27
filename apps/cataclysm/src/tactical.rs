@@ -11,7 +11,7 @@
 
 use glam::Vec3;
 use hwc_sim::command::{attr, order};
-use hwc_sim::object::sof;
+use hwc_sim::object::{sof, CommandId};
 use hwc_sim::statics::ShipClass;
 use hwc_sim::{ShipId, Universe};
 use hwc_ui::canvas::{Canvas, Color};
@@ -299,8 +299,8 @@ fn segment_on_screen(
     Some((px(ca), px(cb)))
 }
 
-/// Ships in a group are this close (world units) to the group's first ship, and their targets
-/// to its target, to share one order line.
+/// Ships of different orders are this close (world units) to a group's first ship, and their
+/// targets to its target, to share its order line.
 pub const GROUP_REACH: f32 = 800.0;
 
 /// One order line: its order, where it ends, and the ships' centre and the target's.
@@ -313,26 +313,35 @@ pub struct OrderGroup {
     /// How far the targets spread from `to` (the ring grows to cover them).
     pub spread: f32,
     count: usize,
+    command: Option<CommandId>,
     first_from: Vec3,
     first_to: Vec3,
 }
 
-/// Puts the ships' order lines together: lines of the same order whose ships are near each
-/// other and whose ends are near each other (the same ship, or points within
-/// [`GROUP_REACH`]) become one, from the ships' centre to the targets' centre. Eight fighters
-/// moving in formation give one line and one ring.
-pub fn group_orders(lines: &[(OrderKind, OrderTarget, Vec3, Vec3)]) -> Vec<OrderGroup> {
+/// One ship's order line before grouping: the order, its target, the command it belongs to,
+/// the ship's position and the target's.
+pub type OrderLine = (OrderKind, OrderTarget, Option<CommandId>, Vec3, Vec3);
+
+/// Puts the ships' order lines together, from the ships' centre to the targets' centre: the
+/// lines of one command (a formation, a group given one order, each ship on its own target)
+/// always, and lines of the same order from ships near each other to ends near each other
+/// (within [`GROUP_REACH`]). Eight fighters in formation give one line and one ring.
+pub fn group_orders(lines: &[OrderLine]) -> Vec<OrderGroup> {
     let mut groups: Vec<OrderGroup> = Vec::new();
     let mut members: Vec<Vec<Vec3>> = Vec::new();
-    for &(kind, target, from, to) in lines {
+    for &(kind, target, command, from, to) in lines {
         let joins = |g: &OrderGroup| {
+            let same_kind_of_end = matches!(
+                (g.target, target),
+                (OrderTarget::Ship(_), OrderTarget::Ship(_))
+                    | (OrderTarget::Point(_), OrderTarget::Point(_))
+                    | (OrderTarget::Resource(_), OrderTarget::Resource(_))
+            );
             g.kind == kind
-                && (from - g.first_from).length() <= GROUP_REACH
-                && match (g.target, target) {
-                    (OrderTarget::Ship(a), OrderTarget::Ship(b)) => a == b,
-                    (OrderTarget::Ship(_), _) | (_, OrderTarget::Ship(_)) => false,
-                    _ => (to - g.first_to).length() <= GROUP_REACH,
-                }
+                && same_kind_of_end
+                && ((command.is_some() && g.command == command)
+                    || ((from - g.first_from).length() <= GROUP_REACH
+                        && (to - g.first_to).length() <= GROUP_REACH))
         };
         match groups.iter().position(joins) {
             Some(i) => {
@@ -351,6 +360,7 @@ pub fn group_orders(lines: &[(OrderKind, OrderTarget, Vec3, Vec3)]) -> Vec<Order
                     to,
                     spread: 0.0,
                     count: 1,
+                    command,
                     first_from: from,
                     first_to: to,
                 });
@@ -396,7 +406,7 @@ pub fn draw_order_lines(
             OrderTarget::Point(p) | OrderTarget::Resource(p) => p,
             OrderTarget::Ship(t) => v3(u.ship(t).expect("alive").posinfo.position),
         };
-        lines.push((kind, target, v3(s.posinfo.position), to));
+        lines.push((kind, target, s.command, v3(s.posinfo.position), to));
     }
     for g in group_orders(&lines) {
         let Some((a, b)) = project_segment(world, size, g.from, g.to) else {
@@ -556,30 +566,38 @@ mod tests {
     }
 
     #[test]
-    fn a_formation_moving_to_a_point_gives_one_line() {
+    fn a_formation_gives_one_line() {
         let to = Vec3::new(5000.0, 0.0, 0.0);
-        let mut lines: Vec<_> = (0..8)
+        // Eight ships moving on their own commands, close together.
+        let mut lines: Vec<OrderLine> = (0..8)
             .map(|i| {
                 let off = Vec3::new(0.0, i as f32 * 60.0, 0.0);
-                (OrderKind::Move, OrderTarget::Point(to + off), off, to + off)
+                let cmd = Some(CommandId(i));
+                (
+                    OrderKind::Move,
+                    OrderTarget::Point(to + off),
+                    cmd,
+                    off,
+                    to + off,
+                )
             })
             .collect();
-        // Far away, another group with the same order; and an attack from the formation.
+        // Far away, another group with the same order.
         let far = Vec3::new(0.0, 20000.0, 0.0);
-        lines.push((OrderKind::Move, OrderTarget::Point(to), far, to));
-        lines.push((
-            OrderKind::Attack,
-            OrderTarget::Ship(ShipId(3)),
-            Vec3::ZERO,
-            to,
-        ));
+        lines.push((OrderKind::Move, OrderTarget::Point(to), None, far, to));
+        // A formation attacking, each ship on its own target, spread wider than the reach.
+        lines.extend((0..9u16).map(|i| {
+            let at = Vec3::new(f32::from(i) * 400.0, 0.0, 0.0);
+            let t = OrderTarget::Ship(ShipId(10 + i));
+            (OrderKind::Attack, t, Some(CommandId(99)), at, to + at)
+        }));
         let g = group_orders(&lines);
         assert_eq!(g.len(), 3);
         assert_eq!(g[0].count, 8);
         assert!((g[0].from - Vec3::new(0.0, 210.0, 0.0)).length() < 1e-3);
         assert!((g[0].spread - 210.0).abs() < 1e-3);
         assert_eq!(g[1].count, 1);
-        assert_eq!(g[2].kind, OrderKind::Attack);
+        assert_eq!((g[2].kind, g[2].count), (OrderKind::Attack, 9));
     }
 
     #[test]
