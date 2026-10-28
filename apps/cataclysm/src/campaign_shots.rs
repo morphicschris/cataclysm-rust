@@ -1838,3 +1838,49 @@ fn mission_four_scripted_camera() {
         "no cut to the heavy cruiser: {cuts:?}"
     );
 }
+
+/// Mission 6's opening NIS (n04 in `Mission06_NIS04`, "Into The Nebula"): its level's `Fog`
+/// line loads the plasma cloud, the NIS starts without it, and at 45.3 s (frame 1360) its `fog`
+/// event fades the cloud in over 13 s while the sky fades out. Run with
+/// `cargo test --release -p cataclysm mission_six_nis_fog -- --ignored`; shots in
+/// `screenshots/game-campaign/15_m6_nis_*`.
+#[test]
+#[ignore = "long: plays a minute of NIS 4"]
+fn mission_six_nis_fog() {
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(6, true);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    assert_eq!(g.world.nis_level().map(|n| n.nis), Some(4));
+    assert!(g.world.plasma.texture, "the level's Fog line loads the cloud");
+    rig.frames_until(g, 16 * 10, "NIS 4 starting", |g| g.nis.is_some());
+    let mut shots = [(40.0f32, "15_m6_nis_before_fog", false), (51.5, "15_m6_nis_fog_fading_in", false), (58.8, "15_m6_nis_fog", false)];
+    let mut frames = 0;
+    while g.nis.as_ref().is_some_and(|n| n.kind.in_own_level()) {
+        rig.frame(g);
+        frames += 1;
+        assert!(frames < 16 * 200, "NIS 4 never ended");
+        let Some(time) = g.nis.as_ref().map(|n| n.player.time) else { break };
+        for (at, name, done) in &mut shots {
+            if !*done && time >= *at {
+                *done = true;
+                rig.shot(g, name);
+                let p = &g.world.plasma;
+                eprintln!("{name}: {time:.1} s active {} sky {:.2} colour {:08x} scale {}", p.active, p.sky, p.colour, p.scale);
+                if *at < 45.0 {
+                    assert!(!p.active && p.sky == 1.0, "fog before its event");
+                } else if *at > 58.5 {
+                    assert!(p.active && p.sky == 0.0 && p.colour == 0xffdc_dcdc, "fog not in at {time:.1} s");
+                }
+            }
+        }
+        if shots.iter().all(|s| s.2) {
+            break;
+        }
+    }
+    assert!(shots.iter().all(|s| s.2), "NIS 4 ended before the fog");
+}

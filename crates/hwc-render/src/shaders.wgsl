@@ -351,7 +351,8 @@ fn sky_clip(direction: vec3<f32>) -> vec4<f32> {
 fn vs_sky(@location(0) direction: vec3<f32>, @location(1) color: vec3<f32>) -> SkyOut {
     var out: SkyOut;
     out.clip = sky_clip(direction);
-    out.color = color;
+    // frame.params.w: the background's colour multiplier (1 unless the plasma cloud fades it).
+    out.color = color * frame.params.w;
     return out;
 }
 
@@ -399,7 +400,7 @@ fn vs_star(in: SpriteIn) -> SpriteOut {
     c = vec4<f32>(c.xy + in.corner * px * c.w, c.z, c.w);
     out.clip = c;
     out.uv = in.uv;
-    out.color = in.color;
+    out.color = vec4<f32>(in.color.rgb * frame.params.w, in.color.a);
     out.mode = in.mode;
     out.plane_distance = 0.0;
     return out;

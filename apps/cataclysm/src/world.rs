@@ -328,6 +328,10 @@ pub struct World {
     /// Lens flares are on (the `LensFlare` option).
     pub lens_flares: bool,
     neb_renderer: Option<hwc_render::NebulaRenderer>,
+    /// The nebula NIS's fog (`plasmaCloud*`): the level's `Fog` line and the NIS `fog` events.
+    pub plasma: hwc_render::PlasmaCloud,
+    /// Its renderer, made once the cloud texture is wanted (`None` inside: it did not load).
+    plasma_renderer: Option<Option<hwc_render::PlasmaCloudRenderer>>,
     /// The main view is not drawn (the sensors manager is open): the nebulae take no camera
     /// and are not drawn.
     pub sensors_open: bool,
@@ -495,6 +499,8 @@ impl World {
             nis_sun: hwc_render::nis_sun::NisSunFlare::default(),
             lens_flares: true,
             neb_renderer: None,
+            plasma: hwc_render::PlasmaCloud::default(),
+            plasma_renderer: None,
             sensors_open: false,
             frames_drawn: 0,
             render_limits: RenderLimits::default(),
@@ -511,6 +517,16 @@ impl World {
         };
         if let Ok(t) = read_script(&w.src, "tweak.script") {
             w.render_limits = RenderLimits::from_script(&t);
+        }
+        // `levelPreInit` resets the cloud; the level's `Fog` line sets it.
+        if let Some((_, fog)) = w
+            .sim
+            .level()
+            .unmodelled
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("Fog"))
+        {
+            w.plasma.set_from_script(fog);
         }
         w.attach_effects();
         w.set_lighting(&lighting);
@@ -2109,6 +2125,29 @@ impl World {
                 &self.camera,
                 (target.width, target.height),
             );
+        // `plasmaCloudUpdate` before the scene, `plasmaCloudRender` after it.
+        let now = self.sim.universe().total_time_elapsed;
+        self.plasma.update(now);
+        let cloud = if self.sensors_open {
+            None
+        } else {
+            self.plasma.render(now)
+        };
+        renderer.set_sky_brightness(if self.sensors_open { 1.0 } else { self.plasma.sky });
+        if self.plasma.texture && self.plasma_renderer.is_none() {
+            self.plasma_renderer = Some(
+                hwc_render::assets::load_lif(&self.src, hwc_render::plasma_cloud::TEXTURE)
+                    .map_err(|e| eprintln!("warning: plasma cloud: {e}"))
+                    .ok()
+                    .map(|l| {
+                        hwc_render::PlasmaCloudRenderer::new(renderer, l.width, l.height, &l.to_rgba())
+                    }),
+            );
+        }
+        let mut plasma = self.plasma_renderer.take();
+        if let Some(Some(p)) = plasma.as_mut() {
+            p.prepare(cloud.as_ref(), target.width, target.height);
+        }
         let mut neb = self.neb_renderer.take();
         let mut fx = self.fx_renderer.take();
         let out = {
@@ -2126,10 +2165,15 @@ impl World {
                 if let Some(n) = neb.as_mut().filter(|_| nebulae) {
                     n.draw(r, enc, c, d);
                 }
+                if let Some(Some(p)) = plasma.as_mut() {
+                    p.draw(r, enc, c);
+                }
             })
         };
+        renderer.set_sky_brightness(1.0);
         self.fx_renderer = fx;
         self.neb_renderer = neb;
+        self.plasma_renderer = plasma;
         out
     }
 

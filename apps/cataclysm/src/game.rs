@@ -2984,8 +2984,9 @@ impl Game {
         };
         let report = run.player.stop();
         run.stage.stop(self.world.universe_mut(), &report);
-        // `lensFlareNISSunRemove`.
+        // `lensFlareNISSunRemove`, `plasmaCloudReset`.
         self.world.nis_sun.remove();
+        self.world.plasma.reset();
         if let Some(a) = audio.as_mut() {
             if report.stop_music {
                 a.stop_music(0.0);
@@ -3119,6 +3120,11 @@ impl Game {
                         r.number_lights = n.clamp(1, 2) as usize;
                         r.apply_lights(&mut self.world);
                     }
+                }
+                NisAction::Fog(ref args) => {
+                    // `nisFog`.
+                    let now = self.world.universe().total_time_elapsed;
+                    self.world.plasma.nis_fog(args, now);
                 }
                 NisAction::MeshAnimStart(ref name) => {
                     if let Some(id) = ship {

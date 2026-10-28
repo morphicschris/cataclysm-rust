@@ -283,6 +283,8 @@ pub struct Renderer {
     timer: Option<GpuTimer>,
     /// GPU milliseconds of the last offscreen render, when timed.
     last_gpu_ms: Option<f64>,
+    /// The background's colour multiplier ([`Renderer::set_sky_brightness`]).
+    sky_brightness: f32,
 }
 
 /// Timestamp queries around an offscreen render's command encoder.
@@ -883,6 +885,7 @@ impl Renderer {
             glow_meshes: Vec::new(),
             timer: None,
             last_gpu_ms: None,
+            sky_brightness: 1.0,
         };
         let white = renderer.sprite_bind_group(&renderer.white, &renderer.linear_sampler);
         renderer.effect_textures.push(white);
@@ -916,6 +919,13 @@ impl Renderer {
 
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
+    }
+
+    /// Scales the sky background's colours and stars (`btgSetColourMultiplier`, which the
+    /// plasma cloud uses to fade the sky out under its fog; [`crate::PlasmaCloud::sky`]).
+    /// 1 draws the sky as it is.
+    pub fn set_sky_brightness(&mut self, m: f32) {
+        self.sky_brightness = m.clamp(0.0, 1.0);
     }
 
     pub fn color_format(&self) -> wgpu::TextureFormat {
@@ -1480,7 +1490,7 @@ impl Renderer {
                 .map(|i| light(i).map_or([0.0; 4], |l| v4(l.direction.normalize_or_zero()))),
             light_ambient: [0, 1].map(|i| light(i).map_or([0.0; 4], |l| v4(l.ambient))),
             light_diffuse: [0, 1].map(|i| light(i).map_or([0.0; 4], |l| v4(l.diffuse))),
-            params: [lights.len().min(2) as f32, width as f32, height as f32, 0.0],
+            params: [lights.len().min(2) as f32, width as f32, height as f32, self.sky_brightness],
             inv_view: mat(inv_view),
             look,
             sky: scene.background.map_or([[0.0; 4]; 6], |b| b.ambient),

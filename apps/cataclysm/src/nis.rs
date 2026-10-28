@@ -155,6 +155,8 @@ impl NisRun {
         let eye = world.camera.eye();
         let (player, step) =
             NisPlayer::start(data, position, matrix, Vector::new(eye.x, eye.y, eye.z));
+        // `plasmaCloudReset`.
+        world.plasma.reset();
         let stage = Stage::create(world.universe_mut(), &player, mission, modules);
         // `lensFlareNISSunAdd`.
         world.nis_sun.add();
