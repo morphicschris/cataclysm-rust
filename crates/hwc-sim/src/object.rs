@@ -246,6 +246,9 @@ pub mod special {
     pub const ATTACK_SIDESTEP: u32 = 0x0000_0004;
     /// `SPECIAL_KasSpecialDamageModifier`: [`super::Ship::damage_modifier`] applies.
     pub const KAS_DAMAGE_MODIFIER: u32 = 0x0000_4000;
+    /// `SPECIAL_KasSpecialRepairModifier`: KAS set the ship's repair multiplier
+    /// ([`crate::base::ShipBase::health_mult`]).
+    pub const KAS_REPAIR_MODIFIER: u32 = 0x0000_2000;
     pub const ROW_GETTING_OUT_OF_WAY: u32 = 0x0001_0000;
     /// Set when the attack started from well above the target (`ATTACKING_FROM_ABOVE`).
     pub const ATTACKING_FROM_ABOVE: u32 = 0x0010_0000;

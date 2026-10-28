@@ -431,7 +431,8 @@ pub struct Game {
     /// `MissionCompleted` was called (the campaign is won, or the tutorial is over).
     pub mission_completed: bool,
     pub delete_when_mission_ends: Vec<ShipId>,
-    /// Repair modifiers set by KAS (+0x3dc), by ship.
+    /// Repair modifiers set by KAS (+0x3dc), by ship; also written to the ships, kept so
+    /// older saves get them back on load.
     pub repair_modifiers: Vec<(ShipId, f32)>,
     /// No longer filled: KAS docking and launching use the dock code (`Ship::base.inside`).
     /// Kept for API compatibility.
@@ -707,6 +708,13 @@ impl MissionRun {
             crate::kas_host::replay_disguise_log(&mut t, &e.text);
         }
         self.game.disguise_tables = t;
+        // Saves from before ShipsRepairModifierSet reached the ship's multiplier.
+        for &(id, m) in &self.game.repair_modifiers {
+            if let Some(s) = self.universe.ships.get_mut(id) {
+                s.base.health_mult = m;
+                s.special_flags |= crate::object::special::KAS_REPAIR_MODIFIER;
+            }
+        }
     }
 
     /// Restores what the build manager may offer in a loaded game, which lives in the statics a

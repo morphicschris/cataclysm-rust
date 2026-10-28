@@ -777,11 +777,26 @@ impl KasRuntime for SimHost<'_> {
         }
     }
 
+    /// `kasfShipsSetRepairFactor` (0x48f030): the self-repair multiplier (+0x3dc) that
+    /// `univShipRegenerateHealth` applies, and `SPECIAL_KasSpecialRepairModifier`.
     fn ships_repair_modifier_set(&mut self, _cx: &Cx, ships: Ships, repair_modifier: i32) {
         for id in self.ships(ships) {
             let m = st(fild_i32(repair_modifier) * ld(0.01f32));
+            if let Some(s) = self.u.ships.get_mut(id) {
+                s.base.health_mult = m;
+                s.special_flags |= special::KAS_REPAIR_MODIFIER;
+            }
             self.g.repair_modifiers.retain(|r| r.0 != id);
             self.g.repair_modifiers.push((id, m));
+        }
+    }
+
+    /// `kasfShipsClearRepairFactor` (0x48f080) only clears the flag: the multiplier stays.
+    fn ships_repair_modifier_clear(&mut self, _cx: &Cx, ships: Ships) {
+        for id in self.ships(ships) {
+            if let Some(s) = self.u.ships.get_mut(id) {
+                s.special_flags &= !special::KAS_REPAIR_MODIFIER;
+            }
         }
     }
 

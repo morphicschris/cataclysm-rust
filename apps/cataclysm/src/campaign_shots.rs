@@ -1499,6 +1499,118 @@ fn mission_five_scripted_camera() {
     );
 }
 
+/// Mission 5's Bentusi going down: once the Bentusi station is gone the Beast's heavy cruiser
+/// is left at 20% health with its self-repair off (`TeamHealthSet(20)` and
+/// `ShipsRepairModifierSet(THISTEAMSHIPS, 0)` on the Bentusi's last message), so it keeps
+/// smoking for the rest of the mission. The cruiser is put next to the station so it starts
+/// infecting at once, and the station is scuttled the way the fleet intel does it.
+#[test]
+#[ignore]
+fn mission_five_cruiser_smokes_after_the_bentusi() {
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(5, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    rig.frames_until(g, 16 * 120, "the fleet arriving in mission 5", |g| {
+        g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE
+    });
+    let team = |g: &Game, t: &str| {
+        g.world
+            .run()
+            .game
+            .level
+            .team(hwc_kas::kas_hash(t))
+            .map(|t| t.ships.clone())
+            .unwrap_or_default()
+    };
+    let city = team(g, "trCity");
+    let cruiser = team(g, "bHCruise1")[0];
+    {
+        let u = g.world.universe_mut();
+        let cp = u.ships.ship(city[0]).posinfo.position;
+        let old = u.ships.ship(cruiser).posinfo.position;
+        let new = hwc_math::Vector::new(cp.x + 4000.0, cp.y, cp.z);
+        u.ships.ship_mut(cruiser).posinfo.position = new;
+        hwc_sim::fow::move_viewer(u, cruiser, old, new);
+    }
+    kas_message(g, None, 0x0fe5fa04);
+    let infecting = hwc_kas::kas_hash("Infecting");
+    rig.frames_until(g, 16 * 60, "the cruiser infecting the Bentusi", |g| {
+        g.world
+            .run()
+            .kas
+            .team(hwc_kas::kas_hash("bHCruise1"))
+            .and_then(|t| t.state)
+            == Some(infecting)
+    });
+    // The Bentusi found (their own discovery message), then scuttled.
+    kas_message(g, Some("trCity"), 0x015e8174);
+    let found = hwc_kas::kas_hash("Found");
+    rig.frames_until(g, 16 * 10, "the Bentusi found", |g| {
+        g.world
+            .run()
+            .kas
+            .team(hwc_kas::kas_hash("trCity"))
+            .and_then(|t| t.state)
+            == Some(found)
+    });
+    {
+        let u = g.world.universe_mut();
+        let now = u.total_time_elapsed;
+        for &id in &city {
+            if let Some(s) = u.ships.get_mut(id) {
+                s.death_time = now + 1.0;
+            }
+        }
+    }
+    kas_message(g, Some("trCity"), hwc_kas::kas_hash("Scuttle"));
+    let attack = hwc_kas::kas_hash("ATTACKPlayer");
+    rig.frames_until(
+        g,
+        16 * 60,
+        "the Bentusi gone and the cruiser let loose",
+        |g| {
+            g.world
+                .run()
+                .kas
+                .team(hwc_kas::kas_hash("bHCruise1"))
+                .and_then(|t| t.state)
+                == Some(attack)
+        },
+    );
+    let ratio = |g: &Game| {
+        let u = g.world.universe();
+        let s = u.ships.ship(cruiser);
+        s.health / u.statics.ship(s.ship_type).unwrap().health.max_health
+    };
+    let start = ratio(g);
+    assert!(
+        (start - 0.2).abs() < 0.01,
+        "cruiser at {start} of its health"
+    );
+    for _ in 0..16 * 60 {
+        rig.frame(g);
+    }
+    let end = ratio(g);
+    let heavy = g
+        .world
+        .universe()
+        .effects
+        .as_ref()
+        .and_then(|e| e.damage.get(&cruiser))
+        .map_or(0, |d| d.count(hwc_sim::effects::damage::HEAVY));
+    eprintln!("cruiser health {start} -> {end}, heavy damage effects {heavy}");
+    assert!(
+        end <= start + 1e-4,
+        "the cruiser repaired itself: {start} -> {end}"
+    );
+    assert!(heavy > 0, "the cruiser shows no heavy damage");
+}
+
 /// Mission 4's scripted camera: the pirates' heavy cruiser hyperspacing in (`CameraFocusClose`
 /// at angle 341, declination -5), the Beast taking it over at the genetics module, and the
 /// rest of the mission's cuts. Started with the "blurb5" message its fleet intel waits for;
