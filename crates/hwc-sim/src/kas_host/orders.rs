@@ -581,18 +581,8 @@ macro_rules! orders_methods {
         fn force_parade_formation(&mut self, _cx: &Cx, mothership: Ships, fleet: Ships) {
             let (ms, fl) = (self.ships(mothership), self.ships(fleet));
             let (Some(&around), false) = (ms.first(), fl.is_empty()) else { return };
-            for id in fl {
-                if self.live(id) {
-                    command::remove_ships_from_doing_stuff(self.u, &[id]);
-                    if let Some(s) = self.u.ships.get_mut(id) {
-                        crate::aitrack::force_steady_ship(s);
-                    }
-                    command::group_ship_into_military_parade(self.u, id, around);
-                }
-            }
-            if let Some(p) = command::military_group_around(self.u, around).and_then(|c| self.u.commands.get(c)).and_then(|c| c.parade.clone()) {
-                crate::parade::set_parade(self.u, &p);
-            }
+            let live: Vec<ShipId> = fl.into_iter().filter(|&id| self.live(id)).collect();
+            crate::parade::force_parade(self.u, around, &live);
         }
 
         // ---- tactics -----------------------------------------------------------------------

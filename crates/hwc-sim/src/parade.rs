@@ -332,7 +332,8 @@ pub fn slot_positions(u: &Universe, parade: &MilitaryParade) -> Vec<(ShipId, Vec
     out
 }
 
-/// `setMilitaryParade` (0x480e90): every ship is put at its slot, facing as the slot says.
+/// `setMilitaryParade` (0x480e90): every ship is put at its slot (`univSetShipPosition`, so its
+/// fog-of-war viewer goes with it), facing as the slot says.
 pub fn set_parade(u: &mut Universe, parade: &MilitaryParade) {
     let Some(leader) = u.ships.get(parade.around) else { return };
     let cs = leader.rotinfo.coordsys;
@@ -340,8 +341,11 @@ pub fn set_parade(u: &mut Universe, parade: &MilitaryParade) {
     let neg = |v: Vector| Vector::new(-v.x, -v.y, -v.z);
     let statics = u.statics.clone();
     for (id, at, face) in slot_positions(u, parade) {
-        let Some(s) = u.ships.get_mut(id) else { continue };
-        s.posinfo.position = at;
+        if u.ships.get(id).is_none() {
+            continue;
+        }
+        crate::base::set_ship_position(u, id, at);
+        let s = u.ships.ship_mut(id);
         s.rotinfo.coordsys = match face {
             1 => hwc_math::Matrix::from_cols(up, neg(right), neg(heading)),
             2 => hwc_math::Matrix::from_cols(up, neg(heading), right),
@@ -351,6 +355,21 @@ pub fn set_parade(u: &mut Universe, parade: &MilitaryParade) {
         if let Some(stat) = statics.ship(s.ship_type) {
             crate::physics::update_obj_rot_info(s, stat);
         }
+    }
+}
+
+/// The body of `kasfForceParadeFormation` (0x495c10): each ship stops what it is doing, joins
+/// the parade around `around` and is put at its slot at once (`setMilitaryParade`).
+pub fn force_parade(u: &mut Universe, around: ShipId, ships: &[ShipId]) {
+    for &id in ships {
+        crate::command::remove_ships_from_doing_stuff(u, &[id]);
+        if let Some(s) = u.ships.get_mut(id) {
+            crate::aitrack::force_steady_ship(s);
+        }
+        crate::command::group_ship_into_military_parade(u, id, around);
+    }
+    if let Some(p) = crate::command::military_group_around(u, around).and_then(|c| u.commands.get(c)).and_then(|c| c.parade.clone()) {
+        set_parade(u, &p);
     }
 }
 

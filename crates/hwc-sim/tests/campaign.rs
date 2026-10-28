@@ -253,3 +253,46 @@ fn real_campaign_chain_mission1_to_mission6() {
         carry = Some(run.carry().expect("carry-over"));
     }
 }
+
+/// Mission 6 opens as the original's does: the Caal-Shto, which came into mission 5 mid-level
+/// and joined the player, jumps with the fleet (the skipped roll call clears its "went out
+/// mid-level" mark, as `singlePlayerGameUpdate` does) and joins mission 6's CaalShto team; and
+/// the ships launched on arrival take their fog-of-war viewers to their parade slots, so no
+/// viewer is left at the origin to "discover" the level's mines there. The first fleet intel
+/// is the Taiidan base signal (0x10002142, then 0x10002144), not the minefield (0x10002145).
+#[test]
+fn mission6_opens_with_the_caal_shto_and_the_base_signal() {
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    let c = Carry::warp(d.statics.clone(), d.tweaks.clone(), &src, 5).expect("warp.script level 5");
+    let mut run = start(d, 5, Some(&c));
+    let caal_shto = |run: &MissionRun| run.universe.ship_list.iter().any(|&id| run.universe.ships.get(id).is_some_and(|s| s.ship_type == ShipType::kCarrier && s.player == 0));
+    let mut ap = Autoplay::new(16 * 3500);
+    let mut steps = 0;
+    while !caal_shto(&run) {
+        ap.play(&mut run, 16);
+        steps += 16;
+        assert!(steps < 16 * 3000, "the Caal-Shto never joined the player in mission 5");
+    }
+    // Until it is out of its hyperspace window.
+    ap.play(&mut run, 16 * 30);
+    run.force_hyperspace().expect("forced jump");
+    while !run.mission_complete() {
+        run.step();
+        steps += 1;
+        assert!(steps < 16 * 3200, "mission 5's jump never ended");
+    }
+    let c = run.carry().expect("carry-over");
+    assert!(c.fleet.iter().any(|f| f.ship_type == ShipType::kCarrier), "the Caal-Shto is carried");
+    let mut m6 = start(d, 6, Some(&c));
+    let speech = |m: &MissionRun| m.game.log.iter().filter(|e| e.text.starts_with("SpeechEvent")).map(|e| e.text.clone()).collect::<Vec<_>>();
+    for _ in 0..16 * 180 {
+        m6.step();
+        if speech(&m6).len() >= 2 {
+            break;
+        }
+    }
+    let said = speech(&m6);
+    assert_eq!(said.get(..2), Some(&["SpeechEvent 0x10002142".to_string(), "SpeechEvent 0x10002144".to_string()][..]), "{said:?}");
+    assert!(caal_shto(&m6), "the Caal-Shto is in mission 6");
+}

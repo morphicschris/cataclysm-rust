@@ -712,6 +712,9 @@ fn jump_now(u: &mut Universe, game: &mut Game, id: ShipId) {
     if u.ships.ship(id).flags & sof::HYPERSPACE == 0 {
         crate::base::remove_ship_from_outside(u, id, false);
         add_ship_to_hyperspace(u, game, id);
+        // It leaves with the fleet, even a ship that came in mid-level (the Caal-Shto in
+        // mission 5), so the next level keeps it.
+        game.hyper.rec(id).midlevel_out = false;
     }
 }
 
@@ -1016,14 +1019,15 @@ pub(crate) fn fade_in_arrival(u: &mut Universe, game: &mut Game, sp: [f32; 4]) -
 
 /// `spLaunchDockedShipsOnArrival` (0x5142c0): with the mothership's auto-launch on, the ships
 /// inside come out at once (not from Hive frigates); in mission 4 the Ecclesiam always does.
+/// Each is put outside at the origin and then at its parade slot around the host
+/// (`kasfForceParadeFormation`), which moves its fog-of-war viewer there too.
 fn launch_docked_on_arrival(u: &mut Universe, game: &mut Game, host: ShipId) {
     let t = u.ships.ship(host).ship_type;
     let put_out = |u: &mut Universe, s: ShipId| {
         crate::dock::remove_ship_from_inside(u, s, host);
         crate::dock::put_ship_outside(u, s, host, Vector::ZERO, 0, 1);
-        let p = u.ships.ship(host).posinfo.position;
-        u.ships.ship_mut(s).posinfo.position = p;
         crate::ships::acolyte::arm_link_missiles(u, s);
+        crate::parade::force_parade(u, host, &[s]);
     };
     if !matches!(t, ShipType::sHiveFrigate | ShipType::bHiveFrigate) && game.hyper.old_auto_launch & 1 != 0 {
         while let Some(s) = u.ships.ship(host).base.inside.as_ref().and_then(|i| i.ships.first().copied()) {
