@@ -3,6 +3,8 @@
 //! keyword that sets the field; fields without a keyword are derived (see
 //! `docs/sim/static-info.md`).
 
+use std::sync::Arc;
+
 use hwc_formats::script::ScriptFile;
 
 use super::cscan::{parse_bool, scan_f32, scan_i32, scan_rgb};
@@ -241,6 +243,8 @@ pub struct ShipStaticInfo {
     pub repair_nozzle: Option<Nozzle>,
     /// +0x408 `bUseRayTriangleIntersectionForHitLocation` (default true).
     pub use_ray_triangle_intersection_for_hit_location: bool,
+    /// The hull the hit tests refine against (the mesh of LOD level 3).
+    pub hull: Option<Arc<super::hull::HullMesh>>,
     /// +0x40c `linkDistance`.
     pub link_distance: f32,
     /// +0x410 `supportUnits`.
@@ -379,6 +383,7 @@ impl ShipStaticInfo {
             res_nozzle: None,
             repair_nozzle: None,
             use_ray_triangle_intersection_for_hit_location: true,
+            hull: None,
             link_distance: 0.0,
             support_units: 0,
             provides_su: 0,
@@ -815,6 +820,7 @@ pub(crate) fn load_ship(ld: &mut Loader, ship_type: ShipType) -> Option<ShipStat
     for w in warnings {
         ld.warn(format!("{file}: {w}"));
     }
+    s.hull = s.header.lod.as_deref().and_then(|lod| super::hull::HullMesh::load(ld.src, lod, ship_type));
     Some(s)
 }
 

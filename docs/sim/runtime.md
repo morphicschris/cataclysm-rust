@@ -196,8 +196,10 @@ two Acolytes linking into an ACV, two workers salvaging a damaged derelict ion a
 - Combat: the burst attack special (heavy corvettes), the carriers' and advance support
   frigates' specials, the RKO, slipgates and the salvage corvettes' own module routines; the
   gun-opening animations (`mad`, they finish at once); alliances beyond "same player". The
-  ray/triangle refinement of hit positions is skipped (the box hit is used) for bullets,
-  missiles and ramming snap points.
+  ramming frigate's snap points and cutting beam use the target's collision box instead of
+  its full-detail mesh. (Bullets, beams and missiles do refine their box hits against the LOD
+  3 hull, `meshShipSegmentCollide`, as the original does for every ship whose file leaves
+  `bUseRayTriangleIntersectionForHitLocation` on; the fighters turn it off.)
 - `NewGimble` turrets start from an identity default orientation (the mesh-bound orientation
   is not computed yet).
 - Fighters that run out of targets stop instead of flying the holding pattern

@@ -8,7 +8,7 @@
 
 use hwc_math::fastmath::fsqrt;
 use hwc_math::fpu::{ld, lt_or_unordered, st, Ext};
-use hwc_math::Vector;
+use hwc_math::{Matrix, Vector};
 
 use crate::object::{sof, Bullet, BulletId, Ship, ShipId};
 use crate::statics::ShipStaticInfo;
@@ -378,11 +378,22 @@ fn check_bullets_in_blob(u: &mut Universe, bi: usize) {
                 if !bullet_sphere_test(t, tstat, &b) {
                     continue;
                 }
-                let (tt, side) = rect_line(t, tstat, b.posinfo.position, b.heading, b.travel_dist);
+                let (mut tt, side) = rect_line(t, tstat, b.posinfo.position, b.heading, b.travel_dist);
                 if lt_or_unordered(ld(tt), 0.0) {
                     continue;
                 }
-                // (The ray/triangle refinement of the hit distance is skipped.)
+                // A hit on the box from outside it stands only if the ray goes on to meet the
+                // hull, and moves on to where it does.
+                if ld(tt) > 0.0 {
+                    let bp = b.posinfo.position;
+                    let h = b.heading;
+                    let entry = Vector::new(st(ld(tt) * ld(h.x) + ld(bp.x)), st(ld(tt) * ld(h.y) + ld(bp.y)), st(ld(tt) * ld(h.z) + ld(bp.z)));
+                    match hull_ray(t, tstat, bp, entry) {
+                        Some(None) => continue,
+                        Some(Some(p)) => tt = beyond(tt, p, entry),
+                        None => {}
+                    }
+                }
                 hit = Some((tid, tt, side));
                 break 'passes;
             }
@@ -447,6 +458,20 @@ fn beam_against_blob(u: &Universe, beam: &Bullet, bi: usize, len: f32, best: &mu
                 }
             }
             if ld(tt) < ld(best.0) {
+                if ld(tt) > 0.0 {
+                    let entry = Vector::new(st(ld(tt) * ld(h.x) + ld(bp.x)), st(ld(tt) * ld(h.y) + ld(bp.y)), st(ld(tt) * ld(h.z) + ld(bp.z)));
+                    match hull_ray(t, tstat, bp, entry) {
+                        Some(None) => continue,
+                        Some(Some(p)) => {
+                            let at = beyond(tt, p, entry);
+                            if ld(at) < ld(best.0) {
+                                *best = (at, Some(tid), side);
+                            }
+                            continue;
+                        }
+                        None => {}
+                    }
+                }
                 *best = (tt, Some(tid), side);
             }
         }
@@ -868,6 +893,98 @@ fn response(u: &mut Universe, a: ShipId, b: ShipId, sum: f32, d: Vector, dist: f
             *p = Vector::new(st(ld(p.x) - ld(k) * ld(d.x)), st(ld(p.y) - ld(k) * ld(d.y)), st(ld(p.z) - ld(k) * ld(d.z)));
         }
     }
+}
+
+/// The hit distance moved from the box entry `entry` (at `t`) on to the hull point `p`
+/// (`t + |p - entry|`).
+fn beyond(t: f32, p: Vector, entry: Vector) -> f32 {
+    let dx = ld(p.x) - ld(entry.x);
+    let dy = ld(p.y) - ld(entry.y);
+    let dz = ld(p.z) - ld(entry.z);
+    st((dx * dx + dy * dy + dz * dz).sqrt() + ld(t))
+}
+
+/// `FUN_004361a0`: where the ray from `s` through `e` crosses triangle `a b c` (normal `n`) at
+/// or beyond `s`, as a fraction of `e - s` (no upper bound: the ray goes on past `e`); `None`
+/// when it runs parallel to the plane, the plane is behind, or the point is outside an edge.
+fn ray_triangle(s: Vector, e: Vector, a: Vector, b: Vector, c: Vector, n: Vector) -> Option<f32> {
+    let dot = |p: Vector, q: Vector| st((ld(p.z) - ld(q.z)) * ld(n.z) + (ld(p.x) - ld(q.x)) * ld(n.x) + (ld(p.y) - ld(q.y)) * ld(n.y));
+    let d = dot(s, e);
+    if -1e-7 < ld(d) && ld(d) < 1e-7 {
+        return None;
+    }
+    let t = st(ld(dot(s, a)) / ld(d));
+    if !(0.0 <= ld(t)) {
+        return None;
+    }
+    let p = Vector::new(
+        st(ld(st(ld(t) * (ld(e.x) - ld(s.x)))) + ld(s.x)),
+        st(ld(st(ld(t) * (ld(e.y) - ld(s.y)))) + ld(s.y)),
+        st(ld(st(ld(t) * (ld(e.z) - ld(s.z)))) + ld(s.z)),
+    );
+    for (base, next) in [(a, b), (b, c), (c, a)] {
+        let ex = st(ld(next.x) - ld(base.x));
+        let ey = st(ld(next.y) - ld(base.y));
+        let ez = st(ld(next.z) - ld(base.z));
+        let mut side = Vector::new(
+            st(ld(ey) * ld(n.z) - ld(ez) * ld(n.y)),
+            st(ld(ez) * ld(n.x) - ld(ex) * ld(n.z)),
+            st(ld(ex) * ld(n.y) - ld(ey) * ld(n.x)),
+        );
+        side.normalize();
+        let along = (ld(base.x) - ld(p.x)) * ld(side.x) + (ld(base.y) - ld(p.y)) * ld(side.y) + (ld(base.z) - ld(p.z)) * ld(side.z);
+        if along < 0.0 {
+            return None;
+        }
+    }
+    Some(t)
+}
+
+/// `meshShipSegmentCollide` (0x4b0ea0) as the hit tests call it (`bUseRayTriangleIntersection-
+/// ForHitLocation`, on for every ship): the ray from `start` through `end` against the ship's
+/// hull mesh (LOD 3). `None` when the type has no hull to test (the box hit then stands);
+/// `Some(None)` when the ray misses the hull; else the world point it meets, the nearest
+/// within each top-level mesh object, the last object hit winning.
+pub fn hull_ray(ship: &Ship, stat: &ShipStaticInfo, start: Vector, end: Vector) -> Option<Option<Vector>> {
+    if !stat.use_ray_triangle_intersection_for_hit_location {
+        return None;
+    }
+    let hull = stat.hull.as_deref()?;
+    let cs = &ship.rotinfo.coordsys;
+    let pos = ship.posinfo.position;
+    let mut found: Option<Vector> = None;
+    let mut best = f32::from_bits(0x6258_d727);
+    for o in &hull.objects {
+        if o.starts_top_level {
+            best = f32::from_bits(0x6258_d727);
+        }
+        // The modelview matrix: the ship's (orientation and position) times the object's.
+        let m = &o.matrix;
+        let col = |k: usize| cs.mul_vec(Vector::new(m[k * 4], m[k * 4 + 1], m[k * 4 + 2]));
+        let (c0, c1, c2) = (col(0), col(1), col(2));
+        let r = Matrix { m: [c0.x, c0.y, c0.z, c1.x, c1.y, c1.z, c2.x, c2.y, c2.z] };
+        let tr = cs.mul_vec(Vector::new(m[12], m[13], m[14]));
+        let t = Vector::new(st(ld(tr.x) + ld(pos.x)), st(ld(tr.y) + ld(pos.y)), st(ld(tr.z) + ld(pos.z)));
+        let local = |p: Vector| r.vec_mul(Vector::new(st(ld(p.x) - ld(t.x)), st(ld(p.y) - ld(t.y)), st(ld(p.z) - ld(t.z))));
+        let (s, e) = (local(start), local(end));
+        let v = |i: u16| o.vertices.get(usize::from(i)).map(|&[x, y, z]| Vector::new(x, y, z));
+        for &(ni, [i0, i1, i2]) in &o.polygons {
+            let (Some(a), Some(b), Some(c)) = (v(i0), v(i1), v(i2)) else { continue };
+            let Some(&[nx, ny, nz]) = o.normals.get(ni as usize) else { continue };
+            let Some(h) = ray_triangle(s, e, a, b, c, Vector::new(nx, ny, nz)) else { continue };
+            if ld(h) < ld(best) || found.is_none() {
+                best = h;
+                let p = Vector::new(
+                    st(ld(st((ld(e.x) - ld(s.x)) * ld(h))) + ld(s.x)),
+                    st(ld(st((ld(e.y) - ld(s.y)) * ld(h))) + ld(s.y)),
+                    st(ld(st((ld(e.z) - ld(s.z)) * ld(h))) + ld(s.z)),
+                );
+                let w = r.mul_vec(p);
+                found = Some(Vector::new(st(ld(t.x) + ld(w.x)), st(ld(t.y) + ld(w.y)), st(ld(t.z) + ld(w.z))));
+            }
+        }
+    }
+    Some(found)
 }
 
 #[cfg(test)]

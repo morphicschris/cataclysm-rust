@@ -12,6 +12,7 @@ pub mod dock;
 pub mod enums;
 pub mod gun;
 pub mod header;
+pub mod hull;
 pub mod lod;
 pub mod missile;
 pub mod navlight;

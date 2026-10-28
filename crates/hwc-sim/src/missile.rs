@@ -1010,7 +1010,12 @@ fn check_against_ships(u: &mut Universe, bi: usize, mines: bool) {
                     break 'passes;
                 }
                 if let Some((t, side)) = path_hits(&m, cp, sst.header.coll.coll_sphere_size_sqr, &sst.header.coll, pos, &cs) {
-                    // (The ray/mesh refinement of the hit is skipped, as for bullets.)
+                    // The ray along the missile's velocity must also meet the hull.
+                    let (mp, mv) = (m.posinfo.position, m.posinfo.velocity);
+                    let ahead = Vector::new(st(ld(mp.x) + ld(mv.x)), st(ld(mp.y) + ld(mv.y)), st(ld(mp.z) + ld(mv.z)));
+                    if crate::collision::hull_ray(u.ships.ship(sid), sst, mp, ahead) == Some(None) {
+                        continue;
+                    }
                     hit = Some((sid, t, side));
                     break 'passes;
                 }

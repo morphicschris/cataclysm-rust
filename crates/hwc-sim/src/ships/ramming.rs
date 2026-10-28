@@ -18,8 +18,9 @@
 //! Not reproduced: the animations, sounds, chatter and trail scaling of the original
 //! (presentation only; the state changes are reported as [`Effect::State`] events), and the
 //! ray tests against the target's polygon mesh (`meshShipSegmentCollide`: the snap point and the
-//! cutting beam's length), which use the target's collision box here (the simulation has no
-//! ship meshes).
+//! cutting beam's length), which use the target's collision box here (they test the
+//! full-detail mesh; the simulation keeps only the LOD 3 hull of the hit tests,
+//! [`crate::statics::hull`]).
 
 use hwc_math::fastmath::fsqrt;
 use hwc_math::fpu::{ld, st, Ext};
