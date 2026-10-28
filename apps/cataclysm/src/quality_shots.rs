@@ -252,7 +252,7 @@ fn combat_frame_times_and_shots() {
         eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
         return;
     };
-    let (mut game, mut play) = combat(&mut rig, size);
+    let (mut game, _play) = combat(&mut rig, size);
     let g = &mut *game;
     let dir = shot_dir();
     let n = 48;
