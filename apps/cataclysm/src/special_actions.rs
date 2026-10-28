@@ -527,3 +527,99 @@ fn mission2_workers_repair_the_bushan_re() {
     assert!(end >= 89.0, "{end}");
     eprintln!("Bushan-Re repaired from {start:.1} % to {end:.1} %");
 }
+
+// ---- Super Acolytes: link missiles on a right click ------------------------------------------
+
+/// Link missiles left on the Acolyte (launchers 2 and 3).
+fn link_missiles_left(g: &Game, id: ShipId) -> i32 {
+    g.world
+        .universe()
+        .ship(id)
+        .map_or(0, |s| s.guns[2..4].iter().map(|g| g.num_missiles).sum())
+}
+
+/// Mission 1 with the missile technology researched: two new (Super) Acolytes have their link
+/// missiles, the fire-missile pointer shows over an enemy and a right click launches all four
+/// at it (`mouseCursorActionClassify` on `selGetCommandAvailability`'s all-link-missiles
+/// entry). Spent, the same right click is a plain attack until they dock again.
+#[test]
+fn mission1_right_click_fires_acolyte_link_missiles() {
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut game = rig.mission1();
+    let g = &mut *game;
+    let mut n = 0;
+    while !(g.world.run().game.ships_have_arrived
+        && g.world.run().game.sp_state == hwc_sim::mission::sp_state::NONE)
+    {
+        rig.frame(g);
+        n += 1;
+        assert!(n < 16 * 60, "the fleet never arrived");
+    }
+    let u = g.world.universe_mut();
+    u.base.players[PLAYER].tech.add(Technology::Missile.index());
+    hwc_sim::upgrade::player_update_from_research(u, PLAYER);
+    let pair = acolytes(g);
+    assert!(pair.iter().all(|&a| link_missiles_left(g, a) == 2));
+    // An enemy within the missiles' 4 km.
+    let u = g.world.universe_mut();
+    let p = u.ship(pair[0]).unwrap().posinfo.position;
+    let enemy = hwc_sim::base::create_ship(
+        u,
+        ShipType::sAcolyte,
+        1,
+        p + Vector::new(2500.0, 0.0, 0.0),
+        Default::default(),
+    )
+    .expect("enemy");
+    hwc_sim::command::cl_set_tactics(u, &[enemy], hwc_sim::object::tactics::EVASIVE);
+    if g.sensors.is_open() {
+        g.toggle_sensors(&mut rig.audio);
+        for _ in 0..16 * 4 {
+            rig.frame(g);
+        }
+    }
+    let aim = |rig: &mut Rig, g: &mut Game| {
+        g.world.focus_on(vec![enemy], false);
+        for _ in 0..32 {
+            rig.frame(g);
+        }
+        g.selection = pair.to_vec();
+        rig.frame(g);
+        g.render(&mut rig.renderer, SIZE).expect("render");
+        let (x, y, _) = on_screen(g, enemy);
+        g.input(InputEvent::MouseMove { x, y }, &mut rig.audio);
+        rig.frame(g);
+        (x, y)
+    };
+    assert!(g.ui.fe.game.options.get_bool("RightClick_CSA"));
+    let (x, y) = aim(&mut rig, g);
+    assert_eq!(
+        g.cursor(),
+        hwc_ui::ingame::cursor::CursorKind::FireMissile,
+        "the fire-missile pointer over the enemy"
+    );
+    rig.right_click(g, x, y);
+    assert!(g.ui.fe.game.ig.popup.open.is_none(), "no menu");
+    let mut n = 0;
+    while pair.iter().any(|&a| link_missiles_left(g, a) > 0) {
+        rig.frame(g);
+        n += 1;
+        assert!(
+            n < 16 * 60,
+            "link missiles left after {n} frames: {:?}",
+            pair.map(|a| link_missiles_left(g, a))
+        );
+    }
+    eprintln!("all four link missiles fired in {n} frames");
+    if g.world.universe().ship(enemy).is_some() {
+        aim(&mut rig, g);
+        assert_eq!(
+            g.cursor(),
+            hwc_ui::ingame::cursor::CursorKind::Attack,
+            "spent, a plain attack"
+        );
+    }
+}

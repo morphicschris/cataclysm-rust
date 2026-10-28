@@ -1069,6 +1069,8 @@ impl Game {
             t[i] = any;
         }
         t[avail::ALL_RAMMING] = any;
+        t[avail::ALL_BEAST_CASCADE] = any;
+        t[avail::ALL_LINK_MISSILES] = any;
         t[avail::ALL_MISSILES] = any;
         for &id in ships {
             let Some(s) = u.ship(id) else { continue };
@@ -1129,6 +1131,17 @@ impl Game {
                 t[avail::RAMMING] = true;
             } else {
                 t[avail::ALL_RAMMING] = false;
+            }
+            if hwc_sim::ships::beast::ship_can_cascade_now(u, id) {
+                t[avail::BEAST_CASCADE] = true;
+            } else {
+                t[avail::ALL_BEAST_CASCADE] = false;
+            }
+            // Super Acolytes with a link missile left (`AcolyteHasLinkMissiles`).
+            if hwc_sim::ships::acolyte::has_link_missiles(u, id) {
+                t[avail::LINK_MISSILES] = true;
+            } else {
+                t[avail::ALL_LINK_MISSILES] = false;
             }
             if ti == 5 {
                 t[avail::MIMIC_TYPE] = true;
