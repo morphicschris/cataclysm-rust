@@ -14,7 +14,7 @@ use hwc_math::fpu::{ld, st};
 
 use crate::object::ShipId;
 use crate::statics::cscan::{scan_f32, scan_i32, scan_rgb};
-use crate::statics::ShipStaticInfo;
+use crate::statics::{ShipStaticInfo, ShipType};
 use crate::universe::{SpecialEvent, Universe};
 
 use super::{Effect, ShipSpec};
@@ -83,6 +83,14 @@ impl ProximityStatics {
         s.search_radius_sq = st(ld(s.search_radius) * ld(s.search_radius));
         s.trigger_speed_sq = st(ld(s.trigger_speed) * ld(s.trigger_speed));
         s
+    }
+}
+
+/// A sensor type's `SearchRadius` (0 for other types).
+pub fn search_radius(u: &Universe, t: ShipType) -> f32 {
+    match super::type_statics(u, t) {
+        super::TypeStatics::ProximitySensor(p) => p.search_radius,
+        _ => 0.0,
     }
 }
 

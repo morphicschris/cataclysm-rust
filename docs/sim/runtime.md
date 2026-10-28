@@ -229,8 +229,9 @@ two Acolytes linking into an ACV, two workers salvaging a damaged derelict ion a
   need a hull mesh from the presentation layer to land.
 - Not modelled in the fly-to code: salvager, clamped and slaved-ship exceptions; the docking
   dock-point lists; military parades.
-- Formations: the sphere formation is not implemented (a sentinel field sphere falls back to the
-  wall, as the original does when it protects nothing); per-type formation
+- Formations: spheres (`formationSpecificsSphere`) surround the guarded ship, the attack target
+  (`enders`) or the leader; the sentinel field sphere uses the 13-ship table and clamps its
+  sentinels to the guarded ship while their field is up; per-type formation
   filters (static +0x190) are not consulted. `processFormationToDo`, `clFormation`,
   `formationArrageCrazyOptimum` follow the binary; only `FormationCalculateOffsets` is verified.
 - `univCheckShipState`: no world-limits recall or death timer. Housekeeping skips damage

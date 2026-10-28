@@ -941,6 +941,16 @@ impl Game {
                 );
                 true
             }
+            // Sentinels shield the ally (`mrProtectShips`).
+            (PointerAction::ForceField, Hover::Ship(t)) => {
+                let sel = self.selection.clone();
+                hwc_sim::player_orders::mr_protect_ships(
+                    self.world.universe_mut(),
+                    &sel,
+                    Some(&[t]),
+                );
+                true
+            }
             // The special orders on the object (`mrSpecialTargetOrder(target, order)`).
             (a, Hover::Ship(t)) => {
                 use hwc_sim::player_orders::TargetOrder as O;

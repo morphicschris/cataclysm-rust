@@ -284,3 +284,110 @@ fn sentinel_field_stops_missiles() {
     let again = run_with(s, 1200, |_| {}).unwrap();
     assert_eq!(hashes, again);
 }
+
+/// The Force Field order (`mrProtectShips`) on a guarded ship: twelve upgraded sentinels form
+/// the field sphere (type 10) around it, take their slots on the 13-ship sphere, raise the
+/// field (twenty triangles), clamp to the ship and take an enemy frigate's fire on the field.
+/// Unlink Force Field turns them into an ordinary guarding sphere and lets go; without a
+/// target the order makes a field wall.
+#[test]
+fn sentinel_field_sphere_guards_a_ship() {
+    use hwc_sim::command::attr;
+    use hwc_sim::formation::kind;
+    use hwc_sim::player_orders::{mr_formation_revert_special, mr_protect_ships};
+    let mut spawns = Vec::new();
+    for i in 0..12 {
+        spawns.push(Spawn { ship_type: ShipType::sSentinel, player: 0, position: v(-800.0, (i as f32 - 5.5) * 150.0, 0.0) });
+    }
+    spawns.push(Spawn { ship_type: ShipType::sProcessor, player: 0, position: v(0.0, 0.0, 0.0) });
+    spawns.push(Spawn { ship_type: ShipType::tStandardFrigate, player: 1, position: v(4000.0, 0.0, 0.0) });
+    let s = scenario("sentinel sphere", spawns, vec![(400, Order::Attack { ships: vec![13], targets: vec![12] })]);
+    let Some(mut run) = new_run(s) else { return };
+    let ids: Vec<ShipId> = run.ids[..12].to_vec();
+    let guarded = run.ids[12];
+    // Without the force-field upgrade the order does nothing.
+    mr_protect_ships(&mut run.universe, &ids, Some(&[guarded]));
+    assert!(run.universe.ship(ids[0]).unwrap().command.is_none());
+    for &i in &ids {
+        run.universe.ships.ship_mut(i).upgrade_flags |= 0x1000;
+    }
+    mr_protect_ships(&mut run.universe, &ids, Some(&[guarded]));
+    let cid = run.universe.ship(ids[0]).unwrap().command.expect("command");
+    let c = run.universe.commands.get(cid).unwrap();
+    assert_eq!(c.formation.formation_type, kind::SENTINEL_SPHERE);
+    assert!(c.attributes & attr::PROTECTING != 0 && c.protect == vec![guarded]);
+    assert_eq!(c.selection.len(), 12);
+    let segments: usize = ids.iter().filter_map(|&i| field(&run, i)).map(|f| f.segments.len()).sum();
+    assert_eq!(segments, 20, "the twelve slots of the sphere own twenty field triangles");
+    let mut up_at = None;
+    let mut hits = 0;
+    for tick in 0..1500u32 {
+        run.step();
+        let up = ids.iter().filter(|&&i| sentinel::field_is_up(&run.universe, i)).count();
+        if up_at.is_none() && up >= 6 {
+            up_at = Some(tick);
+        }
+        hits += run.universe.special_events.iter().filter(|e| matches!(e, SpecialEvent::Special { effect: Effect::FieldHit, .. })).count();
+    }
+    let up = up_at.expect("the field sphere came up");
+    assert!(up < 1000, "field up at tick {up}");
+    let clamped = ids.iter().filter(|&&i| run.universe.ship(i).unwrap().base.clamp.as_ref().and_then(|c| c.host) == Some(guarded)).count();
+    assert!(clamped >= 6, "{clamped} sentinels clamped to the guarded ship");
+    assert!(hits > 0, "the field took the frigate's fire");
+    // The sentinels that reached their slots sit on the sphere around the guarded ship.
+    let centre = run.universe.ship(guarded).unwrap().coll.coll_position;
+    let r = run.universe.ship(ids[0]).unwrap().formation_offset;
+    let radius = (r.x * r.x + r.y * r.y + r.z * r.z).sqrt();
+    for &i in ids.iter().filter(|&&i| field(&run, i).is_some_and(|f| f.in_position)) {
+        let p = run.universe.ship(i).unwrap().posinfo.position;
+        let d = ((p.x - centre.x).powi(2) + (p.y - centre.y).powi(2) + (p.z - centre.z).powi(2)).sqrt();
+        assert!((d - radius).abs() < 60.0, "sentinel {i:?} at {d}, sphere radius {radius}");
+    }
+    let leader = run.universe.commands.get(cid).unwrap().selection[0];
+    mr_formation_revert_special(&mut run.universe, &[leader]);
+    let cid = run.universe.ship(ids[0]).unwrap().command.expect("command");
+    let c = run.universe.commands.get(cid).unwrap();
+    assert_eq!(c.formation.formation_type, kind::SPHERE);
+    assert!(c.attributes & attr::PROTECTING != 0);
+    for _ in 0..4 {
+        run.step();
+    }
+    assert!(ids.iter().all(|&i| !sentinel::field_is_up(&run.universe, i)));
+    assert!(ids.iter().all(|&i| run.universe.ship(i).unwrap().base.clamp.as_ref().and_then(|c| c.host).is_none()));
+    // No target: a field wall.
+    mr_protect_ships(&mut run.universe, &ids[..5], None);
+    let cid = run.universe.ship(ids[0]).unwrap().command.expect("command");
+    assert_eq!(run.universe.commands.get(cid).unwrap().formation.formation_type, kind::SENTINEL_WALL);
+}
+
+/// An ordinary sphere formation guarding a ship surrounds it: the escorts fly to slots on a
+/// sphere around the guarded ship (the original left this to `formationSpecificsSphere`).
+#[test]
+fn sphere_formation_surrounds_the_guarded_ship() {
+    use hwc_sim::command::{cl_formation, cl_protect};
+    use hwc_sim::formation::kind;
+    let mut spawns = Vec::new();
+    for i in 0..6 {
+        spawns.push(Spawn { ship_type: ShipType::sAcolyte, player: 0, position: v(-1500.0, (i as f32 - 2.5) * 100.0, 0.0) });
+    }
+    spawns.push(Spawn { ship_type: ShipType::sProcessor, player: 0, position: v(0.0, 0.0, 0.0) });
+    let s = scenario("sphere guard", spawns, Vec::new());
+    let Some(mut run) = new_run(s) else { return };
+    let ids: Vec<ShipId> = run.ids[..6].to_vec();
+    let guarded = run.ids[6];
+    cl_protect(&mut run.universe, &ids, &[guarded]);
+    cl_formation(&mut run.universe, &ids, kind::SPHERE);
+    for _ in 0..900 {
+        run.step();
+    }
+    let centre = run.universe.ship(guarded).unwrap().posinfo.position;
+    for &i in &ids {
+        let s = run.universe.ship(i).unwrap();
+        let o = s.formation_offset;
+        let want = (o.x * o.x + o.y * o.y + o.z * o.z).sqrt();
+        assert!(want >= 500.0, "slot radius {want}");
+        let p = s.posinfo.position;
+        let d = ((p.x - centre.x).powi(2) + (p.y - centre.y).powi(2) + (p.z - centre.z).powi(2)).sqrt();
+        assert!((d - want).abs() < 150.0, "escort {i:?} at {d}, slot radius {want}");
+    }
+}

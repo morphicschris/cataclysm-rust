@@ -14,10 +14,13 @@
 //!
 //! Not reproduced: the field drawing and hit effects (`SentinelQueueFieldHit`,
 //! `SentinelProcessFieldHitsNear`, `SentinelFlushFieldHits`, `SentinelUpdateFieldSegment(s)`,
-//! `SentinelFieldHitEffect` are render-only); the sphere layout of type 10
-//! (`formationSpecificsSphere` with its sentinel table) needs the protect order's target list,
-//! which commands do not keep, so a type-10 formation falls back to type 9 as the original does
-//! when it protects nothing.
+//! `SentinelFieldHitEffect` are render-only).
+//!
+//! The player raises a field with the Force Field special action ([`crate::player_orders::mr_protect_ships`]):
+//! with ships band-boxed, up to 12 sentinels guard each one in a field sphere (laid out by
+//! [`crate::formation::sphere_specifics`], the sentinels clamped to the ship while their field
+//! is up); with none, three or more make a field wall. Unlink Force Field turns them back into
+//! an ordinary sphere or wall ([`crate::player_orders::mr_formation_revert_special`]).
 
 use hwc_math::fastmath::fsqrt;
 use hwc_math::fpu::{fild_i32, ftol, ld, round_magic, st, Ext};
@@ -467,12 +470,22 @@ fn leader_update(u: &mut Universe, id: ShipId, cid: crate::object::CommandId) {
     let mut centre = id;
     let c = u.commands.get(cid).expect("command").clone();
     if c.formation.formation_type == formation_kind::SPHERE {
-        // Without a protected ship (commands keep no protect list) the sphere becomes a wall.
-        if let Some(cm) = u.commands.get_mut(cid) {
-            cm.formation.formation_type = formation_kind::WALL;
+        // The sphere is around the first ship it guards; guarding nothing, or around a ship
+        // that has left the universe (docked), it becomes a wall.
+        let to_wall = |u: &mut Universe| {
+            if let Some(cm) = u.commands.get_mut(cid) {
+                cm.formation.formation_type = formation_kind::WALL;
+            }
+            crate::formation::calculate_offsets(u, cid);
+        };
+        match c.protect.first() {
+            Some(&p) if c.attributes & crate::command::attr::PROTECTING != 0 => centre = p,
+            _ => to_wall(u),
         }
-        crate::formation::calculate_offsets(u, cid);
-        centre = id;
+        if !u.ship_list.contains(&centre) {
+            to_wall(u);
+            centre = id;
+        }
     }
     let sel = u.commands.get(cid).expect("command").selection.clone();
     for &s in &sel {
@@ -540,7 +553,51 @@ fn leader_update(u: &mut Universe, id: ShipId, cid: crate::object::CommandId) {
             }
         }
     }
-    // (Clamping to the protected ship applies to spheres only.)
+    // A sphere's sentinels hold on to the guarded ship while their field is up.
+    let c = u.commands.get(cid).expect("command");
+    if c.formation.formation_type != formation_kind::SPHERE {
+        return;
+    }
+    let host = c.protect.first().copied();
+    for &s in &sel {
+        let on = spec(u, s).is_some_and(|f| f.field_on);
+        if !on {
+            crate::clamp::unclamp(u, s);
+        } else if u.ships.get(s).is_some_and(|x| x.base.clamp.as_ref().and_then(|ci| ci.host).is_none()) {
+            if let Some(h) = host.filter(|&h| u.ships.get(h).is_some()) {
+                crate::clamp::clamp_obj_to_obj(u, s, h);
+            }
+        }
+    }
+}
+
+/// `FUN_0047cb40`: the field triangles of the sentinel in slot `k` of a field sphere whose
+/// top pole is slot `w` (`formationSpecificsSphere`): itself and two sentinels of the slots
+/// above it, so that the twelve close the sphere.
+pub fn set_sphere_segments(u: &mut Universe, selection: &[ShipId], w: usize, k: usize) {
+    const SEGMENTS: [&[(usize, usize)]; 12] = [
+        &[],
+        &[],
+        &[(0, 1)],
+        &[(0, 2)],
+        &[(0, 3)],
+        &[(0, 4), (1, 0)],
+        &[(1, 5)],
+        &[(1, 6), (2, 1)],
+        &[(2, 7), (3, 2)],
+        &[(4, 3), (3, 8)],
+        &[(5, 4), (4, 9), (6, 5)],
+        &[(6, 7), (7, 8), (8, 9), (9, 10), (10, 6)],
+    ];
+    let list: Vec<(ShipId, ShipId)> = SEGMENTS
+        .get(k - w)
+        .map(|segs| segs.iter().filter_map(|&(a, b)| Some((*selection.get(w + a)?, *selection.get(w + b)?))).collect())
+        .unwrap_or_default();
+    if let Some(&id) = selection.get(k) {
+        if let Some(f) = spec_mut(u, id) {
+            f.segments = list;
+        }
+    }
 }
 
 /// `FUN_0047cd40`: the field level of a sentinel formation, the lowest of its sentinels'

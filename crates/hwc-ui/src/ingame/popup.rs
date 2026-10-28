@@ -219,7 +219,7 @@ fn main_items(fe: &Fe) -> Vec<Item> {
 fn special_items(fe: &Fe) -> Vec<Item> {
     let view = &fe.game.ig.view;
     let mut v = Vec::new();
-    let specials: [(Command, &str, Action, u8); 16] = [
+    let specials: [(Command, &str, Action, u8); 17] = [
         (Command::Harvest, "Harvest", keys::HARVEST, 12),
         (Command::Repair, "Repair", keys::REPAIR, 12),
         (Command::Salvage, "Salvage", keys::SALVAGE, 12),
@@ -230,6 +230,12 @@ fn special_items(fe: &Fe) -> Vec<Item> {
             Command::ForceField,
             "Force Field",
             keys::FORCE_FIELD_OPTIONS,
+            16,
+        ),
+        (
+            Command::UnlinkForceField,
+            "Unlink Force Field",
+            keys::FORCE_FIELD_UNLINK,
             16,
         ),
         (Command::Cloak, "Cloak", keys::CLOAK, 17),

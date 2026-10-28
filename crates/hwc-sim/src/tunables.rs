@@ -97,6 +97,7 @@ pub struct SimTweaks {
     pub sphere_formation_padding_scale: f32,
     pub sphere_minimum_radius: f32,
     pub sphere_maximum_radius: f32,
+    pub spheresize_ignore_numdeclinations: f32,
     pub strikecraft_padding_modifier: f32,
     pub formation_error_calculate_rate: u32,
     /// Not in the table (compiled constant at 0x8a22a0).
@@ -187,6 +188,7 @@ impl Default for SimTweaks {
             sphere_formation_padding_scale: 4.0,
             sphere_minimum_radius: 500.0,
             sphere_maximum_radius: 3500.0,
+            spheresize_ignore_numdeclinations: 600.0,
             strikecraft_padding_modifier: b(0x3f99_999a),
             formation_error_calculate_rate: 7,
             formation_error_calculate_frame: 2,
@@ -301,6 +303,7 @@ const BINDINGS: &[(&str, &str, Conv, Target)] = &[
     ("Formation.script", "SPHERE_FORMATION_PADDING_SCALE", Real, F(|t| &mut t.sphere_formation_padding_scale)),
     ("Formation.script", "SPHERE_MINIMUM_RADIUS", Real, F(|t| &mut t.sphere_minimum_radius)),
     ("Formation.script", "SPHERE_MAXIMUM_RADIUS", Real, F(|t| &mut t.sphere_maximum_radius)),
+    ("Formation.script", "SPHERESIZE_IGNORE_NUMDECLINATIONS", Real, F(|t| &mut t.spheresize_ignore_numdeclinations)),
     ("Formation.script", "STRIKECRAFT_PADDING_MODIFIER", Real, F(|t| &mut t.strikecraft_padding_modifier)),
     ("Formation.script", "FORMATION_ERROR_CALCULATE_RATE", Int, U(|t| &mut t.formation_error_calculate_rate)),
     ("Formation.script", "FORMATION_TRAVELVEL_MAXSCALE", Real, F(|t| &mut t.formation_travelvel_maxscale)),

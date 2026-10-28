@@ -368,7 +368,10 @@ pub enum Command {
     Mimic,
     /// Drop the disguise (`mrMimicUndisguise`).
     UnMimic,
+    /// Sentinels raise a force field (`mrProtectShips`).
     ForceField,
+    /// Sentinels drop their field formation (`mrFormationRevertSpecial`).
+    UnlinkForceField,
     Cloak,
     Swarmers,
     BigGun,

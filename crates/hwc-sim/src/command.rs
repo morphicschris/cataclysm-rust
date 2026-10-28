@@ -1040,11 +1040,16 @@ pub fn process_attack_to_do_in_formation(u: &mut Universe, cid: CommandId) -> bo
     done
 }
 
-/// `formationContentHasChanged` for the types this slice lays out.
+/// `formationContentHasChanged` (0x47ea10).
 fn content_has_changed(u: &mut Universe, cid: CommandId) {
-    let t = u.commands.get(cid).map_or(0, |c| c.formation.formation_type);
-    if t != formation::kind::WALL && t != formation::kind::SPHERE && t != formation::kind::SENTINEL_SPHERE {
-        formation::calculate_offsets(u, cid);
+    formation::calculate_offsets(u, cid);
+}
+
+/// A sphere formation lays its slots out around the ship it guards, so a change of what it
+/// guards lays it out again (`ChangeOrderToProtect`, `ClearProtecting`).
+fn sphere_guard_changed(u: &mut Universe, cid: CommandId) {
+    if u.commands.get(cid).is_some_and(|c| c.attributes & attr::FORMATION != 0 && c.formation.formation_type == formation::kind::SPHERE && !c.selection.is_empty()) {
+        content_has_changed(u, cid);
     }
 }
 
@@ -1661,6 +1666,7 @@ pub fn clear_protecting_and_passive(u: &mut Universe, cid: CommandId) {
             c.attributes &= !attr::PROTECTING;
             c.protect.clear();
         }
+        sphere_guard_changed(u, cid);
     }
     if attrs & attr::PASSIVE_ATTACKING != 0 {
         clear_passive_attacking(u, cid);
@@ -2699,8 +2705,7 @@ fn change_order_to_protect(u: &mut Universe, cid: CommandId, protect: &[ShipId])
         }
         c.attributes &= !attr::PROTECTING;
         c.protect.clear();
-        // (A sphere formation re-forms around the protected ship: formationContentHasChanged
-        // is not modelled.)
+        sphere_guard_changed(u, cid);
     }
     free_last_order(u, cid);
     let Some(c) = u.commands.get_mut(cid) else { return };
@@ -2708,6 +2713,8 @@ fn change_order_to_protect(u: &mut Universe, cid: CommandId, protect: &[ShipId])
     c.order = order::NULL;
     c.protect = protect.to_vec();
     prepare_protect(u, cid);
+    // A sphere now surrounds the ship it guards.
+    sphere_guard_changed(u, cid);
 }
 
 /// `clProtect` (0x4469c0): `selection` guards `protect`. A command whose selection is the
@@ -2895,7 +2902,7 @@ fn process_protect_formation(u: &mut Universe, cid: CommandId) {
     if c.protect.is_empty() || c.selection.is_empty() {
         return;
     }
-    if c.formation.formation_type == formation::kind::SPHERE && c.selection.len() > 1 {
+    if matches!(c.formation.formation_type, formation::kind::SPHERE | formation::kind::SENTINEL_SPHERE) && c.selection.len() > 1 {
         formation::process(u, cid, false, passive);
     } else if c.protect.len() > 1 {
         protect_ships_avg(u, c.selection[0], &c.protect, passive);

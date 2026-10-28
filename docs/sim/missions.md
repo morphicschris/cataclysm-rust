@@ -302,8 +302,7 @@ targets are gone, strike craft fly the holding pattern (`processHoldingPattern`:
 `TW_HOLDING_PATTERN_PATHTIME` seconds, turning right, the wingmen in their slots) and other ships
 stop; the formation is kept. Evasive leaders attack as loose ships (`processAttackToDo`) and the
 formation re-forms when the attack ends. Not modelled: kamikaze attacks, the guard checks during
-the attack, and the attack routines' range argument; sphere formations are not flown by this
-slice.
+the attack, and the attack routines' range argument.
 
 Status with the scripted player (headless, `--speech 3`): missions 1 (fresh start), 4 and 6 (from
 the `warp.script` fleet) complete for real. Mission 3 from the warp fleet now usually fails: the

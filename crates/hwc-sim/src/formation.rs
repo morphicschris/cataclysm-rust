@@ -2,9 +2,10 @@
 //! which slot (`formationArrageCrazyOptimum`), keeping wingmen on their slots while the leader
 //! flies (`processFormationToDo`) and the formation's travel speed.
 //!
-//! Implemented formation types: delta, broad, delta 3D ("Formation X"), claw, wall, custom and
-//! Cataclysm's sentinel field wall (9, laid out by [`crate::ships::sentinel::wall_layout`]).
-//! Sphere (5) and the sentinel field sphere (10) are not.
+//! Implemented formation types: delta, broad, delta 3D ("Formation X"), claw, wall, sphere (5,
+//! around the leader, a guarded ship or an attack target), custom, and Cataclysm's sentinel
+//! field wall (9, laid out by [`crate::ships::sentinel::wall_layout`]) and field sphere (10, up
+//! to 12 sentinels around the ship they guard).
 
 use hwc_math::crt::qsort;
 use hwc_math::fastmath::fsqrt;
@@ -204,11 +205,12 @@ pub fn calculate_offsets(u: &mut Universe, cid: CommandId) {
     if selection.is_empty() {
         return;
     }
-    // Cataclysm's sentinel formations: the field sphere (10) disables its ships (disable
-    // reason 5) and is laid out by `formationSpecificsSphere`, not modelled (it needs the
-    // protected ship); every other formation lifts that reason. The field wall (9), and a wall
-    // made of sentinels only, is `FUN_0047d460`.
+    // Cataclysm's sentinel formations: the field sphere (10) is laid out by
+    // `formationSpecificsSphere` in its sentinel mode and disables its ships (disable reason
+    // 5); every other formation lifts that reason. The field wall (9), and a wall made of
+    // sentinels only, is `FUN_0047d460`.
     if ftype == kind::SENTINEL_SPHERE {
+        sphere_specifics(u, cid, true);
         for &id in &selection {
             crate::base::set_disable_reason(u.ships.ship_mut(id), true, 5);
         }
@@ -222,6 +224,10 @@ pub fn calculate_offsets(u: &mut Universe, cid: CommandId) {
     }
     if ftype == kind::SENTINEL_WALL || (ftype == kind::WALL && crate::ships::sentinel::all_sentinels(u, &selection)) {
         crate::ships::sentinel::wall_layout(u, &selection);
+        return;
+    }
+    if ftype == kind::SPHERE {
+        sphere_specifics(u, cid, false);
         return;
     }
     let tw = u.tweaks.clone();
@@ -352,9 +358,194 @@ pub fn calculate_offsets(u: &mut Universe, cid: CommandId) {
     }
 }
 
+/// One ring of a sphere table entry (`SphereDeclination`): its declination and how many slots
+/// it has, with the rotation from one slot to the next.
+#[derive(Debug, Clone, Copy)]
+struct SphereRing {
+    cos_decl: f32,
+    sin_decl: f32,
+    points: usize,
+    cos_rot: f32,
+    sin_rot: f32,
+}
+
+/// A sphere table entry (`SphereTableEntry`): its rings and how many ships (with the centre)
+/// it holds.
+#[derive(Debug, Clone)]
+struct SphereEntry {
+    can_handle: usize,
+    rings: Vec<SphereRing>,
+}
+
+/// `createSphereStaticInfo` (0x47c980): 50 entries of 1..50 rings. Entry k divides the circle
+/// into 2k+2 steps and puts `cos(declination)` times that many slots on each ring, plus the
+/// centre and the two poles.
+fn sphere_tables() -> &'static [SphereEntry] {
+    static TABLES: std::sync::OnceLock<Vec<SphereEntry>> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        let half_pi = f64::from(f32::from_bits(0x3fc9_0fdb));
+        let two_pi = f64::from(f32::from_bits(0x40c9_0fdb));
+        (1..=50usize)
+            .map(|k| {
+                let div = 2 * k + 2;
+                let step = two_pi / div as f64;
+                let mut angle = half_pi;
+                let mut total = 0;
+                let rings = (0..k)
+                    .map(|_| {
+                        angle -= step;
+                        let points = (angle.cos() * div as f64) as usize;
+                        total += points;
+                        let rot = two_pi / points as f64;
+                        SphereRing { cos_decl: angle.cos() as f32, sin_decl: angle.sin() as f32, points, cos_rot: rot.cos() as f32, sin_rot: rot.sin() as f32 }
+                    })
+                    .collect();
+                SphereEntry { can_handle: total + 3, rings }
+            })
+            .collect()
+    })
+}
+
+/// The entry for `n` ships (`findSphereTableEntry`; the original stops with "Sphere formation
+/// too big" past 50 rings), or the sentinel entry, the one for exactly 13 (12 sentinels and
+/// the ship they guard; 0x8e95a8).
+fn sphere_entry(n: usize, sentinel: bool) -> Option<&'static SphereEntry> {
+    let t = sphere_tables();
+    if sentinel {
+        t.iter().find(|e| e.can_handle == 13)
+    } else {
+        t.iter().find(|e| n <= e.can_handle)
+    }
+}
+
+fn is_proximity_sensor(u: &Universe, id: ShipId) -> bool {
+    u.ships.get(id).is_some_and(|s| matches!(s.ship_type, ShipType::kProximitySensor | ShipType::tProximitySensor))
+}
+
+fn set_slot(u: &mut Universe, id: ShipId, offset: Vector, heading: Vector) {
+    let s = u.ships.ship_mut(id);
+    s.formation_offset = offset;
+    s.formation_heading = heading;
+}
+
+/// `formationSpecificsSphere` (0x47cdf0): slots on a sphere around the ship the formation
+/// guards, the attack target of a formation that surrounds it (`enders`), or else the leader.
+/// One ship takes the top pole and one the bottom pole, the rest go round the rings of the
+/// table entry. The radius is the centre's size padded by the ring count (500..3500), 0.9 of
+/// the shortest gun range when surrounding a target, or the sensors' search radii for a sphere
+/// of proximity sensors.
+///
+/// In sentinel mode (formation type 10) the table is the 13-ship entry, the radius is the
+/// centre's `forceFieldProtectionDistanceScale` times its avoidance radius (at most 3500), the
+/// bottom pole is taken last, every sentinel gets the field triangles of its slot and the field
+/// level of the group is set.
+pub fn sphere_specifics(u: &mut Universe, cid: CommandId, sentinel: bool) {
+    use crate::command::order;
+    let Some(cmd) = u.commands.get(cid).cloned() else { return };
+    let sel = cmd.selection.clone();
+    let n = sel.len();
+    if n == 0 {
+        return;
+    }
+    if sentinel {
+        crate::ships::sentinel::set_field_level(u, &sel);
+    }
+    let alive = |u: &Universe, id: Option<ShipId>| id.filter(|&t| u.ships.get(t).is_some());
+    let (centre, working, with_centre) = if cmd.attributes & attr::PROTECTING != 0 && !cmd.protect.is_empty() {
+        (cmd.protect[0], 0, n + 1)
+    } else if cmd.order == order::ATTACK && !cmd.attack_targets.is_empty() && cmd.formation.enders == 1 {
+        let t = alive(u, u.ships.ship(sel[0]).attack.target).unwrap_or(cmd.attack_targets[0]);
+        (t, 0, n + 1)
+    } else {
+        (sel[0], 1, n)
+    };
+    let Some(cs) = u.ships.get(centre).and_then(|c| u.statics.ship(c.ship_type)).cloned() else { return };
+    let prox = sel[1..].iter().all(|&s| is_proximity_sensor(u, s)) && (centre == sel[0] || is_proximity_sensor(u, sel[0]));
+    if with_centre == 1 {
+        return;
+    }
+    let search = |u: &Universe, id: ShipId| -> f32 {
+        u.ships.get(id).map_or(0.0, |s| crate::ships::proximity::search_radius(u, s.ship_type))
+    };
+    let mut radius = if prox && is_proximity_sensor(u, centre) { search(u, centre) } else { cs.header.coll.coll_sphere_size };
+    let Some(entry) = sphere_entry(with_centre, sentinel) else { return };
+    let rings = entry.rings.len();
+    let tw = u.tweaks.clone();
+    if prox {
+        radius = st(ld(radius) + ld(sel.get(1).map_or(0.0, |&s| search(u, s))));
+    } else if cmd.formation.enders == 1 && !sentinel {
+        let mut min = f32::from_bits(0x6258_d727);
+        for &s in &sel[1..] {
+            let sh = u.ships.ship(s);
+            let range = u.statics.ship(sh.ship_type).map_or(min, |st_| st_.bullet_range[sh.tactics.min(2)]);
+            if range < min {
+                min = range;
+            }
+        }
+        radius = st(ld(min) * 0.9);
+    } else if !sentinel {
+        let pad = ld(tw.sphere_formation_padding_scale);
+        radius = if radius <= tw.spheresize_ignore_numdeclinations {
+            st(fild_i32(rings.max(2) as i32) * pad * ld(radius))
+        } else {
+            st(pad * ld(radius) + pad * ld(radius))
+        };
+    } else {
+        radius = st(ld(cs.force_field_protection_distance_scale) * ld(cs.header.coll.avoid_coll_sphere_size));
+    }
+    if tw.sphere_minimum_radius <= radius || sentinel {
+        if tw.sphere_maximum_radius < radius {
+            radius = tw.sphere_maximum_radius;
+        }
+    } else {
+        radius = tw.sphere_minimum_radius;
+    }
+    let segments = |u: &mut Universe, k: usize| {
+        if sentinel {
+            crate::ships::sentinel::set_sphere_segments(u, &sel, working, k);
+        }
+    };
+    set_slot(u, sel[working], Vector::new(0.0, 0.0, radius), Vector::new(0.0, 0.0, 1.0));
+    segments(u, working);
+    let mut idx = working + 1;
+    if idx == n {
+        return;
+    }
+    if !sentinel {
+        set_slot(u, sel[idx], Vector::new(0.0, 0.0, -radius), Vector::new(0.0, 0.0, -1.0));
+        idx += 1;
+        if idx == n {
+            return;
+        }
+    }
+    for (r, ring) in entry.rings.iter().enumerate() {
+        let mut decl = Vector::new(ring.cos_decl, 0.0, ring.sin_decl);
+        let rot = Matrix::rot_about_z(ring.cos_rot, ring.sin_rot);
+        for j in 0..ring.points {
+            let offset = Vector::new(st(ld(decl.x) * ld(radius)), st(ld(decl.y) * ld(radius)), st(ld(decl.z) * ld(radius)));
+            set_slot(u, sel[idx], offset, decl);
+            segments(u, idx);
+            idx += 1;
+            if idx + 1 == n && r + 1 == rings && j + 1 == ring.points {
+                // The one ship left over takes the bottom pole.
+                set_slot(u, sel[idx], Vector::new(0.0, 0.0, -radius), Vector::new(0.0, 0.0, -1.0));
+                segments(u, idx);
+                return;
+            }
+            if idx == n {
+                return;
+            }
+            decl = rot.mul_vec(decl);
+        }
+    }
+}
+
 /// `calculateTravelDistance` (0x47f8a0): summed squared distance of the wingmen from their
-/// slots around the current leader.
-fn travel_distance(u: &Universe, selection: &[ShipId]) -> f32 {
+/// slots around the current leader (0 for the sphere and sentinel formations).
+fn travel_distance(u: &Universe, formation_type: u32, selection: &[ShipId]) -> f32 {
+    if !matches!(formation_type, 0..=4 | kind::CUSTOM) {
+        return 0.0;
+    }
     let leader = u.ships.ship(selection[0]);
     let mut total = 0.0f32;
     for &id in selection.iter().skip(1) {
@@ -473,7 +664,8 @@ pub fn arrange_crazy_optimum(u: &mut Universe, cid: CommandId) {
         u.commands.get_mut(cid).expect("command").selection = test;
         calculate_offsets(u, cid);
         let sel = u.commands.get(cid).expect("command").selection.clone();
-        let d = travel_distance(u, &sel);
+        let ftype = u.commands.get(cid).map_or(0, |c| c.formation.formation_type);
+        let d = travel_distance(u, ftype, &sel);
         if ld(d) < ld(min_leader) {
             min_leader = d;
             optimum = sel;
@@ -554,6 +746,33 @@ fn fly_to_slot_steady(u: &mut Universe, id: ShipId, leader_vel: Vector, slot: Ve
     }
     let s = u.ships.ship_mut(id);
     aitrack::steady_ship_drift_only(s, stat, &tw, dt);
+}
+
+/// The fly-to helper of a sphere surrounding a ship (0x47dce0): like
+/// [`fly_to_slot_steady`] but without settling, and nothing once within 10 of the slot.
+fn fly_to_slot_surround(u: &mut Universe, id: ShipId, centre_vel: Vector, slot: Vector, heading: &mut Vector) {
+    let dist = st(aitrack::move_left_to_go(u.ships.ship(id), slot));
+    let statics = u.statics.clone();
+    let tw = u.tweaks.clone();
+    let dt = u.phys_time_elapsed;
+    let stat = statics.ship(u.ships.ship(id).ship_type).expect("ship statics");
+    let big = tactics::is_capital_ship_static_or_big(stat);
+    let near_flags = fly::FAST_AS_POSSIBLE | fly::DONT_FLY_TO_OBSCURED_POINTS | fly::RETURN_IMMED_IF_POINT_OBSCURED | fly::IGNORE_FORMATION_OBSCURED_POINTS;
+    let d = ld(dist);
+    let fl = if (!big && d > 100.0) || (big && d > 500.0) {
+        near_flags | fly::POINT_IN_DIRECTION_FLYING
+    } else {
+        let s = u.ships.ship_mut(id);
+        aitrack::heading(s, stat, &tw, dt, heading, tw.flyship_heading_accuracy, tw.flyship_heading_accuracy, stat.sinbank, 0);
+        near_flags
+    };
+    if d >= 10.0 && aiship::fly_to_point_avoiding_objs(u, id, Some(slot), fl, 0.0, Some(centre_vel)) & aiship::FLY_OBJECT_IN_WAY != 0 {
+        let s = u.ships.ship_mut(id);
+        if fl & fly::POINT_IN_DIRECTION_FLYING != 0 {
+            aitrack::heading(s, stat, &tw, dt, heading, tw.flyship_heading_accuracy, tw.flyship_heading_accuracy, stat.sinbank, 0);
+        }
+        aitrack::steady_ship_drift_only(s, stat, &tw, dt);
+    }
 }
 
 /// `processFormationToDo` (0x47e100) for the slot-based formation types.
@@ -650,6 +869,106 @@ pub fn process_command(u: &mut Universe, cmd: &CommandToDo, steady: bool, passiv
                 }
             }
         }
+        kind::SPHERE | kind::SENTINEL_SPHERE => {
+            // A guarding sphere centres on the first ship it guards (and turns with it), a
+            // sphere surrounding an attack target on the target; every ship then flies to its
+            // slot, the leader too. Otherwise the slots are around the leader.
+            let sentinel = cmd.formation.formation_type == kind::SENTINEL_SPHERE;
+            let mut centre = leader.clone();
+            let mut origin = origin;
+            let mut surround = false;
+            if cmd.attributes & attr::PROTECTING != 0 {
+                if let Some(p) = cmd.protect.first().and_then(|&p| u.ships.get(p)) {
+                    centre = p.clone();
+                    origin = centre.coll.coll_position;
+                    heading = centre.heading();
+                    surround = true;
+                }
+            } else if cmd.order == crate::command::order::ATTACK && cmd.formation.enders == 1 {
+                let target = leader.attack.target.filter(|&t| u.ships.get(t).is_some()).or(cmd.attack_targets.first().copied());
+                if let Some(t) = target.and_then(|t| u.ships.get(t)) {
+                    centre = t.clone();
+                    origin = centre.coll.coll_position;
+                    surround = true;
+                }
+            }
+            let centre_vel = centre.posinfo.velocity;
+            let first = usize::from(!surround);
+            for (i, &id) in selection.iter().enumerate().skip(first) {
+                let ship = u.ships.ship(id).clone();
+                let stat = statics.ship(ship.ship_type).expect("ship statics");
+                let dont_rotate = stat.rotate_to_retaliate && passive_attacked;
+                if i & 7 != 0 {
+                    u.ships.ship_mut(id).ship_idle = false;
+                }
+                let slot = if sentinel { centre.rotinfo.coordsys.mul_vec(ship.formation_offset) + origin } else { ship.formation_offset + origin };
+                if calc_error {
+                    error = st(dist_sq(slot, ship.posinfo.position) + ld(error));
+                }
+                if ship.special_flags & special::BROKEN_FORMATION != 0 {
+                    continue;
+                }
+                if !dont_rotate {
+                    if steady {
+                        let mut h = ship.formation_heading;
+                        fly_to_slot_steady(u, id, centre_vel, slot, &mut h);
+                    } else if surround {
+                        let mut h = if sentinel {
+                            centre.rotinfo.coordsys.mul_vec(ship.formation_heading)
+                        } else if centre.posinfo.is_moving & 1 == 0 {
+                            ship.formation_heading
+                        } else {
+                            heading
+                        };
+                        fly_to_slot_surround(u, id, centre_vel, slot, &mut h);
+                    } else {
+                        let dist = st(aitrack::move_left_to_go(&ship, slot));
+                        let big = tactics::is_capital_ship_static_or_big(stat);
+                        let mut fl = fly::POINT_IN_DIRECTION_FLYING | fly::FAST_AS_POSSIBLE;
+                        let near = if big { ld(dist) <= 500.0 } else { ld(dist) <= 100.0 };
+                        if near {
+                            let s = u.ships.ship_mut(id);
+                            aitrack::heading(s, stat, &tw, dt, &mut heading, tw.flyship_heading_accuracy, tw.flyship_heading_accuracy, stat.sinbank, 0);
+                            fl = fly::FAST_AS_POSSIBLE;
+                        }
+                        if !(ld(dist) < 10.0) {
+                            aiship::fly_to_point_avoiding_objs(u, id, Some(slot), fl, 0.0, Some(centre_vel));
+                        }
+                    }
+                } else if !steady {
+                    if !aitrack::move_reached_destination(&ship, slot, 10.0) {
+                        if surround {
+                            let fl = fly::FAST_AS_POSSIBLE | fly::DONT_FLY_TO_OBSCURED_POINTS | fly::RETURN_IMMED_IF_POINT_OBSCURED | fly::IGNORE_FORMATION_OBSCURED_POINTS;
+                            if aiship::fly_to_point_avoiding_objs(u, id, Some(slot), fl, 0.0, Some(centre_vel)) & aiship::FLY_OBJECT_IN_WAY != 0 {
+                                let s = u.ships.ship_mut(id);
+                                aitrack::steady_ship_drift_only(s, stat, &tw, dt);
+                            }
+                        } else {
+                            aiship::fly_to_point_avoiding_objs(u, id, Some(slot), fly::FAST_AS_POSSIBLE, 0.0, Some(centre_vel));
+                        }
+                    }
+                } else {
+                    if aitrack::move_reached_destination(&ship, slot, 100.0) {
+                        u.ships.ship_mut(id).flags |= sof::FORMATION_SETTLED;
+                    }
+                    let reached = aitrack::move_reached_destination(u.ships.ship(id), slot, 10.0);
+                    let blocked = !reached
+                        && aiship::fly_to_point_avoiding_objs(
+                            u,
+                            id,
+                            Some(slot),
+                            fly::FAST_AS_POSSIBLE | fly::DONT_FLY_TO_OBSCURED_POINTS | fly::RETURN_IMMED_IF_POINT_OBSCURED | fly::IGNORE_FORMATION_OBSCURED_POINTS,
+                            0.0,
+                            Some(centre_vel),
+                        ) & aiship::FLY_OBJECT_IN_WAY
+                            != 0;
+                    if reached || blocked {
+                        let s = u.ships.ship_mut(id);
+                        aitrack::steady_ship_drift_only(s, stat, &tw, dt);
+                    }
+                }
+            }
+        }
         _ => {}
     }
     if calc_error {
@@ -693,7 +1012,7 @@ pub fn unlock(u: &mut Universe, cid: CommandId) {
 
 /// Whether a command is a formation of a type this slice can fly.
 pub fn is_supported(cmd: &CommandToDo) -> bool {
-    cmd.attributes & attr::FORMATION != 0 && matches!(cmd.formation.formation_type, 0..=4 | 6 | kind::SENTINEL_WALL)
+    cmd.attributes & attr::FORMATION != 0 && matches!(cmd.formation.formation_type, 0..=6 | kind::SENTINEL_WALL | kind::SENTINEL_SPHERE)
 }
 
 #[cfg(test)]

@@ -898,6 +898,8 @@ pub fn command_of(a: Action) -> Option<host::Command> {
         LINK => C::Link,
         UNLINK => C::Unlink,
         CANCEL_MIMIC => C::UnMimic,
+        FORCE_FIELD_OPTIONS => C::ForceField,
+        FORCE_FIELD_UNLINK => C::UnlinkForceField,
         CLOAK => C::Cloak,
         LAUNCH_SWARMERS => C::Swarmers,
         BIG_GUN_ATTACK => C::BigGun,

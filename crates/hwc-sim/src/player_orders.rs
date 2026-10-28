@@ -107,6 +107,96 @@ pub fn with_upgrade(u: &Universe, list: &mut Vec<ShipId>, bit: u32) {
     retain_swap(list, |id| u.ships.get(id).is_some_and(|s| has_upgrade(s, bit)));
 }
 
+/// `makeShipsHaveUpgradeBits7000` (0x50d540): the ships with a force-field upgrade (field
+/// level 1, 2 or 3).
+pub fn with_force_field(u: &Universe, list: &mut Vec<ShipId>) {
+    retain_swap(list, |id| u.ships.get(id).is_some_and(|s| has_upgrade(s, 0x1000) || has_upgrade(s, 0x2000) || has_upgrade(s, 0x4000)));
+}
+
+/// `mrProtectShips` (0x5608e0), the Force Field order (special action, its key and the
+/// context-sensitive right click on an ally): the selected sentinels with a force-field
+/// upgrade guard each of `targets` in turn in a field sphere, twelve at most to a ship (a
+/// ship already in a field sphere keeps its sentinels and gets more up to twelve; an ordinary
+/// sphere guarding it turns into a delta); a ship needs three. Sentinels are not shielded.
+/// Without targets, three or more of the sentinels form a field wall. (The speech and the
+/// "force field" message are left out.)
+pub fn mr_protect_ships(u: &mut Universe, selection: &[ShipId], targets: Option<&[ShipId]>) {
+    use crate::formation::kind;
+    let mut sel = selection.to_vec();
+    with_force_field(u, &mut sel);
+    if sel.is_empty() {
+        return;
+    }
+    let Some(targets) = targets.filter(|t| !t.is_empty()) else {
+        if sel.len() > 2 {
+            crate::command::cl_formation(u, &sel, kind::SENTINEL_WALL);
+        }
+        return;
+    };
+    for &t in targets {
+        if sel.is_empty() {
+            break;
+        }
+        if u.ships.get(t).is_none_or(|s| crate::ships::sentinel::is_sentinel_type(s.ship_type)) {
+            continue;
+        }
+        let guards: Vec<(u32, Vec<ShipId>)> = u
+            .commands
+            .todo
+            .iter()
+            .filter_map(|&c| u.commands.get(c))
+            .filter(|c| {
+                c.attributes & crate::command::attr::PROTECTING != 0
+                    && c.attributes & crate::command::attr::FORMATION != 0
+                    && c.protect.contains(&t)
+            })
+            .map(|c| (c.formation.formation_type, c.selection.clone()))
+            .collect();
+        let mut field = Vec::new();
+        for (ftype, ships) in guards {
+            if ftype == kind::SPHERE && !ships.is_empty() {
+                crate::command::cl_formation(u, &ships, kind::DELTA);
+            } else if ftype == kind::SENTINEL_SPHERE {
+                field = ships;
+            }
+        }
+        for &s in &sel {
+            if field.len() >= 12 {
+                break;
+            }
+            if !field.contains(&s) {
+                field.push(s);
+            }
+        }
+        sel.retain(|s| !field.contains(s));
+        if field.len() >= 3 {
+            crate::command::cl_wrap_protect(u, &field, &[t]);
+            crate::command::cl_formation(u, &field, kind::SENTINEL_SPHERE);
+        }
+    }
+}
+
+/// `mrFormationRevertSpecial` (0x560c00), Unlink Force Field: each field the selected
+/// sentinels lead turns back into an ordinary formation (a field sphere into a sphere, still
+/// guarding, a field wall into a wall).
+pub fn mr_formation_revert_special(u: &mut Universe, selection: &[ShipId]) {
+    use crate::formation::kind;
+    let mut sel = selection.to_vec();
+    with_force_field(u, &mut sel);
+    for id in sel {
+        let Some(c) = u.ships.get(id).and_then(|s| s.command).and_then(|c| u.commands.get(c)) else { continue };
+        if c.attributes & crate::command::attr::FORMATION == 0 || c.selection.first() != Some(&id) {
+            continue;
+        }
+        let ships = c.selection.clone();
+        match c.formation.formation_type {
+            kind::SENTINEL_SPHERE => crate::command::cl_formation(u, &ships, kind::SPHERE),
+            kind::SENTINEL_WALL => crate::command::cl_formation(u, &ships, kind::WALL),
+            _ => {}
+        }
+    }
+}
+
 fn is_ally(u: &Universe, id: ShipId, player: usize) -> bool {
     crate::shockwave::is_ally(u, id, player)
 }
@@ -652,8 +742,7 @@ pub fn repair_key(u: &mut Universe, player: usize, selection: &[ShipId]) {
 
 /// `pmExecuteSpecialItem` (0x4e8480) for the items the simulation carries out. `targets` are
 /// the band-boxed targets (or the menu's context target); returns false for items it does not
-/// handle (the submenus, the siege cannon's targeting, the Mimic and leech toggles, the force
-/// field).
+/// handle (the submenus, the siege cannon's targeting, the Mimic and leech toggles).
 pub fn execute_special(u: &mut Universe, player: usize, selection: &[ShipId], item: SpecialItem, targets: &[ShipId]) -> bool {
     use SpecialItem as I;
     let t = (!targets.is_empty()).then_some(targets);
@@ -685,7 +774,13 @@ pub fn execute_special(u: &mut Universe, player: usize, selection: &[ShipId], it
         I::Repulse => mr_repulse(u, selection),
         I::FireMissiles => special_target_order(u, player, selection, t, TargetOrder::LinkMissiles),
         I::UnMimic => mr_mimic_undisguise(u, selection),
-        I::SelectLeech | I::Unleech | I::SelectMimic | I::MimicItem | I::ForceField | I::UnlinkForceField | I::BigGun | I::CancelBigGun => {
+        I::ForceField => {
+            // Only the band-boxed targets (no context target), the friendly ones.
+            let friendly: Vec<ShipId> = targets.iter().copied().filter(|&x| is_ally(u, x, player)).collect();
+            mr_protect_ships(u, selection, (!friendly.is_empty()).then_some(&friendly[..]));
+        }
+        I::UnlinkForceField => mr_formation_revert_special(u, selection),
+        I::SelectLeech | I::Unleech | I::SelectMimic | I::MimicItem | I::BigGun | I::CancelBigGun => {
             return false;
         }
     }

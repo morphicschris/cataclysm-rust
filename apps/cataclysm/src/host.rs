@@ -748,6 +748,8 @@ pub fn special_command(item: hwc_sim::player_orders::SpecialItem) -> Option<Comm
         I::Unlink => Command::Unlink,
         I::SelectMimic | I::MimicItem => Command::Mimic,
         I::UnMimic => Command::UnMimic,
+        I::ForceField => Command::ForceField,
+        I::UnlinkForceField => Command::UnlinkForceField,
         I::Cloak => Command::Cloak,
         I::Swarm => Command::Swarmers,
         I::Infect => Command::BeastAttack,
