@@ -1611,6 +1611,140 @@ fn mission_five_cruiser_smokes_after_the_bentusi() {
     assert!(heavy > 0, "the cruiser shows no heavy damage");
 }
 
+/// Mission 5's two carriers as the script has them. The Kiith Maanan carrier (the Caal-Shto)
+/// and its guards dock their fighters and wait in hyperspace, come in on the hyperspace
+/// signature and turn into the player's (not controllable); when the Bentusi go the guards
+/// scuttle and the Caal-Shto is left helpless, not retaliated against, kept at 40% health or
+/// below with its self-repair off. The Beast carrier crawls (top speed 1), and below 80%
+/// average health sends its docked last wave out, which tells it to "leave": it hyperspaces
+/// out.
+#[test]
+#[ignore]
+fn mission_five_carriers() {
+    use hwc_sim::object::sof;
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(5, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    rig.frames_until(g, 16 * 120, "the fleet arriving in mission 5", |g| {
+        g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE
+    });
+    let team = |g: &Game, t: &str| {
+        g.world
+            .run()
+            .game
+            .level
+            .team(hwc_kas::kas_hash(t))
+            .map(|t| t.ships.clone())
+            .unwrap_or_default()
+    };
+    let state = |g: &Game, t: &str| {
+        g.world
+            .run()
+            .kas
+            .team(hwc_kas::kas_hash(t))
+            .and_then(|t| t.state)
+    };
+    let ratio = |g: &Game, id| {
+        let u = g.world.universe();
+        u.ships.get(id).map_or(-1.0, |s| {
+            s.health / u.statics.ship(s.ship_type).unwrap().health.max_health
+        })
+    };
+    let flags = |g: &Game, id| g.world.universe().ships.get(id).map(|s| s.flags);
+    let caal = team(g, "CaalShto");
+    let guards: Vec<_> = [team(g, "CaalShtoGuard1"), team(g, "CaalShtoGuard2")].concat();
+    let bcarrier = team(g, "bCarrier1");
+    eprintln!("Caal-Shto {caal:?}, guards {guards:?}, Beast carrier {bcarrier:?}");
+    assert!(!caal.is_empty() && !guards.is_empty() && !bcarrier.is_empty());
+    rig.frames_until(g, 16 * 60, "the Caal-Shto waiting in hyperspace", |g| {
+        caal.iter()
+            .chain(&guards)
+            .all(|&id| flags(g, id).is_some_and(|f| f & sof::HYPERSPACE != 0))
+    });
+    for &id in &bcarrier {
+        let s = g.world.universe().ships.ship(id);
+        assert!(
+            s.special_flags & hwc_sim::object::special::CUSTOM_MAX_VELOCITY != 0
+                && s.special_max_velocity == 1.0,
+            "Beast carrier top speed {} (special flags {:#x})",
+            s.special_max_velocity,
+            s.special_flags
+        );
+    }
+
+    // The hyperspace signature.
+    kas_message(g, None, 0x0d89f74e);
+    rig.frames_until(g, 16 * 60, "the Caal-Shto in and the player's", |g| {
+        let u = g.world.universe();
+        caal.iter().chain(&guards).all(|&id| {
+            u.ships.get(id).is_some_and(|s| {
+                s.flags & sof::HYPERSPACE == 0 && s.player == 0 && s.special_flags2 & 0x0010_0000 != 0
+            })
+        })
+    });
+
+    // The Bentusi destroyed.
+    kas_message(g, None, 0x010a2ed4);
+    rig.frames_until(g, 16 * 10, "the Caal-Shto left helpless", |g| {
+        state(g, "CaalShto") == Some(0x08761820)
+    });
+    for _ in 0..16 * 5 {
+        rig.frame(g);
+    }
+    for &id in &caal {
+        let s = g.world.universe().ships.ship(id);
+        eprintln!(
+            "Caal-Shto {id:?}: health {:.3}, flags {:#x}, special {:#x}, repair {}",
+            ratio(g, id),
+            s.flags,
+            s.special_flags,
+            s.base.health_mult
+        );
+        assert!((ratio(g, id) - 0.4).abs() < 0.01, "health {}", ratio(g, id));
+        assert!(s.flags & sof::DISABLED != 0, "not helpless");
+        assert!(s.special_flags & 0x4_0000 != 0, "not set to non-retaliation");
+        assert!(s.base.health_mult == 0.0, "still repairs itself");
+    }
+    // Healed back over 40% it is set back.
+    {
+        let u = g.world.universe_mut();
+        for &id in &caal {
+            let m = u.statics.ship(u.ships.ship(id).ship_type).unwrap().health.max_health;
+            u.ships.ship_mut(id).health = m * 0.9;
+        }
+    }
+    for _ in 0..16 * 2 {
+        rig.frame(g);
+    }
+    for &id in &caal {
+        assert!(ratio(g, id) <= 0.401, "Caal-Shto at {}", ratio(g, id));
+    }
+    rig.frames_until(g, 16 * 30, "the guards scuttled", |g| {
+        guards
+            .iter()
+            .all(|&id| g.world.universe().ships.get(id).is_none_or(|s| s.flags & sof::DEAD != 0))
+    });
+
+    // The Beast carrier hurt below 80%: the last wave launches and the carrier leaves.
+    {
+        let u = g.world.universe_mut();
+        for &id in &bcarrier {
+            let m = u.statics.ship(u.ships.ship(id).ship_type).unwrap().health.max_health;
+            u.ships.ship_mut(id).health = m * 0.7;
+        }
+    }
+    rig.frames_until(g, 16 * 90, "the Beast carrier hyperspacing out", |g| {
+        bcarrier
+            .iter()
+            .all(|&id| flags(g, id).is_none_or(|f| f & sof::HYPERSPACE != 0))
+    });
+}
+
 /// Mission 4's scripted camera: the pirates' heavy cruiser hyperspacing in (`CameraFocusClose`
 /// at angle 341, declination -5), the Beast taking it over at the genetics module, and the
 /// rest of the mission's cuts. Started with the "blurb5" message its fleet intel waits for;

@@ -715,6 +715,19 @@ impl MissionRun {
                 s.special_flags |= crate::object::special::KAS_REPAIR_MODIFIER;
             }
         }
+        // Saves from before a cancelled launch cleared the KAS "still launching" bit
+        // (`dock::remove_ship_from_launching`): ships that are no longer launching lose it.
+        let u = &mut self.universe;
+        let stuck: Vec<ShipId> = u
+            .ships
+            .iter()
+            .filter(|s| s.special_flags & crate::base::special::LEAVING_DOCK != 0)
+            .filter(|s| s.command.and_then(|c| u.commands.get(c)).is_none_or(|c| c.order != crate::command::order::LAUNCH_SHIP))
+            .map(|s| s.id)
+            .collect();
+        for id in stuck {
+            u.ships.ship_mut(id).special_flags &= !crate::base::special::LEAVING_DOCK;
+        }
     }
 
     /// Restores what the build manager may offer in a loaded game, which lives in the statics a

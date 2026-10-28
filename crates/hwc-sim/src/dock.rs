@@ -1541,7 +1541,13 @@ pub fn remove_ship_from_docking(u: &mut Universe, ship: ShipId) {
     }
 }
 
-/// `RemoveShipFromLaunching` (0x460b30).
+/// `RemoveShipFromLaunching` (0x460b30). It also clears the KAS "still launching" bit
+/// (`kasfLaunch`'s 0x1000000, [`special::LEAVING_DOCK`]) as HW1's version did
+/// (`SPECIAL_KasCheckDoneLaunching`); Cataclysm dropped that, so a ship whose launch was cut
+/// short by a new order kept `TeamFinishedLaunching` false for good. Mission 5's last wave
+/// hit it every time: its third heavy corvette waits for one of the Beast carrier's two launch
+/// points, the first two go idle, the team's own `IsIdle` -> `Attack` cancels the third's fly
+/// out, and the carrier never got its "leave" (it could be killed instead of warping away).
 pub fn remove_ship_from_launching(u: &mut Universe, ship: ShipId) {
     let Some(s) = u.ships.get(ship) else { return };
     let class = base::class_of(u, s.ship_type);
@@ -1554,7 +1560,7 @@ pub fn remove_ship_from_launching(u: &mut Universe, ship: ShipId) {
         u.ships.ship_mut(ship).base.dock_with = None;
     }
     let s = u.ships.ship_mut(ship);
-    s.special_flags &= !special::DOCK_STAY;
+    s.special_flags &= !(special::DOCK_STAY | special::LEAVING_DOCK);
     s.flags2 &= !flags2::LAUNCHING;
     s.flags &= !sof::NO_BUMPS;
     s.special_flags2 &= !special2::DOCKING;
