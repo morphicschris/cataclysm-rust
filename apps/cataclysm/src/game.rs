@@ -3799,19 +3799,17 @@ mod tests {
 }
 
 /// The hull look from `hwcShipLook` (1 the modern ship look, 0 the original's) and the parts
-/// of it that have their own switch: `hwcSkyLight`, `hwcShipDetail` (rounder outlines and
-/// ambient occlusion), `hwcShadows` and `hwcToneMap`.
+/// of it that have their own switch: `hwcSkyLight`, `hwcAmbientOcclusion`, `hwcShadows`
+/// and `hwcToneMap`.
 pub fn ship_look(options: &hwc_ui::options::Options) -> hwc_render::ShipLook {
     if options.get("hwcShipLook") == 0 {
         return hwc_render::ShipLook::original();
     }
     let on = |key| options.get(key) != 0;
     let full = hwc_render::ShipLook::modern();
-    let detail = on("hwcShipDetail");
     hwc_render::ShipLook {
         sky_light: if on("hwcSkyLight") { full.sky_light } else { 0.0 },
-        subdivide: detail,
-        occlusion: if detail { full.occlusion } else { 0.0 },
+        occlusion: if on("hwcAmbientOcclusion") { full.occlusion } else { 0.0 },
         shadows: on("hwcShadows"),
         tone_map: on("hwcToneMap"),
         ..full

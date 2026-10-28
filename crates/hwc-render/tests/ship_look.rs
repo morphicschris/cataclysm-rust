@@ -229,7 +229,6 @@ fn fleet_effects() {
             * mesh_to_world()
     };
     let none = ShipLook {
-        subdivide: false,
         occlusion: 0.0,
         sky_light: 0.0,
         tone_map: false,
@@ -248,11 +247,10 @@ fn fleet_effects() {
             PostFx::default(),
         ),
         (
-            "4_occlusion_subdivide",
+            "4_occlusion",
             ShipLook {
                 sky_light: 1.0,
                 occlusion: 0.8,
-                subdivide: true,
                 ..none
             },
             PostFx::default(),

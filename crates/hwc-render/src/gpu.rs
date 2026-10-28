@@ -260,7 +260,7 @@ pub struct Renderer {
     mip_sampler: wgpu::Sampler,
     /// The ship look new uploads and frames use ([`Renderer::set_ship_look`]).
     ship_look: crate::look::ShipLook,
-    /// Level geometry already worked out for a look (subdivision and occlusion are slow
+    /// Level geometry already worked out for a look (the baked occlusion is slow
     /// enough to do once per level, not once per team colour).
     geometry_cache: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<LevelGeometry>>>,
     /// The modern look's shadow map.

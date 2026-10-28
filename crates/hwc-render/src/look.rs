@@ -9,8 +9,6 @@
 //! * a bump taken from each texture's brightness, so panel lines and greebles catch the light;
 //! * smoothed facets: flat-shaded faces meeting at a shallow angle share a normal, so curved
 //!   hulls look curved while hard edges stay hard;
-//! * rounder outlines: one level of Phong tessellation on the smoothly shaded parts
-//!   ([`crate::detail::subdivide`]);
 //! * ambient occlusion baked into the vertices ([`crate::detail::occlusion`]);
 //! * sky light: the ambient light takes the background's colours from each direction, so a
 //!   hull facing a red nebula turns red on that side;
@@ -36,8 +34,6 @@ pub struct ShipLook {
     pub bump: f32,
     /// Flat faces meeting at less than this many degrees share a smoothed normal (0: off).
     pub crease_degrees: f32,
-    /// One level of Phong tessellation at upload.
-    pub subdivide: bool,
     /// Strength of the baked ambient occlusion (0: none, not baked).
     pub occlusion: f32,
     /// Strength of the sky's light (0: the scene's flat ambient only).
@@ -57,7 +53,6 @@ impl ShipLook {
             highlight: 0.0,
             bump: 0.0,
             crease_degrees: 0.0,
-            subdivide: false,
             occlusion: 0.0,
             sky_light: 0.0,
             tone_map: false,
@@ -73,7 +68,6 @@ impl ShipLook {
             highlight: 0.35,
             bump: 1.5,
             crease_degrees: 40.0,
-            subdivide: true,
             occlusion: 0.8,
             sky_light: 1.0,
             tone_map: true,
@@ -85,7 +79,6 @@ impl ShipLook {
     pub fn detail(&self) -> crate::mesh::Detail {
         crate::mesh::Detail {
             crease_degrees: self.crease_degrees,
-            subdivide: self.subdivide,
             occlusion: self.occlusion > 0.0,
         }
     }

@@ -156,11 +156,11 @@ Each needs the ship look, is on by default and has its own switch on the ENHANCE
 - `hwcSkyLight`: the ambient light takes the background's colours from each direction
   (`Background::ambient_cube`: each nebula triangle by solid angle and cosine, the clear
   colour for the rest), so a hull facing a red nebula turns red on that side.
-- `hwcShipDetail`: one level of Phong tessellation (`hwc_render::detail::subdivide`) on
-  edges the hull is shaded smoothly across (hard and open edges stay straight, so nothing
-  cracks), and ambient occlusion baked per vertex from 24 rays against the whole level
-  (`detail::occlusion`, a BVH, reach a fifth of the ship's radius). Both are worked out
-  once per level at upload and cached across team colours.
+- `hwcAmbientOcclusion`: ambient occlusion baked per vertex from 24 rays against the whole
+  level (`hwc_render::detail::occlusion`, a BVH, reach a fifth of the ship's radius), worked
+  out once per level at upload and cached across team colours. (A Phong-tessellation pass
+  that rounded the hulls' outlines was tried and taken out at CrasH's request: it made the
+  ships look like marshmallows.)
 - `hwcShadows`: a 2048x2048 shadow map from the main light, an orthographic box around the
   camera's look-at point sized by its distance, filtered 3x3 and faded out at the box's edge
   (`hwc_render::shadow`).
@@ -175,5 +175,5 @@ Each needs the ship look, is on by default and has its own switch on the ENHANCE
 Bloom and heat haze are left out while the sensors manager is open. Mission 1 combat at
 1600x900 on an Intel UHD 750, mean frame times as each item is added
 (`cargo test --release -p cataclysm modern_graphics_combat_shots -- --ignored --nocapture`):
-original 5.4 ms, ship look 6.4, sky light 6.7, detail 6.7, tone map 8.0, shadows 8.3,
+original 5.4 ms, ship look 6.4, sky light 6.7, occlusion and the since-removed rounding 6.7, tone map 8.0, shadows 8.3,
 bloom 11.2, heat haze 12.5.

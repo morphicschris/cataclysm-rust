@@ -334,7 +334,6 @@ fn modern_graphics_combat_shots() {
     let n = 32;
     use hwc_render::{PostFx, ShipLook};
     let base = ShipLook {
-        subdivide: false,
         occlusion: 0.0,
         sky_light: 0.0,
         tone_map: false,
@@ -347,7 +346,7 @@ fn modern_graphics_combat_shots() {
         ("original", ShipLook::original(), none),
         ("ship-look", base, none),
         ("sky-light", ShipLook { sky_light: 1.0, ..base }, none),
-        ("detail", ShipLook { sky_light: 1.0, subdivide: true, occlusion: 0.8, ..base }, none),
+        ("occlusion", ShipLook { sky_light: 1.0, occlusion: 0.8, ..base }, none),
         ("shadows", ShipLook { shadows: false, tone_map: true, ..ShipLook::modern() }, none),
         ("shadows-on", ShipLook::modern(), none),
         ("bloom", ShipLook::modern(), PostFx { heat: 0.0, ..PostFx::modern() }),

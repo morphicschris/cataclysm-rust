@@ -109,7 +109,7 @@ pub const ENTRIES: &[Entry] = &[
     ),
     entry("hwcShipLook", "MODERN SHIP LIGHTING AND TEXTURES", 0, Control::Toggle),
     entry("hwcSkyLight", "SHIPS LIT BY THE NEBULA COLOURS", 0, Control::Toggle),
-    entry("hwcShipDetail", "ROUNDER HULLS AND AMBIENT OCCLUSION", 0, Control::Toggle),
+    entry("hwcAmbientOcclusion", "AMBIENT OCCLUSION", 0, Control::Toggle),
     entry("hwcShadows", "SHIP SHADOWS", 0, Control::Toggle),
     entry("hwcToneMap", "TONE MAPPING AND DITHERING", 0, Control::Toggle),
     entry("hwcBloom", "BLOOM", 0, Control::Toggle),

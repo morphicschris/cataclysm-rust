@@ -182,11 +182,11 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // texture, smoothed facets; a user-requested change); 0: the original's per-vertex light.
     ("hwcShipLook", 1),
     // With the ship look, each a user-requested addition, 0 turning it off: 1 the ambient light
-    // takes the background's colours; rounder hull outlines and baked ambient occlusion;
+    // takes the background's colours; baked ambient occlusion darkens recesses and joins;
     // ships near the camera's focus cast shadows; bright colours roll off instead of clipping,
     // with dithering against banding.
     ("hwcSkyLight", 1),
-    ("hwcShipDetail", 1),
+    ("hwcAmbientOcclusion", 1),
     ("hwcShadows", 1),
     ("hwcToneMap", 1),
     // 1: a soft glow around bright things (engines, lit panels, weapons, explosions); 0 none.

@@ -279,14 +279,12 @@ pub fn build_level_geometry_smoothed(model: &ShipModel, crease_degrees: f32) -> 
 pub struct Detail {
     /// Smoothed normals below this crease angle (0: off).
     pub crease_degrees: f32,
-    /// One level of Phong tessellation ([`crate::detail::subdivide`]).
-    pub subdivide: bool,
     /// Bake ambient occlusion into the vertices ([`crate::detail::occlusion`]).
     pub occlusion: bool,
 }
 
-/// [`build_level_geometry`] with the modern look's geometry: smoothed normals, subdivision
-/// and baked occlusion as `detail` asks.
+/// [`build_level_geometry`] with the modern look's geometry: smoothed normals and baked
+/// occlusion as `detail` asks.
 pub fn build_level_geometry_detailed(model: &ShipModel, detail: Detail) -> LevelGeometry {
     let crease_degrees = detail.crease_degrees;
     let mut out = LevelGeometry {
@@ -344,12 +342,6 @@ pub fn build_level_geometry_detailed(model: &ShipModel, detail: Detail) -> Level
             }
             if crease_degrees > 0.0 {
                 smooth_flat_materials(&mut per_material, &materials, crease_degrees);
-            }
-            if detail.subdivide {
-                for list in &mut per_material {
-                    list.truncate(list.len() - list.len() % 3);
-                }
-                crate::detail::subdivide(&mut per_material);
             }
             for (material, verts) in per_material.into_iter().enumerate() {
                 if verts.len() < 3 {
