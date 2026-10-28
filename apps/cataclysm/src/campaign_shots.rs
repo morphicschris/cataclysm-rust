@@ -1396,3 +1396,199 @@ fn mission_four_infection_beam() {
         }
     }
 }
+
+/// The types of the ships the main camera focuses on.
+fn focus_types(g: &Game) -> Vec<String> {
+    let u = g.world.universe();
+    g.world
+        .focus
+        .iter()
+        .filter_map(|id| u.ship(*id))
+        .map(|s| format!("{:?} {:?}", s.ship_type, s.id))
+        .collect()
+}
+
+/// Plays on, logging every focus the mission's script gives the main camera with three shots
+/// of it (`<name>_cut_<n>_<i>`), until `done` says so after a cut or `frames` frames pass.
+/// The lines, one per cut.
+fn scripted_cuts(
+    rig: &mut Rig,
+    g: &mut Game,
+    name: &str,
+    frames: u32,
+    mut done: impl FnMut(&Game, usize) -> bool,
+) -> Vec<String> {
+    let mut last = (g.world.focus.clone(), g.world.chase);
+    let mut cuts = Vec::new();
+    for frame in 0..frames {
+        rig.frame(g);
+        if (&g.world.focus, g.world.chase) == (&last.0, last.1) {
+            continue;
+        }
+        last = (g.world.focus.clone(), g.world.chase);
+        let c = g.world.camera;
+        let line = format!(
+            "frame {frame}: focus {:?}, angle {:.1}, declination {:.1}, distance {:.0}, chase {}",
+            focus_types(g),
+            c.angle.to_degrees(),
+            c.declination.to_degrees(),
+            c.distance,
+            g.world.chase,
+        );
+        eprintln!("{line}");
+        for (i, wait) in [1, 24, 48].into_iter().enumerate() {
+            for _ in 0..wait {
+                rig.frame(g);
+            }
+            rig.shot(g, &format!("{name}_cut_{}_{i}", cuts.len()));
+        }
+        cuts.push(line);
+        if done(g, cuts.len()) {
+            break;
+        }
+    }
+    eprintln!(
+        "{name}: game time {:.0} s, universe paused {}",
+        g.world.universe().total_time_elapsed,
+        g.world.universe().universe_paused
+    );
+    cuts
+}
+
+/// Sends a KAS message to every team (`MsgSendAll`) or to the named one.
+fn kas_message(g: &mut Game, to: Option<&str>, msg: u32) {
+    let kas = &mut g.world.run_mut().kas;
+    let teams: Vec<_> = match to {
+        Some(t) => vec![hwc_kas::kas_hash(t)],
+        None => kas.teams().map(|t| t.label).collect(),
+    };
+    for t in teams {
+        kas.post_message(t, None, msg);
+    }
+}
+
+/// Mission 5's scripted camera: the Beast ambushing the Bentusi, the Kiith Maanan carrier's
+/// hyperspace signature (`CameraFocus` on the Caal-Shto: angle 62, declination 16, distance
+/// 1200) and the cruiser the Beast takes over. The Beast is let loose by the message its
+/// discovery sends to every team; shots of each cut in `screenshots/game-campaign/13_m5_*`.
+#[test]
+#[ignore]
+fn mission_five_scripted_camera() {
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(5, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    rig.frames_until(g, 16 * 120, "the fleet arriving in mission 5", |g| {
+        g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE
+    });
+    kas_message(g, None, 0x0fe5fa04);
+    let cuts = scripted_cuts(&mut rig, g, "13_m5", 16 * 900, |g, n| {
+        n > 4 && focus_types(g).iter().any(|t| t.contains("HeavyCruiser"))
+    });
+    let carrier = cuts
+        .iter()
+        .find(|l| l.contains("kCarrier"))
+        .expect("no cut to the carrier");
+    assert!(
+        carrier.contains("angle 62.0, declination 16.0, distance 1200"),
+        "{carrier}"
+    );
+}
+
+/// Mission 4's scripted camera: the pirates' heavy cruiser hyperspacing in (`CameraFocusClose`
+/// at angle 341, declination -5), the Beast taking it over at the genetics module, and the
+/// rest of the mission's cuts. Started with the "blurb5" message its fleet intel waits for;
+/// shots in `screenshots/game-campaign/14_m4_*`.
+#[test]
+#[ignore]
+fn mission_four_scripted_camera() {
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(4, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    rig.frames_until(g, 16 * 120, "the fleet arriving in mission 4", |g| {
+        g.world.run().game.ships_have_arrived && g.world.run().game.sp_state == sp_state::NONE
+    });
+    // A mission started on its own has a second Clee-San (the level's and the fleet's); with
+    // two in focus the ride along switches itself off, so one goes.
+    let extra: Vec<_> = {
+        let u = g.world.universe();
+        let all: Vec<_> = u
+            .ships
+            .iter()
+            .filter(|s| s.ship_type == hwc_sim::statics::ShipType::dEcclesiam)
+            .map(|s| s.id)
+            .collect();
+        all.into_iter().skip(1).collect()
+    };
+    for id in extra {
+        let u = g.world.universe_mut();
+        let effects = std::mem::take(&mut u.effects);
+        hwc_sim::damage::really_delete_ship(u, id);
+        u.effects = effects;
+    }
+    // The Clee-San escorted to the genetics module (put next to it) and infected, with the
+    // ride along on board (`CameraSetChaseMode`); then the pirates and their cruiser.
+    {
+        let u = g.world.universe_mut();
+        let find = |u: &hwc_sim::Universe, t| {
+            u.ships
+                .iter()
+                .find(|s| s.ship_type == t)
+                .map(|s| (s.id, s.posinfo.position))
+        };
+        let (_, mp) =
+            find(u, hwc_sim::statics::ShipType::dBeastMothership).expect("genetics module");
+        let (cs, old) = find(u, hwc_sim::statics::ShipType::dEcclesiam).expect("the Clee-San");
+        let new = hwc_math::Vector::new(mp.x + 2000.0, mp.y, mp.z);
+        u.ships.ship_mut(cs).posinfo.position = new;
+        hwc_sim::fow::move_viewer(u, cs, old, new);
+    }
+    kas_message(g, Some("FleetIntel"), hwc_kas::kas_hash("blurb2"));
+    let mut cuts = scripted_cuts(&mut rig, g, "14_m4a", 16 * 600, |g, n| {
+        n >= 3 && focus_types(g).iter().any(|t| t.contains("Mothership"))
+    });
+    for _ in 0..16 * 20 {
+        rig.frame(g);
+    }
+    kas_message(g, Some("FleetIntel"), hwc_kas::kas_hash("blurb5"));
+    cuts.extend(scripted_cuts(&mut rig, g, "14_m4b", 16 * 600, |g, n| {
+        n >= 2 && focus_types(g).iter().any(|t| t.contains("sMothership"))
+    }));
+    // The cruiser brought to the genetics module, which takes it over ("blurb6").
+    {
+        let u = g.world.universe_mut();
+        let find = |u: &hwc_sim::Universe, t| {
+            u.ships
+                .iter()
+                .find(|s| s.ship_type == t)
+                .map(|s| (s.id, s.posinfo.position))
+        };
+        let (_, mp) =
+            find(u, hwc_sim::statics::ShipType::dBeastMothership).expect("genetics module");
+        let (hc, old) =
+            find(u, hwc_sim::statics::ShipType::tHeavyCruiser).expect("the heavy cruiser");
+        let new = hwc_math::Vector::new(mp.x - 4000.0, mp.y, mp.z);
+        u.ships.ship_mut(hc).posinfo.position = new;
+        hwc_sim::fow::move_viewer(u, hc, old, new);
+    }
+    cuts.extend(scripted_cuts(&mut rig, g, "14_m4c", 16 * 600, |_, n| {
+        n >= 5
+    }));
+    assert!(
+        cuts.iter().any(|l| l.contains("chase true")),
+        "no ride along on the Clee-San: {cuts:?}"
+    );
+    assert!(
+        cuts.iter().any(|l| l.contains("HeavyCruiser")),
+        "no cut to the heavy cruiser: {cuts:?}"
+    );
+}

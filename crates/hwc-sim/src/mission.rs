@@ -345,6 +345,31 @@ pub struct CameraState {
     pub scripted: bool,
 }
 
+/// A KAS camera call for the front end's main camera (`universe.mainCameraCommand`), in
+/// order ([`Game::camera_orders`], drained after each update). The front end also writes the
+/// camera's angle, declination and distance back into [`Game::camera`] before each update, for
+/// `CameraGetAngleDeg` and the like.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CameraOrder {
+    /// `ccFocusGeneral` on the ships (an empty list: the player's selection). `close` is
+    /// `ccFocusClose` (zoom in as close as possible); `cut` is the scripted focus of
+    /// `ccFocusScripted` / `ccFocusCloseScripted` (camera command +0x69: the next
+    /// `CameraChase` jumps straight to the new view); `unless_same` is `kasfCameraFocus`'s
+    /// check that leaves the camera alone when it already focuses on those ships.
+    Focus { ships: Vec<ShipId>, close: bool, cut: bool, unless_same: bool },
+    /// `ccChangeAngleDeclination` + `cameraSetEyePosition`, in radians: both the remembered
+    /// and the actual camera.
+    AngleDeclination { angle: f32, declination: f32 },
+    /// `ccSetDistance` (`scripted` false) or `ccDistanceScripted` (true: a cut that also lets
+    /// go of the close-up zoom).
+    Distance { distance: f32, scripted: bool },
+    /// `ccCancelFocus`: back to the previous focus on the camera stack.
+    CancelFocus,
+    /// `kasfCameraSetChaseMode`: camera command +0x8c bit 8, the view from the one focused
+    /// ship (`cameraSetEyePositionBasedOnShip`).
+    Chase(bool),
+}
+
 /// Game-side state of a running mission (everything but the universe and the interpreter).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Game {
@@ -385,6 +410,9 @@ pub struct Game {
     /// to animate (drained by the presentation layer like [`Game::presentation`]).
     pub wide_screen_events: Vec<WideScreenEvent>,
     pub camera: CameraState,
+    /// The KAS camera calls of this update, for the front end ([`CameraOrder`]); not saved.
+    #[serde(skip)]
+    pub camera_orders: Vec<CameraOrder>,
     pub music: Option<i32>,
     pub techs: Vec<String>,
     pub research_allowed: Vec<String>,
@@ -1092,6 +1120,7 @@ pub(crate) fn empty_game(config: MissionConfig) -> Game {
         wide_screen_events: Vec::new(),
         ping_orders: Vec::new(),
         camera: CameraState::default(),
+        camera_orders: Vec::new(),
         presentation: Vec::new(),
         music: None,
         techs: Vec::new(),

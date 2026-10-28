@@ -69,18 +69,25 @@ impl super::SimHost<'_> {
         }
     }
 
-    /// The scripted camera focus of `kasfTutCameraFocus` / `kasfCameraFocusClose` on a
-    /// non-empty selection (the original also leaves point mode and goes to the main screen).
-    /// An empty selection focuses the player's current selection, which the simulation does
-    /// not have: that case is logged only.
-    pub(super) fn scripted_focus(&mut self, what: &str, ships: Vec<crate::object::ShipId>) {
-        if ships.is_empty() {
-            self.g.log(crate::mission::LogKind::Flow, format!("{what}: focus on the player's selection (not modelled)"));
-            return;
+    /// The focus of `kasfTutCameraFocus` (`ccFocus`) / `kasfCameraFocusClose`
+    /// (`ccFocusCloseScripted`, a cut closing in) for the front end's camera. A non-empty
+    /// selection first goes to a clean main screen (the original also leaves point mode); an
+    /// empty one focuses the player's current selection, which only the front end has.
+    pub(super) fn scripted_focus(&mut self, close: bool, ships: Vec<crate::object::ShipId>) {
+        if !ships.is_empty() {
+            self.main_screen();
+            self.g.camera.focus = ships.clone();
+            self.g.camera.scripted = true;
         }
-        self.main_screen();
-        self.g.camera.focus = ships;
-        self.g.camera.scripted = true;
+        self.g.camera_orders.push(crate::mission::CameraOrder::Focus { ships, close, cut: close, unless_same: false });
+    }
+
+    /// The angle and declination of [`Game::camera`](crate::mission::Game) (degrees) to the
+    /// front end's camera, in radians (`ccChangeAngleDeclination` + `cameraSetEyePosition`).
+    pub(super) fn camera_angles(&mut self) {
+        let c = &self.g.camera;
+        let (angle, declination) = (c.angle * 0.017453292, c.declination * 0.017453292);
+        self.g.camera_orders.push(crate::mission::CameraOrder::AngleDeclination { angle, declination });
     }
 }
 
@@ -200,25 +207,28 @@ macro_rules! ai_ui_methods {
         /// `kasfTutCameraFocus` (0x491e00).
         fn tut_camera_focus(&mut self, _cx: &Cx, p_ship_list: Ships) {
             let v = self.ships(p_ship_list);
-            self.scripted_focus("TutCameraFocus", v);
+            self.scripted_focus(false, v);
         }
 
-        /// `kasfCameraFocusClose` (0x491f70): as `TutCameraFocus`, the camera closing in
-        /// (`ccFocusCloseScripted`; the close-up distance is the front end's).
+        /// `kasfCameraFocusClose` (0x491f70): as `TutCameraFocus`, but `ccFocusCloseScripted`:
+        /// a cut to the ships, the camera as close as it may go (the front end's distance).
         fn camera_focus_close(&mut self, _cx: &Cx, ships: Ships) {
             let v = self.ships(ships);
-            self.scripted_focus("CameraFocusClose", v);
+            self.scripted_focus(true, v);
         }
 
         /// `kasfCameraDistance` (0x491f50): `ccDistanceScripted` to the distance.
         fn camera_distance(&mut self, _cx: &Cx, distance: i32) {
             self.g.camera.distance = st(fild_i32(distance));
+            let distance = self.g.camera.distance;
+            self.g.camera_orders.push(crate::mission::CameraOrder::Distance { distance, scripted: true });
         }
 
-        /// `kasfCameraSetChaseMode` (0x496380): sets or clears the camera's chase bit (8).
-        /// `CameraState` has no field for it: logged.
+        /// `kasfCameraSetChaseMode` (0x496380): sets or clears the camera's chase bit (8), for
+        /// the front end.
         fn camera_set_chase_mode(&mut self, _cx: &Cx, chase_mode: i32) {
             self.log(LogKind::Flow, format!("CameraSetChaseMode({})", i32::from(chase_mode != 0)));
+            self.g.camera_orders.push(crate::mission::CameraOrder::Chase(chase_mode != 0));
         }
 
         /// `kasfWideScreenIn` (0x492a40): the letterbox comes in (time compression back to

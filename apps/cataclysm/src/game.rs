@@ -1261,6 +1261,73 @@ impl Game {
         }
     }
 
+    /// The main camera's remembered angle, declination and distance for the mission's
+    /// `CameraGetAngleDeg` and the like (the sensors manager keeps the main camera aside while
+    /// it is open): degrees, the angle 0..360.
+    fn kas_camera_in(&mut self) {
+        let c = *self.sensors.main_camera().unwrap_or(&self.world.camera);
+        let Some(run) = self.world.mission_run_mut() else {
+            return;
+        };
+        let g = &mut run.game.camera;
+        g.angle = c.angle.to_degrees().rem_euclid(360.0);
+        g.declination = c.declination.to_degrees();
+        g.distance = c.distance;
+    }
+
+    /// The mission's camera calls of the last update (`kasfCameraFocus` and the rest) on the
+    /// main camera. A focus on ships first goes to a clean main screen (`spMainScreen(1)`:
+    /// the sensors manager closes for good); an empty selection is the player's.
+    fn kas_camera_orders(&mut self) {
+        use hwc_sim::mission::CameraOrder;
+        let Some(run) = self.world.mission_run_mut() else {
+            return;
+        };
+        let orders = std::mem::take(&mut run.game.camera_orders);
+        for o in orders {
+            match o {
+                CameraOrder::Focus {
+                    ships,
+                    close,
+                    cut,
+                    unless_same,
+                } => {
+                    let selected = ships.is_empty();
+                    let ships = if selected {
+                        self.selection.clone()
+                    } else {
+                        ships
+                    };
+                    if ships.is_empty() || (unless_same && self.world.focuses_on(&ships)) {
+                        continue;
+                    }
+                    if !selected {
+                        self.sensors.close_for_good(&mut self.world);
+                    }
+                    self.world.script_focus(ships, close, cut);
+                }
+                CameraOrder::AngleDeclination { angle, declination } => {
+                    match self.sensors.main_camera_mut() {
+                        Some(c) => {
+                            (c.angle, c.declination) = (angle, declination);
+                            c.rotate_angle(0.0);
+                            c.rotate_declination(0.0);
+                        }
+                        None => self.world.script_angles(angle, declination),
+                    }
+                }
+                CameraOrder::Distance { distance, scripted } => {
+                    match self.sensors.main_camera_mut() {
+                        Some(c) => c.distance = distance,
+                        None => self.world.script_distance(distance, scripted),
+                    }
+                }
+                CameraOrder::CancelFocus => self.world.cancel_focus(),
+                CameraOrder::Chase(on) => self.world.chase = on,
+            }
+        }
+    }
+
     /// The closest the camera may zoom: the sensors camera's own limit while the sensors
     /// manager has it, else the focus's (`cameraMinimumZoom` / `NewSetFocusPoint`).
     fn zoom_min(&self) -> f32 {
@@ -2191,6 +2258,7 @@ impl Game {
             }
         }
         self.real_time += dt;
+        self.world.chase_restore();
         self.note_menu_open();
         let requests = self.with_host(|ui, host| ui.update(host, dt));
         for r in requests {
@@ -2278,7 +2346,9 @@ impl Game {
                 if let (Some(a), None) = (self.autoplay.as_mut(), &self.nis) {
                     a.tick(self.world.run_mut());
                 }
+                self.kas_camera_in();
                 self.world.step();
+                self.kas_camera_orders();
             }
             if let Some(a) = audio.as_mut() {
                 a.sim_events(self.world.universe(), !self.world.effects_on);
@@ -2320,6 +2390,7 @@ impl Game {
         for e in std::mem::take(&mut self.ping_sounds) {
             sound(audio, e);
         }
+        self.world.chase_apply();
         crate::watchdog::checkpoint("update: presentation");
         self.update_presentation(dt, audio);
         crate::watchdog::checkpoint("update: done");

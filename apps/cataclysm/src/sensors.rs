@@ -583,6 +583,11 @@ impl Sensors {
         self.open.as_ref().map(|o| &o.main)
     }
 
+    /// The main camera kept aside while the manager is open, to change.
+    pub fn main_camera_mut(&mut self) -> Option<&mut OrbitCamera> {
+        self.open.as_mut().map(|o| &mut o.main)
+    }
+
     /// `smSensorsBegin`: the camera starts pulling back from the main view. Returns the sound.
     pub fn begin(&mut self, world: &mut World) -> Option<u32> {
         if self.open.is_some() {

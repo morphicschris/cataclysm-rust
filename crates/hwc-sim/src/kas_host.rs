@@ -1328,39 +1328,59 @@ impl KasRuntime for SimHost<'_> {
         self.g.wide_screen_call(self.u, crate::mission::WideScreenKind::Out, frames);
     }
 
+    /// `kasfCameraFocus` (0x491e90): nothing when the camera already focuses on these ships;
+    /// otherwise a clean main screen and `ccFocusScripted` (a cut to them). An empty selection
+    /// focuses the player's.
     fn camera_focus(&mut self, _cx: &Cx, ships: Ships) {
         let v = self.ships(ships);
-        self.g.camera.focus = v;
+        if !v.is_empty() {
+            self.main_screen();
+        }
+        self.g.camera.focus = v.clone();
         self.g.camera.scripted = true;
+        self.g.camera_orders.push(crate::mission::CameraOrder::Focus { ships: v, close: false, cut: true, unless_same: true });
     }
 
+    /// `kasfCameraGetAngleDeg` (0x4917b0): the remembered camera's angle in whole degrees
+    /// (truncated, 0..360).
     fn camera_get_angle_deg(&mut self, _cx: &Cx) -> i32 {
-        self.g.camera.angle.round() as i32
+        self.g.camera.angle as i32
     }
 
+    /// `kasfCameraGetDeclinationDeg` (0x491810): -90 (above) to +90 (below), truncated.
     fn camera_get_declination_deg(&mut self, _cx: &Cx) -> i32 {
-        self.g.camera.declination.round() as i32
+        self.g.camera.declination as i32
     }
 
+    /// `kasfCameraGetDistance` (0x491870), truncated.
     fn camera_get_distance(&mut self, _cx: &Cx) -> i32 {
-        self.g.camera.distance.round() as i32
+        self.g.camera.distance as i32
     }
 
+    /// `kasfCameraSetAngleDeg` (0x4917d0): `ccChangeAngleDeclination` with the current
+    /// declination, then `cameraSetEyePosition` on the actual camera (no blend).
     fn camera_set_angle_deg(&mut self, _cx: &Cx, angle: i32) {
         self.g.camera.angle = angle as f32;
+        self.camera_angles();
     }
 
+    /// `kasfCameraSetDeclinationDeg` (0x491830): as `CameraSetAngleDeg`, for the declination.
     fn camera_set_declination_deg(&mut self, _cx: &Cx, declination: i32) {
         self.g.camera.declination = declination as f32;
+        self.camera_angles();
     }
 
+    /// `kasfCameraSetDistance` (0x491880): `ccSetDistance` + `cameraSetEyePosition`.
     fn camera_set_distance(&mut self, _cx: &Cx, distance: i32) {
         self.g.camera.distance = distance as f32;
+        self.g.camera_orders.push(crate::mission::CameraOrder::Distance { distance: distance as f32, scripted: false });
     }
 
+    /// `kasfTutCameraFocusCancel` (0x492100): `ccCancelFocus`, back to the previous focus.
     fn tut_camera_focus_cancel(&mut self, _cx: &Cx) {
         self.g.camera.scripted = false;
         self.g.camera.focus.clear();
+        self.g.camera_orders.push(crate::mission::CameraOrder::CancelFocus);
     }
 
     fn tut_enable_flags(&mut self, _cx: &Cx, flags_list: Str<'_>) {

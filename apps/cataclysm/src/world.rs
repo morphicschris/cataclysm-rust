@@ -352,6 +352,16 @@ pub struct World {
     /// In a formation attack the wingmen always take the leader's target (a user-requested
     /// change, off by default; `hwcFormationFocusFire`), handed to the universe each update.
     pub formation_focus_leader: bool,
+    /// The camera stack's earlier entries (`CameraStackEntry`: the focus and its remembered
+    /// distance) that a mission's `TutCameraFocusCancel` (`ccCancelFocus`) goes back to; pushed
+    /// by the mission's camera focus calls ([`script_focus`](Self::script_focus)). Not saved.
+    pub focus_stack: Vec<(Vec<ShipId>, f32)>,
+    /// `CameraSetChaseMode` (camera command +0x8c bit 8): with one ship in focus the camera
+    /// rides along from its pilot's seat (`cameraSetEyePositionBasedOnShip`).
+    pub chase: bool,
+    /// The orbiting camera while [`chase`](Self::chase) has the view (put back at the start of
+    /// each frame, so input and the mission see the remembered camera).
+    chase_saved: Option<OrbitCamera>,
     /// The optional Homeworld Remastered deaths and engine trails (`hwcRemasteredFx`), when on
     /// and imported.
     hwr: Option<crate::hwr_fx::HwrFx>,
@@ -490,6 +500,9 @@ impl World {
             alt_focus_keeps_zoom: true,
             zoom_clear: true,
             formation_focus_leader: false,
+            focus_stack: Vec::new(),
+            chase: false,
+            chase_saved: None,
             hwr: None,
         };
         if let Ok(t) = read_script(&w.src, "tweak.script") {
@@ -1275,10 +1288,148 @@ impl World {
         }
     }
 
+    /// A mission's camera focus (`ccFocusGeneral` from `CameraFocus`, `CameraFocusClose` and
+    /// `TutCameraFocus`). The same ships again only ask for the close-up. New ones go on top
+    /// of the camera stack with the camera at least as far as frames them; when the look-at
+    /// point moves 10000 or more, the camera turns to face it from where the eye was. A `cut`
+    /// (`ccFocusScripted`, `ccFocusCloseScripted`: the next `CameraChase` jumps) is there at
+    /// once, the close-up at its distance; otherwise the zoom eases as for the player's focus.
+    pub fn script_focus(&mut self, ships: Vec<ShipId>, close: bool, cut: bool) {
+        // `RENDER_VIEWABLE_DISTANCE_SQR` (0x8a215c) and the stack's size limit (0x747d38).
+        const FAR_SQ: f32 = 1.0e8;
+        const STACK: usize = 20;
+        if ships.is_empty() {
+            return;
+        }
+        if self.focuses_on(&ships) {
+            self.focus_close = true;
+            if cut {
+                self.camera.distance = self.focus_min_zoom();
+                self.camera.zoom_target = None;
+            }
+            return;
+        }
+        let eye = self.camera.eye();
+        let old_look = self.camera.look_at;
+        if !self.focus.is_empty() {
+            self.focus_stack
+                .push((self.focus.clone(), self.camera.distance));
+            if self.focus_stack.len() >= STACK {
+                self.focus_stack.remove(0);
+            }
+        }
+        self.focus = ships;
+        self.follow_focus = true;
+        self.focus_close = close;
+        self.update_focus();
+        let look = self.camera.look_at;
+        if (look - old_look).length_squared() >= FAR_SQ {
+            let d = eye - look;
+            let len = d.length();
+            if len > 0.0 {
+                let mut angle = d.y.atan2(d.x);
+                if angle < 0.0 {
+                    angle += std::f32::consts::TAU;
+                }
+                self.camera.angle = angle;
+                self.camera.declination =
+                    (d.z / len).clamp(-1.0, 1.0).acos() - std::f32::consts::FRAC_PI_2;
+                self.camera.rotate_declination(0.0);
+            }
+        }
+        let min = self.focus_min_zoom();
+        let distance = self.camera.distance.max(min);
+        if cut {
+            self.camera.distance = if close { min } else { distance };
+            self.camera.zoom_target = None;
+        } else if distance != self.camera.distance {
+            self.camera.zoom_target = Some(distance);
+        }
+    }
+
+    /// The camera already focuses on these ships (`SelectionsAreEquivalent`).
+    pub fn focuses_on(&self, ships: &[ShipId]) -> bool {
+        !self.focus.is_empty()
+            && ships.len() == self.focus.len()
+            && ships.iter().all(|id| self.focus.contains(id))
+    }
+
+    /// `ccChangeAngleDeclination` + `cameraSetEyePosition` (radians; the angle wrapped, the
+    /// declination clamped), at once.
+    pub fn script_angles(&mut self, angle: f32, declination: f32) {
+        self.camera.angle = angle;
+        self.camera.rotate_angle(0.0);
+        self.camera.declination = declination;
+        self.camera.rotate_declination(0.0);
+    }
+
+    /// `ccSetDistance`, or with `scripted` `ccDistanceScripted` (which also lets go of the
+    /// close-up zoom), at once.
+    pub fn script_distance(&mut self, distance: f32, scripted: bool) {
+        self.camera.distance = distance;
+        self.camera.zoom_target = None;
+        if scripted {
+            self.focus_close = false;
+        }
+    }
+
+    /// `ccCancelFocus`: back to the newest earlier focus with a ship left, at its remembered
+    /// distance (the zoom eases there; angle and declination stay), the close-up let go.
+    pub fn cancel_focus(&mut self) {
+        while let Some((mut ships, distance)) = self.focus_stack.pop() {
+            let u = self.universe();
+            ships.retain(|id| u.ship(*id).is_some());
+            if ships.is_empty() {
+                continue;
+            }
+            self.focus = ships;
+            self.follow_focus = true;
+            self.focus_close = false;
+            self.update_focus();
+            self.camera.zoom_target = Some(distance.max(self.focus_min_zoom()));
+            return;
+        }
+    }
+
+    /// The start of a frame: the orbiting camera comes back from the chase view.
+    pub fn chase_restore(&mut self) {
+        if let Some(c) = self.chase_saved.take() {
+            self.camera = c;
+        }
+    }
+
+    /// The end of a frame: with [`chase`](Self::chase) on and one ship in focus, the view is
+    /// from that ship (`CameraChase` -> `cameraSetEyePositionBasedOnShip`: the eye at the
+    /// ship's `pilotViewOffset`, looking along its heading, its up the view's up). With more or
+    /// fewer ships the chase mode switches itself off.
+    pub fn chase_apply(&mut self) {
+        if !self.chase || self.sensors_open {
+            return;
+        }
+        let [id] = self.focus[..] else {
+            self.chase = false;
+            return;
+        };
+        let u = self.sim.universe();
+        let Some(s) = u.ship(id) else {
+            return;
+        };
+        let offset = u
+            .statics
+            .ship(s.ship_type)
+            .map_or(hwc_math::Vector::ZERO, |st| st.pilot_view_offset);
+        let m = &s.rotinfo.coordsys;
+        let eye = v3(s.posinfo.position) + v3(m.mul_vec(offset));
+        let (up, heading) = (v3(m.col(0)), v3(m.col(2)));
+        let saved = self.camera;
+        self.camera.set_eye_look_up(eye, eye + heading, Some(up));
+        self.chase_saved = Some(saved);
+    }
+
     /// The main camera and its focus, for a saved game (the camera is part of the game: the
     /// nebulae's update reads it).
     pub fn view_state(&self) -> ViewState {
-        let c = &self.camera;
+        let c = self.chase_saved.as_ref().unwrap_or(&self.camera);
         ViewState {
             look_at: c.look_at.to_array(),
             angle: c.angle,
