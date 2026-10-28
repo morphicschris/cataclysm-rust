@@ -89,7 +89,7 @@ fn stats(g: &Game) -> (usize, usize) {
 }
 
 fn modes(supported: &[u32]) -> Vec<(String, RenderQuality)> {
-    let q = |scale: f32, msaa: u32, fxaa: bool| RenderQuality { scale, msaa, fxaa };
+    let q = |scale: f32, msaa: u32, fxaa: bool| RenderQuality { scale, msaa, fxaa, ..Default::default() };
     let mut v = vec![
         ("off".to_string(), RenderQuality::default()),
         ("scale-0.5".into(), q(0.5, 1, false)),
@@ -168,24 +168,10 @@ fn every_quality_mode_draws_mission_one() {
     rig.renderer.set_sample_count(1);
 }
 
-/// Frame times of each mode in Mission 1 combat at 1600x900 (the same frame drawn repeatedly
-/// once the autoplay fleet is fighting), and screenshots of off, 2x and 4x MSAA. Run with
-/// `--ignored --release --nocapture`.
-#[test]
-#[ignore]
-fn combat_frame_times_and_shots() {
-    let size: (i32, i32) = std::env::var("HWC_AA_SIZE")
-        .ok()
-        .and_then(|v| {
-            let (w, h) = v.split_once('x')?;
-            Some((w.parse().ok()?, h.parse().ok()?))
-        })
-        .unwrap_or((1600, 900));
-    let Some(mut rig) = rig(size) else {
-        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
-        return;
-    };
-    let mut game = mission_one(&mut rig, size);
+/// Mission 1 played on by the autoplay fleet (not drawn) until a fight is on, with the camera
+/// put on it.
+fn combat(rig: &mut Rig, size: (i32, i32)) -> (Box<Game>, hwc_sim::autoplay::Autoplay) {
+    let mut game = mission_one(rig, size);
     let g = &mut *game;
     let mut play = hwc_sim::autoplay::Autoplay::new(16 * 60 * 30);
     // Play on (not drawn) until a fight is on, then put the camera on it.
@@ -246,6 +232,28 @@ fn combat_frame_times_and_shots() {
         "combat at update {frame}: {ships} ships under fire, {fx} effects ({fx_now} when drawn); GPU {:?}",
         rig.renderer.msaa_support()
     );
+    (game, play)
+}
+
+/// Frame times of each mode in Mission 1 combat at 1600x900 (the same frame drawn repeatedly
+/// once the autoplay fleet is fighting), and screenshots of off, 2x and 4x MSAA. Run with
+/// `--ignored --release --nocapture`.
+#[test]
+#[ignore]
+fn combat_frame_times_and_shots() {
+    let size: (i32, i32) = std::env::var("HWC_AA_SIZE")
+        .ok()
+        .and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some((w.parse().ok()?, h.parse().ok()?))
+        })
+        .unwrap_or((1600, 900));
+    let Some(mut rig) = rig(size) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let (mut game, mut play) = combat(&mut rig, size);
+    let g = &mut *game;
     let dir = shot_dir();
     let n = 48;
     let mut rows = Vec::new();
@@ -307,4 +315,70 @@ fn combat_frame_times_and_shots() {
     for r in rows {
         eprintln!("  {r}");
     }
+}
+
+/// Mission 1 combat at 1600x900 in the original look and with every modern graphics option
+/// (`hwcShipLook` and the effects that go with it), with frame times:
+/// `m01-modern-{original,modern}.png`. Run with `--ignored --release --nocapture`.
+#[test]
+#[ignore]
+fn modern_graphics_combat_shots() {
+    let size = (1600, 900);
+    let Some(mut rig) = rig(size) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let (mut game, _play) = combat(&mut rig, size);
+    let g = &mut *game;
+    let dir = shot_dir();
+    let n = 32;
+    use hwc_render::{PostFx, ShipLook};
+    let base = ShipLook {
+        subdivide: false,
+        occlusion: 0.0,
+        sky_light: 0.0,
+        tone_map: false,
+        shadows: false,
+        ..ShipLook::modern()
+    };
+    let none = PostFx::default();
+    // The look built up one option at a time, for the frame times.
+    let modes = [
+        ("original", ShipLook::original(), none),
+        ("ship-look", base, none),
+        ("sky-light", ShipLook { sky_light: 1.0, ..base }, none),
+        ("detail", ShipLook { sky_light: 1.0, subdivide: true, occlusion: 0.8, ..base }, none),
+        ("shadows", ShipLook { shadows: false, tone_map: true, ..ShipLook::modern() }, none),
+        ("shadows-on", ShipLook::modern(), none),
+        ("bloom", ShipLook::modern(), PostFx { heat: 0.0, ..PostFx::modern() }),
+        ("modern", ShipLook::modern(), PostFx::modern()),
+    ];
+    for (name, look, post) in modes {
+        g.world.ship_look = look;
+        g.quality = RenderQuality {
+            post,
+            ..RenderQuality::default()
+        };
+        // The first frames upload the ships in this look and build the target.
+        for _ in 0..2 {
+            g.render(&mut rig.renderer, size).expect("render");
+        }
+        let mut t = Vec::with_capacity(n);
+        for _ in 0..n {
+            let s = std::time::Instant::now();
+            g.render(&mut rig.renderer, size).expect("render");
+            t.push(s.elapsed().as_secs_f64() * 1e3);
+        }
+        t.sort_by(f64::total_cmp);
+        eprintln!(
+            "{name:9} mean {:6.1} ms  p95 {:6.1}",
+            t.iter().sum::<f64>() / n as f64,
+            t[n * 95 / 100]
+        );
+        g.canvas()
+            .save_png(&dir.join(format!("m01-modern-{name}.png")))
+            .expect("png");
+    }
+    g.world.ship_look = hwc_render::ShipLook::original();
+    g.quality = RenderQuality::default();
 }

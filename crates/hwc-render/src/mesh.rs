@@ -150,6 +150,8 @@ pub struct TintVertex {
     /// Packed RGBA bytes; R, G and B are signed deltas.
     pub color: u32,
     pub flags: u32,
+    /// Baked ambient occlusion, 0 (open) to 255 (closed in) ([`crate::detail::occlusion`]).
+    pub occlusion: u32,
 }
 
 /// One mesh object of a level, in the ship's object hierarchy.
@@ -263,6 +265,30 @@ pub fn build_level_geometry(model: &ShipModel) -> LevelGeometry {
 /// [`build_level_geometry`], with each object's flat-shaded faces given smoothed normals
 /// where they meet at less than `crease_degrees` ([`crate::look::smoothed_normals`]; 0: off).
 pub fn build_level_geometry_smoothed(model: &ShipModel, crease_degrees: f32) -> LevelGeometry {
+    build_level_geometry_detailed(
+        model,
+        Detail {
+            crease_degrees,
+            ..Detail::default()
+        },
+    )
+}
+
+/// The geometry the modern ship look works out at upload.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Detail {
+    /// Smoothed normals below this crease angle (0: off).
+    pub crease_degrees: f32,
+    /// One level of Phong tessellation ([`crate::detail::subdivide`]).
+    pub subdivide: bool,
+    /// Bake ambient occlusion into the vertices ([`crate::detail::occlusion`]).
+    pub occlusion: bool,
+}
+
+/// [`build_level_geometry`] with the modern look's geometry: smoothed normals, subdivision
+/// and baked occlusion as `detail` asks.
+pub fn build_level_geometry_detailed(model: &ShipModel, detail: Detail) -> LevelGeometry {
+    let crease_degrees = detail.crease_degrees;
     let mut out = LevelGeometry {
         skeleton: Skeleton::from_model(model),
         ..Default::default()
@@ -299,6 +325,7 @@ pub fn build_level_geometry_smoothed(model: &ShipModel, crease_degrees: f32) -> 
                         .map(|a| TintVertex {
                             color: u32::from_le_bytes(a.color),
                             flags: a.flags,
+                            occlusion: 0,
                         })
                         .unwrap_or_default();
                     corners.push(Vec3::from_array(v.position));
@@ -317,6 +344,12 @@ pub fn build_level_geometry_smoothed(model: &ShipModel, crease_degrees: f32) -> 
             }
             if crease_degrees > 0.0 {
                 smooth_flat_materials(&mut per_material, &materials, crease_degrees);
+            }
+            if detail.subdivide {
+                for list in &mut per_material {
+                    list.truncate(list.len() - list.len() % 3);
+                }
+                crate::detail::subdivide(&mut per_material);
             }
             for (material, verts) in per_material.into_iter().enumerate() {
                 if verts.len() < 3 {
@@ -339,10 +372,57 @@ pub fn build_level_geometry_smoothed(model: &ShipModel, crease_degrees: f32) -> 
         object_base += part.geo.objects.len();
         out.materials.push(materials);
     }
+    if detail.occlusion {
+        bake_occlusion(&mut out);
+    }
     // Keep an evenly spread subset of edges.
     let step = all_edges.len().div_ceil(MAX_EDGES).max(1);
     out.edges = all_edges.into_iter().step_by(step).collect();
     out
+}
+
+/// Bakes ambient occlusion into a level's tints, with the objects in their rest pose: rays
+/// reach a fifth of the level's radius.
+fn bake_occlusion(level: &mut LevelGeometry) {
+    let rest = level.skeleton.rest_matrices();
+    let mut world = vec![(Vec3::ZERO, Vec3::Z); level.vertices.len()];
+    for b in &level.batches {
+        let m = rest.get(b.object).copied().unwrap_or(Mat4::IDENTITY);
+        let nm = Mat3::from_mat4(m).inverse().transpose();
+        let range = b.first_vertex as usize..(b.first_vertex + b.vertex_count) as usize;
+        for i in range {
+            let v = &level.vertices[i];
+            world[i] = (
+                m.transform_point3(Vec3::from_array(v.position)),
+                (nm * Vec3::from_array(v.normal)).normalize_or(Vec3::Z),
+            );
+        }
+    }
+    let (min, max) = world.iter().fold((Vec3::MAX, Vec3::MIN), |(lo, hi), (p, _)| {
+        (lo.min(*p), hi.max(*p))
+    });
+    let reach = (max - min).length() * 0.5 * 0.2;
+    let tris: Vec<[Vec3; 3]> = world.chunks_exact(3).map(|t| [t[0].0, t[1].0, t[2].0]).collect();
+    // One ray cast per distinct point and normal.
+    let key = |(p, n): &(Vec3, Vec3)| {
+        let q = |v: Vec3, s: f32| (v * s).round().as_ivec3().to_array();
+        (q(*p, 1024.0), q(*n, 64.0))
+    };
+    let mut index = std::collections::HashMap::new();
+    let mut points = Vec::new();
+    let slots: Vec<usize> = world
+        .iter()
+        .map(|w| {
+            *index.entry(key(w)).or_insert_with(|| {
+                points.push(*w);
+                points.len() - 1
+            })
+        })
+        .collect();
+    let ao = crate::detail::occlusion(tris, &points, reach);
+    for (t, slot) in level.tints.iter_mut().zip(slots) {
+        t.occlusion = (ao[slot].clamp(0.0, 1.0) * 255.0).round() as u32;
+    }
 }
 
 /// Smooths the normals of one object's flat-shaded materials together (the smooth ones keep

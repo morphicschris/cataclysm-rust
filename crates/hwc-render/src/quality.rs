@@ -31,6 +31,8 @@ pub struct RenderQuality {
     pub msaa: u32,
     /// FXAA over the finished picture.
     pub fxaa: bool,
+    /// Bloom, heat haze, tone mapping and dithering over the scene ([`crate::post`]).
+    pub post: crate::post::PostFx,
 }
 
 impl Default for RenderQuality {
@@ -39,6 +41,7 @@ impl Default for RenderQuality {
             scale: 1.0,
             msaa: 1,
             fxaa: false,
+            post: crate::post::PostFx::default(),
         }
     }
 }
@@ -50,6 +53,7 @@ impl RenderQuality {
             scale: clamp_scale(scale_percent as f32 / 100.0),
             msaa: msaa.clamp(1, 8) as u32,
             fxaa: fxaa != 0,
+            post: crate::post::PostFx::default(),
         }
     }
 

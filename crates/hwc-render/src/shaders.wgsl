@@ -12,8 +12,15 @@ struct Frame {
     params: vec4<f32>,
     inv_view: mat4x4<f32>,
     // The modern ship look (all 0: the original). x: per-pixel lighting, y: highlight
-    // strength, z: bump depth in texels.
+    // strength, z: bump depth in texels, w: sky light strength.
     look: vec4<f32>,
+    // x: tone map, y: shadows, z: ambient occlusion strength, w: shadow map texel in world
+    // units.
+    look2: vec4<f32>,
+    // The sky's light from +X, -X, +Y, -Y, +Z and -Z.
+    sky: array<vec4<f32>, 6>,
+    // World to the shadow map.
+    shadow_view_proj: mat4x4<f32>,
 };
 
 struct Object {
@@ -46,6 +53,9 @@ struct Material {
 
 @group(2) @binding(0) var<uniform> object: Object;
 
+@group(3) @binding(0) var shadow_map: texture_depth_2d;
+@group(3) @binding(1) var shadow_sampler: sampler_comparison;
+
 struct ShipOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -55,6 +65,8 @@ struct ShipOut {
     // World normal and per-vertex tint offset, for per-pixel lighting.
     @location(4) normal: vec3<f32>,
     @location(5) tint: vec3<f32>,
+    // Baked ambient occlusion, scaled by its strength.
+    @location(6) occlusion: f32,
 };
 
 fn signed_byte(v: u32, shift: u32) -> f32 {
@@ -108,7 +120,7 @@ fn vs_ship(
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
-    @location(3) tint: vec2<u32>,
+    @location(3) tint: vec3<u32>,
 ) -> ShipOut {
     var out: ShipOut;
     let world = object.model * vec4<f32>(position, 1.0);
@@ -121,7 +133,84 @@ fn vs_ship(
     out.back = clamp(lit(-n) + t, vec3<f32>(0.0), vec3<f32>(1.0));
     out.normal = n;
     out.tint = t;
+    out.occlusion = f32(tint.z) / 255.0 * frame.look2.z;
     return out;
+}
+
+// Depth only, from the main light.
+@vertex
+fn vs_shadow(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return frame.shadow_view_proj * object.model * vec4<f32>(position, 1.0);
+}
+
+// The sky's light on a surface facing `n`, blended between the six axes.
+fn sky_light(n: vec3<f32>) -> vec3<f32> {
+    let q = n * n;
+    return q.x * select(frame.sky[1].rgb, frame.sky[0].rgb, n.x >= 0.0)
+        + q.y * select(frame.sky[3].rgb, frame.sky[2].rgb, n.y >= 0.0)
+        + q.z * select(frame.sky[5].rgb, frame.sky[4].rgb, n.z >= 0.0);
+}
+
+// How much of the main light reaches `world` (1: all), from the shadow map with a 3x3 filter,
+// fading out towards the map's edge.
+fn shadow_at(world: vec3<f32>, n: vec3<f32>) -> f32 {
+    if (frame.look2.y < 0.5) {
+        return 1.0;
+    }
+    let lifted = world + n * frame.look2.w * 1.5;
+    let c = frame.shadow_view_proj * vec4<f32>(lifted, 1.0);
+    let ndc = c.xyz / c.w;
+    let edge = max(abs(ndc.x), abs(ndc.y));
+    if (edge >= 1.0 || ndc.z <= 0.0 || ndc.z >= 1.0) {
+        return 1.0;
+    }
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    let texel = 1.0 / vec2<f32>(textureDimensions(shadow_map));
+    var lit_share = 0.0;
+    for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+            lit_share += textureSampleCompareLevel(shadow_map, shadow_sampler,
+                uv + vec2<f32>(f32(i), f32(j)) * texel, ndc.z - 0.0005);
+        }
+    }
+    return mix(lit_share / 9.0, 1.0, smoothstep(0.8, 1.0, edge));
+}
+
+// The modern look's light: the original's terms with the sky's light in the ambient, the
+// occlusion taken off the ambient (and half off the diffuse), and the main light's diffuse
+// shadowed. Unclamped when tone mapping.
+fn lit_modern(n: vec3<f32>, shadow: f32, occlusion: f32) -> vec3<f32> {
+    let ambient = select(material.ambient.rgb, vec3<f32>(0.0, 0.0, 0.75), object.tint.z > 0.5);
+    var light = frame.global_ambient.rgb;
+    let count = i32(frame.params.x);
+    for (var i = 0; i < count; i++) {
+        light += frame.light_ambient[i].rgb;
+    }
+    let sky = frame.look.w;
+    if (sky > 0.0) {
+        light = light * (1.0 - 0.35 * min(sky, 1.0)) + sky_light(n) * sky * 2.5;
+    }
+    var c = ambient * light * (1.0 - occlusion);
+    for (var i = 0; i < count; i++) {
+        let s = select(1.0, shadow, i == 0);
+        let d = max(dot(n, frame.light_dir[i].xyz), 0.0) * s;
+        c += material.diffuse.rgb * frame.light_diffuse[i].rgb * d * (1.0 - 0.5 * occlusion);
+    }
+    if (frame.look2.x > 0.5) {
+        return c;
+    }
+    return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Rolls colours off towards white from 0.8 instead of clipping them.
+fn tone(c: vec3<f32>) -> vec3<f32> {
+    if (frame.look2.x < 0.5) {
+        return c;
+    }
+    let k = 0.8;
+    let over = max(c - vec3<f32>(k), vec3<f32>(0.0));
+    let eased = vec3<f32>(k) + (1.0 - k) * (vec3<f32>(1.0) - exp(-over / (1.0 - k)));
+    return select(c, eased, c > vec3<f32>(k));
 }
 
 fn luma(c: vec3<f32>) -> f32 {
@@ -159,7 +248,7 @@ fn look_normal(in: ShipOut, front_facing: bool, dp_x: vec3<f32>, dp_y: vec3<f32>
 }
 
 // The highlight the original never had: Blinn-Phong from each light's diffuse colour.
-fn highlight(n: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
+fn highlight(n: vec3<f32>, world: vec3<f32>, shadow: f32) -> vec3<f32> {
     let eye = (frame.inv_view * vec4<f32>(0.0, 0.0, 0.0, 1.0)).xyz;
     let v = normalize(eye - world);
     var c = vec3<f32>(0.0);
@@ -168,7 +257,7 @@ fn highlight(n: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
         let l = frame.light_dir[i].xyz;
         if (dot(n, l) > 0.0) {
             let h = normalize(l + v);
-            c += frame.light_diffuse[i].rgb * pow(max(dot(n, h), 0.0), 32.0);
+            c += frame.light_diffuse[i].rgb * pow(max(dot(n, h), 0.0), 32.0) * select(1.0, shadow, i == 0);
         }
     }
     return c * frame.look.y;
@@ -188,17 +277,22 @@ fn fs_ship(in: ShipOut, @builtin(front_facing) front_facing: bool) -> @location(
     if (frame.look.x > 0.5) {
         let h0 = luma(t.rgb);
         let n = look_normal(in, front_facing, dp_x, dp_y, duv_x, duv_y, h0);
-        let shade = clamp(lit(n) + in.tint, vec3<f32>(0.0), vec3<f32>(1.0));
-        let spec = highlight(n, in.world);
+        let geo_n = select(-normalize(in.normal), normalize(in.normal), front_facing);
+        let shadow = shadow_at(in.world, geo_n);
+        var shade = lit_modern(n, shadow, in.occlusion) + in.tint;
+        if (frame.look2.x < 0.5) {
+            shade = clamp(shade, vec3<f32>(0.0), vec3<f32>(1.0));
+        }
+        let spec = highlight(n, in.world, shadow) * (1.0 - in.occlusion);
         if (material.flags.y < 0.5) {
-            return vec4<f32>(shade + spec, material.diffuse.a * fade);
+            return vec4<f32>(tone(shade + spec), material.diffuse.a * fade);
         }
         if (material.flags.x > 0.5) {
             return vec4<f32>(t.rgb, t.a * fade);
         }
         // Brighter paint shines more than dark panelling.
         let gloss = 0.35 + 0.65 * h0;
-        return vec4<f32>(t.rgb * shade + spec * gloss, t.a * material.diffuse.a * fade);
+        return vec4<f32>(tone(t.rgb * shade + spec * gloss), t.a * material.diffuse.a * fade);
     }
     let shade = select(in.back, in.front, front_facing);
     if (material.flags.y < 0.5) {

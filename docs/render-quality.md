@@ -147,3 +147,33 @@ Cost, measured on the Acolyte filling a 960x600 view: 0.17 ms original, 0.24 ms 
 Changing the option uploads the ships again at the next frame. Close-ups of both looks:
 `cargo test --release -p hwc-render --test ship_look -- --ignored --nocapture`
 (`HWC_SHIP` picks another ship, pictures in `target/ship_look`).
+
+### The rest of the modern graphics
+
+Each needs the ship look, is on by default and has its own switch on the ENHANCEMENTS screen
+(0 in the options file turns it off):
+
+- `hwcSkyLight`: the ambient light takes the background's colours from each direction
+  (`Background::ambient_cube`: each nebula triangle by solid angle and cosine, the clear
+  colour for the rest), so a hull facing a red nebula turns red on that side.
+- `hwcShipDetail`: one level of Phong tessellation (`hwc_render::detail::subdivide`) on
+  edges the hull is shaded smoothly across (hard and open edges stay straight, so nothing
+  cracks), and ambient occlusion baked per vertex from 24 rays against the whole level
+  (`detail::occlusion`, a BVH, reach a fifth of the ship's radius). Both are worked out
+  once per level at upload and cached across team colours.
+- `hwcShadows`: a 2048x2048 shadow map from the main light, an orthographic box around the
+  camera's look-at point sized by its distance, filtered 3x3 and faded out at the box's edge
+  (`hwc_render::shadow`).
+- `hwcToneMap`: lit colours roll off from 0.8 instead of clipping, and the post chain dithers
+  below one 8-bit step against banding.
+- `hwcBloom`: bright things that stand out from their surroundings (engines, beams, lit
+  windows, explosions; not the backgrounds' broad bright nebulae) are cut out at a quarter of
+  the size, blurred twice and added back (`hwc_render::post`).
+- `hwcHeatHaze`: the picture shimmers around those hot spots, but not over the glowing
+  surfaces themselves.
+
+Bloom and heat haze are left out while the sensors manager is open. Mission 1 combat at
+1600x900 on an Intel UHD 750, mean frame times as each item is added
+(`cargo test --release -p cataclysm modern_graphics_combat_shots -- --ignored --nocapture`):
+original 5.4 ms, ship look 6.4, sky light 6.7, detail 6.7, tone map 8.0, shadows 8.3,
+bloom 11.2, heat haze 12.5.

@@ -200,6 +200,7 @@ fn mission_one_processor_builds_in_from_the_stern() {
                     scale: 1.5,
                     msaa: 4,
                     fxaa: false,
+                    ..Default::default()
                 },
                 true,
             ),

@@ -21,7 +21,7 @@ use crate::effects::{
 };
 use crate::lighting::SceneLighting;
 use crate::lod::LodTable;
-use crate::mesh::{build_level_geometry_smoothed, ShipVertex, Skeleton, TintVertex};
+use crate::mesh::{build_level_geometry_detailed, LevelGeometry, ShipVertex, Skeleton, TintVertex};
 use crate::render_state::{plane_to_world, PhaseStage, ShipRenderState};
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -39,8 +39,12 @@ struct FrameUniform {
     light_diffuse: [[f32; 4]; 2],
     params: [f32; 4],
     inv_view: [[f32; 4]; 4],
-    /// [`ShipLook::uniform`](crate::look::ShipLook): x per-pixel, y highlight, z bump.
-    look: [f32; 4],
+    /// [`ShipLook::uniform`](crate::look::ShipLook).
+    look: [[f32; 4]; 2],
+    /// The sky's light from +X, -X, +Y, -Y, +Z and -Z ([`Background::ambient_cube`]).
+    sky: [[f32; 4]; 6],
+    /// World to the shadow map's clip space.
+    shadow_view_proj: [[f32; 4]; 4],
 }
 
 #[repr(C)]
@@ -156,6 +160,8 @@ struct StarBatch {
 /// A background on the GPU.
 pub struct GpuBackground {
     clear_color: [f32; 3],
+    /// The sky's light for the modern look ([`Background::ambient_cube`]).
+    ambient: [[f32; 4]; 6],
     sky: Option<(wgpu::Buffer, u32)>,
     stars: Option<wgpu::Buffer>,
     star_batches: Vec<StarBatch>,
@@ -254,6 +260,11 @@ pub struct Renderer {
     mip_sampler: wgpu::Sampler,
     /// The ship look new uploads and frames use ([`Renderer::set_ship_look`]).
     ship_look: crate::look::ShipLook,
+    /// Level geometry already worked out for a look (subdivision and occlusion are slow
+    /// enough to do once per level, not once per team colour).
+    geometry_cache: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<LevelGeometry>>>,
+    /// The modern look's shadow map.
+    shadows: crate::shadow::Shadows,
     white: wgpu::TextureView,
     kit: PipelineKit,
     pipes: Pipelines,
@@ -367,7 +378,7 @@ impl PipelineKit {
         let tint_vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<TintVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![3 => Uint32x2],
+            attributes: &wgpu::vertex_attr_array![3 => Uint32x3],
         };
         let glow_vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GlowVertex>() as u64,
@@ -796,12 +807,21 @@ impl Renderer {
 
         let white = Self::make_texture(device, queue, 1, 1, &[255; 4], "white");
 
+        let mut shadows = crate::shadow::Shadows::new(device);
+        shadows.build_pipeline(
+            device,
+            &shader,
+            &frame_layout,
+            &object_layout,
+            std::mem::size_of::<ShipVertex>() as u64,
+        );
         let ship_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ship"),
             bind_group_layouts: &[
                 Some(&frame_layout),
                 Some(&material_layout),
                 Some(&object_layout),
+                Some(&shadows.layout),
             ],
             immediate_size: 0,
         });
@@ -847,6 +867,8 @@ impl Renderer {
             nearest_sampler,
             mip_sampler,
             ship_look: crate::look::ShipLook::original(),
+            geometry_cache: Default::default(),
+            shadows,
             white,
             kit,
             pipes,
@@ -931,6 +953,33 @@ impl Renderer {
             self.sample_count = n;
         }
         n
+    }
+
+    /// `model`'s geometry for `detail`, worked out once.
+    fn level_geometry(&self, model: &ShipModel, detail: crate::mesh::Detail) -> std::sync::Arc<LevelGeometry> {
+        let mut key = format!("{detail:?}");
+        for p in &model.parts {
+            key.push('|');
+            key.push_str(&p.path);
+            // Parts placed differently (mothership modules) are different geometry.
+            let placed: f64 = p
+                .geo
+                .objects
+                .iter()
+                .flat_map(|o| o.local_matrix)
+                .enumerate()
+                .map(|(i, v)| f64::from(v) * (i % 7 + 1) as f64)
+                .sum();
+            key.push_str(&format!("@{placed}"));
+        }
+        if let Some(g) = self.geometry_cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+            return g;
+        }
+        let g = std::sync::Arc::new(build_level_geometry_detailed(model, detail));
+        if let Ok(mut c) = self.geometry_cache.lock() {
+            c.insert(key, g.clone());
+        }
+        g
     }
 
     /// The ship look: textures and smoothed normals apply to ships uploaded after this call,
@@ -1126,7 +1175,7 @@ impl Renderer {
 
     fn upload_level(&self, model: &ShipModel, paint: TeamPaint<'_>) -> GpuLevel {
         let look = self.ship_look;
-        let geometry = build_level_geometry_smoothed(model, look.crease_degrees);
+        let geometry = self.level_geometry(model, look.detail());
         let (verts, tints) = if geometry.vertices.is_empty() {
             (
                 vec![ShipVertex {
@@ -1246,8 +1295,8 @@ impl Renderer {
             batches,
             materials,
             triangle_count: geometry.vertices.len() / 3,
-            skeleton: geometry.skeleton,
-            edges: geometry.edges,
+            skeleton: geometry.skeleton.clone(),
+            edges: geometry.edges.clone(),
         }
     }
 
@@ -1351,6 +1400,7 @@ impl Renderer {
         });
         GpuBackground {
             clear_color: bg.clear_color,
+            ambient: bg.ambient_cube().map(|c| [c[0], c[1], c[2], 0.0]),
             sky,
             stars,
             star_batches,
@@ -1413,6 +1463,14 @@ impl Renderer {
         let lights = &scene.lighting.lights;
         let light = |i: usize| lights.get(i).copied();
         let v4 = |v: Vec3| [v.x, v.y, v.z, 0.0];
+        let mut look = self.ship_look.uniform();
+        let shadows_on = look[1][1] > 0.5 && !lights.is_empty();
+        let (shadow_vp, texel) = match light(0) {
+            Some(l) if shadows_on => crate::shadow::shadow_matrix(cam, l.direction),
+            _ => (Mat4::IDENTITY, 0.0),
+        };
+        look[1][1] = f32::from(u8::from(shadows_on));
+        look[1][3] = texel;
         let frame = FrameUniform {
             view: mat(view),
             proj: mat(proj),
@@ -1424,7 +1482,9 @@ impl Renderer {
             light_diffuse: [0, 1].map(|i| light(i).map_or([0.0; 4], |l| v4(l.diffuse))),
             params: [lights.len().min(2) as f32, width as f32, height as f32, 0.0],
             inv_view: mat(inv_view),
-            look: self.ship_look.uniform(),
+            look,
+            sky: scene.background.map_or([[0.0; 4]; 6], |b| b.ambient),
+            shadow_view_proj: mat(shadow_vp),
         };
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
@@ -1751,6 +1811,40 @@ impl Renderer {
             bytemuck::cast_slice(&nav_vertices),
         );
 
+        // The modern look's shadow map: the opaque ships' depth from the main light.
+        if shadows_on {
+            let map = self.shadows.ensure_map(&self.device).clone();
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow map"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &map,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if let Some(pipeline) = &self.shadows.pipeline {
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, &self.frame_bind_group, &[]);
+                for item in items.iter().filter(|i| !i.transparent) {
+                    let level = &item.ship.levels[item.level];
+                    pass.set_vertex_buffer(0, level.vertices.slice(..));
+                    for b in level.batches.iter().filter(|b| !b.blended) {
+                        let offset =
+                            ((item.first_slot as usize + b.object) as u64 * OBJECT_STRIDE) as u32;
+                        pass.set_bind_group(2, &self.object_bind_group, &[offset]);
+                        pass.draw(b.first_vertex..b.first_vertex + b.vertex_count, 0..1);
+                    }
+                }
+            }
+        }
+
         let clear = scene
             .background
             .map_or([0.0; 3], |b| b.clear_color)
@@ -1828,6 +1922,7 @@ impl Renderer {
                     &self.pipes.ship_pipelines[usize::from(two_sided) | usize::from(blended) << 1],
                 );
                 pass.set_bind_group(1, &level.materials[b.material], &[]);
+                pass.set_bind_group(3, &self.shadows.bind, &[]);
                 pass.draw(b.first_vertex..b.first_vertex + b.vertex_count, 0..1);
             }
         };
@@ -2065,6 +2160,8 @@ pub struct OffscreenTarget {
     pub depth_view: wgpu::TextureView,
     /// The single-sampled scene colour the MSAA attachment resolves into (MSAA only).
     resolve_view: Option<wgpu::TextureView>,
+    /// Bloom, heat haze, tone mapping and dithering straight after the scene ([`crate::post`]).
+    modern_post: Option<crate::post::ModernPost>,
     /// Passes after the scene: resampling to the display size, FXAA, resampling to the logical
     /// size.
     post: Vec<crate::quality::PostStep>,
@@ -2147,6 +2244,19 @@ impl OffscreenTarget {
         let mut post = Vec::new();
         let mut cur = resolve.unwrap_or(scene);
         let mut cur_size = plan.render;
+        let modern_post = (!quality.post.is_off()).then(|| {
+            let out = tex("offscreen modern post", cur_size, 1, image);
+            let p = crate::post::ModernPost::new(
+                device,
+                OFFSCREEN_FORMAT,
+                &cur.create_view(&Default::default()),
+                out.create_view(&Default::default()),
+                cur_size,
+                quality.post,
+            );
+            cur = out;
+            p
+        });
         let needs_post = cur_size != plan.present || quality.fxaa || plan.present != plan.logical;
         let pipes = needs_post.then(|| crate::quality::PostPipelines::new(device, OFFSCREEN_FORMAT));
         let mut step = |cur: &mut wgpu::Texture, cur_size: &mut (u32, u32), size: (u32, u32), fxaa: bool| {
@@ -2187,6 +2297,7 @@ impl OffscreenTarget {
             color_view,
             depth_view: renderer.create_depth_samples(plan.render.0, plan.render.1, plan.samples),
             resolve_view,
+            modern_post,
             post,
             present: (present_tex, present_view),
             readback: cur,
@@ -2206,7 +2317,7 @@ impl OffscreenTarget {
     }
 
     /// Records the MSAA resolve and the post passes into `encoder`.
-    fn finish(&self, encoder: &mut wgpu::CommandEncoder) {
+    fn finish(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
         if let Some(resolve) = &self.resolve_view {
             // An empty pass that only resolves the samples.
             let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2225,6 +2336,9 @@ impl OffscreenTarget {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+        }
+        if let Some(p) = &self.modern_post {
+            p.record(queue, encoder);
         }
         for s in &self.post {
             s.record(encoder);
@@ -2341,7 +2455,7 @@ impl OffscreenTarget {
             extras,
         );
         after(renderer, &mut encoder, &self.color_view, &self.depth_view);
-        self.finish(&mut encoder);
+        self.finish(&renderer.queue, &mut encoder);
         let [rx, ry, rw, rh] = self.clamp_region(region);
         let row = rw * 4;
         let padded =

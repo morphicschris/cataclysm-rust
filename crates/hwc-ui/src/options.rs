@@ -181,6 +181,18 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // textures (mipmapped textures, per-pixel light with a highlight, a bump from the
     // texture, smoothed facets; a user-requested change); 0: the original's per-vertex light.
     ("hwcShipLook", 1),
+    // With the ship look, each a user-requested addition, 0 turning it off: 1 the ambient light
+    // takes the background's colours; rounder hull outlines and baked ambient occlusion;
+    // ships near the camera's focus cast shadows; bright colours roll off instead of clipping,
+    // with dithering against banding.
+    ("hwcSkyLight", 1),
+    ("hwcShipDetail", 1),
+    ("hwcShadows", 1),
+    ("hwcToneMap", 1),
+    // 1: a soft glow around bright things (engines, lit panels, weapons, explosions); 0 none.
+    ("hwcBloom", 1),
+    // 1: the picture shimmers around hot, bright spots; 0 none.
+    ("hwcHeatHaze", 1),
     // The 3D view's internal render scale in percent, 50..200 (100: the original, drawn at
     // the screen's pixels; above 100 supersampled; `--render-scale`).
     ("hwcRenderScale", 100),

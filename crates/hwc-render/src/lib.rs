@@ -18,13 +18,16 @@ pub mod effects;
 pub mod fx;
 pub mod gpu;
 pub mod lighting;
+pub mod detail;
 pub mod lod;
 pub mod look;
 pub mod mesh;
 pub mod nebula;
 pub mod nis_sun;
+pub mod post;
 pub mod quality;
 pub mod render_state;
+pub mod shadow;
 pub mod tga;
 pub mod trails;
 
@@ -44,6 +47,7 @@ pub use look::ShipLook;
 pub use mesh::{mesh_to_world, Skeleton};
 pub use nebula::NebulaRenderer;
 pub use nis_sun::NisSunFlare;
+pub use post::PostFx;
 pub use quality::{RenderPlan, RenderQuality};
 pub use render_state::{ConstructionState, ShipRenderState};
 

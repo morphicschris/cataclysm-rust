@@ -127,11 +127,74 @@ impl Background {
     pub fn star_count(&self) -> usize {
         self.star_groups.iter().map(|g| g.stars.len()).sum()
     }
+
+    /// The light this sky sheds ([`ambient_cube`]).
+    pub fn ambient_cube(&self) -> [[f32; 3]; 6] {
+        ambient_cube(&self.vertices, self.clear_color)
+    }
+}
+
+/// The light a sky sheds onto a surface facing +X, -X, +Y, -Y, +Z and -Z (irradiance over π,
+/// so a sky of one colour everywhere gives that colour): each nebula triangle counts by its
+/// solid angle and its cosine to the axis, and what the triangles leave uncovered by the clear
+/// colour. Stars are left out.
+pub fn ambient_cube(vertices: &[SkyVertex], clear_color: [f32; 3]) -> [[f32; 3]; 6] {
+    const AXES: [Vec3; 6] = [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z];
+    let mut out = [Vec3::ZERO; 6];
+    let mut covered = 0.0f32;
+    for t in vertices.chunks_exact(3) {
+        let d = [0, 1, 2].map(|i| Vec3::from_array(t[i].direction));
+        let omega = 0.5 * (d[1] - d[0]).cross(d[2] - d[0]).length();
+        let centre = (d[0] + d[1] + d[2]).normalize_or_zero();
+        let colour = t.iter().map(|v| Vec3::from_array(v.color)).sum::<Vec3>() / 3.0;
+        covered += omega;
+        for (o, a) in out.iter_mut().zip(AXES) {
+            *o += colour * a.dot(centre).max(0.0) * omega / std::f32::consts::PI;
+        }
+    }
+    let open = (1.0 - covered / (4.0 * std::f32::consts::PI)).max(0.0);
+    let clear = Vec3::from_array(clear_color);
+    out.map(|o| (o + clear * open).to_array())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sky_of_one_colour_lights_every_side_alike() {
+        // Each octant of the sphere split finely enough that flat triangles measure it well.
+        let n = 24;
+        let mut vertices = Vec::new();
+        for octant in 0..8 {
+            let sign = |b: usize| if octant >> b & 1 == 0 { 1.0 } else { -1.0 };
+            let p = |a: usize, b: usize| {
+                Vec3::new(sign(0) * a as f32, sign(1) * b as f32, sign(2) * (n - a - b) as f32)
+                    .normalize()
+            };
+            let mut tri = |ds: [Vec3; 3]| {
+                for d in ds {
+                    vertices.push(SkyVertex {
+                        direction: d.to_array(),
+                        color: [0.5, 0.25, 0.0],
+                    });
+                }
+            };
+            for i in 0..n {
+                for j in 0..n - i {
+                    tri([p(i, j), p(i + 1, j), p(i, j + 1)]);
+                    if i + j + 1 < n {
+                        tri([p(i + 1, j), p(i + 1, j + 1), p(i, j + 1)]);
+                    }
+                }
+            }
+        }
+        for c in ambient_cube(&vertices, [0.0; 3]) {
+            assert!((c[0] - 0.5).abs() < 0.02 && (c[1] - 0.25).abs() < 0.01, "{c:?}");
+        }
+        // No nebula at all: the clear colour from everywhere.
+        assert_eq!(ambient_cube(&[], [0.1, 0.2, 0.3]), [[0.1, 0.2, 0.3]; 6]);
+    }
 
     #[test]
     fn page_corners() {

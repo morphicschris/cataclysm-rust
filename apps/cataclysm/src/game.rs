@@ -379,11 +379,14 @@ impl Game {
             formation_index: 0,
             canvas: Canvas::new(640, 480),
             target: None,
-            quality: hwc_render::RenderQuality::from_options(
-                options.get("hwcRenderScale"),
-                options.get("hwcMsaa"),
-                options.get("hwcFxaa"),
-            ),
+            quality: hwc_render::RenderQuality {
+                post: post_fx(&options),
+                ..hwc_render::RenderQuality::from_options(
+                    options.get("hwcRenderScale"),
+                    options.get("hwcMsaa"),
+                    options.get("hwcFxaa"),
+                )
+            },
             present: None,
             scene_copy: Vec::new(),
             target_quality: hwc_render::RenderQuality::default(),
@@ -468,11 +471,14 @@ impl Game {
     /// letterbox. The interface switches (HUD, managers, menus) are read from the store as
     /// they are drawn.
     pub fn apply_modern_options(&mut self, options: &hwc_ui::options::Options) {
-        self.quality = hwc_render::RenderQuality::from_options(
-            options.get("hwcRenderScale"),
-            options.get("hwcMsaa"),
-            options.get("hwcFxaa"),
-        );
+        self.quality = hwc_render::RenderQuality {
+            post: post_fx(options),
+            ..hwc_render::RenderQuality::from_options(
+                options.get("hwcRenderScale"),
+                options.get("hwcMsaa"),
+                options.get("hwcFxaa"),
+            )
+        };
         self.smooth_zoom = options.get("hwcSmoothZoom") != 0;
         self.scene_at_window = options.get("hwcSceneAtWindow") != 0;
         self.right_click_move = options.get("hwcRightClickMove") != 0;
@@ -3048,7 +3054,11 @@ impl Game {
             .present
             .filter(|p| p.0 > px.0 || p.1 > px.1)
             .unwrap_or(px);
-        let quality = self.quality;
+        let mut quality = self.quality;
+        // The sensors manager is a flat map: no bloom or heat haze over its blips and discs.
+        if self.sensors.is_open() {
+            quality.post = hwc_render::PostFx::default();
+        }
         if self.target.as_ref().is_none_or(|t| {
             t.plan.logical != px
                 || t.plan.samples != samples
@@ -3788,11 +3798,34 @@ mod tests {
     }
 }
 
-/// The hull look from `hwcShipLook`: 1 the modern ship look, 0 the original's.
+/// The hull look from `hwcShipLook` (1 the modern ship look, 0 the original's) and the parts
+/// of it that have their own switch: `hwcSkyLight`, `hwcShipDetail` (rounder outlines and
+/// ambient occlusion), `hwcShadows` and `hwcToneMap`.
 pub fn ship_look(options: &hwc_ui::options::Options) -> hwc_render::ShipLook {
-    if options.get("hwcShipLook") != 0 {
-        hwc_render::ShipLook::modern()
-    } else {
-        hwc_render::ShipLook::original()
+    if options.get("hwcShipLook") == 0 {
+        return hwc_render::ShipLook::original();
+    }
+    let on = |key| options.get(key) != 0;
+    let full = hwc_render::ShipLook::modern();
+    let detail = on("hwcShipDetail");
+    hwc_render::ShipLook {
+        sky_light: if on("hwcSkyLight") { full.sky_light } else { 0.0 },
+        subdivide: detail,
+        occlusion: if detail { full.occlusion } else { 0.0 },
+        shadows: on("hwcShadows"),
+        tone_map: on("hwcToneMap"),
+        ..full
+    }
+}
+
+/// The post effects from `hwcBloom`, `hwcHeatHaze` and `hwcToneMap` (which also dithers).
+pub fn post_fx(options: &hwc_ui::options::Options) -> hwc_render::PostFx {
+    let on = |key| options.get(key) != 0;
+    let full = hwc_render::PostFx::modern();
+    hwc_render::PostFx {
+        bloom: if on("hwcBloom") { full.bloom } else { 0.0 },
+        heat: if on("hwcHeatHaze") { full.heat } else { 0.0 },
+        tone_map: on("hwcToneMap"),
+        dither: on("hwcToneMap"),
     }
 }

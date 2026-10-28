@@ -184,7 +184,13 @@ options:
   Ship look             hwcShipLook = 1 in the options file (default, a user-requested
                         change, also on the ENHANCEMENTS screen): hulls get mipmapped
                         textures, per-pixel light with a highlight, a bump from their own
-                        textures and smoothed facets; 0 draws them as the original did
+                        textures and smoothed facets; 0 draws them as the original did.
+                        With it, each 1 by default and 0 to turn it off: hwcSkyLight (ambient
+                        light in the background's colours), hwcShipDetail (rounder hulls and
+                        baked ambient occlusion), hwcShadows (ship shadows), hwcToneMap (bright
+                        colours roll off, dithering against banding)
+  Bloom and heat haze   hwcBloom = 1/0 (a glow around bright things), hwcHeatHaze = 1/0 (the
+                        picture shimmers around hot spots); both on by default
   Remastered effects    hwcRemasteredFx = 1 in the options file (a user-requested addition,
                         off by default, also on the ENHANCEMENTS screen): ship deaths and
                         engine trails use Homeworld Remastered's effects, imported from your
