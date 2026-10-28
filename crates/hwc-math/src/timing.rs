@@ -12,7 +12,8 @@
 //!   the cap is dropped).
 //! * New in Cataclysm: a game-speed factor scales the frame's ticks before they are handed
 //!   out: `scaled = round_to_nearest_even(ticks * factor)` (the 1.5·2^52 trick), with the
-//!   factor taken from `{0.25, 0.5, 1.0, 2.0}` (index 2, normal speed, by default).
+//!   factor taken from the time-compression table `{1/4, 1/2, 1, 2, 4, 6, 8}` (index 2,
+//!   normal speed, by default; `taskGetMaxTimeCompressionLevel` is 6).
 //!   `taskTimeDelta` is the scaled ticks over the frequency; a second, unscaled
 //!   delta/elapsed pair is kept for real time.
 
@@ -26,10 +27,12 @@ pub const UNIVERSE_UPDATE_PERIOD: f32 = 1.0 / UNIVERSE_UPDATE_RATE as f32;
 pub const TIMER_RESOLUTION: u32 = 240;
 /// `TSK_MaxTicks`: most times a task runs in one frame.
 pub const TSK_MAX_TICKS: u32 = 8;
-/// Cataclysm game-speed factors (table at 0x721cec).
-pub const GAME_SPEED_FACTORS: [f32; 4] = [0.25, 0.5, 1.0, 2.0];
-/// Default game-speed index (normal speed).
+/// Cataclysm game-speed factors, the time-compression levels (table at 0x721cec).
+pub const GAME_SPEED_FACTORS: [f32; 7] = [0.25, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0];
+/// Default game-speed index (normal speed, 0x8a0410).
 pub const GAME_SPEED_DEFAULT: usize = 2;
+/// `taskGetMaxTimeCompressionLevel` (0x5253f0).
+pub const GAME_SPEED_MAX: usize = 6;
 
 /// The task frequency the game derives from the performance-counter frequency.
 pub fn task_frequency(perf_freq: u64) -> u32 {

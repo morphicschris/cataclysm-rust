@@ -10,6 +10,7 @@
 use std::rc::Rc;
 
 use glam::Vec3;
+use hwc_math::timing::{GAME_SPEED_DEFAULT, GAME_SPEED_FACTORS, GAME_SPEED_MAX};
 use hwc_render::{EffectBatch, OffscreenTarget, Renderer};
 use hwc_sim::base::BaseEvent;
 use hwc_sim::harness::group_centre;
@@ -146,7 +147,7 @@ pub struct Game {
     pub carried_groups: Option<CarriedGroups>,
     /// The hot-key number fonts by level of detail (`selGroupFont0..3`).
     group_fonts: [Option<Rc<hwc_formats::font::Font>>; 4],
-    messages: Vec<GameMessage>,
+    pub(crate) messages: Vec<GameMessage>,
     /// Speech subtitles, simulated subtitles and location cards (`Subtitle.c`).
     pub subtitles: Option<Subtitles>,
     /// The NIS letterbox the mission's `wideScreenIn/Out` drive.
@@ -164,6 +165,9 @@ pub struct Game {
     right_moved: f32,
     /// Paused by the UI (escape menu, objectives) or the pause key.
     pub paused: bool,
+    /// The time-compression level (`taskTimeCompressionLevel` 0xa585ec), an index into
+    /// `GAME_SPEED_FACTORS`; not saved (`universeReset` sets it back to normal).
+    pub speed_level: usize,
     pub end: Option<End>,
     pub music: Option<i32>,
     formation_index: usize,
@@ -374,6 +378,7 @@ impl Game {
             right_down: false,
             right_moved: 0.0,
             paused: false,
+            speed_level: GAME_SPEED_DEFAULT,
             end: None,
             music: None,
             formation_index: 0,
@@ -2027,6 +2032,28 @@ impl Game {
                     self.selection.clear();
                 }
             }
+            // `kbcbAccelerateTime` / `kbcbDecelerateTime` (Ctrl+= / Ctrl+-): one level up or
+            // down, not while the letterbox comes in.
+            keys::ACCELERATE_TIME if self.letterbox.fade_in == 0.0 => {
+                if self.speed_level < GAME_SPEED_MAX {
+                    self.set_speed_level(self.speed_level + 1, true);
+                }
+            }
+            keys::DECELERATE_TIME if self.letterbox.fade_in == 0.0 => {
+                if self.speed_level > 0 {
+                    self.set_speed_level(self.speed_level - 1, true);
+                }
+            }
+            // `kbcbToggleGameSpeed` (backslash): normal speed to the fastest, anything else back to
+            // normal.
+            keys::TOGGLE_GAME_SPEED if self.letterbox.fade_in == 0.0 => {
+                let level = if self.speed_level == GAME_SPEED_DEFAULT {
+                    GAME_SPEED_MAX
+                } else {
+                    GAME_SPEED_DEFAULT
+                };
+                self.set_speed_level(level, true);
+            }
             // `kbcbPause`: not while the letterbox comes in or is in.
             keys::PAUSE if self.letterbox.fade_in == 0.0 && !self.letterbox.fully => {
                 self.paused = !self.paused
@@ -2046,6 +2073,36 @@ impl Game {
                 );
             }
             _ => {}
+        }
+    }
+
+    /// `taskApplyTimeCompressionLevel` (0x525410), with `taskShowTimeCompressionMessage`
+    /// (0x525440: "8 X Time Compression", "1/4 X Time Compression") when `message`.
+    fn set_speed_level(&mut self, level: usize, message: bool) {
+        self.speed_level = level;
+        let factor = GAME_SPEED_FACTORS[level];
+        self.world.speed_factor = factor;
+        if message {
+            let what = self
+                .strings
+                .get("strTimesTimeCompression")
+                .unwrap_or("X Time Compression")
+                .trim()
+                .to_string();
+            let text = if factor < 1.0 {
+                format!("1/{} {what}", (1.0 / factor) as i32)
+            } else {
+                format!("{} {what}", factor as i32)
+            };
+            self.post(&text);
+        }
+    }
+
+    /// `taskResetTimeCompression` (0x5254c0) / `...WithMessage` (0x5254f0): back to normal
+    /// speed if it is not.
+    fn reset_speed(&mut self, message: bool) {
+        if self.speed_level != GAME_SPEED_DEFAULT {
+            self.set_speed_level(GAME_SPEED_DEFAULT, message);
         }
     }
 
@@ -2330,6 +2387,14 @@ impl Game {
             || self.next_mission
             || self.nis_level_done;
         self.world.sensors_open = self.sensors.is_open() && self.nis.is_none();
+        // `subTitleAdd` drops the time compression for every subtitle it queues.
+        if self
+            .subtitles
+            .as_mut()
+            .is_some_and(|s| std::mem::take(&mut s.added) > 0)
+        {
+            self.reset_speed(true);
+        }
         let steps = self.world.due_steps(f64::from(dt));
         crate::watchdog::checkpoint("update: simulation steps");
         for _ in 0..steps {
@@ -2428,15 +2493,18 @@ impl Game {
     fn campaign_step(&mut self, audio: &mut Option<Audio>, out: &mut Vec<Outcome>) {
         let h = &self.world.run().game.hyper;
         let mission = self.world.run().game.config.mission;
-        if self.bink_pending && !h.bink_pending && h.whiteout_t > 0.0 {
-            // `animBinkPlay(m, m + 1)`: music and sound stop, the game waits for the movie.
+        let pending = h.bink_pending;
+        if self.bink_pending && !pending && h.whiteout_t > 0.0 {
+            // `animBinkPlay(m, m + 1)`: music and sound stop, the game waits for the movie
+            // (at normal speed).
             self.movie = true;
+            self.reset_speed(false);
             if let Some(a) = audio.as_mut() {
                 a.stop_music(0.0);
             }
             out.push(Outcome::Animatic(mission + 1));
         }
-        self.bink_pending = h.bink_pending;
+        self.bink_pending = pending;
         if self.world.run().mission_complete() && !self.next_mission {
             self.next_mission = true;
             out.push(Outcome::NextMission);
@@ -2811,6 +2879,8 @@ impl Game {
             self.letterbox.fade_in = secs;
         }
         self.nis = Some(run);
+        // `nisStartup`: normal speed.
+        self.reset_speed(false);
         self.nis_present(fired, audio);
     }
 
@@ -3392,6 +3462,10 @@ impl Game {
         }
         for e in events {
             let coming_in = e.kind != hwc_sim::mission::WideScreenKind::Out;
+            if coming_in {
+                // `kasfWideScreenIn` and the other ins: normal speed, said every time.
+                self.set_speed_level(GAME_SPEED_DEFAULT, true);
+            }
             if let Some(id) = self.letterbox.wide_screen_call(coming_in, e.frames) {
                 sound(audio, id);
             }
@@ -3893,8 +3967,16 @@ pub fn ship_look(options: &hwc_ui::options::Options) -> hwc_render::ShipLook {
     let on = |key| options.get(key) != 0;
     let full = hwc_render::ShipLook::modern();
     hwc_render::ShipLook {
-        sky_light: if on("hwcSkyLight") { full.sky_light } else { 0.0 },
-        occlusion: if on("hwcAmbientOcclusion") { full.occlusion } else { 0.0 },
+        sky_light: if on("hwcSkyLight") {
+            full.sky_light
+        } else {
+            0.0
+        },
+        occlusion: if on("hwcAmbientOcclusion") {
+            full.occlusion
+        } else {
+            0.0
+        },
         shadows: on("hwcShadows"),
         tone_map: on("hwcToneMap"),
         ..full

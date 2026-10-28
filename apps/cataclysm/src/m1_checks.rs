@@ -484,7 +484,9 @@ fn sensors_draw_the_kuun_lan_with_its_modules() {
     for _ in 0..16 * 140 {
         rig.frame(g);
     }
-    let ms = g.world.universe().base.players[0].mothership.expect("mothership");
+    let ms = g.world.universe().base.players[0]
+        .mothership
+        .expect("mothership");
     let drawn = crate::sensors::Sensors::with_clamped(g.world.universe(), &[ms]);
     eprintln!("the Kuun-Lan and {} modules", drawn.len() - 1);
     assert!(drawn.len() > 1, "no modules clamped to the Kuun-Lan");
@@ -495,7 +497,9 @@ fn sensors_draw_the_kuun_lan_with_its_modules() {
         rig.frame(g);
     }
     assert_eq!(g.sensors.phase(), Phase::Sensors);
-    g.sensors.close_on(&g.world, &[ms]).expect("focus on the Kuun-Lan");
+    g.sensors
+        .close_on(&g.world, &[ms])
+        .expect("focus on the Kuun-Lan");
     for _ in 0..40 {
         rig.frame(g);
     }
@@ -676,4 +680,70 @@ fn intel_scenes_lose_their_bars_with_their_subtitles() {
             s.bars_out
         );
     }
+}
+
+/// Time compression as in Cataclysm (`taskIncreaseTimeCompression` 0x525520 and the rest):
+/// the backslash toggles normal speed and 8x, Ctrl+= / Ctrl+- step through 1/4..8x, each
+/// change says "<n> X Time Compression", and at 8x the universe runs 8 updates a frame.
+#[test]
+fn time_compression_keys() {
+    use hwc_ui::ingame::InputEvent;
+    let Some((mut game, mut rig)) = mission_one((800, 600), false) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let g = &mut *game;
+    let key = |g: &mut Game, rig: &mut Rig, codes: &[u16]| {
+        for &c in codes {
+            g.input(InputEvent::KeyDown(c), &mut rig.audio);
+        }
+        for &c in codes.iter().rev() {
+            g.input(InputEvent::KeyUp(c), &mut rig.audio);
+        }
+        rig.frame(g);
+    };
+    // Past the opening fleet intel (it holds the keyboard; Escape skips it).
+    let mut frames = 0;
+    while g.ui.fleet_intel || frames < 16 * 20 {
+        if g.ui.fleet_intel && frames % 16 == 0 {
+            key(g, &mut rig, &[0x1b]);
+        }
+        rig.frame(g);
+        frames += 1;
+        assert!(frames < 16 * 600, "the opening intel never ended");
+    }
+    let last = |g: &Game| {
+        g.messages
+            .last()
+            .map(|m| m.text.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(g.speed_level, 2);
+    key(g, &mut rig, &[220]);
+    assert_eq!(g.speed_level, 6, "backslash goes to the fastest speed");
+    assert_eq!(last(g), "8 X Time Compression");
+    let t0 = g.world.universe().total_time_elapsed;
+    for _ in 0..4 {
+        rig.frame(g);
+    }
+    let dt = g.world.universe().total_time_elapsed - t0;
+    eprintln!("4 frames of 1/16 s at 8x: {dt} s of game time");
+    assert!(dt > 1.9, "8x ran only {dt} s of game time in 0.25 s");
+    key(g, &mut rig, &[0x11, 189]);
+    assert_eq!(g.speed_level, 5);
+    assert_eq!(last(g), "6 X Time Compression");
+    key(g, &mut rig, &[220]);
+    assert_eq!(
+        g.speed_level, 2,
+        "backslash at any other speed goes back to normal"
+    );
+    assert_eq!(last(g), "1 X Time Compression");
+    for _ in 0..3 {
+        key(g, &mut rig, &[0x11, 189]);
+    }
+    assert_eq!(g.speed_level, 0, "slowest is 1/4");
+    assert_eq!(last(g), "1/4 X Time Compression");
+    key(g, &mut rig, &[0x11, 187]);
+    assert_eq!(g.speed_level, 1);
+    assert_eq!(last(g), "1/2 X Time Compression");
 }

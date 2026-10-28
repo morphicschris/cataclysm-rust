@@ -439,6 +439,9 @@ pub struct Subtitles {
     pending: Vec<NewSubtitle>,
     /// Fragments dropped because too many arrived at once.
     pub missed: usize,
+    /// Fragments queued since the game last looked (`subTitleAdd` resets the time
+    /// compression for each one it queues).
+    pub added: usize,
     /// `strCurLanguage`: 0 English (paged), others scroll.
     pub language: usize,
     /// `subMessageEnded`: 1 when the last card of a region expired, 2 when skipped.
@@ -502,6 +505,7 @@ impl Subtitles {
             pictures,
             pending: Vec::new(),
             missed: 0,
+            added: 0,
             language: 0,
             message_ended: 0,
             dummy_event: 0,
@@ -579,6 +583,7 @@ impl Subtitles {
                 text: text.to_vec(),
                 seconds,
             });
+            self.added += 1;
         } else {
             self.missed += 1;
         }

@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use hwc_formats::hsf::Hsf;
-use hwc_math::timing::{TaskTicker, TIMER_RESOLUTION};
+use hwc_math::timing::{scale_ticks, TaskTicker, TIMER_RESOLUTION};
 use hwc_render::assets::{load_mad_clip, mothership_modules, read_script, AssetSource};
 use hwc_render::effects::{EffectBatch, Line as FxLine, Sprite, FULL_UV};
 use hwc_render::lod::{screen_radius, LodKind, LodSelector, LodTable};
@@ -306,6 +306,9 @@ pub struct World {
     pub paused: bool,
     ticker: TaskTicker,
     tick_carry: f64,
+    /// The time-compression factor `taskExecuteAllPending` scales each frame's ticks by
+    /// (`GAME_SPEED_FACTORS`; 1 is normal speed).
+    pub speed_factor: f32,
     pub nav_lights: bool,
     /// The camera keeps looking at these ships (the game's camera focus).
     pub focus: Vec<ShipId>,
@@ -478,6 +481,7 @@ impl World {
             paused: false,
             ticker: TaskTicker::new(15),
             tick_carry: 0.0,
+            speed_factor: 1.0,
             nav_lights: true,
             focus: Vec::new(),
             effects: Vec::new(),
@@ -1532,7 +1536,8 @@ impl World {
     }
 
     /// Advances real time: the task scheduler hands out 240 Hz ticks and runs the universe
-    /// task once per 15 (at most 8 times per frame, like the original).
+    /// task once per 15 (at most 8 times per frame, like the original). The frame's ticks are
+    /// scaled by the time compression first.
     pub fn due_steps(&mut self, seconds: f64) -> u32 {
         if self.paused {
             return 0;
@@ -1540,7 +1545,8 @@ impl World {
         self.tick_carry += seconds * f64::from(TIMER_RESOLUTION);
         let ticks = self.tick_carry.floor();
         self.tick_carry -= ticks;
-        self.ticker.advance(ticks as u32)
+        let scaled = scale_ticks(ticks as i32, self.speed_factor).max(0);
+        self.ticker.advance(scaled as u32)
     }
 
     /// Blend factor between the previous and the current update.
@@ -1548,7 +1554,8 @@ impl World {
         if !self.interpolate || self.paused {
             return 1.0;
         }
-        ((f64::from(self.ticker.carry) + self.tick_carry) / f64::from(self.ticker.ticks_per_call))
+        let carry = self.tick_carry * f64::from(self.speed_factor);
+        ((f64::from(self.ticker.carry) + carry) / f64::from(self.ticker.ticks_per_call))
             .clamp(0.0, 1.0) as f32
     }
 
