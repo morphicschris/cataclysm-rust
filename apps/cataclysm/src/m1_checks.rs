@@ -472,6 +472,37 @@ fn sensors_gpu_layer_matches_the_cpu_canvas() {
     }
 }
 
+/// The Kuun-Lan in the sensors manager in Mission 1, closed onto: its modules are drawn with
+/// it, as `smShipMeshDraw` draws a ship's clamped slaves. Writes `m1_sensors_kuun_lan`.
+#[test]
+fn sensors_draw_the_kuun_lan_with_its_modules() {
+    let Some((mut game, mut rig)) = mission_one((1600, 900), false) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let g = &mut *game;
+    for _ in 0..16 * 140 {
+        rig.frame(g);
+    }
+    let ms = g.world.universe().base.players[0].mothership.expect("mothership");
+    let drawn = crate::sensors::Sensors::with_clamped(g.world.universe(), &[ms]);
+    eprintln!("the Kuun-Lan and {} modules", drawn.len() - 1);
+    assert!(drawn.len() > 1, "no modules clamped to the Kuun-Lan");
+    if !g.sensors.is_open() {
+        g.toggle_sensors(&mut rig.audio);
+    }
+    for _ in 0..40 {
+        rig.frame(g);
+    }
+    assert_eq!(g.sensors.phase(), Phase::Sensors);
+    g.sensors.close_on(&g.world, &[ms]).expect("focus on the Kuun-Lan");
+    for _ in 0..40 {
+        rig.frame(g);
+    }
+    rig.render(g);
+    save(g.canvas(), "m1_sensors_kuun_lan");
+}
+
 /// The Kuun-Lan half out of its hyperspace window in Mission 1 at 1600x900, seen from the
 /// side: its nav lights show only on the part that has come out (they are cut by the window's
 /// plane, as the hull is). Screenshots: `m1_arrival_nav_lights_{0..3}`. The plane cut itself is

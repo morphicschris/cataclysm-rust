@@ -1152,6 +1152,21 @@ impl Sensors {
         MESH_TYPES.contains(&s.ship_type.index()) && self.ship_drawn(inp, fog, id)
     }
 
+    /// `smShipMeshDraw` draws each ship's clamped slaves (+0x1bc +0x34) with it: the
+    /// Kuun-Lan's modules are components, which `smShipsDraw` itself skips.
+    pub fn with_clamped(u: &Universe, hosts: &[ShipId]) -> Vec<ShipId> {
+        let mut out = hosts.to_vec();
+        for &id in hosts {
+            let slaves = u.ship(id).and_then(|s| s.base.clamp.as_ref()?.slaves.as_ref());
+            for &slave in slaves.into_iter().flatten() {
+                if u.ship(slave).is_some() && !out.contains(&slave) {
+                    out.push(slave);
+                }
+            }
+        }
+        out
+    }
+
     /// `smShipsDraw`'s per-ship visibility (fog, hidden types, selection blink).
     fn ship_drawn(&self, inp: &SceneInput, fog: &Fog, id: ShipId) -> bool {
         let u = inp.world.universe();

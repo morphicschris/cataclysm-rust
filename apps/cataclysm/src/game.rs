@@ -3453,6 +3453,10 @@ impl Game {
             .copied()
             .filter(|&id| frame.is_mesh(id) && self.sensors.draws_mesh(&inp, &fog, id))
             .collect();
+        let meshes: Vec<ShipId> = Sensors::with_clamped(u, &meshes)
+            .into_iter()
+            .filter(|&id| frame.is_mesh(id))
+            .collect();
         profile::count("sm.meshes", meshes.len() as u64);
         if !meshes.is_empty() {
             let span = profile::span("sm.meshes_pass");
