@@ -97,6 +97,8 @@ pub struct SimTweaks {
     pub sphere_formation_padding_scale: f32,
     pub sphere_minimum_radius: f32,
     pub sphere_maximum_radius: f32,
+    /// Saved from version 4; older files take the compiled default.
+    #[serde(default = "spheresize_ignore_numdeclinations", deserialize_with = "spheresize_ignore_numdeclinations_v4")]
     pub spheresize_ignore_numdeclinations: f32,
     pub strikecraft_padding_modifier: f32,
     pub formation_error_calculate_rate: u32,
@@ -130,6 +132,16 @@ pub struct SimTweaks {
     pub base: crate::base_tweaks::BaseTweaks,
     /// The military parade tables (`Parade_*.script`).
     pub parade: crate::parade::ParadeTables,
+}
+
+/// `SPHERESIZE_IGNORE_NUMDECLINATIONS` compiled into the executable.
+fn spheresize_ignore_numdeclinations() -> f32 {
+    600.0
+}
+
+/// Reads [`SimTweaks::spheresize_ignore_numdeclinations`], added at save version 4.
+fn spheresize_ignore_numdeclinations_v4<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    crate::save::added_in_or(4, d, spheresize_ignore_numdeclinations)
 }
 
 impl Default for SimTweaks {
@@ -188,7 +200,7 @@ impl Default for SimTweaks {
             sphere_formation_padding_scale: 4.0,
             sphere_minimum_radius: 500.0,
             sphere_maximum_radius: 3500.0,
-            spheresize_ignore_numdeclinations: 600.0,
+            spheresize_ignore_numdeclinations: spheresize_ignore_numdeclinations(),
             strikecraft_padding_modifier: b(0x3f99_999a),
             formation_error_calculate_rate: 7,
             formation_error_calculate_frame: 2,

@@ -45,7 +45,7 @@ pub const MAGIC: [u8; 8] = *b"HWCSAVE\0";
 /// removed, reordered or retyped). A field added at version `n` is read with `added_in_<n>`
 /// ([`added_in_2`]), so files of older versions still load with the field at its default;
 /// files of a newer version, or older ones whose shape is not known, are refused.
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 /// The oldest version still read.
 pub const OLDEST_VERSION: u32 = 1;
@@ -162,8 +162,14 @@ thread_local! {
 /// Reads a field added at shape `n`: a file of an older shape does not have it, so it is left
 /// at its default without reading anything.
 fn added_in<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(n: u32, d: D) -> Result<T, D::Error> {
+    added_in_or(n, d, T::default)
+}
+
+/// [`added_in`] for a field whose value in an older file is not its type's default.
+/// Version 4: [`crate::tunables::SimTweaks::spheresize_ignore_numdeclinations`].
+pub fn added_in_or<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(n: u32, d: D, old: impl FnOnce() -> T) -> Result<T, D::Error> {
     if SHAPE.with(Cell::get) < n {
-        Ok(T::default())
+        Ok(old())
     } else {
         T::deserialize(d)
     }
