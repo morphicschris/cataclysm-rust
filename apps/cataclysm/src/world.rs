@@ -1953,8 +1953,14 @@ impl World {
             }
         }
         self.combat_effects(&mut frame.effects, glow_texture);
+        let field_time = self.universe().total_time_elapsed + (self.alpha() - 1.0) * TICK;
         let u = self.sim.universe();
         let seed = &mut self.field_random;
+        let modern = self
+            .fields_look
+            .as_ref()
+            .filter(|_| self.modern_fields)
+            .map(|m| (m, field_time));
         crate::sentinel_field::draw(
             u,
             frame.ids.iter().filter_map(|(id, _)| *id),
@@ -1973,14 +1979,9 @@ impl World {
                 *seed ^= *seed << 5;
                 *seed
             },
-        let field_time = self.universe().total_time_elapsed + (self.alpha() - 1.0) * TICK;
+            modern,
             &mut frame.effects,
         );
-        let modern = self
-            .fields_look
-            .as_ref()
-            .filter(|_| self.modern_fields)
-            .map(|m| (m, field_time));
         if let Some(mut h) = self.hwr.take() {
             let u = self.sim.universe();
             let now = f64::from(u.total_time_elapsed) + f64::from(self.alpha()) * f64::from(TICK);
@@ -1999,7 +2000,6 @@ impl World {
             let (sensors, render_list, limits, look_at, eye, far) = (
                 self.sensors_open,
                 self.render_list,
-            modern,
                 self.render_limits,
                 self.camera.look_at,
                 self.camera.eye(),
