@@ -41,6 +41,8 @@ pub struct SimHost<'a> {
     pub messages: &'a [GameMessage],
     pub paused: bool,
     pub escape_pending: bool,
+    /// The waypoint mode while waypoints are being placed.
+    pub placing_waypoints: Option<u8>,
     /// The sensors manager is open.
     pub in_sensors: bool,
     /// RUs shown (the mission's `RUsSet` value is copied onto the player as it changes).
@@ -731,6 +733,10 @@ impl GameUiHost for SimHost<'_> {
 
     fn escape_pending(&self) -> bool {
         self.escape_pending
+    }
+
+    fn placing_waypoints(&self) -> Option<u8> {
+        self.placing_waypoints
     }
 
     fn ship_screen_pos(&self, ship: u32) -> Option<(i32, i32, i32)> {

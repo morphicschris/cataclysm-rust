@@ -29,6 +29,8 @@ pub mod event {
     pub const ATTACK_OWN_SHIPS: u32 = 0x400_0807;
     /// A forced attack on resources (`speechEventAttack`).
     pub const ATTACK_RESOURCES: u32 = 0x400_0808;
+    /// A kamikaze order with no ship attacking (`kbcbKamikaze`: `COMM_Kamikaze_NoTargets`).
+    pub const KAMIKAZE_NO_TARGETS: u32 = 0x400_0809;
     /// Tactics set to evasive, neutral, aggressive (`mrSetTactics`).
     pub const TACTICS_EVASIVE: u32 = 0x400_080d;
     pub const TACTICS_NEUTRAL: u32 = 0x400_080e;
@@ -53,6 +55,8 @@ pub mod event {
     /// `mrHarvestResources`).
     pub const HARVEST_NOTHING: u32 = 0x400_08a2;
     pub const HARVEST: u32 = 0x400_08a3;
+    /// Ships told to kamikaze (`kbcbKamikaze`).
+    pub const KAMIKAZE: u32 = 0x400_08a7;
     /// A mimic taking on, dropping its disguise (`MimicHouseKeep`).
     pub const DISGUISE: u32 = 0x400_08a5;
     pub const UNDISGUISE: u32 = 0x400_08a6;
@@ -74,6 +78,9 @@ pub mod event {
     pub const GUARD: u32 = 0x400_1061;
     pub const FORMATION_SET: u32 = 0x400_1062;
     pub const RETIRE: u32 = 0x400_106a;
+    /// Fleet command (speaker flag 0x2000) asking to confirm a scuttle order (`mrScuttle`'s
+    /// first press: `COMM_F_ScuttleRequest`).
+    pub const SCUTTLE_REQUEST: u32 = 0x400_2088;
 }
 
 /// A speech event to queue: `ship` speaks (`None`: the mothership's voice with no ship),

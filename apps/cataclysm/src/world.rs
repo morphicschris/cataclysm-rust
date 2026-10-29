@@ -359,6 +359,9 @@ pub struct World {
     /// In a formation attack the wingmen always take the leader's target (a user-requested
     /// change, off by default; `hwcFormationFocusFire`), handed to the universe each update.
     pub formation_focus_leader: bool,
+    /// The battle chatter option (`opBattleChatter` / 100, `battleChatterFrequencySet`),
+    /// handed to the universe each update with the camera's eye.
+    pub chatter_frequency: Option<f32>,
     /// The camera stack's earlier entries (`CameraStackEntry`: the focus and its remembered
     /// distance) that a mission's `TutCameraFocusCancel` (`ccCancelFocus`) goes back to; pushed
     /// by the mission's camera focus calls ([`script_focus`](Self::script_focus)). Not saved.
@@ -510,6 +513,7 @@ impl World {
             alt_focus_keeps_zoom: true,
             zoom_clear: true,
             formation_focus_leader: false,
+            chatter_frequency: None,
             focus_stack: Vec::new(),
             chase: false,
             chase_saved: None,
@@ -966,6 +970,7 @@ impl World {
         self.snapshot();
         self.set_nebula_camera();
         self.sim.universe_mut().formation_focus_leader = self.formation_focus_leader;
+        self.hand_chatter();
         match &mut self.sim {
             Sim::Mission(r) => r.step(),
             Sim::NisLevel(n) => n.universe.update(),
@@ -979,8 +984,19 @@ impl World {
         self.snapshot();
         self.set_nebula_camera();
         self.sim.universe_mut().formation_focus_leader = self.formation_focus_leader;
+        self.hand_chatter();
         self.sim.universe_mut().update();
         self.after_update();
+    }
+
+    /// What battle chatter needs from the front end: the chatter option, the main camera's
+    /// eye (`mrCamera->eyeposition`) and the local player.
+    fn hand_chatter(&mut self) {
+        let eye = self.camera.eye();
+        let c = &mut self.sim.universe_mut().chatter;
+        c.frequency = self.chatter_frequency;
+        c.camera_eye = Some(hwc_math::Vector::new(eye.x, eye.y, eye.z));
+        c.local_player = crate::host::PLAYER;
     }
 
     /// `mrCamera` for the next universe update: the nebulae's render list and the tendrils they
@@ -2133,14 +2149,23 @@ impl World {
         } else {
             self.plasma.render(now)
         };
-        renderer.set_sky_brightness(if self.sensors_open { 1.0 } else { self.plasma.sky });
+        renderer.set_sky_brightness(if self.sensors_open {
+            1.0
+        } else {
+            self.plasma.sky
+        });
         if self.plasma.texture && self.plasma_renderer.is_none() {
             self.plasma_renderer = Some(
                 hwc_render::assets::load_lif(&self.src, hwc_render::plasma_cloud::TEXTURE)
                     .map_err(|e| eprintln!("warning: plasma cloud: {e}"))
                     .ok()
                     .map(|l| {
-                        hwc_render::PlasmaCloudRenderer::new(renderer, l.width, l.height, &l.to_rgba())
+                        hwc_render::PlasmaCloudRenderer::new(
+                            renderer,
+                            l.width,
+                            l.height,
+                            &l.to_rgba(),
+                        )
                     }),
             );
         }

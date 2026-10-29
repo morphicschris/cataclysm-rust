@@ -8,6 +8,8 @@
 //! ships left (which decides, for example, which Acolyte of a pair flies to the other) is the
 //! original's.
 
+use hwc_math::fpu::{ld, st};
+
 use crate::object::{flags2, sof, CommandId, ShipId};
 use crate::ships::{acolyte, acv, beast, crystal, hive, leech, mimic, mothership};
 use crate::statics::{ShipClass, ShipType};
@@ -128,6 +130,114 @@ pub fn mr_set_tactics(u: &mut Universe, selection: &[ShipId], tactics: usize) {
     };
     crate::speech::by_first(u, selection, e);
     crate::command::cl_set_tactics(u, &sel, tactics);
+}
+
+/// `MakeSelectionKamikazeCapable` (0x50e6b0): only corvettes, fighters and workers stay.
+pub fn kamikaze_capable(u: &Universe, list: &mut Vec<ShipId>) {
+    retain_swap(list, |id| {
+        let class = u.ships.get(id).and_then(|s| u.statics.ship(s.ship_type)).and_then(|st| st.ship_class);
+        matches!(class, Some(ShipClass::Corvette | ShipClass::Fighter | ShipClass::Resource))
+    });
+}
+
+/// `kbcbKamikaze` (0x5497b0): the selection keeps only the ships that can kamikaze; if one of
+/// them is attacking (or on its special), they all turn kamikaze (`clWrapSetKamikaze`: not
+/// those docking or launching), otherwise the first says it has no target. Returns true when
+/// the order went out (the click sound).
+pub fn mr_kamikaze(u: &mut Universe, selection: &mut Vec<ShipId>) -> bool {
+    use crate::speech::event;
+    kamikaze_capable(u, selection);
+    if selection.is_empty() {
+        return false;
+    }
+    let busy = selection.iter().any(|&id| {
+        let o = u.ships.get(id).and_then(|s| s.command).and_then(|c| u.commands.get(c)).map(|c| c.order);
+        matches!(o, Some(crate::command::order::ATTACK | crate::command::order::SPECIAL))
+    });
+    if !busy {
+        crate::speech::by_first(u, selection, event::KAMIKAZE_NO_TARGETS);
+        return false;
+    }
+    crate::speech::by_first(u, selection, event::KAMIKAZE);
+    crate::command::make_ships_controllable(u, selection);
+    if !selection.is_empty() {
+        crate::command::cl_set_kamikaze(u, selection);
+    }
+    true
+}
+
+/// `makeShipsScuttleable(selection, TRUE)` (0x50cfc0): disabled ships leave, and motherships
+/// and carriers too, the first ship saying it cannot comply (battle chatter).
+pub fn scuttleable(u: &mut Universe, list: &mut Vec<ShipId>) {
+    use crate::battle_chatter::{attempt, bce, can_chatter_at_this_time};
+    let mut i = 0;
+    while i < list.len() {
+        let Some(s) = u.ships.get(list[i]) else {
+            list.swap_remove(i);
+            continue;
+        };
+        let refuses = matches!(s.ship_type, ShipType::sCarrier | ShipType::sMothership | ShipType::bCarrier | ShipType::bMothership);
+        if !s.base.disabled && !refuses {
+            i += 1;
+            continue;
+        }
+        if !s.base.disabled {
+            let first = list[0];
+            if can_chatter_at_this_time(u, bce::CANNOT_COMPLY, Some(first)) {
+                let t = u.ships.get(first).map_or(-1, |f| f.ship_type.index() as i32);
+                attempt(u, bce::CANNOT_COMPLY, first, t);
+            }
+        }
+        list.swap_remove(i);
+    }
+}
+
+/// `makeShipsRetireable` (0x50d090): Taiidan resource collectors leave.
+pub fn retireable(u: &Universe, list: &mut Vec<ShipId>) {
+    retain_swap(list, |id| u.ships.get(id).is_some_and(|s| s.ship_type != ShipType::tResourceCollector));
+}
+
+/// What a scuttle order did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scuttle {
+    /// Nothing (no ship can scuttle).
+    Nothing,
+    /// The first press: fleet command asks for confirmation.
+    Request,
+    /// The second press within `TW_ScuttleReconfirmTime`: the ships blow themselves up.
+    Confirmed,
+}
+
+/// `mrScuttle` (0x55fbc0): the selection keeps the ships that may scuttle; a first order only
+/// asks for confirmation (and notes its time in `confirm_time`), a second one within
+/// `TW_ScuttleReconfirmTime` scuttles them (`clWrapScuttle`), the first ship confirming.
+/// (Multiplayer games where capital ships must be captured refuse it: not modelled.)
+pub fn mr_scuttle(u: &mut Universe, selection: &mut Vec<ShipId>, confirm_time: &mut f32) -> Scuttle {
+    use crate::battle_chatter::{attempt, bce, can_chatter_at_this_time};
+    if selection.is_empty() {
+        return Scuttle::Nothing;
+    }
+    scuttleable(u, selection);
+    retireable(u, selection);
+    if selection.is_empty() {
+        return Scuttle::Nothing;
+    }
+    let tw = &u.statics.tweaks;
+    let (reconfirm, reset) = (tw.scuttle_reconfirm_time, tw.scuttle_confirm_time);
+    let now = u.total_time_elapsed;
+    if st(ld(now) - ld(*confirm_time)) < reconfirm {
+        let first = selection[0];
+        if can_chatter_at_this_time(u, bce::SCUTTLE_REAFFIRM, Some(first)) {
+            let t = u.ships.get(first).map_or(-1, |f| f.ship_type.index() as i32);
+            attempt(u, bce::SCUTTLE_REAFFIRM, first, t);
+        }
+        *confirm_time = -reset;
+        crate::command::cl_scuttle(u, selection);
+        return Scuttle::Confirmed;
+    }
+    crate::speech::queue(u, None, crate::speech::event::SCUTTLE_REQUEST, -1);
+    *confirm_time = now;
+    Scuttle::Request
 }
 
 /// `makeShipsHaveUpgrade` (0x50d6f0).

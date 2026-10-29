@@ -242,6 +242,9 @@ pub mod special {
     pub const CUSTOM_MAX_VELOCITY: u32 = 0x0000_0100;
     /// `SPECIAL_Kamikaze`.
     pub const KAMIKAZE: u32 = 0x0000_0002;
+    /// `SPECIAL_KamikazeCrazyFast`: a kamikaze closing in flies at `kamikazeSpeedBurst` times
+    /// its top speed.
+    pub const KAMIKAZE_CRAZY_FAST: u32 = 0x0000_0008;
     /// `SPECIAL_Attacking...` side-stepping flags cleared with the attack.
     pub const ATTACK_SIDESTEP: u32 = 0x0000_0004;
     /// `SPECIAL_KasSpecialDamageModifier`: [`super::Ship::damage_modifier`] applies.
@@ -495,6 +498,13 @@ pub struct Ship {
     pub death_time: f32,
     /// `+0x394`: players whose proximity sensors have sensed the ship (bit per player).
     pub sensed_by: u32,
+    /// `kamikazeState` (+0x2e4): where [`crate::attack::kamikaze_attack`] is in its run. Only
+    /// ship creation resets it, so a new kamikaze order goes on from where the last left off.
+    #[serde(default, deserialize_with = "crate::save::added_in_5")]
+    pub kamikaze_state: i32,
+    /// `kamikazeVector` (+0x2e8): the fly-by point of a kamikaze run.
+    #[serde(default, deserialize_with = "crate::save::added_in_5")]
+    pub kamikaze_vector: Vector,
 }
 
 impl Ship {
@@ -588,6 +598,8 @@ impl Ship {
             worker_repair: Default::default(),
             death_time: 0.0,
             sensed_by: 0,
+            kamikaze_state: 0,
+            kamikaze_vector: Vector::ZERO,
         }
     }
 

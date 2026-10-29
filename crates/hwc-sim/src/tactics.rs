@@ -52,7 +52,8 @@ pub fn speed_multiplier(ship: &Ship, stat: &ShipStaticInfo) -> Ext {
 pub struct MaxVelocityContext {
     /// The ship's command is a formation of type sphere.
     pub in_sphere_formation: bool,
-    /// Global factor used when special flags 2 and 8 are both set (0xa58888).
+    /// `kamikazeSpeedBurst` (0xa58888): the factor while special flags 2 and 8
+    /// (`SPECIAL_Kamikaze`, `SPECIAL_KamikazeCrazyFast`) are both set.
     pub special_factor: f32,
 }
 

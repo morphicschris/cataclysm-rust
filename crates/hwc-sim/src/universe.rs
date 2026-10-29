@@ -176,6 +176,10 @@ pub struct Universe {
     /// unlike the events they are not cleared by an update). Not saved.
     #[serde(skip)]
     pub speech: Vec<crate::speech::Speech>,
+    /// Battle chatter's last times and places, and what the front end tells it (the
+    /// original's globals: not saved).
+    #[serde(skip)]
+    pub chatter: crate::battle_chatter::ChatterState,
     /// KAS `PauseUniverse` (0x8f1fc0): orders and ship movement stop, time goes on.
     pub universe_paused: bool,
     /// `nisIsRunning` (0x8f1f14): an NIS is playing (set by `nisStart`, cleared by `nisStop`).
@@ -247,6 +251,7 @@ impl Universe {
             sp_difficulty: 1,
             temp_disable_avoiding: false,
             formation_focus_leader: false,
+            chatter: Default::default(),
             events: Vec::new(),
             special_events: Vec::new(),
             speech: Vec::new(),
@@ -287,7 +292,7 @@ impl Universe {
             .command
             .and_then(|c| self.commands.get(c))
             .is_some_and(|c| c.attributes & command::attr::FORMATION != 0 && c.formation.formation_type == formation::kind::SPHERE);
-        MaxVelocityContext { in_sphere_formation: sphere, special_factor: 0.0 }
+        MaxVelocityContext { in_sphere_formation: sphere, special_factor: self.tweaks.combat.kamikaze_speed_burst }
     }
 
     /// `univCreateShip` (0x53d3c0) + `univAddShip`: a new ship at `position` with the default

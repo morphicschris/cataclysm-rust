@@ -79,6 +79,12 @@ pub struct Tweaks {
     /// Default `rightOfWay` per ship type (table at 0x8a7a80), overwritten by the
     /// `rowDetails <type> <rightOfWay>, <avoidBy>` lines of AIShip.script.
     pub right_of_way: [i8; super::ShipType::COUNT],
+    /// `TW_ScuttleReconfirmTime` (Tweak.script, 0x8a2268): a second scuttle order within this
+    /// many seconds of the first carries it out (`mrScuttle`).
+    pub scuttle_reconfirm_time: f32,
+    /// `TW_SCUTTLE_CONFIRM_TIME` (Tweak.script, 0xa4723c): after a scuttle the request time
+    /// goes back to minus this, so the next order asks again.
+    pub scuttle_confirm_time: f32,
 }
 
 impl Default for Tweaks {
@@ -118,6 +124,8 @@ impl Default for Tweaks {
             hyperspace_gate_width: 1000.0,
             hyperspace_gate_height: 1000.0,
             right_of_way: super::ship::RIGHT_OF_WAY,
+            scuttle_reconfirm_time: 3.0,
+            scuttle_confirm_time: 0.0,
         }
     }
 }
@@ -154,6 +162,8 @@ const BINDINGS: &[(&str, &str, Conv, Field)] = &[
     ("CommandLayer.script", "GLOBAL_SHIP_HEALTH_MODIFIER", Conv::Real, |t| &mut t.global_ship_health_modifier),
     ("Formation.script", "STRIKECRAFT_PADDING_MODIFIER", Conv::Real, |t| &mut t.strikecraft_padding_modifier),
     ("Tweak.script", "RETALIATE_ZONE", Conv::Real, |t| &mut t.retaliate_zone),
+    ("Tweak.script", "TW_ScuttleReconfirmTime", Conv::Real, |t| &mut t.scuttle_reconfirm_time),
+    ("Tweak.script", "TW_SCUTTLE_CONFIRM_TIME", Conv::Real, |t| &mut t.scuttle_confirm_time),
     ("Tweak.script", "BLAST_RADIUS_MULTIPLE_DEFAULT", Conv::Real, |t| &mut t.blast_radius_multiple_default),
     ("Tweak.script", "COLLDAMAGE_DEFAULTMIN_FRACTION", Conv::Real, |t| &mut t.coll_damage_default_min_fraction),
     ("Tweak.script", "COLLDAMAGE_DEFAULTMAX_FRACTION", Conv::Real, |t| &mut t.coll_damage_default_max_fraction),

@@ -299,6 +299,11 @@ pub struct CombatTweaks {
     /// `kamikazeDamage[type]` (Tactics.script, 0xa58640): damage a kamikaze ship of the type
     /// does to what it rams.
     pub kamikaze_damage: Vec<f32>,
+    /// `kamikazeSpeedBurst` (Tactics.script, 0xa58888; 0 compiled): a kamikaze closing in
+    /// (`SPECIAL_KamikazeCrazyFast`) flies at this times its top speed. Saved from version 5;
+    /// older files take the shipped script's 3.5.
+    #[serde(default = "kamikaze_speed_burst", deserialize_with = "kamikaze_speed_burst_v5")]
+    pub kamikaze_speed_burst: f32,
     /// Missile target loss (Tweak.script): frame mask, checks per missile, distance,
     /// miss chance by the target's tactics, bonus when it dodges or manoeuvres.
     pub missile_target_loss_rate: u32,
@@ -388,6 +393,7 @@ impl Default for CombatTweaks {
             careen_rock: [[-100.0, 100.0]; 3],
             crazy_rock: [[-10.0, 10.0]; 3],
             kamikaze_damage: vec![0.0; ShipType::COUNT],
+            kamikaze_speed_burst: 0.0,
             missile_target_loss_rate: 0,
             missile_num_times_check: 0,
             missile_min_dist_before_target_loss: 0.0,
@@ -521,6 +527,7 @@ const BINDINGS: &[(&str, &str, Conv, Target)] = &[
     (FILE_CL, "FIGHTER_BREAK_VERTICAL_ANGLE_MIN", Int, I(|t| &mut t.fighter_break_vertical_angle_min)),
     (FILE_CL, "FIGHTER_BREAK_VERTICAL_ANGLE_MAX", Int, I(|t| &mut t.fighter_break_vertical_angle_max)),
     (FILE_TACTICS, "EnemyNearZone", Real, F(|t| &mut t.enemy_near_zone)),
+    (FILE_TACTICS, "kamikazeSpeedBurst", Real, F(|t| &mut t.kamikaze_speed_burst)),
     (FILE_TACTICS, "PassiveRetaliationFireTimeModifierLow", Real, F(|t| &mut t.passive_retaliation_fire_time_modifier_lo)),
     (FILE_TACTICS, "PassiveRetaliationFireTimeModifierHi", Real, F(|t| &mut t.passive_retaliation_fire_time_modifier_hi)),
     (FILE_TACTICS, "ATTACKING_FROM_ABOVE_MIN_DIST", Real, F(|t| &mut t.attacking_from_above_min_dist)),
@@ -699,6 +706,16 @@ const BINDINGS: &[(&str, &str, Conv, Target)] = &[
     (FILE_FLIGHTMAN, "FLIGHTMAN_NUM_EVASIVEPURE_MANEUVERS[Neutral]", Int, W(|t| &mut t.flightman.num_evasivepure_maneuvers[1])),
     (FILE_FLIGHTMAN, "FLIGHTMAN_NUM_EVASIVEPURE_MANEUVERS[Aggressive]", Int, W(|t| &mut t.flightman.num_evasivepure_maneuvers[2])),
 ];
+
+/// `kamikazeSpeedBurst` as the shipped Tactics.script sets it.
+fn kamikaze_speed_burst() -> f32 {
+    3.5
+}
+
+/// Reads [`CombatTweaks::kamikaze_speed_burst`], added at save version 5.
+fn kamikaze_speed_burst_v5<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    crate::save::added_in_or(5, d, kamikaze_speed_burst)
+}
 
 impl CombatTweaks {
     /// Compiled defaults overwritten by the scripts found in `src`, then the derived values.

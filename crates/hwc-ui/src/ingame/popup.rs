@@ -159,6 +159,22 @@ fn main_items(fe: &Fe) -> Vec<Item> {
             ..item(&one.name, None, 0)
         });
     }
+    // While waypoints are being placed only the waypoint items and the view menus
+    // (`pmEnableMenuItems` with `piePointSpecMode` 4).
+    if view.waypoints.is_some() {
+        v.push(item("End Waypoints", Some(keys::WAYPOINTS), 3));
+        v.push(sub("Waypoint Mode", Submenu::WaypointMode, 3));
+        v.push(item("Cancel Waypoints", Some(keys::ESCAPE), 3));
+        v.push(item(
+            "Remove Last Waypoint",
+            Some(keys::CANCEL_LAST_WAYPOINT),
+            3,
+        ));
+        v.push(sub("Focus", Submenu::Focus, 5));
+        v.push(sub("View", Submenu::View, 6));
+        v.push(sub("Sensors", Submenu::Sensors, 7));
+        return v;
+    }
     if !view.selection.is_empty() {
         v.push(item("Special Action...", Some(keys::SHIP_SPECIAL), 1));
     }
@@ -395,11 +411,23 @@ fn submenu_items(fe: &Fe, s: Submenu) -> Vec<Item> {
                 item("Pilot View", Some(keys::TOGGLE_CHASE_MODE), 0),
             ]
         }
-        Submenu::WaypointMode => vec![
-            item("Linear", Some(keys::WAYPOINT_MODE_NORMAL), 0),
-            item("End To End", Some(keys::WAYPOINT_MODE_END_TO_END), 0),
-            item("Circular", Some(keys::WAYPOINT_MODE_CIRCULAR), 0),
-        ],
+        Submenu::WaypointMode => {
+            let mode = fe.game.ig.view.waypoints;
+            vec![
+                checked(
+                    item("Linear", Some(keys::WAYPOINT_MODE_NORMAL), 0),
+                    mode == Some(0),
+                ),
+                checked(
+                    item("End To End", Some(keys::WAYPOINT_MODE_END_TO_END), 0),
+                    mode == Some(2),
+                ),
+                checked(
+                    item("Circular", Some(keys::WAYPOINT_MODE_CIRCULAR), 0),
+                    mode == Some(1),
+                ),
+            ]
+        }
     }
 }
 
@@ -414,6 +442,7 @@ fn reserves_checks(s: Option<Submenu>) -> bool {
                 | Submenu::MimicType
                 | Submenu::Sensors
                 | Submenu::View
+                | Submenu::WaypointMode
         )
     )
 }

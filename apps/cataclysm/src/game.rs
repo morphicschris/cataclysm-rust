@@ -264,6 +264,17 @@ pub struct Game {
     /// that right click, or (with [`right_click_move`](Self::right_click_move)) by the move key
     /// or the menu. Otherwise the original's: left confirms, right cancels.
     plate_from_right: bool,
+    /// The waypoints placed so far while the plate places waypoints (`mrWaypointMoveBegin`:
+    /// 0x9def40, count 0x9df030); `None` for a plain move. Only meaningful with the plate up.
+    waypoints: Option<Vec<Vec3>>,
+    /// The waypoint mode (0x91a658): 0 linear, 1 circular, 2 end to end (the command's
+    /// [`command::waypoint_mode`]). Kept for the session, as the original keeps it.
+    waypoint_mode: u32,
+    waypoint_rings: plate::WaypointRings,
+    waypoint_frame: Option<std::time::Instant>,
+    /// When the last scuttle order asked for confirmation (`mrScuttle`'s `confirmTime`,
+    /// 0x8b0018, -7 at start).
+    scuttle_confirm: f32,
     /// A user-requested change, on by default (`hwcDoubleClickSelectType`): double-clicking
     /// one of the player's ships selects all the player's ships of its type on screen.
     pub double_click_type: bool,
@@ -425,6 +436,11 @@ impl Game {
             health_brackets: options.get("hwcHealthBrackets") != 0,
             last_ship_click: None,
             plate_from_right: false,
+            waypoints: None,
+            waypoint_mode: 0,
+            waypoint_rings: plate::WaypointRings::default(),
+            waypoint_frame: None,
+            scuttle_confirm: -7.0,
             saves: None,
             level_save: None,
             thumb: None,
@@ -456,6 +472,7 @@ impl Game {
         g.world.zoom_clear = options.get("hwcZoomClear") != 0;
         g.world.render_list = options.get("hwcRenderList") != 0;
         g.world.formation_focus_leader = options.get("hwcFormationFocusFire") != 0;
+        g.world.chatter_frequency = Some(options.get("opBattleChatter") as f32 * 0.01);
         g.world
             .set_remastered_fx(options.get("hwcRemasteredFx") != 0);
         g.world
@@ -500,6 +517,7 @@ impl Game {
         self.world.zoom_clear = options.get("hwcZoomClear") != 0;
         self.world.render_list = options.get("hwcRenderList") != 0;
         self.world.formation_focus_leader = options.get("hwcFormationFocusFire") != 0;
+        self.world.chatter_frequency = Some(options.get("opBattleChatter") as f32 * 0.01);
         self.world
             .set_remastered_fx(options.get("hwcRemasteredFx") != 0);
         self.world
@@ -544,6 +562,7 @@ impl Game {
             escape_pending: self.mode != Mode::Select
                 || self.sensors.is_open()
                 || !self.selection.is_empty(),
+            placing_waypoints: self.placing_waypoints().then_some(self.waypoint_mode as u8),
             in_sensors: self.sensors.is_open(),
             resource_units: world.universe().base.players[PLAYER].resource_units,
             screen_pos: &pos,
@@ -686,6 +705,11 @@ impl Game {
         let size = self.size();
         let p = [self.mouse.0 as f32, self.mouse.1 as f32];
         if let Mode::Move(_) = self.mode {
+            // Placing waypoints, a click adds one (`piePointSpecExecute` -> `mrWaypointAdd`).
+            if self.placing_waypoints() {
+                self.waypoint_add(audio);
+                return;
+            }
             // A plate opened by right click is confirmed with right click; left cancels it.
             if self.plate_from_right {
                 self.mode = Mode::Select;
@@ -827,6 +851,11 @@ impl Game {
 
     /// Right click without moving the camera: the menu (`mrRightClickMenu`).
     fn right_click(&mut self, audio: &mut Option<Audio>) {
+        // Placing waypoints the menu offers ending, cancelling and the waypoint mode.
+        if self.placing_waypoints() {
+            self.with_host(|ui, host| ui.open_popup(host, false));
+            return;
+        }
         if let Mode::Move { .. } = self.mode {
             if self.plate_from_right {
                 self.execute_plate(audio);
@@ -1969,6 +1998,23 @@ impl Game {
                 }
             }
             Command::Upgrade => hwc_sim::player_orders::mr_upgrade_ships(u, &sel),
+            // `kbcbKamikaze`: the selection keeps only the ships that can.
+            Command::Kamikaze => {
+                if hwc_sim::player_orders::mr_kamikaze(u, &mut self.selection) {
+                    sound(audio, CLICK);
+                }
+            }
+            // `mrScuttle`: a first press asks, a second within the reconfirm time scuttles.
+            Command::Scuttle => {
+                let r = hwc_sim::player_orders::mr_scuttle(
+                    u,
+                    &mut self.selection,
+                    &mut self.scuttle_confirm,
+                );
+                if r == hwc_sim::player_orders::Scuttle::Confirmed {
+                    sound(audio, CLICK);
+                }
+            }
             // The special-action menu's items (`pmExecuteSpecialItem`) on the band-boxed targets
             // the menu was opened for, else on the item's context target; the same orders'
             // keys act without one (the repair key on each ship's nearest ally).
@@ -2042,6 +2088,80 @@ impl Game {
         }
     }
 
+    /// Waypoints are being placed (the plate is up in waypoint mode).
+    fn placing_waypoints(&self) -> bool {
+        matches!(self.mode, Mode::Move(_)) && self.waypoints.is_some()
+    }
+
+    /// `mrWaypointMoveBegin` (0x55f7d0): the plate comes up for placing waypoints (a move
+    /// plate already up is put away first).
+    fn waypoint_move_begin(&mut self, audio: &mut Option<Audio>) {
+        if self.mobile_selection().is_empty() {
+            return;
+        }
+        let Some((c, size)) = self.plate_centre() else {
+            return;
+        };
+        self.mode = Mode::Move(Plate::new(c, size));
+        self.plate_from_right = false;
+        self.waypoints = Some(Vec::new());
+        sound(audio, MOVEMENT_GUI_ON);
+    }
+
+    /// `mrWaypointAdd` (0x55f720): the plate's point is the next waypoint (at most 19). With
+    /// `AutoFocusOnWaypoints` the sensors camera looks at it.
+    pub(crate) fn waypoint_add(&mut self, audio: &mut Option<Audio>) {
+        let Mode::Move(plate) = self.mode else { return };
+        let dest = plate.destination();
+        let Some(w) = self.waypoints.as_mut() else {
+            return;
+        };
+        if !dest.is_finite() {
+            return;
+        }
+        if w.len() < plate::MAX_WAYPOINTS {
+            w.push(dest);
+            sound(audio, plate::SOUND_CHIMES);
+        }
+        if self.sensors.is_open() && self.ui.fe.game.options.get_bool("AutoFocusOnWaypoints") {
+            self.sensors.look_at(&mut self.world, dest);
+        }
+    }
+
+    /// `mrWaypointMoveExecute` (0x55f8f0): the selection moves along the waypoints in the
+    /// waypoint mode (`clWrapMove`), the first ship answering; the plate goes.
+    fn waypoint_move_execute(&mut self, audio: &mut Option<Audio>) {
+        let points = self.waypoints.take().unwrap_or_default();
+        let sel = self.mobile_selection();
+        if !sel.is_empty() && !points.is_empty() {
+            if let Some((c, _)) = self.plate_centre() {
+                let from = hwc_math::Vector::new(c.x, c.y, c.z);
+                let wps: Vec<hwc_math::Vector> = points
+                    .iter()
+                    .map(|p| hwc_math::Vector::new(p.x, p.y, p.z))
+                    .collect();
+                let u = self.world.universe_mut();
+                command::cl_move(u, &sel, self.waypoint_mode, from, &wps);
+                hwc_sim::speech::by_first(u, &sel, hwc_sim::speech::event::MOVE);
+                sound(audio, plate::SOUND_CHIMES);
+            }
+        }
+        self.mode = Mode::Select;
+    }
+
+    /// `mrWaypointModeSet` (0x55fab0) and `mrWaypointModeCycle` (0x55fa40): the mode, and a
+    /// message naming it.
+    fn set_waypoint_mode(&mut self, mode: u32) {
+        self.waypoint_mode = mode;
+        let key = match mode {
+            0 => "strWaypointModeNormal",
+            1 => "strWaypointModePatrolCircular",
+            _ => "strWaypointModePatrolEndToEnd",
+        };
+        let text = self.strings.text(key);
+        self.post(&text);
+    }
+
     fn start_move(&mut self, audio: &mut Option<Audio>) {
         if self.mobile_selection().is_empty() {
             return;
@@ -2052,6 +2172,7 @@ impl Game {
             };
             self.mode = Mode::Move(Plate::new(c, size));
             self.plate_from_right = self.right_click_move;
+            self.waypoints = None;
             sound(audio, MOVEMENT_GUI_ON);
         } else {
             self.mode = Mode::Select;
@@ -2060,7 +2181,7 @@ impl Game {
     }
 
     /// Key actions the game handles (`mrKeyPress`).
-    fn action(&mut self, a: Action, down: bool, audio: &mut Option<Audio>) {
+    pub(crate) fn action(&mut self, a: Action, down: bool, audio: &mut Option<Audio>) {
         // The overlay's pan arrows are held like keys.
         let arrows = [
             keys::PAN_SENSORS_LEFT,
@@ -2091,6 +2212,24 @@ impl Game {
         }
         match a {
             keys::MOVE => self.start_move(audio),
+            // `mrWaypointMove`: begin placing waypoints, or order the move along them.
+            keys::WAYPOINTS => {
+                if self.placing_waypoints() {
+                    self.waypoint_move_execute(audio);
+                } else {
+                    self.waypoint_move_begin(audio);
+                }
+            }
+            keys::TOGGLE_WAYPOINT_MODES => self.set_waypoint_mode((self.waypoint_mode + 1) % 3),
+            keys::WAYPOINT_MODE_NORMAL => self.set_waypoint_mode(0),
+            keys::WAYPOINT_MODE_CIRCULAR => self.set_waypoint_mode(1),
+            keys::WAYPOINT_MODE_END_TO_END => self.set_waypoint_mode(2),
+            // `mrWaypointRemoveLast`.
+            keys::CANCEL_LAST_WAYPOINT => {
+                if let Some(w) = self.waypoints.as_mut() {
+                    w.pop();
+                }
+            }
             keys::FOCUS => {
                 if !self.selection.is_empty() {
                     let sel = self.selection.clone();
@@ -3624,6 +3763,12 @@ impl Game {
         }
     }
 
+    /// The waypoints placed so far, while placing them.
+    #[cfg(test)]
+    pub fn placed_waypoints(&self) -> Option<&Vec<Vec3>> {
+        self.waypoints.as_ref().filter(|_| self.placing_waypoints())
+    }
+
     /// The pointer shown this frame.
     #[cfg(test)]
     pub fn cursor(&self) -> cursor::CursorKind {
@@ -3893,6 +4038,17 @@ impl Game {
             .toggles
             .pieplate_lines
             .then(|| self.drop_ships(universe));
+        // `pieWaypointPathDraw`: the path so far, and the line in the waypoint mode's colour.
+        let now = std::time::Instant::now();
+        let dt = self
+            .waypoint_frame
+            .map_or(0.0, |t| now.duration_since(t).as_secs_f32());
+        self.waypoint_frame = Some(now);
+        if let Some(points) = &self.waypoints {
+            self.waypoint_rings
+                .draw(&mut self.canvas, &view, centre, points, dt);
+            plate.line_color = plate::WAYPOINT_LINE_COLORS[(self.waypoint_mode as usize).min(2)];
+        }
         let font = self.plate_font.clone();
         let readout_at = (!self.right_down).then_some(self.mouse);
         let chime = plate.draw(

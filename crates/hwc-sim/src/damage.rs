@@ -597,6 +597,7 @@ mod tests {
             unit_caps: Default::default(),
             unit_cap_presets: BTreeMap::new(),
             team_colors: Default::default(),
+            battle_chatter: Default::default(),
             default_lod: None,
             default_mex: None,
             warnings: Vec::new(),

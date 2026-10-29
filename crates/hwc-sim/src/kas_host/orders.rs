@@ -26,8 +26,6 @@ use crate::statics::{ShipClass, ShipType};
 pub(super) const HELPLESS_DURATION_BITS: u32 = 0x6258_d727;
 /// Special flags (+0x1c8): KAS asked the ship not to retaliate.
 pub(super) const NON_RETALIATION: u32 = 0x0004_0000;
-/// Special flags (+0x1c8) set by `clSetKamikaze` (`SPECIAL_Kamikaze` and its attack flag).
-pub(super) const KAMIKAZE_FLAGS: u32 = 0x0000_0006;
 /// Special flags 2 (+0x1cc): the ship may be hurt while the letterbox is up (cleared by
 /// `ShipsSetInvincibleInWidescreen(ships, TRUE)`).
 pub(super) const VULNERABLE_IN_WIDESCREEN: u32 = 0x0100_0000;
@@ -37,8 +35,6 @@ pub(super) const NOT_PLAYER_CONTROLLED: u32 = 0x0010_0000;
 pub(super) const UNDER_CONSTRUCTION: u32 = 0x0000_0008;
 /// `flags2` (+0x18) bit 5, set by `ShipsEffectedByMines(ships, 1)`.
 pub(super) const MINES_FLAG: u32 = 0x0000_0020;
-/// `flags2` (+0x18): a Mimic in disguise.
-pub(super) const DISGUISED: u32 = 0x0000_0008;
 /// The disable reason `MakeShipsControllable` sets.
 pub(super) const REASON_NOT_CONTROLLABLE: usize = 1;
 /// `suShipHasUpgrade` bit that makes a ship repair-capable.
@@ -386,16 +382,8 @@ macro_rules! orders_methods {
                 return;
             }
             command::cl_attack(self.u, &ok, &t);
-            // clSetKamikaze: ships attacking (or the special-attack types using their special).
             let ok = self.wrap_filter(&sel);
-            for id in ok {
-                let order = self.u.ships.get(id).and_then(|s| s.command).and_then(|c| self.u.commands.get(c)).map(|c| c.order);
-                let Some(s) = self.u.ships.get_mut(id) else { continue };
-                let special_type = matches!(s.ship_type.index(), 0x48 | 0x59);
-                if order == Some(command::order::ATTACK) || (order == Some(command::order::SPECIAL) && special_type) {
-                    s.special_flags |= orders::KAMIKAZE_FLAGS;
-                }
-            }
+            command::cl_set_kamikaze(self.u, &ok);
         }
 
         /// `kasfHarvest`: the team's harvesters collect resources.
@@ -718,10 +706,8 @@ macro_rules! orders_methods {
             }
         }
 
-        /// `kasfShipsScuttle` (0x493890, `clScuttle` 0x445bf0): each ship's self-destruct
-        /// timer is armed (now plus a random delay between `SCUTTLE_SHIPDEATHTIMEMIN` and `MAX`,
-        /// stream 10) and `univCheckShipState` blows it up when the time comes; disguised Mimics
-        /// drop their disguise. (In the tutorial only with its scuttle flag, not modelled.)
+        /// `kasfShipsScuttle` (0x493890): [`command::cl_scuttle`]. (In the tutorial only with
+        /// its scuttle flag, not modelled.)
         fn ships_scuttle(&mut self, _cx: &Cx, ships: Ships) {
             let sel = self.ships(ships);
             if sel.is_empty() {
@@ -731,21 +717,8 @@ macro_rules! orders_methods {
                 self.log(LogKind::Flow, "ShipsScuttle: ignored in the tutorial");
                 return;
             }
-            let (lo, hi) = (self.u.tweaks.combat.scuttle_death_time_min, self.u.tweaks.combat.scuttle_death_time_max);
-            for id in sel {
-                if !self.live(id) {
-                    continue;
-                }
-                let r = self.u.randy.random(10);
-                let now = self.u.total_time_elapsed;
-                let t = st((ld(hi) - ld(lo)) * ld(2.328_306_4e-10f32) * hwc_math::fpu::fild_u32(r) + ld(lo) + ld(now));
-                if let Some(s) = self.u.ships.get_mut(id) {
-                    s.death_time = t;
-                }
-                if self.u.ships.get(id).is_some_and(|s| s.flags2 & orders::DISGUISED != 0) {
-                    crate::ships::mimic::end_disguise(self.u, id, false);
-                }
-            }
+            let live: Vec<ShipId> = sel.into_iter().filter(|&id| self.live(id)).collect();
+            command::cl_scuttle(self.u, &live);
         }
 
         /// `kasfDeleteShips`: the ships leave the universe at once (no explosion) and every

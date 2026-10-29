@@ -248,7 +248,13 @@ impl Audio {
                 return;
             }
         }
-        self.fleet_speech(event, s.variable.clamp(0, 0x3c));
+        // No variable (-1) stays none; a ship's type is clamped to 60.
+        let variable = if s.variable < 0 {
+            -1
+        } else {
+            s.variable.min(0x3c)
+        };
+        self.fleet_speech(event, variable);
     }
 
     /// The event and variable speech stream `stream` is playing (tests).

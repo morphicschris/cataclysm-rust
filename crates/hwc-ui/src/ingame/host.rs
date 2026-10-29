@@ -568,6 +568,11 @@ pub trait GameUiHost {
     fn escape_pending(&self) -> bool {
         false
     }
+    /// Waypoints are being placed (`piePointModeOnOff(4, ...)`): the waypoint mode (0 linear,
+    /// 1 circular, 2 end to end); `None` otherwise.
+    fn placing_waypoints(&self) -> Option<u8> {
+        None
+    }
     /// Player names with colours (multiplayer overlay).
     fn player_names(&self) -> Vec<(String, [u8; 4])> {
         Vec::new()
@@ -640,6 +645,8 @@ pub struct HostView {
     pub hyperspace_label: Option<String>,
     pub roll_call: Option<RollCall>,
     pub mimic: MimicMenus,
+    /// [`GameUiHost::placing_waypoints`].
+    pub waypoints: Option<u8>,
 }
 
 impl HostView {
@@ -684,6 +691,7 @@ impl HostView {
             hyperspace_label: host.hyperspace_label(),
             roll_call: host.roll_call(),
             mimic: host.mimic_menus(),
+            waypoints: host.placing_waypoints(),
         }
     }
 

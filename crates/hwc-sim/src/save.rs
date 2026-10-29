@@ -45,7 +45,7 @@ pub const MAGIC: [u8; 8] = *b"HWCSAVE\0";
 /// removed, reordered or retyped). A field added at version `n` is read with `added_in_<n>`
 /// ([`added_in_2`]), so files of older versions still load with the field at its default;
 /// files of a newer version, or older ones whose shape is not known, are refused.
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 5;
 
 /// The oldest version still read.
 pub const OLDEST_VERSION: u32 = 1;
@@ -166,7 +166,8 @@ fn added_in<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(n: 
 }
 
 /// [`added_in`] for a field whose value in an older file is not its type's default.
-/// Version 4: [`crate::tunables::SimTweaks::spheresize_ignore_numdeclinations`].
+/// Version 4: [`crate::tunables::SimTweaks::spheresize_ignore_numdeclinations`]; version 5:
+/// [`crate::combat_tweaks::CombatTweaks::kamikaze_speed_burst`].
 pub fn added_in_or<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(n: u32, d: D, old: impl FnOnce() -> T) -> Result<T, D::Error> {
     if SHAPE.with(Cell::get) < n {
         Ok(old())
@@ -185,6 +186,12 @@ pub fn added_in_2<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Defaul
 /// version 3: [`crate::base::ShipBase::avoid_exception`].
 pub fn added_in_3<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
     added_in(3, d)
+}
+
+/// `#[serde(default, deserialize_with = "crate::save::added_in_5")]` on a field added at
+/// version 5: [`crate::object::Ship::kamikaze_state`] and [`crate::object::Ship::kamikaze_vector`].
+pub fn added_in_5<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
+    added_in(5, d)
 }
 
 fn current<T>(f: impl FnOnce(&Relink) -> T) -> T {

@@ -721,6 +721,14 @@ impl Sensors {
         true
     }
 
+    /// `mrWaypointAdd` with `AutoFocusOnWaypoints`: the sensors camera looks at the waypoint
+    /// just placed (and stops following ships).
+    pub fn look_at(&mut self, world: &mut World, p: Vec3) {
+        let Some(o) = self.open.as_mut() else { return };
+        o.follow = None;
+        world.camera.look_at = p;
+    }
+
     /// The ships within the focus radius of the mean of those that exist, with their
     /// positions (`ccFocusCullRadiusMean`).
     fn cull(&self, world: &World, ships: &[ShipId]) -> Option<Vec<(ShipId, Vec3)>> {
@@ -1162,7 +1170,9 @@ impl Sensors {
     pub fn with_clamped(u: &Universe, hosts: &[ShipId]) -> Vec<ShipId> {
         let mut out = hosts.to_vec();
         for &id in hosts {
-            let slaves = u.ship(id).and_then(|s| s.base.clamp.as_ref()?.slaves.as_ref());
+            let slaves = u
+                .ship(id)
+                .and_then(|s| s.base.clamp.as_ref()?.slaves.as_ref());
             for &slave in slaves.into_iter().flatten() {
                 if u.ship(slave).is_some() && !out.contains(&slave) {
                     out.push(slave);

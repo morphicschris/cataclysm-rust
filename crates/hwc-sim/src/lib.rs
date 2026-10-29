@@ -21,6 +21,7 @@ pub mod aiship;
 pub mod aitrack;
 pub mod attack;
 pub mod autobehaviour;
+pub mod battle_chatter;
 pub mod autoplay;
 pub mod base;
 pub mod base_tweaks;

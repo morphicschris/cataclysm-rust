@@ -800,6 +800,10 @@ pub fn cl_halt(u: &mut Universe, selection: &[ShipId]) {
     }
     let existing = u.commands.iter().find(|c| selections_equivalent(selection, &c.selection)).map(|c| c.id);
     if let Some(cid) = existing {
+        // `clHalt` frees the order first (an attack drops its targets and the kamikaze flag).
+        if u.commands.get(cid).is_some_and(|c| c.order != order::MILITARY_PARADE) {
+            free_last_order(u, cid);
+        }
         let c = u.commands.get_mut(cid).expect("command");
         c.order = order::HALT;
         prepare_ships(u, cid);
@@ -1078,14 +1082,14 @@ pub fn delegate_command(u: &mut Universe, cid: CommandId, fake: &mut CommandToDo
     let lead_attack = |u: &mut Universe, id: ShipId| {
         let Some(t) = alive(u, u.ships.ship(id).attack.target) else { return };
         if full {
-            crate::attack::ship_attack(u, id, t);
+            attack_or_kamikaze(u, id, t);
         } else {
-            crate::attack::ship_attack_passive(u, id, t, true);
+            passive_or_kamikaze(u, id, t);
         }
     };
     let passive = |u: &mut Universe, id: ShipId| {
         if let Some(t) = alive(u, u.ships.ship(id).attack.target) {
-            crate::attack::ship_attack_passive(u, id, t, true);
+            passive_or_kamikaze(u, id, t);
         }
     };
     match group {
@@ -1134,6 +1138,12 @@ pub fn delegate_command(u: &mut Universe, cid: CommandId, fake: &mut CommandToDo
                         u.ships.ship_mut(w).tactics_need_to_flightman = 0;
                     } else {
                         loose = true;
+                    }
+                    continue;
+                }
+                if crate::attack::is_kamikaze(u, w) {
+                    if let Some(t) = alive(u, u.ships.ship(w).attack.target) {
+                        crate::attack::kamikaze_attack(u, w, t);
                     }
                     continue;
                 }
@@ -1200,7 +1210,7 @@ pub fn delegate_command(u: &mut Universe, cid: CommandId, fake: &mut CommandToDo
             let leader = sel[0];
             lead_attack(u, leader);
             for &w in &sel[1..] {
-                if crate::attack::can_attack_passive(u, w) {
+                if crate::attack::is_kamikaze(u, w) || crate::attack::can_attack_passive(u, w) {
                     passive(u, w);
                 } else if is_minelayer(u, w) {
                     // Minelayers leave their slots to lay their mines.
@@ -1221,6 +1231,25 @@ pub fn delegate_command(u: &mut Universe, cid: CommandId, fake: &mut CommandToDo
         _ => {}
     }
     false
+}
+
+/// `CustShipAttack`, or `doKamikazeAttack` for a ship flagged `SPECIAL_Kamikaze` (the command
+/// layer checks the flag before every attack call).
+fn attack_or_kamikaze(u: &mut Universe, id: ShipId, t: ShipId) {
+    if crate::attack::is_kamikaze(u, id) {
+        crate::attack::kamikaze_attack(u, id, t);
+    } else {
+        crate::attack::ship_attack(u, id, t);
+    }
+}
+
+/// `CustShipAttackPassive(ship, target, TRUE)`, or `doKamikazeAttack` for a kamikaze.
+fn passive_or_kamikaze(u: &mut Universe, id: ShipId, t: ShipId) {
+    if crate::attack::is_kamikaze(u, id) {
+        crate::attack::kamikaze_attack(u, id, t);
+    } else {
+        crate::attack::ship_attack_passive(u, id, t, true);
+    }
 }
 
 /// `processHoldingPattern` (0x447230): strike craft that have run out of targets fly legs of
@@ -2337,8 +2366,7 @@ fn process_attack_to_do(u: &mut Universe, cid: CommandId) -> bool {
         }
         if attack {
             if let Some(t) = target.filter(|&t| crate::target::exists(u, t)) {
-                // (Kamikaze attacks are not modelled.)
-                crate::attack::ship_attack(u, id, t);
+                attack_or_kamikaze(u, id, t);
             }
         }
         let s = u.ships.ship_mut(id);
@@ -2985,6 +3013,41 @@ pub fn protect_list(u: &Universe, id: ShipId) -> &[ShipId] {
     }
 }
 
+/// `clSetKamikaze` (0x445590): ships attacking (and the salvage corvettes on their special
+/// order) turn kamikaze (`SPECIAL_Kamikaze`, broken formation).
+pub fn cl_set_kamikaze(u: &mut Universe, selection: &[ShipId]) {
+    for &id in selection {
+        let o = u.ships.get(id).and_then(|s| s.command).and_then(|c| u.commands.get(c)).map(|c| c.order);
+        let Some(s) = u.ships.get_mut(id) else { continue };
+        let salvager = matches!(s.ship_type, crate::statics::ShipType::kSalCapCorvette | crate::statics::ShipType::tSalCapCorvette);
+        if o == Some(order::ATTACK) || (o == Some(order::SPECIAL) && salvager) {
+            s.special_flags |= special::KAMIKAZE | special::BROKEN_FORMATION;
+        }
+    }
+}
+
+/// `clScuttle` (0x445bf0): each ship's self-destruct timer is armed (now plus a random delay
+/// between `SCUTTLE_SHIPDEATHTIMEMIN` and `MAX`, stream 10) and `univCheckShipState` blows it
+/// up when the time comes; a ship the Beast is converting keeps its timer, the mothership in
+/// the tutorial too; disguised Mimics drop their disguise.
+pub fn cl_scuttle(u: &mut Universe, selection: &[ShipId]) {
+    let (lo, hi) = (u.tweaks.combat.scuttle_death_time_min, u.tweaks.combat.scuttle_death_time_max);
+    for &id in selection {
+        let Some(s) = u.ships.get(id) else { continue };
+        let tutorial_mothership = u.base.options.tutorial && s.ship_type == crate::statics::ShipType::sMothership;
+        let converting = s.flags2 & crate::ships::beast::FLAGS2_STUN_SPIN != 0 && s.beast.timer != 0.0;
+        if !tutorial_mothership && !converting {
+            let r = u.randy.random(hwc_math::random::RAN_GAME);
+            let now = u.total_time_elapsed;
+            let t = st((ld(hi) - ld(lo)) * ld(2.328_306_4e-10f32) * hwc_math::fpu::fild_u32(r) + ld(lo) + ld(now));
+            u.ships.ship_mut(id).death_time = t;
+        }
+        if u.ships.get(id).is_some_and(|s| s.flags2 & crate::object::flags2::DISGUISED != 0) {
+            crate::ships::mimic::end_disguise(u, id, false);
+        }
+    }
+}
+
 /// `makeShipsControllable(selection, order)` (0x50d300) for orders other than halt: ships
 /// that are docking or launching with a host leave the selection (the last ship moves into
 /// the hole).
@@ -3136,6 +3199,7 @@ mod tests {
                 unit_caps: Default::default(),
                 unit_cap_presets: BTreeMap::new(),
                 team_colors: Default::default(),
+                battle_chatter: Default::default(),
                 default_lod: None,
                 default_mex: None,
                 warnings: Vec::new(),

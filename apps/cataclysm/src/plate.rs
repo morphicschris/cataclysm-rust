@@ -18,6 +18,10 @@
 //! circle, the drop line of every visible ship to the plane with a circle where it meets it
 //! (the closest one in its own colour, a chime when that changes), and the distance readout
 //! beside the pointer.
+//!
+//! Placing waypoints (`piePointModeOnOff(4, mrWaypointAdd)`) uses the same plate, coloured by
+//! the waypoint mode, with the path drawn over it (`pieWaypointPathDraw`): a white line from
+//! the selection through the waypoints so far, and three yellow rings spinning round each.
 
 use glam::{Mat4, Vec3, Vec4};
 use hwc_formats::font::Font;
@@ -59,6 +63,22 @@ const HATCH_SPACING: f32 = 700.0;
 const HATCH_HALF: f32 = 300.0;
 /// The move line's colour for a plain move (`0x8836d4`).
 const MOVE_LINE_COLOR: Color = [255, 255, 255, 255];
+/// The move line's colour while placing waypoints, by mode: linear, circular, end to end
+/// (`0x8836c4`, `0x8836c8`, `0x8836cc`).
+pub const WAYPOINT_LINE_COLORS: [Color; 3] = [
+    [0x91, 0xb5, 0xf7, 255],
+    [0xac, 0x59, 0xcd, 255],
+    [0x82, 0x79, 0xad, 255],
+];
+/// The waypoint path (`0x8836b8`) and its rings (`0x8836b4`), the rings' radius and slices
+/// (`0x8836ac`, `0x8836b0`) and their spin in degrees a second (`0x8836bc`..`0x8836c0`).
+const WAYPOINT_PATH_COLOR: Color = [255, 255, 255, 255];
+const WAYPOINT_RING_COLOR: Color = [0xef, 0xec, 0x5d, 255];
+const WAYPOINT_RING_RADIUS: f32 = 200.0;
+const WAYPOINT_RING_SLICES: i32 = 32;
+const WAYPOINT_SPIN: (f32, f32) = (10.0, 20.0);
+/// Waypoints one order holds (`mrWaypointAdd`: 19, the rest overwrite a spare slot).
+pub const MAX_WAYPOINTS: usize = 19;
 /// The readout's offset from the pointer.
 const READOUT_OFFSET: i32 = 10;
 
@@ -246,6 +266,87 @@ impl View {
     }
 }
 
+/// The spinning rings of the waypoint path (`pieWaypointPathDraw`'s statics): each waypoint
+/// slot turns about its own axis, picked once at random, by a random 10..20 degrees a second.
+#[derive(Debug, Clone)]
+pub struct WaypointRings {
+    axes: [Vec3; MAX_WAYPOINTS + 1],
+    angles: [f32; MAX_WAYPOINTS + 1],
+    seed: u32,
+}
+
+impl Default for WaypointRings {
+    fn default() -> Self {
+        let mut r = WaypointRings {
+            axes: [Vec3::ZERO; MAX_WAYPOINTS + 1],
+            angles: [0.0; MAX_WAYPOINTS + 1],
+            seed: 0x1234_5678,
+        };
+        for k in 0..r.axes.len() {
+            r.axes[k] = Vec3::new(r.unit(), r.unit(), r.unit());
+        }
+        r
+    }
+}
+
+impl WaypointRings {
+    /// A random number in 0..1 (the drawing's own; nothing in the game depends on it).
+    fn unit(&mut self) -> f32 {
+        self.seed = self
+            .seed
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        (self.seed >> 8) as f32 / (1u32 << 24) as f32
+    }
+
+    /// Draws the path from `centre` through `points` with three rings round each point, the
+    /// rings turned on by `dt` seconds.
+    pub fn draw(
+        &mut self,
+        canvas: &mut Canvas,
+        view: &View,
+        centre: Vec3,
+        points: &[Vec3],
+        dt: f32,
+    ) {
+        let mut from = centre;
+        for (k, &p) in points.iter().enumerate().take(MAX_WAYPOINTS) {
+            view.line(canvas, from, p, WAYPOINT_PATH_COLOR, 0xffff);
+            from = p;
+            let speed = WAYPOINT_SPIN.0 + (WAYPOINT_SPIN.1 - WAYPOINT_SPIN.0) * self.unit();
+            let mut a = self.angles[k] + speed * dt;
+            if a > 360.0 {
+                a -= 360.0;
+            }
+            self.angles[k] = a;
+            let turn =
+                glam::Quat::from_axis_angle(self.axes[k].normalize_or_zero(), a.to_radians());
+            for axis in 0..3 {
+                let n = WAYPOINT_RING_SLICES;
+                let at = |i: i32| {
+                    let t = std::f32::consts::TAU * i as f32 / n as f32;
+                    let (x, y) = (
+                        t.cos() * WAYPOINT_RING_RADIUS,
+                        t.sin() * WAYPOINT_RING_RADIUS,
+                    );
+                    let v = match axis {
+                        0 => Vec3::new(0.0, x, y),
+                        1 => Vec3::new(x, 0.0, y),
+                        _ => Vec3::new(x, y, 0.0),
+                    };
+                    p + turn * v
+                };
+                let mut last = at(0);
+                for i in 1..=n {
+                    let q = at(i);
+                    view.line(canvas, last, q, WAYPOINT_RING_COLOR, 0xffff);
+                    last = q;
+                }
+            }
+        }
+    }
+}
+
 /// Which point the pointer moves (`PSM_XY`, `PSM_Z`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Spec {
@@ -284,6 +385,9 @@ pub struct Plate {
     /// The ship whose foot was closest to the plane point last frame.
     pub closest: Option<ShipId>,
     stipple_counter: f32,
+    /// The move line's colour (`pieMovementCursorColor`, 0xad5478): white for a move, by
+    /// waypoint mode while placing waypoints.
+    pub line_color: Color,
 }
 
 impl Plate {
@@ -301,6 +405,7 @@ impl Plate {
             vertical: None,
             closest: None,
             stipple_counter: 0.0,
+            line_color: MOVE_LINE_COLOR,
         }
     }
 
@@ -518,14 +623,15 @@ impl Plate {
         // `pieMovementCursorDraw`.
         let stipple = self.stipple();
         if self.spec_z.abs() >= DOTTED_DISTANCE {
-            view.line(canvas, self.height, self.centre, MOVE_LINE_COLOR, stipple);
-            view.line(canvas, self.height, self.plane, MOVE_LINE_COLOR, 0xffff);
-            view.line(canvas, self.plane, self.centre, MOVE_LINE_COLOR, 0xffff);
+            let c = self.line_color;
+            view.line(canvas, self.height, self.centre, c, stipple);
+            view.line(canvas, self.height, self.plane, c, 0xffff);
+            view.line(canvas, self.plane, self.centre, c, 0xffff);
             if let Some((r, n)) = view.circle_size(self.height, self.average_size) {
-                view.circle(canvas, self.height, r, n, MOVE_LINE_COLOR);
+                view.circle(canvas, self.height, r, n, c);
             }
         } else {
-            view.line(canvas, self.plane, self.centre, MOVE_LINE_COLOR, stipple);
+            view.line(canvas, self.plane, self.centre, self.line_color, stipple);
         }
         ships.and_then(|s| self.drop_lines(canvas, view, colors, s))
     }

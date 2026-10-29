@@ -458,6 +458,12 @@ pub fn point_in_universe(u: &Universe, p: Vector) -> bool {
     inside(p.z, b.z) && inside(p.y, b.y) && inside(p.x, b.x)
 }
 
+/// `RammingFrigateBlendHeadingDefault` (0x5ba990): [`blend_heading`] with the default weights
+/// (0.07 towards `dir`, 1 for the heading).
+pub(crate) fn blend_heading_default(u: &mut Universe, id: ShipId, dir: Vector) {
+    blend_heading(u, id, dir, f32::from_bits(0x3d8f_5c29), 1.0);
+}
+
 /// `RammingFrigateBlendHeading` (0x5ba8a0): turns the ship to the weighted mean of `dir` and
 /// its heading at once.
 fn blend_heading(u: &mut Universe, id: ShipId, dir: Vector, w_dir: f32, w_heading: f32) {

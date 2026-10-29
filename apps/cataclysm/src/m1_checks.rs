@@ -847,3 +847,221 @@ fn ships_acknowledge_orders() {
         assert_eq!(speaking(&rig), before);
     }
 }
+
+/// The kamikaze, scuttle and waypoint orders (`kbcbKamikaze`, `mrScuttle`, `mrWaypointMove*`):
+/// waypoints are placed on the plate and flown in the chosen mode, the kamikaze key turns
+/// attacking fighters into rammers, and scuttling takes a second press (never a mothership).
+#[test]
+fn kamikaze_scuttle_and_waypoint_orders() {
+    use hwc_sim::object::special;
+    use hwc_sim::speech::{event, Speech};
+    use hwc_ui::ingame::host::Command;
+    use hwc_ui::ingame::keys;
+    use hwc_ui::ingame::InputEvent;
+    let Some((mut game, mut rig)) = mission_one((800, 600), false) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let g = &mut *game;
+    let mut frames = 0;
+    while g.ui.fleet_intel || frames < 16 * 5 {
+        if g.ui.fleet_intel && frames % 16 == 0 {
+            g.input(InputEvent::KeyDown(0x1b), &mut rig.audio);
+            g.input(InputEvent::KeyUp(0x1b), &mut rig.audio);
+        }
+        rig.frame(g);
+        frames += 1;
+        assert!(frames < 16 * 600, "the opening intel never ended");
+    }
+    // Three Acolytes of the player's own beside the mothership, and an enemy carrier ahead.
+    let u = g.world.universe_mut();
+    let mothership = u.base.players[crate::host::PLAYER]
+        .mothership
+        .expect("mothership");
+    let p = u.ship(mothership).expect("mothership").posinfo.position;
+    let mut make = |t: hwc_sim::statics::ShipType, player: usize, x: f32, y: f32| {
+        let at = p + hwc_math::Vector::new(x, y, 0.0);
+        let id = hwc_sim::base::create_ship(u, t, player, at, Default::default()).expect("ship");
+        hwc_sim::construction::unit_cap_create_ship(u, id);
+        id
+    };
+    use hwc_sim::statics::ShipType::{sAcolyte, sCarrier};
+    let ships = vec![
+        make(sAcolyte, 0, 3000.0, 0.0),
+        make(sAcolyte, 0, 3000.0, 300.0),
+        make(sAcolyte, 0, 3000.0, -300.0),
+    ];
+    let enemy = make(sCarrier, 1, 9000.0, 0.0);
+    // Mission 1 still has its bars up here; the carrier may be hurt anyway
+    // (`VULNERABLE_IN_WIDESCREEN`).
+    u.ships.ship_mut(enemy).special_flags2 |= 0x0100_0000;
+    let ty = |g: &Game, id| g.world.universe().ship(id).expect("ship").ship_type.index() as i32;
+    let said = |g: &Game, e: u32| {
+        g.world
+            .universe()
+            .speech
+            .iter()
+            .any(|s: &Speech| s.event == e)
+    };
+
+    // Waypoints: two points on the plate, the circular mode, then the order.
+    g.selection = ships.clone();
+    g.action(keys::WAYPOINTS, true, &mut rig.audio);
+    assert!(g.plate().is_some(), "the waypoint plate did not come up");
+    let start = g.plate().expect("plate").centre;
+    for (k, off) in [
+        glam::Vec3::new(3000.0, 0.0, 0.0),
+        glam::Vec3::new(3000.0, 3000.0, 500.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if let crate::game::Mode::Move(p) = &mut g.mode {
+            p.height = start + off;
+            p.plane = glam::Vec3::new(p.height.x, p.height.y, start.z);
+        }
+        g.waypoint_add(&mut rig.audio);
+        assert_eq!(g.placed_waypoints().map(|w| w.len()), Some(k + 1));
+    }
+    g.action(keys::CANCEL_LAST_WAYPOINT, true, &mut rig.audio);
+    assert_eq!(g.placed_waypoints().map(|w| w.len()), Some(1));
+    g.waypoint_add(&mut rig.audio);
+    g.action(keys::TOGGLE_WAYPOINT_MODES, true, &mut rig.audio);
+    assert_eq!(
+        g.messages.last().map(|m| m.text.as_str()),
+        Some("Waypoint Mode = Patrol Circular")
+    );
+    g.action(keys::WAYPOINTS, true, &mut rig.audio);
+    assert!(
+        g.plate().is_none(),
+        "the plate stayed up after the waypoint order"
+    );
+    assert!(said(g, event::MOVE), "no ship answered the waypoint move");
+    let u = g.world.universe();
+    let c = u
+        .ship(ships[0])
+        .and_then(|s| s.command)
+        .and_then(|c| u.commands.get(c))
+        .expect("a move command");
+    assert_eq!(c.order, hwc_sim::command::order::MOVE);
+    assert_eq!(c.waypoint_mode, hwc_sim::command::waypoint_mode::LOOP);
+    assert_eq!(c.waypoints.len(), 2);
+    g.action(keys::WAYPOINT_MODE_NORMAL, true, &mut rig.audio);
+    rig.frame(g);
+
+    // Kamikaze: with no ship attacking the first says it has no target.
+    g.selection = ships.clone();
+    g.command(Command::Cancel, &mut rig.audio);
+    rig.frame(g);
+    g.command(Command::Kamikaze, &mut rig.audio);
+    assert!(said(g, event::KAMIKAZE_NO_TARGETS), "no 'no targets' line");
+    rig.frame(g);
+    g.attack(&[enemy]);
+    rig.frame(g);
+    g.command(Command::Kamikaze, &mut rig.audio);
+    assert!(
+        g.world
+            .universe()
+            .speech
+            .iter()
+            .any(|s| s.event == event::KAMIKAZE && s.variable == ty(g, ships[0])),
+        "the kamikaze order was not acknowledged"
+    );
+    for &id in &ships {
+        let s = g.world.universe().ship(id).expect("ship");
+        assert_ne!(
+            s.special_flags & special::KAMIKAZE,
+            0,
+            "{id:?} did not turn kamikaze"
+        );
+    }
+    for _ in 0..16 * 3 {
+        rig.frame(g);
+    }
+    let running = ships.iter().any(|&id| {
+        g.world
+            .universe()
+            .ship(id)
+            .is_some_and(|s| s.kamikaze_state != 0)
+    });
+    assert!(running, "no kamikaze run started");
+    // The first to reach the enemy rams it: it blows up and the carrier takes the damage.
+    let health = g.world.universe().ship(enemy).expect("carrier").health;
+    let mut t = 0;
+    while ships
+        .iter()
+        .all(|&id| g.world.universe().ship(id).is_some())
+    {
+        rig.frame(g);
+        t += 1;
+        assert!(t < 16 * 60, "no kamikaze reached its target");
+    }
+    eprintln!("rammed after {:.1} s", t as f32 / 16.0);
+    let after = g.world.universe().ship(enemy).map_or(0.0, |e| e.health);
+    assert!(
+        after < health,
+        "the rammed carrier took no damage ({health} -> {after})"
+    );
+    // A fresh Acolyte told to kamikaze, then to stop, is a plain fighter again.
+    let spare = {
+        let u = g.world.universe_mut();
+        let p = u.ship(mothership).expect("mothership").posinfo.position
+            + hwc_math::Vector::new(3000.0, 0.0, 0.0);
+        let id =
+            hwc_sim::base::create_ship(u, sAcolyte, 0, p, Default::default()).expect("acolyte");
+        hwc_sim::construction::unit_cap_create_ship(u, id);
+        id
+    };
+    g.selection = vec![spare];
+    g.attack(&[enemy]);
+    rig.frame(g);
+    g.command(Command::Kamikaze, &mut rig.audio);
+    let flags = |g: &Game| g.world.universe().ship(spare).expect("spare").special_flags;
+    assert_ne!(flags(g) & special::KAMIKAZE, 0);
+    g.command(Command::Cancel, &mut rig.audio);
+    rig.frame(g);
+    assert_eq!(
+        flags(g) & special::KAMIKAZE,
+        0,
+        "a halt keeps the kamikaze flag"
+    );
+
+    // Scuttle: the mothership never; a fighter on the second press.
+    g.selection = vec![mothership];
+    g.command(Command::Scuttle, &mut rig.audio);
+    g.command(Command::Scuttle, &mut rig.audio);
+    assert_eq!(
+        g.world
+            .universe()
+            .ship(mothership)
+            .expect("mothership")
+            .death_time,
+        0.0
+    );
+    rig.frame(g);
+    let victim = spare;
+    g.selection = vec![victim];
+    g.command(Command::Scuttle, &mut rig.audio);
+    assert!(
+        said(g, event::SCUTTLE_REQUEST),
+        "fleet command did not ask to confirm"
+    );
+    assert_eq!(
+        g.world.universe().ship(victim).expect("ship").death_time,
+        0.0,
+        "scuttled without confirmation"
+    );
+    rig.frame(g);
+    g.command(Command::Scuttle, &mut rig.audio);
+    assert!(
+        g.world.universe().ship(victim).expect("ship").death_time > 0.0,
+        "the second press did not scuttle"
+    );
+    for _ in 0..16 * 4 {
+        rig.frame(g);
+    }
+    assert!(
+        g.world.universe().ship(victim).is_none(),
+        "the scuttled ship is still there"
+    );
+}

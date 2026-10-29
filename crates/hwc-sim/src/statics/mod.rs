@@ -197,6 +197,8 @@ pub struct StaticWorld {
     /// `unit_caps`).
     pub unit_cap_presets: BTreeMap<u32, UnitCaps>,
     pub team_colors: TeamColors,
+    /// Battle chatter tunables after `BattleChatter.script`.
+    pub battle_chatter: crate::battle_chatter::ChatterTable,
     pub default_lod: Option<Arc<LodInfo>>,
     pub default_mex: Option<Arc<Mex>>,
     /// Problems the original would have reported (or silently tolerated) while loading.
@@ -247,6 +249,7 @@ impl StaticWorld {
             }
         }
         let team_colors = ld.read_script("TeamColors.script").map(|s| TeamColors::parse(&s)).unwrap_or_default();
+        let battle_chatter = crate::battle_chatter::ChatterTable::parse(ld.read_script("BattleChatter.script").as_ref());
 
         StaticWorld {
             options,
@@ -263,6 +266,7 @@ impl StaticWorld {
             unit_caps,
             unit_cap_presets,
             team_colors,
+            battle_chatter,
             default_lod: ld.default_lod.clone(),
             default_mex: ld.default_mex.clone(),
             warnings: ld.warnings,
@@ -320,6 +324,7 @@ pub(crate) fn test_world(list: Vec<ShipStaticInfo>) -> StaticWorld {
         unit_caps: Default::default(),
         unit_cap_presets: std::collections::BTreeMap::new(),
         team_colors: Default::default(),
+        battle_chatter: Default::default(),
         default_lod: None,
         default_mex: None,
         warnings: Vec::new(),

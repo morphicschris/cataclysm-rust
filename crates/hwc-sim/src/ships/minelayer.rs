@@ -219,6 +219,14 @@ fn spec_mut(u: &mut Universe, id: ShipId) -> Option<&mut MinelayerSpec> {
     }
 }
 
+/// `doKamikazeAttack`: a kamikaze minelayer drops attack mines (`mineaistate =
+/// MINE_DROP_ATTACK`).
+pub fn drop_attack_mines(u: &mut Universe, id: ShipId) {
+    if let Some(m) = spec_mut(u, id) {
+        m.mine_ai_state = mine_ai::DROP_ATTACK;
+    }
+}
+
 fn statics_of_type(u: &Universe, t: crate::statics::ShipType) -> Option<&MinelayerStatics> {
     match super::type_statics(u, t) {
         super::TypeStatics::Minelayer(s) => Some(s),

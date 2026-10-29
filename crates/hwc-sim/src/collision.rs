@@ -813,6 +813,29 @@ fn killer_collision(u: &mut Universe, a: ShipId, b: ShipId) {
     crate::effects::killer_collision(u, killer, d);
 }
 
+/// `GenericDefenderKamikazeCollide` (0x5ac4c0): a kamikaze touching its target. Its
+/// `kamikazeCheck` (0x436610) does the kamikaze damage either way round; when it did, the two
+/// bounce (`ObjectsCollided`).
+pub(crate) fn kamikaze_collide(u: &mut Universe, a: ShipId, b: ShipId) {
+    let mut dmg = [0f32; 2];
+    let mut cause = [(crate::damage::how::KILLED_BY_COLLISION, 99i32); 2];
+    let ka = kamikaze_check(u, a, b, &mut dmg, &mut cause, 0);
+    let kb = kamikaze_check(u, b, a, &mut dmg, &mut cause, 1);
+    if !ka && !kb {
+        return;
+    }
+    crate::damage::apply_damage_to_target(u, a, dmg[0], 0, cause[0].0, cause[0].1, Some(b));
+    crate::damage::apply_damage_to_target(u, b, dmg[1], 0, cause[1].0, cause[1].1, Some(a));
+    let (Some(sa), Some(sb)) = (u.ships.get(a), u.ships.get(b)) else { return };
+    let r = |s: &Ship| u.statics.ship(s.ship_type).map_or(0.0, |st_| st_.header.coll.coll_sphere_size);
+    let sum = st(ld(r(sa)) + ld(r(sb)));
+    let (pa, pb) = (sa.coll.coll_position, sb.coll.coll_position);
+    let d = Vector::new(st(ld(pb.x) - ld(pa.x)), st(ld(pb.y) - ld(pa.y)), st(ld(pb.z) - ld(pa.z)));
+    let dsq = st(ld(d.x) * ld(d.x) + ld(d.y) * ld(d.y) + ld(d.z) * ld(d.z));
+    let dist = st(fsqrt(ld(dsq)));
+    response(u, a, b, sum, d, dist);
+}
+
 /// `collCheckRectBumpCollision` for the ship modules.
 pub(crate) fn rect_bump_pub(a: &Ship, astat: &ShipStaticInfo, b: &Ship, bstat: &ShipStaticInfo) -> bool {
     rect_bump(a, astat, b, bstat)

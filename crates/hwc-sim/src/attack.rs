@@ -941,3 +941,188 @@ fn multibeam_fire(u: &mut Universe, id: ShipId, target: ShipId, c: &TypeCombat) 
         u.ships.ship_mut(id).ai_state_attack = 3;
     }
 }
+
+// --- kamikaze
+
+/// `doKamikazeAttack` states (`ship->kamikazeState`).
+pub mod kamikaze {
+    pub const START: i32 = 0;
+    pub const RAM: i32 = 1;
+    pub const RAM2: i32 = 2;
+    pub const TURN_AROUND: i32 = 3;
+    pub const TURN_AROUND2: i32 = 4;
+    pub const YELL: i32 = 5;
+}
+
+/// How far past the target a missed kamikaze turns round (`kamikazeFlyByDist`).
+const KAMIKAZE_FLY_BY_DIST: f32 = 1200.0;
+/// Inside this range the kamikaze yells; inside the next it goes crazy fast.
+const KAMIKAZE_YELL_RANGE: f32 = 400.0;
+const KAMIKAZE_CRAZY_RANGE: f32 = 1500.0;
+/// Inside this range it matches the target's velocity (0x8ba078).
+const KAMIKAZE_MATCH_RANGE: f32 = 800.0;
+
+/// Whether the ship attacks as a kamikaze (`SPECIAL_Kamikaze`): the command layer then calls
+/// [`kamikaze_attack`] in place of the ship's attack routines.
+pub fn is_kamikaze(u: &Universe, id: ShipId) -> bool {
+    u.ships.get(id).is_some_and(|s| s.special_flags & special::KAMIKAZE != 0)
+}
+
+/// `doKamikazeAttack` (0x5ac580), what an attacking ship flagged `SPECIAL_Kamikaze` does in
+/// place of its attack routine: fly flat out at a point 500 m beyond the target, firing on the
+/// way, yell once inside 400 m, go crazy fast inside 1500 m, match the target's velocity
+/// inside 800 m and, touching it, ram it (`GenericDefenderKamikazeCollide`).
+///
+/// As in Cataclysm, the turn-round run is never flown: the start state sets it up and then goes
+/// straight to ramming.
+pub fn kamikaze_attack(u: &mut Universe, id: ShipId, target: ShipId) {
+    let Some(t) = crate::target::get(u, target) else { return };
+    let Some(c) = combat(u, id) else { return };
+    let statics = u.statics.clone();
+    let s = u.ships.ship(id);
+    let Some(stat) = statics.ship(s.ship_type) else { return };
+    let tpos = t.coll.coll_position;
+    let p = s.posinfo.position;
+    let traj = Vector::new(st(ld(tpos.x) - ld(p.x)), st(ld(tpos.y) - ld(p.y)), st(ld(tpos.z) - ld(p.z)));
+    let dist = st(aiship::traj_dist(traj));
+    let mut heading = traj;
+    heading.normalize();
+    let ahead = st(ld(dist) + 500.0);
+    let dest = Vector::new(
+        st(ld(heading.x) * ld(ahead) + ld(tpos.x)),
+        st(ld(heading.y) * ld(ahead) + ld(tpos.y)),
+        st(ld(ahead) * ld(heading.z) + ld(tpos.z)),
+    );
+    let range = st(aiship::range_given_coll(&t.coll_header, ld(dist)));
+    let flags = fly::FIRST_POINT_IN_DIRECTION_FLYING | fly::POINT_IN_DIRECTION_FLYING | fly::FAST_AS_POSSIBLE;
+    let state = s.kamikaze_state;
+    let ship_type = s.ship_type;
+    let set_state = |u: &mut Universe, k: i32| u.ships.ship_mut(id).kamikaze_state = k;
+    let crazy = |u: &mut Universe, on: bool| {
+        let s = u.ships.ship_mut(id);
+        if on {
+            s.special_flags |= special::KAMIKAZE_CRAZY_FAST;
+        } else {
+            s.special_flags &= !special::KAMIKAZE_CRAZY_FAST;
+        }
+    };
+    match state {
+        kamikaze::START => {
+            crazy(u, false);
+            if range < 500.0 {
+                let s = u.ships.ship_mut(id);
+                let h = s.heading();
+                s.kamikaze_vector = Vector::new(
+                    st(ld(h.x) * ld(KAMIKAZE_FLY_BY_DIST) + ld(tpos.x)),
+                    st(ld(h.y) * ld(KAMIKAZE_FLY_BY_DIST) + ld(tpos.y)),
+                    st(ld(h.z) * ld(KAMIKAZE_FLY_BY_DIST) + ld(tpos.z)),
+                );
+            }
+            set_state(u, kamikaze::RAM);
+        }
+        kamikaze::RAM | kamikaze::RAM2 => {
+            if state == kamikaze::RAM && range < KAMIKAZE_YELL_RANGE {
+                set_state(u, kamikaze::YELL);
+            }
+            if ship_type == crate::statics::ShipType::tMinelayerCorvette {
+                crate::ships::minelayer::drop_attack_mines(u, id);
+            }
+            if c.attack == AttackKind::Interceptor {
+                let tac = u.ships.ship(id).tactics;
+                if range < stat.bullet_range[tac] && interceptor_can_fire(u, id, target, &c) {
+                    ship_fire(u, id, target);
+                }
+            } else if !crate::ships::mimic::is_disguised(u, id) {
+                gun::shoot_guns_at_target(u, id, target, range, traj);
+            }
+            aiship::fly_to_point_avoiding_objs(u, id, Some(dest), flags, 0.0, None);
+            crazy(u, range < KAMIKAZE_CRAZY_RANGE);
+            if range < KAMIKAZE_MATCH_RANGE {
+                match_target_velocity(u, id, &t, range);
+            }
+            if range < 1.0 && t.is_ship() {
+                let (Some(a), Some(b)) = (u.ships.get(id), u.ships.get(target)) else { return };
+                let other_blob = a.coll_my_blob != b.coll_my_blob || a.coll_my_blob.is_none() || b.coll_my_blob.is_none();
+                let bstat = statics.ship(b.ship_type);
+                if other_blob && bstat.is_some_and(|bs| crate::collision::rect_bump_pub(a, stat, b, bs)) {
+                    crate::collision::kamikaze_collide(u, id, target);
+                }
+            }
+        }
+        kamikaze::TURN_AROUND => {
+            crazy(u, false);
+            let v = u.ships.ship(id).kamikaze_vector;
+            aiship::fly_to_point_avoiding_objs(u, id, Some(v), flags, 0.0, None);
+            if aitrack::move_reached_destination(u.ships.ship(id), v, 300.0) {
+                set_state(u, kamikaze::TURN_AROUND2);
+            }
+        }
+        kamikaze::TURN_AROUND2 => {
+            crazy(u, false);
+            let acc = f32::from_bits(0x3f66_6666);
+            if self::heading(u, id, &mut heading, acc, 0.0, aitrack::IGNORE_UP_VEC) {
+                set_state(u, kamikaze::RAM);
+            }
+        }
+        kamikaze::YELL => {
+            crate::battle_chatter::attempt(u, crate::battle_chatter::bce::KAMIKAZE, id, -1);
+            set_state(u, kamikaze::RAM2);
+        }
+        _ => {}
+    }
+}
+
+/// `GenericDefenderMatchTargetVelocity` (0x5ac220) as `doKamikazeAttack` uses it: a kamikaze
+/// at least as fast as its (ship) target heads straight at it, either at its own speed (at
+/// least 200, x1.3 below top speed) or, inside 200 m of a small target, closing the gap in a
+/// frame on top of the target's velocity; and it turns a little towards it.
+fn match_target_velocity(u: &mut Universe, id: ShipId, t: &Target, range: f32) {
+    if !t.is_ship() || t.flags & crate::object::sof::NO_BUMPS != 0 {
+        return;
+    }
+    let Some(ts) = u.ships.get(t.id) else { return };
+    if ts.flags2 & crate::object::flags2::INVULNERABLE != 0 {
+        return;
+    }
+    let statics = u.statics.clone();
+    let s = u.ships.ship(id);
+    let (Some(stat), Some(tstat)) = (statics.ship(s.ship_type), statics.ship(ts.ship_type)) else { return };
+    let top = |x: &crate::object::Ship, xs: &crate::statics::ShipStaticInfo| {
+        let mult = st(crate::tactics::speed_multiplier(x, xs));
+        let vmax = st(crate::tactics::ships_max_velocity(x, xs, u.max_velocity_context(x)));
+        (vmax, mult)
+    };
+    let (mv, mm) = top(s, stat);
+    let (tv, tm) = top(ts, tstat);
+    if ld(st(ld(mv) * ld(mm))) < ld(tv) * ld(tm) {
+        return;
+    }
+    let tpos = t.coll.coll_position;
+    let tvel = t.posinfo.velocity;
+    let mpos = s.posinfo.position;
+    let speed = aiship::traj_dist(s.posinfo.velocity);
+    let mut dir = Vector::new(st(ld(tpos.x) - ld(mpos.x)), st(ld(tpos.y) - ld(mpos.y)), st(ld(tpos.z) - ld(mpos.z)));
+    dir.normalize();
+    let vel = if 200.0 <= range || range <= 0.0 || 50.0 <= t.coll_header.coll_sphere_size {
+        let mut spd = st(speed);
+        if spd < 200.0 {
+            spd = 200.0;
+        }
+        if ld(spd) < ld(mv) * ld(mm) {
+            spd = st(ld(f32::from_bits(0x3fa6_6666)) * ld(spd));
+        }
+        Vector::new(st(ld(dir.x) * ld(spd)), st(ld(dir.y) * ld(spd)), st(ld(dir.z) * ld(spd)))
+    } else {
+        let dt = u.phys_time_elapsed;
+        let mut closing: Ext = 100.0;
+        if dt > 0.0 {
+            let c = Vector::distance_ext(mpos, tpos) / ld(dt);
+            if c >= 100.0 {
+                closing = c;
+            }
+        }
+        Vector::new(st(ld(dir.x) * closing + ld(tvel.x)), st(ld(dir.y) * closing + ld(tvel.y)), st(closing * ld(dir.z) + ld(tvel.z)))
+    };
+    u.ships.ship_mut(id).posinfo.velocity = vel;
+    crate::ships::ramming::blend_heading_default(u, id, dir);
+}
