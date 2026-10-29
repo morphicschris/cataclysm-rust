@@ -1126,28 +1126,49 @@ fn camera_focus_zoom_and_draw_distance() {
         seen.push(drawn);
     }
     assert_eq!(seen[0], seen[1], "drawn {seen:?} head-on / near the corner");
-    // `--draw-distance far`: drawn within the far clip distance of the eye, by radial distance.
-    g.world.render_list = false;
-    for dir in [
-        along,
-        along * turn.cos() + (-side - up).normalize() * turn.sin(),
-    ] {
-        let eye = centre - dir * 14500.0;
-        g.world.camera.set_eye_look_up(eye, centre, None);
-        let drawn = g
-            .world
-            .frame((SIZE.0 as u32, SIZE.1 as u32))
-            .ship_levels()
-            .iter()
-            .any(|&(id, _)| id == far);
+    // `--draw-distance far`: beyond the render list, drawn within the far clip distance of the
+    // eye (by radial distance) only where the player's ships see it, so the far view shows
+    // nothing the sensors have not revealed. The enemy goes out along the view line.
+    // The far clip opened out so the walk leaves what the fleet sees.
+    let eye = centre - along * 14500.0;
+    g.world.camera.set_eye_look_up(eye, centre, None);
+    let clip_far = g.world.camera.tweaks.clip_far;
+    g.world.camera.tweaks.clip_far = 150_000.0;
+    let (mut seen_drawn, mut hidden_skipped) = (0, 0);
+    for step in 0..40 {
+        let target = centre + along * (4000.0 + 3000.0 * step as f32);
         let reach = (target - eye).length();
-        assert_eq!(
-            drawn,
-            reach < g.world.camera.tweaks.clip_far,
-            "far mode at {reach}"
-        );
+        if reach >= g.world.camera.tweaks.clip_far {
+            break;
+        }
+        {
+            let s = g.world.universe_mut().ships.ship_mut(far);
+            s.posinfo.position = hwc_math::Vector::new(target.x, target.y, target.z);
+        }
+        let drawn_with = |g: &mut Game, render_list: bool| {
+            g.world.render_list = render_list;
+            g.world
+                .frame((SIZE.0 as u32, SIZE.1 as u32))
+                .ship_levels()
+                .iter()
+                .any(|&(id, _)| id == far)
+        };
+        let listed = drawn_with(g, true);
+        let drawn = drawn_with(g, false);
+        let u = g.world.universe();
+        let visible = crate::sensors::ship_visible(u, &crate::sensors::Fog::of(u), far);
+        if visible {
+            assert!(drawn, "far mode: a seen ship at {reach:.0} is not drawn");
+            seen_drawn += 1;
+        } else if !listed {
+            assert!(!drawn, "far mode: an unseen ship at {reach:.0} is drawn");
+            hidden_skipped += 1;
+        }
     }
+    eprintln!("far mode: {seen_drawn} seen and drawn, {hidden_skipped} unseen and hidden");
+    assert!(seen_drawn > 0 && hidden_skipped > 0, "the walk out did not cover both");
     g.world.render_list = true;
+    g.world.camera.tweaks.clip_far = clip_far;
     let _ = std::fs::remove_file(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/game-campaign/x.png"),
     );

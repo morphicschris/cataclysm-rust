@@ -1563,43 +1563,63 @@ impl World {
         self.camera.ease_zoom(dt, min_zoom);
     }
 
-    /// Whether a ship is drawn by the render list (or, with it off, within the far clip
-    /// distance of the eye).
+    /// Whether a ship is drawn: by the render list, or, with it off, also beyond it within
+    /// the far clip distance of the eye when the local player's sensors see it now (the
+    /// sensors manager's fog test). The original only draws its render list, around the
+    /// look-at point the player's own ships see, so the far view keeps to what they see.
     fn ship_in_view(&self, s: &hwc_sim::object::Ship, position: Vec3) -> bool {
         // The sensors manager draws its ships its own way, from its own camera.
         if self.sensors_open {
             return true;
         }
         let eye = self.camera.eye();
-        if !self.render_list {
-            return (position - eye).length() < self.camera.tweaks.clip_far;
-        }
-        let Some(st) = self.universe().statics.ship(s.ship_type) else {
-            return true;
+        let u = self.universe();
+        let listed = match u.statics.ship(s.ship_type) {
+            Some(st) => {
+                let to_look = (position - self.camera.look_at).length_squared();
+                let to_eye = (position - eye).length_squared();
+                self.render_limits.ship_drawn(
+                    st.ship_class,
+                    s.ship_type,
+                    st.renderlist_fade,
+                    st.renderlist_limit_sqr,
+                    to_look,
+                    to_look.min(to_eye),
+                )
+            }
+            None => true,
         };
-        let to_look = (position - self.camera.look_at).length_squared();
-        let to_eye = (position - eye).length_squared();
-        self.render_limits.ship_drawn(
-            st.ship_class,
-            s.ship_type,
-            st.renderlist_fade,
-            st.renderlist_limit_sqr,
-            to_look,
-            to_look.min(to_eye),
-        )
+        if self.render_list || listed {
+            return listed;
+        }
+        (position - eye).length() < self.camera.tweaks.clip_far
+            && crate::sensors::ship_visible(u, &crate::sensors::Fog::of(u), s.id)
     }
 
     /// Whether an effect, bullet or asteroid at `position` is drawn (see
-    /// [`ship_in_view`](Self::ship_in_view)).
+    /// [`ship_in_view`](Self::ship_in_view)): beyond the render list, the far view draws
+    /// asteroids where the player has explored (as the sensors manager draws resources) and
+    /// everything else where its ships see now.
     fn object_in_view(&self, position: Vec3, big: bool) -> bool {
+        self.object_drawn(position, big, false)
+    }
+
+    fn object_drawn(&self, position: Vec3, big: bool, asteroid: bool) -> bool {
         if self.sensors_open {
-            true
-        } else if self.render_list {
-            self.render_limits
-                .object_listed((position - self.camera.look_at).length_squared(), big)
-        } else {
-            (position - self.camera.eye()).length() < self.camera.tweaks.clip_far
+            return true;
         }
+        let listed = self
+            .render_limits
+            .object_listed((position - self.camera.look_at).length_squared(), big);
+        if self.render_list || listed {
+            return listed;
+        }
+        (position - self.camera.eye()).length() < self.camera.tweaks.clip_far
+            && far_seen(
+                &crate::sensors::Fog::of(self.universe()),
+                position,
+                asteroid,
+            )
     }
 
     /// Keeps the camera on the focused ships.
@@ -1877,7 +1897,7 @@ impl World {
                 continue;
             };
             if r.flags & hwc_sim::object::sof::HIDE != 0
-                || !self.object_in_view(v3(r.position), false)
+                || !self.object_drawn(v3(r.position), false, true)
             {
                 continue;
             }
@@ -1997,23 +2017,7 @@ impl World {
         }
         if self.effects_on {
             // Effects are objects of the render list too.
-            let (sensors, render_list, limits, look_at, eye, far) = (
-                self.sensors_open,
-                self.render_list,
-                self.render_limits,
-                self.camera.look_at,
-                self.camera.eye(),
-                self.camera.tweaks.clip_far,
-            );
-            retain_fx_systems(&mut frame.fx_list, |p| {
-                if sensors {
-                    true
-                } else if render_list {
-                    limits.object_listed((p - look_at).length_squared(), false)
-                } else {
-                    (p - eye).length() < far
-                }
-            });
+            retain_fx_systems(&mut frame.fx_list, |p| self.object_in_view(p, false));
         }
         // Nothing unbounded goes to the GPU; the counts go to the crash log's history.
         let mut stats = crate::draw_check::Stats::default();
@@ -2765,6 +2769,19 @@ impl RenderLimits {
 
 /// Keeps the particle systems of an effect list whose first primitive `keep` accepts (whole
 /// systems, so a cut never splits one), in their draw order.
+/// Whether the far view draws an object beyond the render list at `p`: where the local
+/// player's ships see now, or, for an asteroid, where they have explored. With no fog grid
+/// (fog off, or a cutscene level) nothing is hidden.
+fn far_seen(fog: &crate::sensors::Fog, p: Vec3, asteroid: bool) -> bool {
+    let p = hwc_math::Vector::new(p.x, p.y, p.z);
+    fog.grid.is_none()
+        || if asteroid {
+            fog.explored(p)
+        } else {
+            fog.seen(p)
+        }
+}
+
 fn retain_fx_systems(list: &mut hwc_fx::RenderList, keep: impl Fn(Vec3) -> bool) {
     use hwc_fx::render::PrimKind;
     let order = list.draw_order();
