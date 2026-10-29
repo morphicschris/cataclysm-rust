@@ -113,7 +113,7 @@ const REF_LINES: f32 = 1080.0;
 /// Never smaller than this scale unless the window is (then it fits the window).
 pub const MIN_SCALE: f32 = 0.8;
 /// Space kept around the panel when it has to fit the window.
-const FIT_MARGIN: f32 = 8.0;
+pub const FIT_MARGIN: f32 = 8.0;
 
 pub const PAD: f32 = 24.0;
 pub const HEADER_H: f32 = 56.0;

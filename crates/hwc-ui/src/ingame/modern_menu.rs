@@ -220,6 +220,9 @@ pub struct Model {
     pub sections: Vec<String>,
     /// The controls: the body in its order (sections together), then the footer.
     pub items: Vec<Item>,
+    /// How far a form's body is scrolled, in reference pixels (a form taller than the
+    /// canvas scrolls between its header and footer).
+    pub scroll: f32,
 }
 
 impl Model {
@@ -243,10 +246,12 @@ impl Model {
 
 /// The modern screen up now: the modern options over the hub, else the screen on top.
 pub fn model(fe: &Fe) -> Option<Model> {
-    if let Some(page) = &fe.game.ig.mmenu.page {
-        return Some(mo::model(fe, page));
-    }
-    fe.current_screen().map(|s| screen_model(fe, s))
+    let mut m = match &fe.game.ig.mmenu.page {
+        Some(page) => mo::model(fe, page),
+        None => screen_model(fe, fe.current_screen()?),
+    };
+    m.scroll = fe.game.ig.mmenu.scroll;
+    Some(m)
 }
 
 /// A pop-up's screen below it, which is drawn too.
@@ -912,6 +917,7 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
         messages,
         sections,
         items,
+        scroll: 0.0,
     }
 }
 
@@ -1007,6 +1013,50 @@ pub struct Layout {
     pub headings: Vec<(usize, Rect)>,
     /// A confirmation's lines.
     pub messages: Vec<Rect>,
+    /// A form too tall for the canvas: its body scrolls.
+    pub body: Option<BodyScroll>,
+}
+
+/// A form's scrolling body: the rows move under a window between the header and the
+/// footer, with a scroll bar along the panel's right edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BodyScroll {
+    /// The window the rows show through (they are drawn and hit only inside it).
+    pub view: Rect,
+    pub track: Rect,
+    /// The body's whole height and the window's, in reference pixels.
+    pub content: f32,
+    pub visible: f32,
+    /// How far it is scrolled (clamped), in reference pixels.
+    pub offset: f32,
+}
+
+impl BodyScroll {
+    /// The furthest it scrolls.
+    pub fn max_offset(&self) -> f32 {
+        (self.content - self.visible).max(0.0)
+    }
+
+    pub fn thumb(&self, f: &Frame) -> Option<Rect> {
+        mm::thumb(
+            self.track,
+            self.visible.round() as usize,
+            self.content.round() as usize,
+            self.offset.round() as usize,
+            f.px(32.0),
+        )
+    }
+
+    /// The offset that puts the thumb's top at `y`.
+    pub fn offset_for_thumb(&self, f: &Frame, y: i32) -> f32 {
+        mm::top_for_thumb(
+            self.track,
+            self.visible.round() as usize,
+            self.content.round() as usize,
+            y,
+            f.px(32.0),
+        ) as f32
+    }
 }
 
 impl Layout {
@@ -1194,6 +1244,7 @@ fn menu_layout(m: &Model, width: i32, height: i32) -> Layout {
         placed,
         headings: Vec::new(),
         messages,
+        body: None,
     }
 }
 
@@ -1303,15 +1354,40 @@ fn form_layout(m: &Model, width: i32, height: i32) -> Layout {
     let col_h = |range: std::ops::Range<usize>| hs[range].iter().sum::<f32>();
     let body_h = col_h(0..split).max(col_h(split..sections.len()));
     let has_footer = m.items.iter().any(|i| i.footer);
-    let ref_h = (BODY_Y + body_h + if has_footer { FOOTER_SPACE } else { PAD }).max(260.0);
+    let below = if has_footer { FOOTER_SPACE } else { PAD };
+    let ref_h = (BODY_Y + body_h + below).max(260.0);
+    // Too tall for the canvas at its own scale: rather than shrink it all, the panel takes
+    // the canvas's height and its body scrolls.
+    let natural = mm::scale_sized(width, height, ref_w, 1.0, 0);
+    let room = ((height as f32 - mm::FIT_MARGIN) / natural).floor() - 1.0;
+    let visible = room - BODY_Y - below;
+    let scrolls = !wide && ref_h > room && visible >= 160.0;
+    let ref_h = if scrolls { room } else { ref_h };
     let frame = Frame::sized(width, height, ref_w, ref_h, 0, has_footer);
+    let body = scrolls.then(|| {
+        let mut b = BodyScroll {
+            view: Rect::new(
+                frame.panel.x0,
+                frame.panel.y0 + frame.px(HEADER_H + 2.0),
+                frame.panel.x1,
+                frame.panel.y0 + frame.px(BODY_Y + visible),
+            ),
+            track: frame.at(ref_w - PAD / 2.0 - 1.5, BODY_Y + 4.0, 3.0, visible - 8.0),
+            content: body_h,
+            visible,
+            offset: 0.0,
+        };
+        b.offset = m.scroll.clamp(0.0, b.max_offset()).round();
+        b
+    });
+    let scroll = body.map_or(0.0, |b| b.offset);
     let mut placed = vec![Placed::default(); m.items.len()];
     let mut headings = Vec::new();
     for (k, lines) in sections.iter().enumerate() {
         let col = usize::from(k >= split);
         let x = PAD + col as f32 * (col_w + COL_GAP);
         let start = if col == 0 { 0 } else { split };
-        let mut y = BODY_Y + col_h(start..k);
+        let mut y = BODY_Y + col_h(start..k) - scroll;
         for line in lines {
             let h = line_height(m, line, col_w);
             let row = frame.at(x, y, col_w, h);
@@ -1368,6 +1444,7 @@ fn form_layout(m: &Model, width: i32, height: i32) -> Layout {
         placed,
         headings,
         messages: Vec::new(),
+        body,
     }
 }
 
@@ -1497,6 +1574,9 @@ pub enum Hit {
     Thumb(usize),
     /// A list's scroll track above (true) or below its thumb.
     Track(usize, bool),
+    /// A scrolling form's thumb, and its track above (true) or below it.
+    BodyThumb,
+    BodyTrack(bool),
     Panel,
     Outside,
 }
@@ -1522,7 +1602,27 @@ pub fn hit(m: &Model, l: &Layout, open: Option<usize>, canvas_h: i32, x: i32, y:
             }
         }
     }
+    if let Some(b) = &l.body {
+        let grip = Rect::new(
+            b.track.x0 - l.px(7.0),
+            b.track.y0,
+            b.track.x1 + l.px(7.0),
+            b.track.y1,
+        );
+        if grip.contains(x, y) {
+            if let Some(th) = b.thumb(&l.frame) {
+                if (th.y0..th.y1).contains(&y) {
+                    return Hit::BodyThumb;
+                }
+                return Hit::BodyTrack(y < th.y0);
+            }
+        }
+    }
     for (i, (it, p)) in m.items.iter().zip(&l.placed).enumerate() {
+        // A scrolling body's rows answer only inside its window.
+        if !it.footer && l.body.is_some_and(|b| !b.view.contains(x, y)) {
+            continue;
+        }
         match &it.kind {
             Kind::Button { .. } | Kind::Entry { .. } if p.control.contains(x, y) => {
                 return Hit::Item(i)
@@ -1670,6 +1770,10 @@ pub struct State {
     drag: Option<(usize, i32)>,
     /// Dragging one of the modern options' sliders (an item).
     slide: Option<usize>,
+    /// How far a tall form's body is scrolled (reference pixels), and dragging its thumb
+    /// (the pointer's offset from the thumb's top).
+    pub scroll: f32,
+    body_drag: Option<i32>,
     /// The modern options, over the options hub.
     pub page: Option<mo::Page>,
     /// Escape left a text entry: it goes on to the screen's back button next frame.
@@ -1720,6 +1824,9 @@ pub fn mouse_move(fe: &mut Fe, x: i32, y: i32) {
     if let Some(i) = fe.game.ig.mmenu.slide {
         mo::slide(fe, &m, &l, i, x);
     }
+    if let (Some(grab), Some(b)) = (fe.game.ig.mmenu.body_drag, l.body) {
+        fe.game.ig.mmenu.scroll = b.offset_for_thumb(&l.frame, y - grab);
+    }
     let at = hit_now(fe, &m, &l);
     let t = under(fe, &m, &l, at);
     let mut proxy = fe.game.ig.mmenu.proxy;
@@ -1762,7 +1869,7 @@ fn local(m: &Model, l: &Layout, at: Hit) -> bool {
         Hit::Part(i, _) | Hit::Choice(i, _) => {
             matches!(&m.items[i].kind, Kind::Choice { sources, .. } if sources.iter().any(|s| matches!(s, Source::Option(_))))
         }
-        Hit::Thumb(_) | Hit::Track(..) => true,
+        Hit::Thumb(_) | Hit::Track(..) | Hit::BodyThumb | Hit::BodyTrack(_) => true,
         _ => false,
     }
 }
@@ -1802,6 +1909,15 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool) {
                         }
                     }
                 }
+                Hit::BodyThumb => {
+                    if let Some(th) = l.body.and_then(|b| b.thumb(&l.frame)) {
+                        fe.game.ig.mmenu.body_drag = Some(pos.1 - th.y0);
+                    }
+                }
+                Hit::BodyTrack(up) => {
+                    page_body(fe, !up);
+                    fe.ui_sound(sound::CLICK);
+                }
                 Hit::Track(i, up) => {
                     // The original's scroll bar: a press on the track pages, with a click.
                     if let Kind::List { page, .. } = &m.items[i].kind {
@@ -1831,6 +1947,7 @@ pub fn mouse_button(fe: &mut Fe, left: bool, down: bool) {
     let pressed = fe.game.ig.mmenu.pressed.take();
     fe.game.ig.mmenu.drag = None;
     fe.game.ig.mmenu.slide = None;
+    fe.game.ig.mmenu.body_drag = None;
     if fe.game.ig.mmenu.proxy.holding() {
         let t = under(fe, &m, &l, at);
         let mut proxy = fe.game.ig.mmenu.proxy;
@@ -1857,7 +1974,8 @@ pub(crate) fn start_slide(fe: &mut Fe, i: usize) {
     fe.game.ig.mmenu.slide = Some(i);
 }
 
-/// The wheel: three rows over a list (the original list's own step).
+/// The wheel: three rows over a list (the original list's own step); anywhere else on a
+/// scrolling form, three rows of its body.
 pub fn wheel(fe: &mut Fe, up: bool) {
     let Some((m, l)) = current(fe) else { return };
     let (x, y) = fe.game.ig.mmenu.mouse;
@@ -1869,10 +1987,54 @@ pub fn wheel(fe: &mut Fe, up: bool) {
                 p.track.map_or(p.control.x1, |t| t.x1 + l.px(6.0)),
                 p.control.y1,
             );
-            if zone.contains(x, y) {
+            if zone.contains(x, y) && l.body.is_none_or(|b| b.view.contains(x, y)) {
                 scroll_list(fe, &m, i, ScrollTo::Wheel(up));
+                return;
             }
         }
+    }
+    if l.body.is_some() {
+        let d = 3.0 * ROW_H;
+        scroll_body(fe, &l, if up { -d } else { d });
+    }
+}
+
+/// Scrolls a tall form's body by `d` reference pixels (an open drop-down closes).
+fn scroll_body(fe: &mut Fe, l: &Layout, d: f32) {
+    let Some(b) = l.body else { return };
+    let to = (b.offset + d).clamp(0.0, b.max_offset());
+    if to != b.offset {
+        fe.game.ig.mmenu.scroll = to;
+        fe.game.ig.mmenu.dropdown = None;
+    }
+}
+
+/// Scrolls a tall form's body by a page (Page Up / Page Down, a press on its track).
+pub(crate) fn page_body(fe: &mut Fe, down: bool) {
+    let Some((_, l)) = current(fe) else { return };
+    if let Some(b) = l.body {
+        let page = (b.visible - ROW_H).max(ROW_H);
+        scroll_body(fe, &l, if down { page } else { -page });
+    }
+}
+
+/// Scrolls a tall form's body just enough to show item `i` (the keyboard's focus).
+pub(crate) fn reveal(fe: &mut Fe, i: usize) {
+    let Some((m, l)) = current(fe) else { return };
+    let (Some(b), Some(p), Some(it)) = (l.body, l.placed.get(i), m.items.get(i)) else {
+        return;
+    };
+    if it.footer {
+        return;
+    }
+    let s = l.frame.scale;
+    let margin = l.px(8.0);
+    let above = (b.view.y0 + margin - p.row.y0) as f32 / s;
+    let below = (p.row.y1 + margin - b.view.y1) as f32 / s;
+    if above > 0.0 {
+        scroll_body(fe, &l, -above.ceil());
+    } else if below > 0.0 {
+        scroll_body(fe, &l, below.ceil());
     }
 }
 
@@ -1939,6 +2101,8 @@ pub fn tick(fe: &mut Fe) {
         st.dropdown = None;
         st.drag = None;
         st.slide = None;
+        st.scroll = 0.0;
+        st.body_drag = None;
         if !st.proxy.holding() {
             st.pressed = None;
         }
@@ -1974,7 +2138,7 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
     let hot = |at: Hit| -> bool {
         match at {
             Hit::Item(i) | Hit::Part(i, _) | Hit::Choice(i, _) => !m.items[i].disabled,
-            Hit::Thumb(_) => true,
+            Hit::Thumb(_) | Hit::BodyThumb => true,
             _ => false,
         }
     };
@@ -1988,6 +2152,9 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
     }
     if let Some((i, _)) = fe.game.ig.mmenu.drag {
         targets.push((Key::Hit(Hit::Thumb(i)), 1.0));
+    }
+    if fe.game.ig.mmenu.body_drag.is_some() {
+        targets.push((Key::Hit(Hit::BodyThumb), 1.0));
     }
     if let Some(i) = fe.game.ig.mmenu.slide {
         targets.push((Key::Hit(Hit::Item(i)), 1.0));
@@ -2033,6 +2200,11 @@ fn draw_model(fe: &Fe, canvas: &mut Canvas, pen: &Pen, m: &Model, l: &Layout, li
             &m.messages[k],
         );
     }
+    // A scrolling body is drawn through its window, with its scroll bar beside it.
+    let clip = canvas.clip();
+    if let Some(b) = &l.body {
+        canvas.set_clip(Some(b.view));
+    }
     for &(s, r) in &l.headings {
         section_heading(
             canvas,
@@ -2044,7 +2216,21 @@ fn draw_model(fe: &Fe, canvas: &mut Canvas, pen: &Pen, m: &Model, l: &Layout, li
             &m.sections[s],
         );
     }
-    for i in 0..m.items.len() {
+    for i in (0..m.items.len()).filter(|&i| !m.items[i].footer) {
+        draw_item(fe, canvas, pen, m, l, i, live);
+    }
+    canvas.set_clip(Some(clip));
+    if let Some(b) = &l.body {
+        if let Some(th) = b.thumb(f) {
+            let hv = if live {
+                eased(fe, Key::Hit(Hit::BodyThumb))
+            } else {
+                0.0
+            };
+            draw_scroll(canvas, b.track, th, hv);
+        }
+    }
+    for i in (0..m.items.len()).filter(|&i| m.items[i].footer) {
         draw_item(fe, canvas, pen, m, l, i, live);
     }
 }
@@ -2661,6 +2847,7 @@ mod tests {
                 .enumerate()
                 .map(|(k, l)| item(button(l, k == 4), l, 0, false))
                 .collect(),
+            scroll: 0.0,
         }
     }
 
@@ -2741,6 +2928,7 @@ mod tests {
             messages: Vec::new(),
             sections,
             items,
+            scroll: 0.0,
         }
     }
 
@@ -2796,15 +2984,30 @@ mod tests {
                 let l = layout(&m, w, h);
                 let panel = l.frame.panel;
                 assert!(panel.x0 >= 0 && panel.x1 <= w && panel.y0 >= 0 && panel.y1 <= h);
-                let rects: Vec<Rect> = l.placed.iter().map(|p| p.row).collect();
-                for (a, r) in rects.iter().enumerate() {
-                    assert!(
-                        inside(panel, *r),
-                        "{rows} rows {w}x{h}: {r:?} outside {panel:?}"
-                    );
-                    for b in rects.iter().skip(a + 1) {
-                        assert!(!overlap(*r, *b), "{rows} rows {w}x{h}: {r:?} and {b:?}");
+                // A scrolling body's rows reach past the panel, under its window; they
+                // must not overlap one another, and the footer's must not either.
+                let scrolled = |footer: bool| l.body.is_some() && !footer;
+                for part in [false, true] {
+                    let rects: Vec<Rect> = m
+                        .items
+                        .iter()
+                        .zip(&l.placed)
+                        .filter(|(i, _)| l.body.is_none() || i.footer == part)
+                        .map(|(_, p)| p.row)
+                        .collect();
+                    for (a, r) in rects.iter().enumerate() {
+                        assert!(
+                            scrolled(part) || inside(panel, *r),
+                            "{rows} rows {w}x{h}: {r:?} outside {panel:?}"
+                        );
+                        for b in rects.iter().skip(a + 1) {
+                            assert!(!overlap(*r, *b), "{rows} rows {w}x{h}: {r:?} and {b:?}");
+                        }
                     }
+                }
+                if let Some(b) = &l.body {
+                    assert!(inside(panel, b.view) && b.view.y1 <= l.frame.footer_line);
+                    continue;
                 }
                 for p in &l.placed {
                     assert!(inside(p.row, p.control) || p.row == p.control, "{p:?}");
@@ -2828,6 +3031,53 @@ mod tests {
         assert_eq!(xs.len(), 2, "two columns");
         let short = layout(&form(3), 1920, 1080);
         assert!(short.frame.panel.width() < long.frame.panel.width());
+    }
+
+    #[test]
+    fn a_form_taller_than_the_window_scrolls_at_its_own_scale() {
+        let mut m = form(60);
+        for (w, h) in [(1920, 1080), (1024, 768), (640, 480)] {
+            m.scroll = 0.0;
+            let l = layout(&m, w, h);
+            let b = l.body.expect("a scrolling body");
+            assert!(l.frame.scale >= 0.6, "not shrunk to fit: {w}x{h}");
+            assert!(l.frame.panel.y1 <= h);
+            let top = l.placed[0].row;
+            assert!(b.view.contains(top.x0, top.y0));
+            // The thumb at the top; the track under it pages down.
+            let th = b.thumb(&l.frame).expect("a thumb");
+            assert_eq!(th.y0, b.track.y0);
+            assert_eq!(hit(&m, &l, None, h, th.x0 + 1, th.y0 + 2), Hit::BodyThumb);
+            assert_eq!(
+                hit(&m, &l, None, h, th.x0 + 1, th.y1 + 4),
+                Hit::BodyTrack(false)
+            );
+            // A row below the window is not hit there; scrolled to the end, the last row
+            // shows and the first is gone.
+            let last = m.items.iter().rposition(|i| !i.footer).unwrap();
+            let r = l.placed[last].row;
+            assert!(r.y0 >= b.view.y1);
+            m.scroll = 1e6;
+            let l = layout(&m, w, h);
+            let b = l.body.unwrap();
+            assert_eq!(b.offset, b.max_offset());
+            let r = l.placed[last].row;
+            assert!(r.y1 <= b.view.y1 && r.y0 >= b.view.y0, "{w}x{h}");
+            assert_eq!(
+                hit(&m, &l, None, h, r.x0 + 20, (r.y0 + r.y1) / 2),
+                Hit::Item(last)
+            );
+            let r = l.placed[0].row;
+            assert_ne!(
+                hit(&m, &l, None, h, r.x0 + 20, (r.y0 + r.y1) / 2),
+                Hit::Item(0)
+            );
+            // The footer stays put.
+            let a = m.find("ACCEPT!").unwrap();
+            assert_eq!(l.placed[a].control, l.frame.footer_button(0));
+        }
+        // One that fits does not scroll.
+        assert!(layout(&form(3), 1024, 768).body.is_none());
     }
 
     #[test]

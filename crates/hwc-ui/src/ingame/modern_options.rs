@@ -68,7 +68,15 @@ const fn entry(key: &'static str, label: &'static str, section: usize, control: 
     }
 }
 
-pub const SECTIONS: [&str; 4] = ["DISPLAY", "CAMERA", "CONTROLS", "INTERFACE"];
+pub const SECTIONS: [&str; 7] = [
+    "DISPLAY",
+    "SHIPS AND LIGHTING",
+    "EFFECTS",
+    "CAMERA",
+    "CONTROLS",
+    "INTERFACE",
+    "SPEECH",
+];
 
 /// The resolution entry's key (not an options key: it stands for `screenWidth`,
 /// `screenHeight` and [`display::REFRESH_KEY`]).
@@ -107,117 +115,125 @@ pub const ENTRIES: &[Entry] = &[
         0,
         Control::Toggle,
     ),
-    entry("hwcShipLook", "MODERN SHIP LIGHTING AND TEXTURES", 0, Control::Toggle),
-    entry("hwcSkyLight", "SHIPS LIT BY THE NEBULA COLOURS", 0, Control::Toggle),
-    entry("hwcAmbientOcclusion", "AMBIENT OCCLUSION", 0, Control::Toggle),
-    entry("hwcShadows", "SHIP SHADOWS", 0, Control::Toggle),
-    entry("hwcToneMap", "TONE MAPPING AND DITHERING", 0, Control::Toggle),
-    entry("hwcBloom", "BLOOM", 0, Control::Toggle),
-    entry("hwcHeatHaze", "HEAT HAZE", 0, Control::Toggle),
     entry(
-        "hwcRemasteredFx",
-        "REMASTERED EXPLOSIONS AND TRAILS",
-        0,
+        "hwcShipLook",
+        "MODERN SHIP LIGHTING AND TEXTURES",
+        1,
         Control::Toggle,
     ),
     entry(
-        "hwcSmoothTrails",
-        "SMOOTH ENGINE TRAILS",
-        0,
+        "hwcSkyLight",
+        "SHIPS LIT BY THE NEBULA COLOURS",
+        1,
         Control::Toggle,
     ),
     entry(
-        "hwcGlowsInProportion",
-        "ENGINE GLOWS SIZED TO THE SHIP",
-        0,
+        "hwcAmbientOcclusion",
+        "AMBIENT OCCLUSION",
+        1,
         Control::Toggle,
     ),
+    entry("hwcShadows", "SHIP SHADOWS", 1, Control::Toggle),
+    entry(
+        "hwcToneMap",
+        "TONE MAPPING AND DITHERING",
+        1,
+        Control::Toggle,
+    ),
+    entry("hwcBloom", "BLOOM", 1, Control::Toggle),
     entry(
         "hwcFullDetailShips",
         "FULL-DETAIL SHIPS AT ANY DISTANCE",
         1,
         Control::Toggle,
     ),
+    entry("hwcHeatHaze", "HEAT HAZE", 2, Control::Toggle),
+    entry(
+        "hwcRemasteredFx",
+        "REMASTERED EXPLOSIONS AND TRAILS",
+        2,
+        Control::Toggle,
+    ),
+    entry(
+        "hwcSmoothTrails",
+        "SMOOTH ENGINE TRAILS",
+        2,
+        Control::Toggle,
+    ),
+    entry(
+        "hwcGlowsInProportion",
+        "ENGINE GLOWS SIZED TO THE SHIP",
+        2,
+        Control::Toggle,
+    ),
     entry(
         "hwcRenderList",
         "DRAW DISTANCE",
-        1,
+        3,
         Control::Choice(&[("ORIGINAL", 1), ("FAR", 0)]),
     ),
-    entry("hwcSmoothZoom", "SMOOTH WHEEL ZOOM", 1, Control::Toggle),
-    entry("hwcFocusZoom", "FOCUS AGAIN ZOOMS IN", 1, Control::Toggle),
+    entry("hwcSmoothZoom", "SMOOTH WHEEL ZOOM", 3, Control::Toggle),
+    entry("hwcFocusZoom", "FOCUS AGAIN ZOOMS IN", 3, Control::Toggle),
     entry(
         "hwcAltFocusKeepsZoom",
         "ALT FOCUS KEEPS THE ZOOM",
-        1,
+        3,
         Control::Toggle,
     ),
     entry(
         "hwcZoomClear",
         "KEEP THE CAMERA OUT OF HULLS",
-        1,
+        3,
         Control::Toggle,
     ),
     entry(
         "hwcSensorsFollow",
         "SENSORS CAMERA FOLLOWS THE FOCUS",
-        1,
+        3,
         Control::Toggle,
     ),
     entry(
         "hwcSensorsFocusStays",
         "FOCUS IN SENSORS STAYS IN SENSORS",
-        1,
+        3,
         Control::Toggle,
     ),
     entry(
         "hwcRightClickMove",
         "RIGHT CLICK OPENS THE MOVE PLATE",
-        2,
+        4,
         Control::Toggle,
     ),
     entry(
         "hwcDoubleClickSelectType",
         "DOUBLE CLICK SELECTS ALL OF A TYPE",
-        2,
+        4,
         Control::Toggle,
     ),
     entry(
         "hwcTabShipIcons",
         "TAB CYCLES SHIP ICONS",
-        2,
+        4,
         Control::Toggle,
     ),
     entry(
         "hwcFormationFocusFire",
         "FORMATION WINGMEN FOCUS FIRE",
-        2,
+        4,
         Control::Toggle,
     ),
-    entry(modern_hud::OPTION_KEY, "MODERN HUD", 3, Control::Toggle),
-    entry(
-        "hwcRemasteredChatter",
-        "REMASTERED CHATTER",
-        3,
-        Control::Choice(&[("OFF", 0), ("GAPS", 1), ("MIXED", 2)]),
-    ),
-    entry(
-        "hwcBattleReports",
-        "INTEL BATTLE REPORTS IN CAMPAIGNS",
-        3,
-        Control::Toggle,
-    ),
-    entry("hwcOrderLines", "ORDER LINES", 3, Control::Toggle),
+    entry(modern_hud::OPTION_KEY, "MODERN HUD", 5, Control::Toggle),
+    entry("hwcOrderLines", "ORDER LINES", 5, Control::Toggle),
     entry(
         "hwcShipIcons",
         "SHIP ICONS",
-        3,
+        5,
         Control::Choice(&[("ALL", 2), ("FAR", 1), ("OFF", 0)]),
     ),
     entry(
         "hwcHealthBrackets",
         "OUTLINED HEALTH BARS",
-        3,
+        5,
         Control::Toggle,
     ),
     Entry {
@@ -225,7 +241,7 @@ pub const ENTRIES: &[Entry] = &[
         ..entry(
             modern_build_manager::OPTION_KEY,
             "MODERN BUILD MANAGER",
-            3,
+            5,
             Control::Toggle,
         )
     },
@@ -234,7 +250,7 @@ pub const ENTRIES: &[Entry] = &[
         ..entry(
             modern_research_manager::OPTION_KEY,
             "MODERN RESEARCH MANAGER",
-            3,
+            5,
             Control::Toggle,
         )
     },
@@ -243,15 +259,27 @@ pub const ENTRIES: &[Entry] = &[
         ..entry(
             menu::OPTION_KEY,
             "MODERN MENUS AND SYSTEMS MANAGER",
-            3,
+            5,
             Control::Toggle,
         )
     },
     entry(
         "hwcOriginalLetterbox",
         "CUTSCENE LETTERBOX",
-        3,
+        5,
         Control::Choice(&[("TALL", 0), ("ORIGINAL", 1)]),
+    ),
+    entry(
+        "hwcRemasteredChatter",
+        "REMASTERED CHATTER",
+        6,
+        Control::Choice(&[("OFF", 0), ("GAPS", 1), ("MIXED", 2)]),
+    ),
+    entry(
+        "hwcBattleReports",
+        "INTEL BATTLE REPORTS IN CAMPAIGNS",
+        6,
+        Control::Toggle,
     ),
 ];
 
@@ -419,6 +447,7 @@ pub fn model(fe: &Fe, page: &Page) -> Model {
         messages: Vec::new(),
         sections: SECTIONS.iter().map(|s| s.to_string()).collect(),
         items,
+        scroll: 0.0,
     }
 }
 
@@ -633,10 +662,12 @@ pub fn key(fe: &mut Fe, code: u16) {
         return;
     };
     let shift = fe.input.down.contains(&key::SHIFT);
+    // The focus moved: a tall screen scrolls to show it.
     let move_to = |fe: &mut Fe, f: usize| {
         if let Some(p) = page_mut(fe) {
             p.focus = f % n;
         }
+        menu::reveal(fe, f % n);
     };
     match code {
         key::ESCAPE => {
@@ -648,6 +679,7 @@ pub fn key(fe: &mut Fe, code: u16) {
         key::UP => move_to(fe, focus + n - 1),
         key::HOME => move_to(fe, 0),
         key::END => move_to(fe, n - 1),
+        key::PAGE_UP | key::PAGE_DOWN => menu::page_body(fe, code == key::PAGE_DOWN),
         key::LEFT | key::RIGHT if focus < ENTRIES.len() => {
             let d = if code == key::RIGHT { 1 } else { -1 };
             if ENTRIES[focus].control == Control::Toggle {
@@ -838,6 +870,7 @@ mod tests {
             messages: Vec::new(),
             sections: SECTIONS.iter().map(|s| s.to_string()).collect(),
             items,
+            scroll: 0.0,
         };
         for (w, h) in [(1920, 1080), (1024, 768), (640, 480)] {
             let l = menu::layout(&m, w, h);

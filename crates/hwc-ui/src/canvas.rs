@@ -205,6 +205,11 @@ impl Canvas {
         };
     }
 
+    /// The rectangle drawing is restricted to.
+    pub fn clip(&self) -> Rect {
+        self.clip
+    }
+
     fn index(&self, x: i32, y: i32) -> Option<usize> {
         self.clip
             .contains(x, y)

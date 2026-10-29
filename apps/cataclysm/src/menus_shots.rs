@@ -232,6 +232,19 @@ fn in_mission(size: (i32, i32)) {
     let (x, y) = centre(l.placed[i].parts[2]);
     rig.click(g, x, y);
     rig.shot(g, "m1_enhancements");
+    // Taller than the window: the wheel over it scrolls its body to the end.
+    let (x, y) = centre(l.frame.panel);
+    rig.input(g, InputEvent::MouseMove { x, y });
+    for _ in 0..20 {
+        rig.input(g, InputEvent::Wheel { up: false });
+        rig.frame(g);
+    }
+    let m = menu::model(&g.ui.fe).unwrap();
+    let l = menu::layout(&m, size.0, size.1);
+    if let Some(b) = l.body {
+        assert_eq!(b.offset, b.max_offset(), "scrolled to the end");
+    }
+    rig.shot(g, "m1_enhancements_end");
     rig.press(g, "ACCEPT");
     assert_eq!(g.quality.msaa, 4, "applied at once");
     rig.key(g, 27);
