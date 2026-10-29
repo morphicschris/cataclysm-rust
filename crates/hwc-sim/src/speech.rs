@@ -113,9 +113,9 @@ pub struct SpeechGate {
     pub ducked: bool,
     /// The ships in the render list (`univSpaceObjInRenderList`): only they report status or
     /// chatter.
-    pub in_view: std::collections::HashSet<ShipId>,
+    pub in_view: std::collections::BTreeSet<ShipId>,
     /// The hot-key group of each grouped ship (`ship+0x43e`, 1..=9).
-    pub groups: std::collections::HashMap<ShipId, u8>,
+    pub groups: std::collections::BTreeMap<ShipId, u8>,
     /// The main screen is drawn and no ship is within 5000 of the camera (`mrRenderMainScreen`
     /// 0x8afb4c, the sound's closest distance 0x9102a4).
     pub far_from_camera: bool,

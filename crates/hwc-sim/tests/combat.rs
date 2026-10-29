@@ -98,7 +98,8 @@ fn frigates_engage_a_destroyer() {
 }
 
 /// Battle pings: once the dogfight is on, the collision blob holding it is flagged and split
-/// into ping sub-blobs that hold the fighting ships, on the battle-ping frames.
+/// into ping sub-blobs that hold the fighting ships (and the targets of their attacks), on the
+/// battle-ping frames.
 #[test]
 fn dogfight_makes_battle_pings() {
     let Some(d) = data() else { return };
@@ -116,10 +117,15 @@ fn dogfight_makes_battle_pings() {
         for p in &pings {
             assert!(!p.ships.is_empty());
             assert!(p.radius > 0.0);
+            // The sub-blob's ships lie within it; the targets of their attack orders join it
+            // wherever they are (`pingAttackPingsCreate`).
+            let u = &run.universe;
+            let targeted = |t| p.ships.iter().any(|&o| u.ship(o).and_then(|s| s.command).and_then(|c| u.commands.get(c)).is_some_and(|c| c.attack_targets.contains(&t)));
             for &s in &p.ships {
-                let pos = run.universe.ship(s).unwrap().posinfo.position;
-                assert!((pos - p.centre).mag_sq().sqrt() <= 2.0 * p.radius, "a ship of the ping lies within it");
+                let pos = u.ship(s).unwrap().posinfo.position;
+                assert!((pos - p.centre).mag_sq().sqrt() <= 2.0 * p.radius || targeted(s), "a ship of the ping lies within it or is attacked from it");
             }
+            assert_eq!(p.friendlies + p.enemies, p.ships.len() as i32, "every ship counts on one side");
         }
         seen += pings.len();
     }
