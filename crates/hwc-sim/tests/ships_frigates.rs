@@ -352,6 +352,24 @@ fn sentinel_field_sphere_guards_a_ship() {
         let d = ((p.x - centre.x).powi(2) + (p.y - centre.y).powi(2) + (p.z - centre.z).powi(2)).sqrt();
         assert!((d - radius).abs() < 60.0, "sentinel {i:?} at {d}, sphere radius {radius}");
     }
+    // Drawn as a round bubble, a hit shows where the shot enters the sphere through the
+    // sentinels, short of the flat field triangle it stopped at.
+    let up = *ids.iter().find(|&&i| sentinel::field_is_up(&run.universe, i)).expect("a field up");
+    let from = v(4000.0, 0.0, 0.0);
+    assert!(sentinel::bubble_hit(&run.universe, up, from, v(-1.0, 0.0, 0.0), 3000.0).is_none(), "no effects, no bubble");
+    if let Ok(dir) = std::env::var("HWC_GAME_DIR") {
+        let src = BigArchive::open(std::path::Path::new(&dir).join("cataclysm.big")).unwrap();
+        hwc_sim::effects::attach(&mut run.universe, &hwc_sim::effects::EffectData::load_from(&src));
+        run.universe.effects.as_mut().unwrap().field_bubble = true;
+        let c = run.universe.ship(guarded).unwrap().coll.coll_position;
+        let towards = v(c.x - from.x, c.y - from.y, c.z - from.z);
+        let l = (towards.x * towards.x + towards.y * towards.y + towards.z * towards.z).sqrt();
+        let dir = v(towards.x / l, towards.y / l, towards.z / l);
+        let at = sentinel::bubble_hit(&run.universe, up, from, dir, l).expect("on the bubble");
+        let d = ((at.x - c.x).powi(2) + (at.y - c.y).powi(2) + (at.z - c.z).powi(2)).sqrt();
+        assert!((d - radius).abs() < 0.1 * radius, "bubble hit {d} from the centre, radius {radius}");
+        run.universe.effects.as_mut().unwrap().field_bubble = false;
+    }
     let leader = run.universe.commands.get(cid).unwrap().selection[0];
     mr_formation_revert_special(&mut run.universe, &[leader]);
     let cid = run.universe.ship(ids[0]).unwrap().command.expect("command");

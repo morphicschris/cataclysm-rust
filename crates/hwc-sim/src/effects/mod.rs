@@ -190,6 +190,11 @@ pub struct Effects {
     pub events: Vec<FxEvent>,
     /// `local_5c` of `univUpdateAllPosVelBullets`.
     pub bullet_effect_deleted_this_pass: bool,
+    /// The front end draws sentinel field spheres as round bubbles (`hwcModernFields`): hits
+    /// on them are shown on the bubble ([`crate::ships::sentinel::bubble_hit`]). Presentation
+    /// only, not saved.
+    #[serde(skip)]
+    pub field_bubble: bool,
 }
 
 impl std::fmt::Debug for Effects {
@@ -217,6 +222,7 @@ impl Effects {
             omit_from_render: BTreeSet::new(),
             events: Vec::new(),
             bullet_effect_deleted_this_pass: false,
+            field_bubble: false,
         }
     }
 
@@ -750,6 +756,12 @@ pub fn bullet_hit(u: &mut Universe, bullet: BulletId, target: ObjRef, t: f32, da
             st(ld(scale) * (ld(at.y) - ld(tpos.y)) + ld(tpos.y)),
             st(ld(scale) * (ld(at.z) - ld(tpos.z)) + ld(tpos.z)),
         );
+    }
+    if let ObjRef::Ship(id) = target {
+        let dir = if t == 0.0 { Vector::ZERO } else { b.heading };
+        if let Some(q) = crate::ships::sentinel::bubble_hit(u, id, b.posinfo.position, dir, t) {
+            at = q;
+        }
     }
     let back = Vector::new(-b.heading.x, -b.heading.y, -b.heading.z);
     let cs = Matrix::coord_sys_from_heading(back);

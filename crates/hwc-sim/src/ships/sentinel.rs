@@ -213,9 +213,74 @@ pub fn field_take_damage(u: &mut Universe, id: ShipId, bullet: &Bullet) {
 }
 
 /// Where the field was hit, for the front end ([`Universe::field_hits`]): `t` along `dir`
-/// from `from`.
+/// from `from`, or on the bubble ([`bubble_hit`]).
 pub fn note_field_hit(u: &mut Universe, id: ShipId, from: Vector, dir: Vector, t: f32) {
-    u.field_hits.push((id, Vector::new(from.x + dir.x * t, from.y + dir.y * t, from.z + dir.z * t)));
+    let at = bubble_hit(u, id, from, dir, t)
+        .unwrap_or(Vector::new(from.x + dir.x * t, from.y + dir.y * t, from.z + dir.z * t));
+    u.field_hits.push((id, at));
+}
+
+/// A ship's `DPT_ForceFieldOrigin` point in the world.
+fn field_origin(u: &Universe, s: &Ship) -> Vector {
+    let point = u
+        .statics
+        .ship(s.ship_type)
+        .and_then(|st| st.dock.as_ref())
+        .and_then(|d| d.points.get(usize::from(d.first_of_type[crate::statics::DockPointType::ForceFieldOrigin.index()])))
+        .map_or(Vector::ZERO, |p| p.position);
+    let o = s.rotinfo.coordsys.mul_vec(point);
+    let p = s.posinfo.position;
+    Vector::new(o.x + p.x, o.y + p.y, o.z + p.z)
+}
+
+/// Where a hit on a sentinel of a raised field sphere shows when the front end draws the
+/// sphere as a round bubble (`Effects::field_bubble`; presentation only, the hit itself is
+/// where the original puts it): where the ray from `from` along `dir` enters the sphere
+/// through the sentinels' field points before `t`, else the hit point (`t` along `dir`)
+/// pushed out onto it. `None` when not drawn so, or the sentinel is not in a field sphere.
+pub fn bubble_hit(u: &Universe, id: ShipId, from: Vector, dir: Vector, t: f32) -> Option<Vector> {
+    if !u.effects.as_ref().is_some_and(|fx| fx.field_bubble) {
+        return None;
+    }
+    let s = u.ships.get(id)?;
+    if !is_sentinel_type(s.ship_type) || !field_is_up_on(s) {
+        return None;
+    }
+    let c = s.command.and_then(|c| u.commands.get(c))?;
+    if formation_type(u, s) != Some(formation_kind::SPHERE) {
+        return None;
+    }
+    let points: Vec<Vector> = c.selection.iter().filter_map(|&x| u.ships.get(x)).map(|x| field_origin(u, x)).collect();
+    let n = points.len().max(1) as f32;
+    let centre = points.iter().fold(Vector::ZERO, |a, p| Vector::new(a.x + p.x, a.y + p.y, a.z + p.z));
+    let centre = Vector::new(centre.x / n, centre.y / n, centre.z / n);
+    let len = |v: Vector| (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+    let sub = |a: Vector, b: Vector| Vector::new(a.x - b.x, a.y - b.y, a.z - b.z);
+    let radius = points.iter().map(|&p| len(sub(p, centre))).sum::<f32>() / n;
+    if radius <= 0.0 {
+        return None;
+    }
+    // Entry of the ray into the sphere.
+    let dd = dir.x * dir.x + dir.y * dir.y + dir.z * dir.z;
+    if dd > 0.0 {
+        let m = sub(from, centre);
+        let b = (m.x * dir.x + m.y * dir.y + m.z * dir.z) / dd;
+        let k = (len(m) * len(m) - radius * radius) / dd;
+        let disc = b * b - k;
+        if disc >= 0.0 {
+            let s = -b - disc.sqrt();
+            if (0.0..=t).contains(&s) {
+                return Some(Vector::new(from.x + dir.x * s, from.y + dir.y * s, from.z + dir.z * s));
+            }
+        }
+    }
+    let p = Vector::new(from.x + dir.x * t, from.y + dir.y * t, from.z + dir.z * t);
+    let r = sub(p, centre);
+    let l = len(r);
+    if l <= 0.0 {
+        return None;
+    }
+    Some(Vector::new(centre.x + r.x / l * radius, centre.y + r.y / l * radius, centre.z + r.z / l * radius))
 }
 
 /// `SentinelFieldDamageEffect` (0x5c1650): a missile hits the field (whole points of its
@@ -261,7 +326,8 @@ fn field_hit_effect(u: &mut Universe, id: ShipId, m: &crate::missile::Missile) {
     }
     let vel = u.ships.ship(id).posinfo.velocity;
     let scale = 1.0;
-    crate::effects::create(u, effect, None, Some(m.posinfo.position), Some(vel), Some(m.rotinfo.coordsys), scale, 0, &[100, 0]);
+    let at = bubble_hit(u, id, m.posinfo.position, Vector::ZERO, 0.0).unwrap_or(m.posinfo.position);
+    crate::effects::create(u, effect, None, Some(at), Some(vel), Some(m.rotinfo.coordsys), scale, 0, &[100, 0]);
 }
 
 /// `FUN_004361a0`: whether the ray from `p1` through `p2` (beyond `p2` too) crosses the

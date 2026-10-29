@@ -989,6 +989,9 @@ impl World {
         self.snapshot();
         self.set_nebula_camera();
         self.sim.universe_mut().formation_focus_leader = self.formation_focus_leader;
+        if let Some(fx) = self.sim.universe_mut().effects.as_mut() {
+            fx.field_bubble = self.modern_fields;
+        }
         self.hand_chatter();
         match &mut self.sim {
             Sim::Mission(r) => r.step(),
@@ -1003,6 +1006,9 @@ impl World {
         self.snapshot();
         self.set_nebula_camera();
         self.sim.universe_mut().formation_focus_leader = self.formation_focus_leader;
+        if let Some(fx) = self.sim.universe_mut().effects.as_mut() {
+            fx.field_bubble = self.modern_fields;
+        }
         self.hand_chatter();
         self.sim.universe_mut().update();
         self.after_update();
