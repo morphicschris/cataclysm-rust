@@ -728,6 +728,10 @@ impl MissionRun {
         for id in stuck {
             u.ships.ship_mut(id).special_flags &= !crate::base::special::LEAVING_DOCK;
         }
+        // Saves from before a cancelled module build removed its half-built hull.
+        for id in crate::construction::remove_orphan_hulls(&mut self.universe) {
+            self.game.ship_removed(id);
+        }
     }
 
     /// Restores what the build manager may offer in a loaded game, which lives in the statics a

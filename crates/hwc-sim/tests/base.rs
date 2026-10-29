@@ -150,6 +150,59 @@ fn build_a_ship_and_launch_it() {
     assert!(free.reserved.iter().filter(|&&r| r).count() >= 1, "the docking bay hull keeps its build point");
 }
 
+/// Runs the base scenario until the docking bay hull is clamped and building; returns the
+/// mothership and the hull.
+fn docking_bay_building(run: &mut Run) -> (hwc_sim::object::ShipId, hwc_sim::object::ShipId) {
+    let ms = run.ids[0];
+    let t = ShipType::sMothershipDockingBay;
+    run_until(run, 400, |r| {
+        hwc_sim::construction::job(&r.universe, ms, t).is_some_and(|j| j.hull_launched && j.cost_so_far > 20)
+    })
+    .expect("the docking bay hull builds");
+    (ms, hwc_sim::construction::job(&run.universe, ms, t).unwrap().hull.unwrap())
+}
+
+#[test]
+fn cancelling_a_module_removes_its_hull() {
+    let Some(mut run) = start(scenario("base").unwrap()) else { return };
+    let t = ShipType::sMothershipDockingBay;
+    let (ms, hull) = docking_bay_building(&mut run);
+    let paid = hwc_sim::construction::job(&run.universe, ms, t).unwrap().cost_so_far;
+    let ru = run.universe.base.players[0].resource_units;
+    let ratio = run.universe.tweaks.base.cm_float_refund_ratio;
+    hwc_sim::construction::cancel_job(&mut run.universe, ms, t);
+    // `cmCancelJobs`: the half-built hull goes, what it cost comes back.
+    assert!(run.universe.ship(hull).is_none());
+    assert_eq!(run.universe.base.players[0].resource_units, ru + (paid as f32 * ratio) as i32);
+    let j = hwc_sim::construction::job(&run.universe, ms, t).unwrap();
+    assert!(j.n_jobs == 0 && !j.hull_exists && j.hull.is_none());
+    // Its build point is free: it can be built again, from a new hull.
+    assert_eq!(hwc_sim::construction::queue_build(&mut run.universe, ms, t, 1), 1);
+    run_until(&mut run, 100, |r| hwc_sim::construction::job(&r.universe, ms, t).is_some_and(|j| j.hull.is_some_and(|h| h != hull)))
+        .expect("a new hull starts");
+}
+
+#[test]
+fn a_hull_left_by_an_old_cancel_is_removed() {
+    let Some(mut run) = start(scenario("base").unwrap()) else { return };
+    let t = ShipType::sMothershipDockingBay;
+    let (ms, hull) = docking_bay_building(&mut run);
+    // What the old build-manager cancel left: the job emptied, the hull still there.
+    let u = &mut run.universe;
+    let fi = u.base.factories.iter().position(|f| f.ship == Some(ms)).unwrap();
+    let j = &mut u.base.factories[fi].jobs[t.index()];
+    (j.n_jobs, j.n_total, j.cost_so_far, j.time_left) = (0, 0, 0, 0);
+    assert_eq!(hwc_sim::construction::remove_orphan_hulls(u), vec![hull]);
+    assert!(u.ship(hull).is_none());
+    let j = hwc_sim::construction::job(u, ms, t).unwrap();
+    assert!(!j.hull_exists && !j.hull_launched && j.hull.is_none());
+    assert_eq!(hwc_sim::construction::queue_build(u, ms, t, 1), 1);
+    run_until(&mut run, 100, |r| hwc_sim::construction::job(&r.universe, ms, t).is_some_and(|j| j.hull.is_some()))
+        .expect("a new hull starts");
+    // A hull its job holds is left alone.
+    assert!(hwc_sim::construction::remove_orphan_hulls(&mut run.universe).is_empty());
+}
+
 #[test]
 fn workers_harvest_and_deliver() {
     let Some(mut run) = start(scenario("base").unwrap()) else { return };

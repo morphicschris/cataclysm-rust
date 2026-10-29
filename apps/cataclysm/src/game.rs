@@ -1938,18 +1938,12 @@ impl Game {
         }
     }
 
-    /// `cmCancelJobs`: the job goes, what the current ship cost so far comes back.
+    /// `cmCancelJobs`: the job goes, what it cost so far comes back and a half-built module
+    /// is removed.
     fn cancel_build(&mut self, factory: ShipId, ship_type: u32) {
-        let mut refund = 0;
-        if let Some(j) = self.job_mut(factory, ship_type) {
-            refund = j.cost_so_far;
-            j.n_jobs = 0;
-            j.n_total = 0;
-            j.cost_so_far = 0;
-            j.time_left = 0;
-            j.paused = false;
+        if let Some(t) = ShipType::from_index(ship_type as usize) {
+            hwc_sim::construction::cancel_job(self.world.universe_mut(), factory, t);
         }
-        self.world.universe_mut().base.players[PLAYER].resource_units += refund;
     }
 
     pub(crate) fn command(&mut self, c: Command, audio: &mut Option<Audio>) {

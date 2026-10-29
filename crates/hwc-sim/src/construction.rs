@@ -581,6 +581,69 @@ pub fn cancel_external_build_job(u: &mut Universe, ship: ShipId) {
     }
 }
 
+/// `cmCancelJobs` (0x451350), for one selected job: with ships queued, what was paid so far
+/// comes back (`cmFloatRefundRatio`) and an externally built hull is removed, half built or
+/// not; then the job is emptied. The paused flag stays (the next `cmBuildJobsAdd` clears it).
+pub fn cancel_job(u: &mut Universe, factory: ShipId, t: ShipType) {
+    let Some(fi) = factory_index(u, factory) else { return };
+    let job = u.base.factories[fi].jobs[t.index()];
+    let mp = u.base.options.multiplayer_network;
+    if job.n_total != 0 {
+        if !mp {
+            let ratio = u.tweaks.base.cm_float_refund_ratio;
+            let refund = hwc_math::fpu::ftol_i32(ld(job.cost_so_far as f32) * ld(ratio));
+            let cur = u.base.cur_player;
+            u.base.players[cur].resource_units += refund;
+        }
+        let ext = u.statics.ship(t).is_some_and(|s| s.external_build);
+        if ext && job.hull_exists && !mp {
+            if let Some(h) = job.hull {
+                update_external_construction(u, h, 0.0, ExternalUpdate::Cancel);
+            }
+        }
+    }
+    let Some(fi) = factory_index(u, factory) else { return };
+    let j = &mut u.base.factories[fi].jobs[t.index()];
+    *j = BuildJob { paused: j.paused, info: j.info, ..BuildJob::default() };
+}
+
+/// Hulls left behind by the old build-manager cancel, which emptied the job without removing
+/// its half-built hull: the hull kept its build point, so the type could never be built again.
+/// A hull under construction at one of the local player's factories that no job holds is
+/// removed, as `cmCancelJobs` would have done. Returns the hulls removed.
+pub fn remove_orphan_hulls(u: &mut Universe) -> Vec<ShipId> {
+    let cur = u.base.cur_player;
+    let orphans: Vec<ShipId> = u
+        .ships
+        .iter()
+        .filter(|s| s.player == cur && s.special_flags2 & special2::UNDER_CONSTRUCTION != 0)
+        .filter(|s| u.statics.ship(s.ship_type).is_some_and(|st| st.external_build))
+        .filter(|s| {
+            let Some(fi) = s.base.builder.and_then(|b| factory_index(u, b)) else { return false };
+            let j = &u.base.factories[fi].jobs[s.ship_type.index()];
+            !(j.n_jobs > 0 && j.hull_exists && j.hull == Some(s.id))
+        })
+        .map(|s| s.id)
+        .collect();
+    for &h in &orphans {
+        update_external_construction(u, h, 0.0, ExternalUpdate::Cancel);
+    }
+    // An emptied job still naming a hull would wait for that hull forever when queued again.
+    for fi in 0..u.base.factories.len() {
+        for idx in 0..base::NUM_SHIP_TYPES {
+            let j = u.base.factories[fi].jobs[idx];
+            let gone = j.hull.is_some_and(|h| u.ships.get(h).is_none());
+            if (j.n_jobs == 0 || gone) && (j.hull_exists || j.hull_launched || j.hull.is_some()) {
+                let j = &mut u.base.factories[fi].jobs[idx];
+                j.hull_exists = false;
+                j.hull_launched = false;
+                j.hull = None;
+            }
+        }
+    }
+    orphans
+}
+
 /// `cmCancelFactoryJobs` (0x4515a0): the factory's docking bay died; externally built jobs are
 /// cancelled and refunded (`cmFloatRefundRatio`), hulls removed.
 pub fn cancel_factory_jobs(u: &mut Universe, factory: ShipId) {
