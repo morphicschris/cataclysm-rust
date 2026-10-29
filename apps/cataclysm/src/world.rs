@@ -362,6 +362,11 @@ pub struct World {
     /// The battle chatter option (`opBattleChatter` / 100, `battleChatterFrequencySet`),
     /// handed to the universe each update with the camera's eye.
     pub chatter_frequency: Option<f32>,
+    /// What the speech queue refuses, from the audio and the hot-key groups (`None`: no
+    /// audio); the render list is added before each update.
+    pub speech_gate: Option<hwc_sim::speech::SpeechGate>,
+    /// `hwcBattleReports`: fleet intelligence's battle reports in single-player games too.
+    pub battle_reports: bool,
     /// The camera stack's earlier entries (`CameraStackEntry`: the focus and its remembered
     /// distance) that a mission's `TutCameraFocusCancel` (`ccCancelFocus`) goes back to; pushed
     /// by the mission's camera focus calls ([`script_focus`](Self::script_focus)). Not saved.
@@ -514,6 +519,8 @@ impl World {
             zoom_clear: true,
             formation_focus_leader: false,
             chatter_frequency: None,
+            speech_gate: None,
+            battle_reports: false,
             focus_stack: Vec::new(),
             chase: false,
             chase_saved: None,
@@ -990,13 +997,34 @@ impl World {
     }
 
     /// What battle chatter needs from the front end: the chatter option, the main camera's
-    /// eye (`mrCamera->eyeposition`) and the local player.
+    /// eye (`mrCamera->eyeposition`), the local player, and the speech queue's refusals with
+    /// the local ships in the render list.
     fn hand_chatter(&mut self) {
         let eye = self.camera.eye();
-        let c = &mut self.sim.universe_mut().chatter;
+        let gate = self.speech_gate.clone().map(|mut g| {
+            let u = self.universe();
+            g.in_view = u
+                .ship_list
+                .iter()
+                .filter(|&&id| {
+                    u.ship(id).is_some_and(|s| {
+                        s.player == crate::host::PLAYER && {
+                            let p = s.posinfo.position;
+                            self.ship_in_view(s, Vec3::new(p.x, p.y, p.z))
+                        }
+                    })
+                })
+                .copied()
+                .collect();
+            g
+        });
+        let u = self.sim.universe_mut();
+        u.speech_gate = gate;
+        let c = &mut u.chatter;
         c.frequency = self.chatter_frequency;
         c.camera_eye = Some(hwc_math::Vector::new(eye.x, eye.y, eye.z));
         c.local_player = crate::host::PLAYER;
+        c.reports_in_campaign = self.battle_reports;
     }
 
     /// `mrCamera` for the next universe update: the nebulae's render list and the tendrils they

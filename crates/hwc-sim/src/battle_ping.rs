@@ -15,12 +15,15 @@ use crate::statics::DataSource;
 use crate::tunables::BlobProperties;
 use crate::universe::Universe;
 
-/// One battle ping: where, how big, and the ships in it.
+/// One battle ping: where, how big, and the ships in it, with how many are the local
+/// player's or its allies' (`nFriendlyShips`) and how many are not (`nEnemyShips`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BattlePing {
     pub centre: Vector,
     pub radius: f32,
     pub ships: Vec<ShipId>,
+    pub friendlies: i32,
+    pub enemies: i32,
 }
 
 /// 0x888ae0: per ship type, bit 4 = left out of the sensors' battle pings (types 0..=144).
@@ -91,8 +94,10 @@ pub fn is_battle_ping_frame(u: &Universe) -> bool {
 }
 
 /// The battle pings of the current collision blobs: one per sub-blob of every blob flagged
-/// 0x40 or 0x80. Call it on [`is_battle_ping_frame`] frames, as the original does. The
-/// universe is borrowed mutably only to walk the blobs' objects; it is not changed.
+/// 0x40 or 0x80, with the targets of its ships' attack orders that are in a battle too (up
+/// to the parent blob's ship count). Call it on [`is_battle_ping_frame`] frames, as the
+/// original does. The universe is borrowed mutably only to walk the blobs' objects; it is
+/// not changed.
 pub fn battle_pings(u: &mut Universe, props: &BlobProperties) -> Vec<BattlePing> {
     let statics = u.statics.clone();
     let cur = u.base.cur_player;
@@ -100,12 +105,49 @@ pub fn battle_pings(u: &mut Universe, props: &BlobProperties) -> Vec<BattlePing>
     let mut objs = Objects { ships: &mut u.ships, bullets: &mut u.bullets, missiles: &mut u.missiles };
     let mut out = Vec::new();
     for parent in &parents {
+        let cap = parent.objects.iter().filter(|r| matches!(r, crate::object::ObjRef::Ship(_))).count();
         for b in BlobList::sub_blobs(parent, &mut objs, &statics, props, &|o, id| battle_ship(cur, o, id)) {
             let ships = b.objects.iter().filter_map(|r| if let crate::object::ObjRef::Ship(id) = r { Some(*id) } else { None }).collect();
-            out.push(BattlePing { centre: b.centre, radius: b.radius, ships });
+            out.push((BattlePing { centre: b.centre, radius: b.radius, ships, friendlies: 0, enemies: 0 }, cap));
         }
     }
-    out
+    out.into_iter()
+        .map(|(mut p, cap)| {
+            add_attack_targets(u, &mut p.ships, cap);
+            for &id in &p.ships {
+                if crate::shockwave::is_ally(u, id, cur) {
+                    p.friendlies += 1;
+                } else {
+                    p.enemies += 1;
+                }
+            }
+            p
+        })
+        .collect()
+}
+
+/// `pingAttackPingsCreate`'s second pass: the targets of the ping's ships' attack commands
+/// that pass `pingBattleBlobCriteria` join the ping (each command once).
+fn add_attack_targets(u: &mut Universe, ships: &mut Vec<ShipId>, cap: usize) {
+    let cur = u.base.cur_player;
+    let mut seen = Vec::new();
+    let mut i = 0;
+    while i < ships.len() {
+        let command = u.ships.get(ships[i]).and_then(|s| s.command);
+        i += 1;
+        let Some(c) = command.filter(|c| !seen.contains(c)) else { continue };
+        seen.push(c);
+        let Some(targets) = u.commands.get(c).filter(|c| c.order == crate::command::order::ATTACK).map(|c| c.attack_targets.clone()) else { continue };
+        for t in targets {
+            let objs = Objects { ships: &mut u.ships, bullets: &mut u.bullets, missiles: &mut u.missiles };
+            if objs.ships.get(t).is_none() || !battle_ship(cur, &objs, t) || ships.contains(&t) {
+                continue;
+            }
+            if ships.len() < cap {
+                ships.push(t);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

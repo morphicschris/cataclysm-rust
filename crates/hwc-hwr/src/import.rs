@@ -39,6 +39,8 @@ pub struct Report {
     pub textures: usize,
     /// Sound clips.
     pub sounds: usize,
+    /// Battle chatter clips ([`crate::chatter`]).
+    pub speech: usize,
     pub bytes: u64,
     /// Effects named somewhere but not found in the archive.
     pub missing: Vec<String>,
@@ -83,6 +85,7 @@ pub fn import(root: &Path, out: &Path) -> io::Result<Report> {
         )
     })?;
     let mut main = Archive::open(data.join("Homeworld2.big"))?;
+    let (speech, speech_bytes) = crate::chatter::import(&data, out)?;
     let mut ships = Archive::open(data.join("HW1Ships.big"))?;
     fs::create_dir_all(out)?;
     let mut report = Report::default();
@@ -199,12 +202,15 @@ pub fn import(root: &Path, out: &Path) -> io::Result<Report> {
         report.sounds += usize::from(e.path.ends_with(".fda"));
     }
 
+    report.speech = speech;
+    report.bytes += speech_bytes;
     let index = format!(
-        "{INDEX_FORMAT}\nships {}\neffects {}\ntextures {}\nsounds {}\nsource {}\n",
+        "{INDEX_FORMAT}\nships {}\neffects {}\ntextures {}\nsounds {}\nspeech {}\nsource {}\n",
         report.ships,
         report.effects,
         report.textures,
         report.sounds,
+        report.speech,
         data.display()
     );
     fs::write(out.join("index.txt"), index)?;

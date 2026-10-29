@@ -598,6 +598,10 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
                 if let Some(h) = spec_mut(u, id) {
                     h.state = state::SEND;
                 }
+                use crate::battle_chatter::{attempt, bce, can_chatter_at_this_time};
+                if can_chatter_at_this_time(u, bce::HIVE_SWARMERS_UNDERWAY, Some(id)) {
+                    attempt(u, bce::HIVE_SWARMERS_UNDERWAY, id, -1);
+                }
             }
         }
         state::SEND => {

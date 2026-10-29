@@ -48,6 +48,39 @@ pub struct Audio {
     /// The Voice options: commands, status reports, chatter (`bCommandsOn` 0x88b3ec,
     /// `bStatusOn` 0x88b3f0, `bChatterOn` 0x88b3f4).
     voices: Voices,
+    /// The stream each recently played ship or chatter line went to, by its speech handle:
+    /// a line linked to it plays after it there.
+    linked_streams: HashMap<u32, usize>,
+    /// The game data folder (where an import of Remastered's chatter is looked for).
+    data_root: Option<std::path::PathBuf>,
+    /// `hwcRemasteredChatter`: 0 off, 1 Remastered lines for the battle chatter Cataclysm has
+    /// no line for, 2 also mixed in with Cataclysm's own (half the time).
+    hwr_chatter_mode: i32,
+    hwr_chatter: Option<HwrChatter>,
+}
+
+/// The imported Remastered chatter clips and the ones read so far.
+struct HwrChatter {
+    lines: hwc_hwr::chatter::Chatter,
+    clips: HashMap<std::path::PathBuf, Option<(Arc<[u8]>, u16)>>,
+    roll: u32,
+}
+
+impl HwrChatter {
+    fn clip(&mut self, path: &std::path::Path) -> Option<(Arc<[u8]>, u16)> {
+        self.clips
+            .entry(path.to_path_buf())
+            .or_insert_with(|| {
+                let f = hwc_hwr::sound::Fda::parse(&std::fs::read(path).ok()?)?;
+                Some((f.mono().into(), f.bitrate))
+            })
+            .clone()
+    }
+
+    fn next(&mut self) -> u32 {
+        self.roll = self.roll.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        self.roll >> 8
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -108,6 +141,7 @@ impl Audio {
     /// Loads the sound data and opens the default output device (`play` false: no device, for
     /// the screenshot tour and tests).
     pub fn open(game: GameData, play: bool) -> Result<Audio, String> {
+        let data_root = game.root().map(std::path::Path::to_path_buf);
         let data = SoundData::load(&DataSource::from_game_data(game)).map_err(|e| e.to_string())?;
         let mixer = Arc::new(Mutex::new(Mixer::new(MixerOptions::default())));
         let output = if play {
@@ -141,6 +175,10 @@ impl Audio {
                 status: true,
                 chatter: true,
             },
+            linked_streams: HashMap::new(),
+            data_root,
+            hwr_chatter_mode: 0,
+            hwr_chatter: None,
         })
     }
 
@@ -158,6 +196,7 @@ impl Audio {
             status: o.get("VoiceStatus") != 0,
             chatter: o.get("VoiceChatter") != 0,
         };
+        self.set_remastered_chatter(o.get("hwcRemasteredChatter"));
         let s = &mut self.system;
         let mut m = s.mixer();
         let auto = |on: bool| if on { AutoMode::Auto } else { AutoMode::Off };
@@ -214,20 +253,22 @@ impl Audio {
     /// `STAT_F_AssGrp_*`), on the stream of its speaker class. Like `speechEventQueue`, an
     /// event is dropped while the same event with the same variable is playing on its stream,
     /// so pressing a group key twice (select, then focus) says "Standby group n" once.
-    pub fn fleet_speech(&mut self, event: u32, variable: i32) {
+    pub fn fleet_speech(&mut self, event: u32, variable: i32) -> bool {
         let stream = crate::movie_script::speech_stream(event);
         let now = Instant::now();
         if let Some(Some((e, v, end))) = self.fleet_current.get(stream) {
             if (*e, *v) == (event, variable) && now < *end {
-                return;
+                return false;
             }
         }
-        if let Some(started) = self.system.play_speech(event, variable, -1, stream) {
-            let end = now + Duration::from_millis(started.duration_ms.max(0) as u64);
-            if let Some(slot) = self.fleet_current.get_mut(stream) {
-                *slot = Some((event, variable, end));
-            }
+        let Some(started) = self.system.play_speech(event, variable, -1, stream) else {
+            return false;
+        };
+        let end = now + Duration::from_millis(started.duration_ms.max(0) as u64);
+        if let Some(slot) = self.fleet_current.get_mut(stream) {
+            *slot = Some((event, variable, end));
         }
+        true
     }
 
     /// `speechEventQueue(ship, event, variable, ...)` for speech the ships and orders asked
@@ -235,17 +276,127 @@ impl Audio {
     /// NIS plays, and only the local `player`'s ships speak (not one under construction or
     /// flagged silent, `specialFlags2 & 0x100008`). Commands do not need the ship in view.
     pub fn ship_speech(&mut self, u: &Universe, player: usize, s: hwc_sim::speech::Speech) {
-        let event = s.event;
-        if !self.voices.allow(event) || u.nis_running && event & 0x6000_0000 == 0 {
+        if let Some(stream) = self.play_ship_speech(u, player, s) {
+            if self.linked_streams.len() > 64 {
+                self.linked_streams.clear();
+            }
+            self.linked_streams.insert(s.handle, stream);
+        }
+    }
+
+    /// `hwcRemasteredChatter` (see [`Audio::hwr_chatter_mode`]): the imported clips are found
+    /// like the Remastered effects ([`crate::hwr_fx::find_dir`]) when first wanted.
+    pub fn set_remastered_chatter(&mut self, mode: i32) {
+        self.hwr_chatter_mode = mode.clamp(0, 2);
+        if self.hwr_chatter_mode == 0 || self.hwr_chatter.is_some() {
             return;
         }
+        let lines = crate::hwr_fx::find_dir(self.data_root.as_deref())
+            .map(|d| hwc_hwr::chatter::Chatter::open(&d))
+            .unwrap_or_default();
+        if lines.is_empty() {
+            eprintln!("note: Remastered chatter is on but not imported (hwc-import --hwr <Homeworld Remastered folder> <data folder>)");
+            self.hwr_chatter_mode = 0;
+            return;
+        }
+        self.hwr_chatter = Some(HwrChatter {
+            lines,
+            clips: HashMap::new(),
+            roll: 0x2545_f491,
+        });
+    }
+
+    /// The Remastered clip to say a battle chatter line with instead of Cataclysm's: when
+    /// Cataclysm has none (or, mixing, every other time), a voice of the speaker's kind.
+    fn remastered_line(
+        &mut self,
+        u: &Universe,
+        s: &hwc_sim::speech::Speech,
+        variable: i32,
+    ) -> Option<(Arc<[u8]>, u16)> {
+        use hwc_hwr::chatter::Family;
+        let k = s.chatter?;
+        if self.hwr_chatter_mode == 0 {
+            return None;
+        }
+        let stock = self.system.has_speech(s.event, variable);
+        let mode = self.hwr_chatter_mode;
+        let c = self.hwr_chatter.as_mut()?;
+        let group = u8::try_from(variable).ok().filter(|g| (1..=10).contains(g));
+        if !c.lines.has(k, group) {
+            return None;
+        }
+        let roll = c.next();
+        if stock && (mode < 2 || roll & 0x100 == 0) {
+            return None;
+        }
+        let class = s
+            .ship
+            .and_then(|id| u.ship(id))
+            .and_then(|sh| u.statics.ship(sh.ship_type))
+            .and_then(|st| st.ship_class);
+        let families: &[Family] = match class {
+            Some(ShipClass::Fighter | ShipClass::Corvette | ShipClass::Micro) => {
+                &[Family::Fighter, Family::All]
+            }
+            Some(ShipClass::Resource | ShipClass::NonCombat) => &[Family::Support, Family::All],
+            Some(_) => &[Family::Capital, Family::All],
+            None => &[Family::All, Family::Fleet],
+        };
+        let seed = s.ship.map_or(0, |id| u32::from(id.0));
+        let path = c.lines.pick(k, group, families, seed, roll)?.to_path_buf();
+        c.clip(&path)
+    }
+
+    /// Plays a line now on `stream`: the Remastered clip, or Cataclysm's own.
+    fn say(
+        &mut self,
+        event: u32,
+        variable: i32,
+        stream: usize,
+        hwr: Option<(Arc<[u8]>, u16)>,
+    ) -> Option<i32> {
+        match hwr {
+            Some((blocks, bitrate)) => self.system.play_speech_clip(blocks, bitrate, event, stream),
+            None => self
+                .system
+                .play_speech(event, variable, -1, stream)
+                .map(|p| p.duration_ms),
+        }
+    }
+
+    /// The speech queue's checks the simulation cannot make (`speechEventQueue`): the Voice
+    /// options, the playing single-player line (no chatter meanwhile).
+    pub fn speech_gate(&self) -> hwc_sim::speech::SpeechGate {
+        hwc_sim::speech::SpeechGate {
+            chatter: self.voices.chatter,
+            status: self.voices.status,
+            commands: self.voices.commands,
+            single_player_speaking: self.system.single_player_speaking() > 0,
+            far_from_camera: self.system.context.main_screen
+                && !self.system.context.sensors
+                && self.system.context.closest_distance >= 5000.0,
+            ..Default::default()
+        }
+    }
+
+    fn play_ship_speech(
+        &mut self,
+        u: &Universe,
+        player: usize,
+        s: hwc_sim::speech::Speech,
+    ) -> Option<usize> {
+        let event = s.event;
+        if !self.voices.allow(event) || u.nis_running && event & 0x6000_0000 == 0 {
+            return None;
+        }
         if let Some(id) = s.ship {
-            let Some(ship) = u.ship(id) else { return };
+            let ship = u.ship(id)?;
             if ship.player != player && !u.nis_running {
-                return;
+                return None;
             }
             if ship.special_flags2 & 0x0010_0008 != 0 {
-                return;
+                return None;
             }
         }
         // No variable (-1) stays none; a ship's type is clamped to 60.
@@ -254,7 +405,34 @@ impl Audio {
         } else {
             s.variable.min(0x3c)
         };
-        self.fleet_speech(event, variable);
+        // A reply plays after the line it answers, on its stream (the handle names the
+        // stream); with that line dropped, it is dropped too.
+        let hwr = self.remastered_line(u, &s, variable);
+        if let Some(link) = s.link {
+            let stream = *self.linked_streams.get(&link)?;
+            self.say(event, variable, stream, hwr)?;
+            return Some(stream);
+        }
+        let stream = crate::movie_script::speech_stream(event);
+        // Chatter and status reports wait in the original's queue only briefly behind other
+        // lines; here one is dropped while its stream is busy, so a battle does not pile up
+        // minutes of reports.
+        if event & (hwc_sim::speech::kind::CHATTER | hwc_sim::speech::kind::STATUS) != 0 {
+            let m = self.system.mixer();
+            let h = m.stream_handle(stream);
+            if !m.stream_over(h) || m.stream_queued(h) > 0 {
+                return None;
+            }
+        }
+        if hwr.is_some() {
+            let ms = self.say(event, variable, stream, hwr)?;
+            let end = Instant::now() + Duration::from_millis(ms.max(0) as u64);
+            if let Some(slot) = self.fleet_current.get_mut(stream) {
+                *slot = Some((event, variable, end));
+            }
+            return Some(stream);
+        }
+        self.fleet_speech(event, variable).then_some(stream)
     }
 
     /// The event and variable speech stream `stream` is playing (tests).
@@ -560,6 +738,80 @@ mod tests {
                 "no line for {ev:#x} variable {v}"
             );
         }
+    }
+
+    /// With the Remastered chatter imported (`HWC_HWR_DIR`), a chatter line Cataclysm has
+    /// none of (a fighter calling out a chaser) is said in a Remastered voice when the option
+    /// fills the gaps, and not at all when it is off; a line Cataclysm has stays its own.
+    #[test]
+    fn remastered_chatter_fills_the_silent_lines() {
+        use hwc_sim::battle_chatter::bce;
+        use hwc_sim::speech::Speech;
+        let Some(Ok(g)) = GameData::from_env() else {
+            eprintln!("skipped: no game data");
+            return;
+        };
+        if std::env::var_os("HWC_HWR_DIR").is_none() {
+            eprintln!("skipped: no Remastered import (set HWC_HWR_DIR)");
+            return;
+        }
+        let Ok(mut audio) = Audio::open(g, false) else {
+            eprintln!("skipped: no sound data");
+            return;
+        };
+        audio.set_in_game(true);
+        struct NoData;
+        impl hwc_sim::statics::DataSource for NoData {
+            fn read(&self, _: &str) -> Option<Vec<u8>> {
+                None
+            }
+            fn exists(&self, _: &str) -> bool {
+                false
+            }
+        }
+        let statics = hwc_sim::statics::StaticWorld::load_from(
+            &NoData,
+            hwc_sim::statics::LoadOptions::default(),
+        );
+        let u = Universe::new(
+            Arc::new(statics),
+            hwc_sim::SimTweaks::default(),
+            &[hwc_sim::statics::ShipRace::Somtaaw],
+        );
+        let line = |k: usize, event: u32| Speech {
+            ship: None,
+            event,
+            variable: -1,
+            handle: k as u32 + 1,
+            link: None,
+            chatter: Some(k),
+        };
+        let chased = line(bce::WINGMAN_CHASED, 0x200_08be);
+        assert!(
+            !audio.system.has_speech(chased.event, -1),
+            "Cataclysm has no line for it"
+        );
+        assert!(audio.play_ship_speech(&u, 0, chased).is_none());
+        audio.set_remastered_chatter(1);
+        if audio.hwr_chatter.is_none() {
+            eprintln!("skipped: the import has no chatter");
+            return;
+        }
+        let stream = audio
+            .play_ship_speech(&u, 0, chased)
+            .expect("a Remastered line");
+        let m = audio.system.mixer();
+        assert!(
+            m.stream_queued(m.stream_handle(stream)) > 0 || !m.stream_over(m.stream_handle(stream))
+        );
+        drop(m);
+        let won = line(bce::KICKING_BUTT_RSP, 0x100_0813);
+        let stock = audio.system.has_speech(won.event, 5);
+        assert!(stock, "Cataclysm says this one");
+        assert!(
+            audio.remastered_line(&u, &won, 5).is_none(),
+            "filling gaps keeps it"
+        );
     }
 
     /// A second press of a group key (select, then focus) queues no second "Standby group n"

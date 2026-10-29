@@ -170,6 +170,10 @@ pub struct Universe {
     pub formation_focus_leader: bool,
     /// What happened during the last update.
     pub events: Vec<SimEvent>,
+    /// The ships that died in the last update as the battle pings count them (presentation;
+    /// not saved).
+    #[serde(skip)]
+    pub battle_losses: Vec<(ShipId, crate::battle_status::Loss)>,
     /// What the missiles and ship modules did during the last update.
     pub special_events: Vec<SpecialEvent>,
     /// Speech the ships and orders asked for, waiting for the front end (which takes them;
@@ -180,6 +184,12 @@ pub struct Universe {
     /// original's globals: not saved).
     #[serde(skip)]
     pub chatter: crate::battle_chatter::ChatterState,
+    /// What the front end's speech queue refuses (not saved; `None` refuses nothing).
+    #[serde(skip)]
+    pub speech_gate: Option<crate::speech::SpeechGate>,
+    /// The last speech handle given out (`SNDcreatehandle`).
+    #[serde(skip)]
+    pub speech_handles: u32,
     /// KAS `PauseUniverse` (0x8f1fc0): orders and ship movement stop, time goes on.
     pub universe_paused: bool,
     /// `nisIsRunning` (0x8f1f14): an NIS is playing (set by `nisStart`, cleared by `nisStop`).
@@ -252,7 +262,10 @@ impl Universe {
             temp_disable_avoiding: false,
             formation_focus_leader: false,
             chatter: Default::default(),
+            speech_gate: None,
+            speech_handles: 0,
             events: Vec::new(),
+            battle_losses: Vec::new(),
             special_events: Vec::new(),
             speech: Vec::new(),
             universe_paused: false,
@@ -310,6 +323,7 @@ impl Universe {
     pub fn update_with(&mut self, hooks: &mut dyn UpdateHooks) {
         let dt = UNIVERSE_UPDATE_PERIOD;
         self.events.clear();
+        self.battle_losses.clear();
         self.special_events.clear();
         self.total_time_elapsed = st(ld(self.total_time_elapsed) + ld(dt));
         self.update_counter = self.update_counter.wrapping_add(1);

@@ -322,6 +322,9 @@ fn queue_for_deletion(u: &mut Universe, id: ShipId, bullet_type: i32, scuttle: b
     let s = u.ships.ship(id);
     let explosion_type = stat.custom_entries.iter().find(|(k, _)| k == "explosionType").map(|(_, v)| v.split_whitespace().next().unwrap_or("").to_string());
     u.events.push(SimEvent::ShipDied { ship: id, ship_type: s.ship_type, position: s.posinfo.position, radius: stat.header.coll.coll_sphere_size, explosion_type });
+    if let Some(loss) = crate::battle_status::loss_of(u, id) {
+        u.battle_losses.push((id, loss));
+    }
     shockwave(u, id, scuttle);
     let death_by = crate::effects::death_by(u, id, bullet_type);
     u.dead_ships.push(id);
@@ -421,6 +424,9 @@ pub fn really_delete_ship(u: &mut Universe, id: ShipId) {
 fn delete_dead_ship(u: &mut Universe, id: ShipId, death_by: i32) {
     if u.ships.get(id).is_none() {
         return;
+    }
+    if death_by == 0 {
+        crate::battle_status::ship_dying(u, id);
     }
     let fx = u.effects.is_some();
     retire_dead_ship(u, id, !fx);

@@ -181,6 +181,14 @@ options:
   Formation focus fire  hwcFormationFocusFire = 1 in the options file (a user-requested
                         change, off by default, also on the ENHANCEMENTS screen): in a
                         formation attack the wingmen always fire at the leader's target
+  Remastered chatter    hwcRemasteredChatter = 1 or 2 in the options file (off by default,
+                        also on the ENHANCEMENTS screen; needs hwc-import --hwr): battle
+                        chatter from Homeworld Remastered's voices, 1 for the lines
+                        Cataclysm has none of, 2 also mixed in with Cataclysm's own
+  Battle reports        hwcBattleReports = 1 in the options file (a user-requested change,
+                        off by default, also on the ENHANCEMENTS screen): fleet
+                        intelligence's battle reports are said in campaign games too (the
+                        original says them only in skirmish games)
   Ship look             hwcShipLook = 1 in the options file (default, a user-requested
                         change, also on the ENHANCEMENTS screen): hulls get mipmapped
                         textures, per-pixel light with a highlight, a bump from their own

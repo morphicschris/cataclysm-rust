@@ -469,7 +469,18 @@ fn apply_event(u: &mut Universe, ev: &FxEvent) {
                 damage::stop_single_effect(u, id, effect);
             }
         }
-        FxEvent::Sound { .. } | FxEvent::Chatter { .. } | FxEvent::DeathCries { .. } => {}
+        // `etgChatterEventPlay` and `etgDeathCriesPlay`.
+        FxEvent::Chatter { owner, event, .. } => {
+            if let Some(FxOwner::Ship(id)) = FxOwner::from_id(owner) {
+                crate::battle_chatter::attempt(u, event as usize, id, -1);
+            }
+        }
+        FxEvent::DeathCries { owner } => {
+            if let Some(FxOwner::Ship(id)) = FxOwner::from_id(owner) {
+                crate::battle_status::ship_dying(u, id);
+            }
+        }
+        FxEvent::Sound { .. } => {}
     }
 }
 

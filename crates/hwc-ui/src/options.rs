@@ -133,6 +133,14 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // user-requested change); 0: the original, where they keep their own targets unless the
     // leader's is under no command (or the tactics are aggressive).
     ("hwcFormationFocusFire", 0),
+    // 1: fleet intelligence's battle reports ("we're winning", "this one's going badly")
+    // are said in campaign games too (a user-requested change); 0: the original, which says
+    // them only in skirmish games.
+    ("hwcBattleReports", 0),
+    // Battle chatter from an import of Homeworld Remastered's speech (`hwc-import --hwr`):
+    // 1 for the lines Cataclysm has none of (the fighters' "picked up a trailer"), 2 also
+    // mixed in with Cataclysm's own; 0, the default: Cataclysm's lines only.
+    ("hwcRemasteredChatter", 0),
     // 1: lines from the selected ships to what they were ordered to, with a circle there,
     // coloured by the order; 0: none, the original (`--order-lines`).
     ("hwcOrderLines", 1),

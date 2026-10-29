@@ -9,8 +9,10 @@
 //! * [`lua`]: a reader for the Lua data files (effects, animations, ship events and tuning).
 //! * [`fx`]: effect definitions; [`ships`]: death sequences and engine trails.
 //! * [`library`]: an imported folder, loaded; [`player`]: runs effects and draws them.
+//! * [`chatter`]: the battle chatter voices of the Remastered ships.
 
 pub mod big;
+pub mod chatter;
 pub mod fx;
 pub mod import;
 pub mod library;

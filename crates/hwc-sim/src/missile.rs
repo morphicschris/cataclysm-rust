@@ -1095,6 +1095,16 @@ pub fn collided_with_ship(u: &mut Universe, tid: ShipId, mid: MissileId, t: f32,
     let Some(ship) = u.ships.get(tid) else { return };
     let Some(sst) = statics.ship(ship.ship_type) else { return };
     let m = u.missiles.missile(mid).clone();
+    // A mine of a wall hit one of the local player's ships: fleet intelligence warns of the
+    // minefield (for its group, if it has one).
+    if m.forced && ship.player == u.base.cur_player {
+        use crate::battle_chatter::{bce, fleet_attempt};
+        match u.speech_gate.as_ref().and_then(|g| g.groups.get(&tid).copied()) {
+            Some(n) => fleet_attempt(u, None, bce::GROUP_IN_MINE_FIELD, i32::from(n), None),
+            None => fleet_attempt(u, None, bce::IN_MINE_FIELD, -1, None),
+        };
+    }
+    let Some(ship) = u.ships.get(tid) else { return };
     if !sst.header.immobile && ship.flags & sof::NOT_BUMPABLE == 0 {
         if let Some((push, r, mass)) = knock_back(u, mid) {
             let s = u.ships.ship_mut(tid);

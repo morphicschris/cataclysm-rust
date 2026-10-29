@@ -170,9 +170,21 @@ pub enum Eval {
     /// New ships: expires at its first evaluation.
     NewShip,
     /// `pingBattlePingEvaluate`: a battle over the ships of its sub-blob. It expires at its
-    /// first evaluation (the battle chatter is the simulation's), or once the last of its
-    /// ships has died.
-    Battle { ships: Vec<ShipId> },
+    /// first evaluation (which hands it to the simulation's battle chatter), or once the last
+    /// of its ships has died. Its counts and losses are not saved (it lives half a second).
+    Battle {
+        ships: Vec<ShipId>,
+        #[serde(skip)]
+        stats: hwc_sim::battle_status::BattleStats,
+    },
+}
+
+/// A battle ping at its evaluation, for `battlePingEvaluate` ([`hwc_sim::battle_status`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvaluatedBattle {
+    pub centre: Vector,
+    pub ships: Vec<ShipId>,
+    pub stats: hwc_sim::battle_status::BattleStats,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -351,11 +363,25 @@ impl Pings {
         self.list.push(p);
     }
 
-    /// A battle ping of `radius` around `centre` over `ships` (`pingAttackPingsCreate`).
-    pub fn battle(&mut self, centre: Vector, radius: f32, ships: Vec<ShipId>, now: f32) {
-        let mut p = Ping::new(centre, None, Eval::Battle { ships }, now);
+    /// A battle ping over a battle sub-blob (`pingAttackPingsCreate`).
+    pub fn battle(&mut self, b: hwc_sim::battle_ping::BattlePing, now: f32) {
+        let stats = hwc_sim::battle_status::BattleStats {
+            enemies: b.enemies,
+            friendlies: b.friendlies,
+            radius: b.radius,
+            ..Default::default()
+        };
+        let mut p = Ping::new(
+            b.centre,
+            None,
+            Eval::Battle {
+                ships: b.ships,
+                stats,
+            },
+            now,
+        );
         p.apply(&self.tweaks.battle, mask::BATTLE);
-        p.size = radius;
+        p.size = b.radius;
         self.list.push(p);
     }
 
@@ -370,7 +396,7 @@ impl Pings {
             return;
         }
         for b in battles {
-            self.battle(b.centre, b.radius, b.ships, now);
+            self.battle(b, now);
         }
     }
 
@@ -424,6 +450,24 @@ impl Pings {
         }
     }
 
+    /// `pingObjectDied` for a ship that died with `loss`: the battle pings it was in count it
+    /// (`battleAccountForLosses`) before they drop it.
+    pub fn battle_loss(&mut self, u: &Universe, ship: ShipId, loss: hwc_sim::battle_status::Loss) {
+        for p in &mut self.list {
+            if let Eval::Battle { ships, stats } = &mut p.eval {
+                if !ships.contains(&ship) {
+                    continue;
+                }
+                hwc_sim::battle_status::account_for_losses(u, stats, loss);
+                if loss.friendly {
+                    stats.friendlies -= 1;
+                } else {
+                    stats.enemies -= 1;
+                }
+            }
+        }
+    }
+
     /// `pingObjectDied`: pings centred on the object stay where it died; the ping tests drop
     /// their references (and the pings that depended on it).
     pub fn object_died(&mut self, obj: Owner, at: Vector) {
@@ -444,7 +488,7 @@ impl Pings {
                     !ships.is_empty()
                 }
                 Eval::Proximity(s) => Owner::Ship(*s) != obj,
-                Eval::Battle { ships } => {
+                Eval::Battle { ships, .. } => {
                     if let Owner::Ship(id) = obj {
                         if let Some(i) = ships.iter().position(|&s| s == id) {
                             ships.swap_remove(i);
@@ -457,10 +501,17 @@ impl Pings {
         });
     }
 
-    /// `pingUpdateTask`: runs every [`TASK_PERIOD`] of game time.
-    pub fn update(&mut self, u: &Universe, now: f32, sensor_found: impl Fn(ShipId) -> bool) {
+    /// `pingUpdateTask`: runs every [`TASK_PERIOD`] of game time. The battle pings it
+    /// evaluated (and so removed) come back for the battle chatter.
+    pub fn update(
+        &mut self,
+        u: &Universe,
+        now: f32,
+        sensor_found: impl Fn(ShipId) -> bool,
+    ) -> Vec<EvaluatedBattle> {
+        let mut battles = Vec::new();
         match self.last_task {
-            Some(t) if now - t < TASK_PERIOD && now >= t => return,
+            Some(t) if now - t < TASK_PERIOD && now >= t => return battles,
             _ => self.last_task = Some(now),
         }
         self.list.retain_mut(|p| {
@@ -468,7 +519,7 @@ impl Pings {
                 return true;
             }
             p.last_evaluate = now;
-            match &p.eval {
+            match &mut p.eval {
                 Eval::Anomaly { ships, .. } => {
                     if let Some(c) = selection_centre(u, ships) {
                         p.centre = c;
@@ -476,9 +527,18 @@ impl Pings {
                     true
                 }
                 Eval::Proximity(s) => sensor_found(*s),
-                Eval::NewShip | Eval::Battle { .. } => false,
+                Eval::Battle { ships, stats } => {
+                    battles.push(EvaluatedBattle {
+                        centre: p.centre,
+                        ships: std::mem::take(ships),
+                        stats: *stats,
+                    });
+                    false
+                }
+                Eval::NewShip => false,
             }
         });
+        battles
     }
 
     /// `pingListDraw`'s circles, farthest first, and the sound to play. `centre_of` gives an
@@ -787,6 +847,8 @@ mod tests {
         let battle = |x: f32, ships: Vec<ShipId>| BattlePing {
             centre: Vector::new(x, 0.0, 0.0),
             radius: 4000.0,
+            friendlies: ships.len() as i32,
+            enemies: 0,
             ships,
         };
         p.battles(
@@ -814,9 +876,11 @@ mod tests {
         let (c, ..) = p.frame(0.0, Vector::ZERO, |_| None, project, |_| true, false);
         assert!(c.is_empty());
         // The first evaluation ends it (the battle tweaks' evaluate period is 2 s).
-        p.update(&u, 0.5, |_| false);
+        assert!(p.update(&u, 0.5, |_| false).is_empty());
         assert_eq!(p.list.len(), 1);
-        p.update(&u, 2.5, |_| false);
+        let evaluated = p.update(&u, 2.5, |_| false);
         assert!(p.list.is_empty());
+        assert_eq!(evaluated.len(), 1);
+        assert_eq!(evaluated[0].ships, vec![ShipId(2)]);
     }
 }

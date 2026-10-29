@@ -84,17 +84,95 @@ pub mod event {
 }
 
 /// A speech event to queue: `ship` speaks (`None`: the mothership's voice with no ship),
-/// with `variable` choosing the line.
+/// with `variable` choosing the line. `link` is the handle of the event it answers: it plays
+/// after that one, on its stream, and not at all if that one was dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Speech {
     pub ship: Option<ShipId>,
     pub event: u32,
     pub variable: i32,
+    pub handle: u32,
+    pub link: Option<u32>,
+    /// The battle chatter event (`BCE_*`) it says, for battle chatter.
+    pub chatter: Option<usize>,
+}
+
+/// What `speechEventQueue`'s refusals need from the front end, handed over before each
+/// update ([`Universe::speech_gate`]; `None`, as in tests, refuses nothing).
+#[derive(Debug, Clone, Default)]
+pub struct SpeechGate {
+    /// The Voice options: chatter (0x88b3f4), status (0x88b3f0), commands (0x88b3ec).
+    pub chatter: bool,
+    pub status: bool,
+    pub commands: bool,
+    /// Speech is off or the sound paused (`!enableSpeech` 0x8ae2c0, 0x910254).
+    pub off: bool,
+    /// `numSinglePlayerEvents` (0xaaeb50) > 0: a mission line plays, so no chatter.
+    pub single_player_speaking: bool,
+    /// `soundEventDuckSFX` (0x9102ec): no status or chatter while the effects are ducked.
+    pub ducked: bool,
+    /// The ships in the render list (`univSpaceObjInRenderList`): only they report status or
+    /// chatter.
+    pub in_view: std::collections::HashSet<ShipId>,
+    /// The hot-key group of each grouped ship (`ship+0x43e`, 1..=9).
+    pub groups: std::collections::HashMap<ShipId, u8>,
+    /// The main screen is drawn and no ship is within 5000 of the camera (`mrRenderMainScreen`
+    /// 0x8afb4c, the sound's closest distance 0x9102a4).
+    pub far_from_camera: bool,
+}
+
+/// `SPEECH_TYPE_*` bits.
+pub mod kind {
+    pub const CHATTER: u32 = 0x100_0000;
+    pub const STATUS: u32 = 0x200_0000;
+    pub const COMMAND: u32 = 0x400_0000;
+    pub const ALWAYS_PLAY: u32 = 0x8000_0000;
 }
 
 /// `speechEventQueue(ship, event, variable, ...)`.
 pub fn queue(u: &mut Universe, ship: Option<ShipId>, event: u32, variable: i32) {
-    u.speech.push(Speech { ship, event, variable });
+    queue_linked(u, ship, event, variable, None);
+}
+
+/// `speechEventQueue(ship, event, variable, ..., linkTo, ...)` with the refusals the
+/// simulation can see ([`SpeechGate`]): the handle of the queued event, or `None` (`ERROR`).
+/// The front end may still drop it (a full queue, the same line already playing).
+pub fn queue_linked(u: &mut Universe, ship: Option<ShipId>, event: u32, variable: i32, link: Option<u32>) -> Option<u32> {
+    if !accepts(u, ship, event) {
+        return None;
+    }
+    u.speech_handles = u.speech_handles.wrapping_add(1);
+    let handle = u.speech_handles;
+    u.speech.push(Speech { ship, event, variable, handle, link, chatter: None });
+    Some(handle)
+}
+
+fn accepts(u: &Universe, ship: Option<ShipId>, event: u32) -> bool {
+    use kind::*;
+    if (event & 0x7ff) > 0x35e || u.nis_running && event & 0x6000_0000 == 0 {
+        return false;
+    }
+    let Some(g) = &u.speech_gate else { return true };
+    let refused = g.off
+        || g.single_player_speaking && event & CHATTER != 0
+        || g.ducked && event & (CHATTER | STATUS) != 0
+        || event & CHATTER != 0 && !g.chatter
+        || event & STATUS != 0 && !g.status
+        || event & COMMAND != 0 && !g.commands;
+    if refused {
+        return false;
+    }
+    let Some(id) = ship else { return true };
+    if event & 0x1000 != 0 {
+        return true;
+    }
+    let Some(s) = u.ships.get(id) else { return false };
+    if !g.in_view.contains(&id) && event & (STATUS | CHATTER) != 0 && event & ALWAYS_PLAY == 0 {
+        return false;
+    }
+    // Other players' ships speak only through a Mimic's disguise (selection), which the
+    // order acknowledgements handle; silent ships (`specialFlags2 & 0x100008`) never.
+    (s.player == u.chatter.local_player || u.nis_running) && s.special_flags2 & 0x0010_0008 == 0
 }
 
 /// `speechEventQueue(ship, event, ship->shiptype, ...)`: the ship names its type.

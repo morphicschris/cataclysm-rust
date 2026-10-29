@@ -472,6 +472,7 @@ impl Game {
         g.world.zoom_clear = options.get("hwcZoomClear") != 0;
         g.world.render_list = options.get("hwcRenderList") != 0;
         g.world.formation_focus_leader = options.get("hwcFormationFocusFire") != 0;
+        g.world.battle_reports = options.get("hwcBattleReports") != 0;
         g.world.chatter_frequency = Some(options.get("opBattleChatter") as f32 * 0.01);
         g.world
             .set_remastered_fx(options.get("hwcRemasteredFx") != 0);
@@ -517,6 +518,7 @@ impl Game {
         self.world.zoom_clear = options.get("hwcZoomClear") != 0;
         self.world.render_list = options.get("hwcRenderList") != 0;
         self.world.formation_focus_leader = options.get("hwcFormationFocusFire") != 0;
+        self.world.battle_reports = options.get("hwcBattleReports") != 0;
         self.world.chatter_frequency = Some(options.get("opBattleChatter") as f32 * 0.01);
         self.world
             .set_remastered_fx(options.get("hwcRemasteredFx") != 0);
@@ -1721,6 +1723,16 @@ impl Game {
                 a.ship_speech(self.world.universe(), PLAYER, s);
             }
         }
+        // For the next updates: the speech queue's refusals and the hot-key groups.
+        self.world.speech_gate = audio.as_ref().map(|a| {
+            let mut g = a.speech_gate();
+            for (n, ships) in self.hotkeys.non_empty() {
+                for &id in ships {
+                    g.groups.insert(id, n);
+                }
+            }
+            g
+        });
     }
 
     // ---------------------------------------------------------------------------------------
@@ -2821,6 +2833,9 @@ impl Game {
         }
         p.kas_orders(u, orders, now);
         p.battles(battles, now);
+        for &(ship, loss) in &u.battle_losses {
+            p.battle_loss(u, ship, loss);
+        }
         for e in &u.events {
             match *e {
                 SimEvent::ShipDied { ship, position, .. } => {
@@ -2914,10 +2929,15 @@ impl Game {
                 }
             }
         }
-        p.update(u, now, |id| {
+        let evaluated = p.update(u, now, |id| {
             u.ship(id)
                 .is_some_and(|s| matches!(&s.spec, ShipSpec::ProximitySensor(x) if found(x.state)))
         });
+        // `battlePingEvaluate`: what each battle makes the fleet say.
+        let u = &mut self.world.run_mut().universe;
+        for mut b in evaluated {
+            hwc_sim::battle_status::evaluate(u, b.centre, &mut b.stats, &b.ships);
+        }
     }
 
     /// `pingListDraw` in the sensors view: the circles, their sounds and, with the tactical

@@ -374,6 +374,10 @@ pub fn special_target(u: &mut Universe, id: ShipId, targets: &[ShipId]) -> bool 
     }
     let Some(t) = pick else { return true };
     if spec(u, id).and_then(|r| r.target) != Some(t) {
+        use crate::battle_chatter::{attempt, bce, can_chatter_at_this_time};
+        if can_chatter_at_this_time(u, bce::RAMMER_STARTING_RAM, Some(id)) {
+            attempt(u, bce::RAMMER_STARTING_RAM, id, -1);
+        }
         start_run(u, id, t);
     }
     false
@@ -970,6 +974,10 @@ fn check_bump(u: &mut Universe, r: ShipId, bumped: ShipId) {
                 s.push_heading = rh;
             }
             restart_effect(u, r);
+            use crate::battle_chatter::{attempt, bce, can_chatter_at_this_time};
+            if can_chatter_at_this_time(u, bce::RAM_COMPLETE, Some(r)) {
+                attempt(u, bce::RAM_COMPLETE, r, -1);
+            }
             return;
         }
     } else if let Some(h) = hit {

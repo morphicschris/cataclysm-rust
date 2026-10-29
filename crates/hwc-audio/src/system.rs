@@ -904,10 +904,54 @@ impl SoundSystem {
         })
     }
 
+    /// Whether `event` with `variable` (-1: any) has a spoken line in the race's speech data
+    /// (no state changes; see [`select_sentence`](Self::select_sentence)).
+    pub fn has_speech(&self, event: u32, variable: i32) -> bool {
+        let Some(speech) = self.data.speech(self.race) else { return false };
+        let Some(s) = speech.sentences.sentence(0, (event & 0x7ff) as usize) else { return false };
+        let (nvar, maxv, first) = (s.num_variations as u16 as i32, s.max_variable as u16 as i32, s.phrase_index as u16 as i32);
+        if nvar == 0 || maxv == 0 || variable >= maxv {
+            return false;
+        }
+        let vars: Vec<i32> = if variable < 0 { (0..maxv).collect() } else { vec![variable] };
+        vars.iter().any(|&v| {
+            (0..nvar).any(|k| speech.phrases.phrases.get((first + v + maxv * k) as usize).is_some_and(|p| !p.placeholder && !p.offsets.is_empty()))
+        })
+    }
+
+    /// A clip of Relic-coded mono blocks (an imported `.fda`) on speech stream `stream`, at the
+    /// level `event` would have (see [`play_speech`](Self::play_speech)). Its length in
+    /// milliseconds, or `None` when it is not played.
+    pub fn play_speech_clip(&mut self, blocks: Arc<[u8]>, bitrate: u16, event: u32, stream: usize) -> Option<i32> {
+        if stream >= crate::mixer::NUM_STREAMS - 1 || blocks.is_empty() || bitrate < 8 {
+            return None;
+        }
+        let data = self.data.clone();
+        let mut vol = self.speech_level() * 255.0;
+        if self.single_player_speaking() < 1 || event & 0x1000_0000 != 0 {
+            if event & 0x800 != 0 {
+                vol *= 0.75;
+            }
+        } else {
+            vol *= data.tweaks.speech_singleplayer_ratio;
+        }
+        if vol < data.tweaks.speech_min_perceptible_vol {
+            return None;
+        }
+        let handle = self.mixer().stream_handle(stream);
+        let len = blocks.len();
+        let mut entry = StreamEntry::new(StreamData { bytes: blocks, start: 0, len }, round_vol(vol), 0, 1, bitrate);
+        entry.eq = data.eq_intel.as_option();
+        entry.tag = i64::from(event);
+        self.mixer.lock().unwrap().stream_queue(handle, entry, false);
+        let blocks_n = len / usize::from(bitrate / 8);
+        Some((blocks_n as f64 * crate::codec::BLOCK_SECONDS * 1000.0) as i32)
+    }
+
     /// `numSinglePlayerEvents`: speech streams playing a single-player (mission) event,
     /// `SPEECH_TYPE_SINGLE_PLAYER` (0x1000_0000). Only while one plays are other voices
     /// (NIS and animatic lines, chatter) turned down by `SPEECH_SINGLEPLAYER_RATIO`.
-    fn single_player_speaking(&self) -> usize {
+    pub fn single_player_speaking(&self) -> usize {
         let m = self.mixer();
         (0..crate::mixer::NUM_STREAMS - 1)
             .map(|i| m.stream_handle(i))

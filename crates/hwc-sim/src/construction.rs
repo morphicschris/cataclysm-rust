@@ -411,6 +411,11 @@ fn ship_build_complete(u: &mut Universe, factory: ShipId, idx: usize, cost_div: 
     }
     u.base.events.push(BaseEvent::ShipBuilt { ship: built, ship_type: t, player });
     let Some(fi) = factory_index(u, factory) else { return };
+    if u.base.factories[fi].jobs[idx].n_jobs > 0 && player == u.base.cur_player {
+        if let Some(c) = stat.ship_class.map(|c| c.index()).filter(|&c| c < 5) {
+            crate::battle_status::launch_welcome(u, c, t.index() as i32);
+        }
+    }
     let j = &mut u.base.factories[fi].jobs[idx];
     if j.n_jobs > 0 {
         j.n_jobs -= 1;

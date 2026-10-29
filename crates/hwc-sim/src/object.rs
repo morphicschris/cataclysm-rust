@@ -373,6 +373,13 @@ pub struct Ship {
     pub special_flags: u32,
     /// `specialFlags2` (+0x1cc).
     pub special_flags2: u32,
+    /// +0x1d0: the battle evaluation saw this ship move out of a battle; fleet intelligence
+    /// reports the retreat a success when its command ends. Battle chatter only: not saved.
+    #[serde(skip)]
+    pub retreating: bool,
+    /// +0x444: when fleet intelligence last reported this ship retaliating. Not saved.
+    #[serde(skip)]
+    pub retaliation_reported: f32,
     /// `moveTo` (+0x24c) and `moveFrom` (+0x258).
     pub move_to: Vector,
     pub move_from: Vector,
@@ -531,6 +538,8 @@ impl Ship {
             attributes: 0,
             special_flags: 0,
             special_flags2: 0,
+            retreating: false,
+            retaliation_reported: 0.0,
             move_to: Vector::ZERO,
             move_from: Vector::ZERO,
             formation_offset: Vector::ZERO,

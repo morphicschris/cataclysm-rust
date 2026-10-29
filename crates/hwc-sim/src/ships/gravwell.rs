@@ -194,6 +194,10 @@ pub fn attack(u: &mut Universe, id: ShipId, target: ShipId) {
 /// `turnoffGravwell` (0x5aed00): the well lets everything go, its field effect is left to
 /// finish by itself and the switch-off effect plays.
 pub fn turn_off(u: &mut Universe, id: ShipId) {
+    use crate::battle_chatter::{attempt, bce, can_chatter_at_this_time};
+    if u.ships.get(id).is_some_and(|s| s.player == u.base.cur_player) && can_chatter_at_this_time(u, bce::GRAV_WELL_OFF, Some(id)) {
+        attempt(u, bce::GRAV_WELL_OFF, id, -1);
+    }
     if let Some(g) = spec_mut(u, id) {
         g.field_on = false;
     }
@@ -322,6 +326,10 @@ pub fn add_obj(u: &mut Universe, id: ShipId, ship: ShipId) {
     if holds(u, id, ship) {
         u.ships.ship_mut(ship).special_flags |= special::CANT_FIRE;
         return;
+    }
+    // One of the local player's ships caught: fleet command warns of it.
+    if u.ships.ship(ship).player == u.base.cur_player {
+        crate::battle_chatter::fleet_attempt(u, None, crate::battle_chatter::bce::GRAV_WELL_HAS_SHIPS, -1, None);
     }
     let rot = statics(u, u.ships.ship(id).ship_type).rot;
     let mut r = |m: f32| st(u.randy.frandom_between_ext(RAN_GAME, -m, m));

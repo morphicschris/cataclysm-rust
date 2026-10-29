@@ -1149,6 +1149,18 @@ pub fn auto_launch_bit(u: &Universe, dw: ShipId) -> u32 {
     0
 }
 
+/// `ShipDocksAtShip`'s chatter as a ship gets inside or latches on: it says it docked, or
+/// that it is unloading its resources.
+fn docked_chatter(u: &mut Universe, ship: ShipId) {
+    use crate::battle_chatter::{attempt, bce, can_chatter_at_this_time};
+    if can_chatter_at_this_time(u, bce::DOCKING_MORE, Some(ship)) {
+        let s = u.ships.ship(ship);
+        let k = if s.base.resources as f32 <= 0.0 { bce::DOCKING_MORE } else { bce::RESOURCES_TRANSFERRED };
+        let t = s.ship_type.index() as i32;
+        attempt(u, k, ship, t);
+    }
+}
+
 /// `ShipDocksAtShip` (0x460e00): one step of `ship` docking with `dw` for `purpose_`. True when
 /// this dock (or launch) is complete.
 pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Option<CommandId>, purpose_: i32) -> bool {
@@ -1234,10 +1246,16 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
                 let point_type = reserved_point(u, ship, dw).and_then(|p| p.dock_type).map_or(-1, |t| t.index() as i32);
                 base::remove_ship_from_outside(u, ship, true);
                 if purpose_ == purpose::RETIRE {
+                    // Fleet command reports the retired ship (`STAT_MoShip_ShipRetired`).
+                    let (t, player) = (u.ships.ship(ship).ship_type.index() as i32, u.ships.ship(ship).player);
+                    if player == u.chatter.local_player {
+                        crate::speech::queue(u, None, 0x200_1040, t);
+                    }
                     if u.ships.ship(ship).ship_race == ShipRace::Beast {
                         crate::research::acquire_ship_tech_on_dock(u, ship);
                     }
                 } else {
+                    docked_chatter(u, ship);
                     put_ship_inside(u, ship, dw);
                     let s = u.ships.ship_mut(ship);
                     s.base.dock_state = state::INSIDE;
@@ -1279,6 +1297,7 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
                 dock_timer_extras(u, ship);
                 crate::clamp::clamp_obj_to_obj(u, ship, dw);
                 u.ships.ship_mut(ship).base.dock_state = state::LATCHED;
+                docked_chatter(u, ship);
                 u.base.events.push(base::BaseEvent::ShipDocked { ship, with: dw });
                 return false;
             }

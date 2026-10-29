@@ -138,9 +138,14 @@ pub fn detect_ships(u: &mut Universe, id: ShipId) -> bool {
         }
     }
     for &o in &hits {
-        // (The local player's sensor also has the fleet announce a cloaked ship.)
         if player < 32 {
             u.ships.ship_mut(o).sensed_by |= 1 << player;
+        }
+        // The local player's sensor has fleet command announce a cloaked ship.
+        let s = u.ships.ship(o);
+        if player == u.base.cur_player && s.flags & crate::cloak::SOF_CLOAKED != 0 {
+            let at = s.posinfo.position;
+            crate::battle_chatter::fleet_attempt(u, None, crate::battle_chatter::bce::CLOAKED_SHIPS_DETECTED, -1, Some(at));
         }
     }
     !hits.is_empty()

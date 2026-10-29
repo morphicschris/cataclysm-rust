@@ -195,6 +195,18 @@ pub const ENTRIES: &[Entry] = &[
         Control::Toggle,
     ),
     entry(modern_hud::OPTION_KEY, "MODERN HUD", 3, Control::Toggle),
+    entry(
+        "hwcRemasteredChatter",
+        "REMASTERED CHATTER",
+        3,
+        Control::Choice(&[("OFF", 0), ("GAPS", 1), ("MIXED", 2)]),
+    ),
+    entry(
+        "hwcBattleReports",
+        "INTEL BATTLE REPORTS IN CAMPAIGNS",
+        3,
+        Control::Toggle,
+    ),
     entry("hwcOrderLines", "ORDER LINES", 3, Control::Toggle),
     entry(
         "hwcShipIcons",

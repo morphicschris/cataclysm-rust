@@ -957,6 +957,7 @@ pub fn process_attack_to_do_in_formation(u: &mut Universe, cid: CommandId) -> bo
             c.turn_around_times = 0;
             c.holding_pattern_vec = Vector::new(st(ld(dist) * ld(h.x)), st(ld(dist) * ld(h.y)), st(ld(dist) * ld(h.z)));
             c.attributes |= attr::HOLDING_PATTERN;
+            strike_complete(u, leader);
             return true;
         }
         if cmd.attributes != 0 {
@@ -1290,6 +1291,27 @@ fn process_holding_pattern(u: &mut Universe, cid: CommandId) -> bool {
 }
 
 /// `clProcess` (0x447400) for the orders of this slice.
+/// Strike craft finished their attack: fleet command says so if they are the local player's.
+fn strike_complete(u: &mut Universe, leader: ShipId) {
+    if u.ships.get(leader).is_some_and(|s| s.player == u.base.cur_player) {
+        crate::battle_chatter::fleet_attempt(u, None, crate::battle_chatter::bce::STRIKE_ATTACK_COMPLETE, -1, None);
+    }
+}
+
+/// A move done: if the battle evaluation saw these ships retreat, fleet intelligence reports
+/// the retreat a success (`clProcess`, once for the selection).
+fn retreat_done(u: &mut Universe, ships: &[ShipId]) {
+    let mut said = false;
+    for &id in ships {
+        let s = u.ships.ship_mut(id);
+        if s.retreating && !said {
+            said = true;
+            crate::battle_chatter::fleet_attempt(u, None, crate::battle_chatter::bce::RETREAT_SUCCESSFUL, -1, None);
+        }
+        u.ships.ship_mut(id).retreating = false;
+    }
+}
+
 pub fn cl_process(u: &mut Universe) {
     let todo = u.commands.todo.clone();
     let statics = u.statics.clone();
@@ -1338,6 +1360,7 @@ pub fn cl_process(u: &mut Universe) {
                 order::MOVE => {
                     run_passive_attack(u, cid);
                     if process_move_to_do(u, cid, false, 0, true) {
+                        retreat_done(u, &cmd.selection[..1]);
                         free_last_order(u, cid);
                         let c = u.commands.get_mut(cid).expect("command");
                         c.order = order::NULL;
@@ -1438,6 +1461,7 @@ pub fn cl_process(u: &mut Universe) {
                     all_done &= process_move_to_do(u, cid, false, i, false);
                 }
                 if all_done {
+                    retreat_done(u, &cmd.selection);
                     if cmd.attributes & (attr::PROTECTING | attr::PASSIVE_ATTACKING) == 0 {
                         for &id in &cmd.selection {
                             u.ships.ship_mut(id).command = None;
@@ -2228,6 +2252,7 @@ fn process_attack_to_do(u: &mut Universe, cid: CommandId) -> bool {
             return all;
         }
         // (Strike craft go into the holding pattern here; it is not modelled, they stop.)
+        strike_complete(u, cmd.selection[0]);
         return true;
     }
     // (Guard conditions during an attack and attacking while moving are not modelled.)
@@ -2396,6 +2421,7 @@ pub fn cl_passive_attack(u: &mut Universe, selection: &[ShipId], targets: &[Ship
             return;
         }
         change_order_to_passive_attack(u, cid, targets);
+        retaliation_chatter(u, selection[0]);
         return;
     }
     remove_ships_from_doing_stuff(u, selection);
@@ -2408,9 +2434,29 @@ pub fn cl_passive_attack(u: &mut Universe, selection: &[ShipId], targets: &[Ship
         let s = u.ships.ship_mut(id);
         s.ai_state = 0;
         s.ai_state_attack = 0;
+        s.retreating = false;
     }
     let cid = u.commands.add(cmd);
     prepare_ships(u, cid);
+}
+
+/// `clPassiveAttack`'s report of a local ship firing back, at most every 40 s: fleet
+/// intelligence (for the ship's group, if it has one), then the ship itself.
+fn retaliation_chatter(u: &mut Universe, ship: ShipId) {
+    use crate::battle_chatter::{attempt_linked, bce, can_chatter_at_this_time, fleet_attempt};
+    let Some(s) = u.ships.get(ship) else { return };
+    let now = u.total_time_elapsed;
+    if s.player != u.base.cur_player || now < st(ld(s.retaliation_reported) + 40.0) {
+        return;
+    }
+    let t = s.ship_type.index() as i32;
+    let grouped = u.speech_gate.as_ref().is_some_and(|g| g.groups.contains_key(&ship));
+    let k = if grouped { bce::GROUP_ATTACK_RETALIATE } else { bce::ATTACK_RETALIATE };
+    let Some(h) = fleet_attempt(u, None, k, -1, None) else { return };
+    u.ships.ship_mut(ship).retaliation_reported = now;
+    if can_chatter_at_this_time(u, bce::ATTACK_RETALIATE_REPEAT, Some(ship)) {
+        attempt_linked(u, Some(h), bce::ATTACK_RETALIATE_REPEAT, ship, t);
+    }
 }
 
 /// `ChangeOrderToPassiveAttack` (0x444600).

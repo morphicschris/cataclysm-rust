@@ -530,6 +530,10 @@ pub fn collect_resources(u: &mut Universe, ship: ShipId, r: ResourceId) -> bool 
     if max < s.base.resources {
         amount += max - s.base.resources;
         s.base.resources = max;
+        let t = s.ship_type.index() as i32;
+        if crate::battle_chatter::can_chatter_at_this_time(u, crate::battle_chatter::bce::WORKER_FULL, Some(ship)) {
+            crate::battle_chatter::attempt(u, crate::battle_chatter::bce::WORKER_FULL, ship, t);
+        }
     }
     let rinfo = info(u, res.kind).cloned();
     let rr = u.base.resources.get_mut(r).expect("resource");

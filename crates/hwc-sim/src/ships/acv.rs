@@ -303,8 +303,14 @@ pub fn fire_emp(u: &mut Universe, group: &[ShipId], centre: ShipId) {
         a.emp_targets.extend(joined);
     }
     let charges = group.len() as i32;
+    let mut reported = false;
     for v in victims {
         crate::disable::apply_emp(u, v, charges);
+        // The first of the local player's ships it hits has fleet command report the pulse.
+        if !reported && u.ships.get(v).is_some_and(|s| s.player == u.base.cur_player) {
+            crate::battle_chatter::fleet_attempt(u, None, crate::battle_chatter::bce::EMP_PULSE_DETECTED, -1, None);
+            reported = true;
+        }
         if let Some(a) = spec_mut(u, centre) {
             a.emp_targets.push(v);
         }

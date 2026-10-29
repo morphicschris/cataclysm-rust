@@ -237,3 +237,57 @@ fn idle_ships_return_fire_by_tactics() {
     }
     assert!(failures.is_empty(), "ships that did not fire back: {failures:?}");
 }
+
+/// Battle chatter (`battlePingEvaluate`): evaluating the battle pings of a fight the local
+/// player is not losing (ten Acolytes on four Taiidan bombers) makes fleet intelligence
+/// report it in a skirmish; in a single-player game the reports marked
+/// `battleStatusSuppress` are counted as said but never queued, unless the enhancement lets
+/// them through. (Turanic and heavy fighters have no `gunsFireTime`, so their firepower is
+/// infinite and battles against them make no report, as in the original.)
+#[test]
+fn battle_reports_chatter() {
+    use hwc_math::Vector;
+    use hwc_sim::battle_status::{evaluate, BattleStats};
+    use hwc_sim::harness::{Order, Scenario, Spawn};
+    use hwc_sim::statics::{ShipRace, ShipType};
+    let Some(d) = data() else { return };
+    let table = &d.statics.battle_chatter;
+    let suppressed: Vec<u32> = table.events.iter().filter(|e| e.status_suppress).map(|e| e.event).collect();
+    assert!(suppressed.contains(&0x200_207a), "winning-battle reports are suppressed in campaigns");
+    let talk = |single_player: bool, reports: bool| {
+        let mut spawns: Vec<Spawn> = (0..10).map(|i| Spawn { ship_type: ShipType::sAcolyte, player: 0, position: Vector::new(-2500.0, i as f32 * 200.0, 0.0) }).collect();
+        spawns.extend((0..4).map(|i| Spawn { ship_type: ShipType::tAttackBomber, player: 1, position: Vector::new(2500.0, i as f32 * 200.0, 0.0) }));
+        let sc = Scenario {
+            name: "winning",
+            players: vec![ShipRace::Somtaaw, ShipRace::Taiidan],
+            spawns,
+            orders: vec![(0, Order::Attack { ships: (0..10).collect(), targets: (10..14).collect() }), (0, Order::Attack { ships: (10..14).collect(), targets: (0..10).collect() })],
+            resources: Vec::new(),
+            resource_units: Vec::new(),
+        };
+        let mut run = Run::new(d.statics.clone(), d.tweaks.clone(), sc).unwrap();
+        run.universe.single_player = single_player;
+        run.universe.chatter.reports_in_campaign = reports;
+        let props = hwc_sim::battle_ping::ping_blob_properties(None);
+        let mut said = Vec::new();
+        for _ in 0..16 * 120 {
+            run.step();
+            if hwc_sim::battle_ping::is_battle_ping_frame(&run.universe) {
+                for p in hwc_sim::battle_ping::battle_pings(&mut run.universe, &props) {
+                    let mut b = BattleStats { enemies: p.enemies, friendlies: p.friendlies, radius: p.radius, ..Default::default() };
+                    evaluate(&mut run.universe, p.centre, &mut b, &p.ships);
+                }
+            }
+            said.extend(run.universe.speech.drain(..).map(|s| s.event));
+        }
+        said
+    };
+    // Fleet intelligence's battle reports (start of battle, neutral, winning, kicking butt).
+    let reports = [0x200_2078, 0x100_2081, 0x200_2079, 0x200_207a, 0x200_207b];
+    let skirmish = talk(false, false);
+    assert!(skirmish.iter().any(|e| reports.contains(e)), "skirmish battle reports: {skirmish:x?}");
+    let campaign = talk(true, false);
+    assert!(!campaign.iter().any(|e| suppressed.contains(e)), "campaign stays quiet: {campaign:x?}");
+    let enhanced = talk(true, true);
+    assert!(enhanced.iter().any(|e| reports.contains(e)), "the enhancement lets them through: {enhanced:x?}");
+}
