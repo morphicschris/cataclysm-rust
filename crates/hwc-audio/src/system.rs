@@ -665,18 +665,25 @@ impl SoundSystem {
     }
 
     /// A sound from outside the game's banks (the optional Remastered effects): `patch` at
-    /// `position`, at `volume(distance)` (0..1) of the effects level, panned as effects are.
-    pub fn play_external(&mut self, patch: &crate::mixer::PatchRef, position: Vec3, volume: impl Fn(f32) -> f32) -> i32 {
+    /// `position`, fading with distance and muffled as explosion `event` is (its range, volume
+    /// and EQ rows), at `gain` (0..1) of that, panned as effects are.
+    pub fn play_external(&mut self, patch: &crate::mixer::PatchRef, position: Vec3, event: u32, gain: f32) -> i32 {
         if !self.in_game() {
             return NO_HANDLE;
         }
         let dist = self.listener.distance(position);
-        let vol = round_vol(volume(dist).clamp(0.0, 1.0) * self.sfx_level * 255.0);
+        let index = (event & event::INDEX) as usize;
+        let row = if index < 0x10 { rows::EXPLOSION_OFFSET + index } else { rows::EXPLOSION_LAST };
+        if !self.data.tables.in_range(row, dist) {
+            return NO_HANDLE;
+        }
+        let (vol, eq) = self.atten(row, dist);
+        let vol = round_vol(gain.clamp(0.0, 1.0) * f32::from(vol));
         if vol < 1 {
             return NO_HANDLE;
         }
         let pan = self.listener.pan_angle(position, EFFECT_SIZE, dist);
-        self.mixer().play(patch, None, -1.0, pan, priority::NORMAL, vol, false, false, false)
+        self.mixer().play(patch, eq.as_ref(), -1.0, pan, priority::NORMAL, vol, false, false, false)
     }
 
     /// The Cataclysm `soundEffectType`: an effect-driven ship sound (ship event 0x0c).

@@ -380,7 +380,7 @@ impl Audio {
     pub fn remastered_sounds(&mut self, cues: Vec<crate::hwr_fx::SoundCue>) {
         for c in cues {
             self.system
-                .play_external(&c.patch, c.position, |d| c.volume(d));
+                .play_external(&c.patch, c.position, c.event(), c.gain());
         }
     }
 

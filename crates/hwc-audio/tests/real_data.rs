@@ -184,6 +184,32 @@ fn distance_attenuation_eq_and_pan() {
     eprintln!("explosion: near {ln:.0} far {lf:.0} rms; centroid near {cn:.0} Hz far {cf:.0} Hz; pan ratio {:.3}", r / l);
 }
 
+/// An outside sound (the Remastered explosions) fades and darkens with distance as the stock
+/// explosion it is played as, and is not played beyond that explosion's range.
+#[test]
+fn external_sounds_fade_with_distance_as_stock_explosions() {
+    let Some(d) = data() else { return };
+    let patch = d.special.patches[0].clone();
+    let max = d.tables.max_range(70).unwrap();
+    let render_at = |x: f32| {
+        let mut s = system(&d);
+        s.listener = Listener { eye: [0.0; 3], look_at: [1.0, 0.0, 0.0], up: [0.0, 0.0, 1.0] };
+        let h = s.play_external(&patch, [x, 0.0, 0.0], event::EXPLOSION + 2, 1.0);
+        (h, offline::render(&mut s, &[], 2.5, 3))
+    };
+    let (hn, near) = render_at(1000.0);
+    let (hf, far) = render_at(9000.0);
+    let (hx, _) = render_at(max + 10.0);
+    assert!(hn >= 0 && hf >= 0);
+    assert_eq!(hx, NO_HANDLE, "beyond the stock range of {max}");
+    let (ln, lf) = (levels(&near.left).rms, levels(&far.left).rms);
+    // Row 70: 239 at 1000 units, 128 at 9000.
+    assert!((0.4..0.65).contains(&(lf / ln)), "far {lf} vs near {ln}");
+    let n = 1024;
+    let (cn, cf) = (offline::centroid(&power_spectrum(&near.left, n), n), offline::centroid(&power_spectrum(&far.left, n), n));
+    assert!(cf < cn, "distance EQ should darken: near {cn:.0} Hz, far {cf:.0} Hz");
+}
+
 #[test]
 fn gun_engine_and_hit_events_follow_their_rules() {
     let Some(d) = data() else { return };

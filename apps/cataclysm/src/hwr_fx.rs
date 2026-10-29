@@ -127,13 +127,26 @@ pub struct SoundCue {
     pub patch: hwc_audio::mixer::PatchRef,
     pub position: [f32; 3],
     pub envelope: hwc_hwr::sound::Envelope,
+    /// The event's name, lower case.
+    pub name: String,
 }
 
 impl SoundCue {
-    /// Volume at `distance` (Cataclysm units) from the listener: the envelope is in Remastered
-    /// units, scaled to sit with Cataclysm's own effects (several Remastered events overlap).
-    pub fn volume(&self, distance: f32) -> f32 {
-        (self.envelope.volume(distance / UNIT_SCALE) * SOUND_BOOST).min(1.0)
+    /// Loudness up close (0..1), scaled to sit with Cataclysm's own effects (several Remastered
+    /// events overlap). Over distance the sound fades as the stock explosion of [`Self::event`]
+    /// does: the Remastered envelopes are for its own map scale, and many events have none.
+    pub fn gain(&self) -> f32 {
+        (self.envelope.volume(0.0) * SOUND_BOOST).min(1.0)
+    }
+
+    /// The stock explosion whose distance falloff this sound takes: the small one for small
+    /// blasts and accents, the large one for medium (frigate) and large blasts, as the stock
+    /// sounds pick by ship class.
+    pub fn event(&self) -> u32 {
+        let large = ["/large/", "/medium/", "_large", "_medium"]
+            .iter()
+            .any(|k| self.name.contains(k));
+        hwc_audio::event::EXPLOSION + if large { 2 } else { 0 }
     }
 }
 
@@ -380,6 +393,7 @@ impl HwrFx {
                 patch,
                 position: cue.position.to_array(),
                 envelope: sound.envelope,
+                name: cue.event.to_ascii_lowercase().replace('\\', "/"),
             });
         }
         out
@@ -645,5 +659,43 @@ mod tests {
         let r = ramp_of(&img);
         assert_eq!(r.first(), Some(&1.0));
         assert_eq!(r.last(), Some(&0.0));
+    }
+
+    #[test]
+    fn sounds_fade_as_the_stock_explosion_of_their_size() {
+        let cue = |name: &str, envelope: Vec<(f32, f32)>| SoundCue {
+            patch: hwc_audio::mixer::PatchRef {
+                data: std::sync::Arc::from(&[][..]),
+                start: 0,
+                end: 0,
+                loop_start: 0,
+                loop_end: 0,
+                bitrate: 0,
+                flags: 0,
+                sample_rate: 0,
+                volume: 255,
+                pan: 0,
+                priority: 0,
+            },
+            position: [0.0; 3],
+            envelope: hwc_hwr::sound::Envelope(envelope),
+            name: name.into(),
+        };
+        let small = hwc_audio::event::EXPLOSION;
+        let large = small + 2;
+        let c = cue(
+            "explosion/small/etg_explode_small_plasma",
+            vec![(0.0, 0.445), (6250.0, 0.0)],
+        );
+        assert_eq!(c.event(), small);
+        assert!((c.gain() - 0.445 * SOUND_BOOST).abs() < 1e-6);
+        assert_eq!(cue("explosion/accents", vec![]).event(), small);
+        assert_eq!(
+            cue("explosion/medium/etg_explode_medium_firey", vec![]).event(),
+            large
+        );
+        let l = cue("explosion/large/etg_explode_large_energy", vec![]);
+        assert_eq!(l.event(), large);
+        assert!((l.gain() - SOUND_BOOST).abs() < 1e-6);
     }
 }
