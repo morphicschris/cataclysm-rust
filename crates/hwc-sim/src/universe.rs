@@ -262,6 +262,15 @@ impl Universe {
         u
     }
 
+    /// The mission clock (`moDrawRUsAndTime` 0x4a3650): `totaltimeelapsed` less `moTimer`
+    /// (0x8f1754), which `moResetTimer` sets when the level loads (`univupdateReset`, the end
+    /// of `singlePlayerLoadNewLevel`). The clock itself carries over from mission to mission,
+    /// but the level load also restarts `univUpdateCounter`, which counts the same steps, so
+    /// the time since the load is the counter's steps (and needs nothing more in a save).
+    pub fn mission_time(&self) -> f32 {
+        self.update_counter as f32 * UNIVERSE_UPDATE_PERIOD
+    }
+
     /// `ShipIDtoShip`.
     pub fn ship(&self, id: ShipId) -> Option<&Ship> {
         self.ships.get(id)

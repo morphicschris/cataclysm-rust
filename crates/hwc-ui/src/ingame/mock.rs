@@ -563,6 +563,9 @@ impl GameUiHost for MockHost {
     fn game_time(&self) -> f32 {
         self.time
     }
+    fn mission_time(&self) -> f32 {
+        self.time
+    }
     fn factories(&self) -> Vec<Factory> {
         self.factories.clone()
     }

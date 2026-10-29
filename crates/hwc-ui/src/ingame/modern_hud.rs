@@ -397,8 +397,7 @@ pub fn fill_rect(bar: Rect, fraction: f32) -> Rect {
 
 /// "hh:mm:ss", like the original box.
 pub fn clock_text(time: f32) -> String {
-    let t = time.max(0.0) as u32;
-    format!("{:02}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)
+    super::overlay::clock_text(time)
 }
 
 /// The readout's state, kept in the overlay state: the eased bar fills, and the fold chosen
@@ -906,7 +905,7 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas, view: &HostView, clock: f32, mouse
         ru: p.resource_units,
         su_used: p.support_used,
         su_cap: p.support_capacity,
-        time: view.time,
+        time: view.mission_time,
     };
     paint(
         canvas,
@@ -1275,7 +1274,9 @@ mod tests {
 
     #[test]
     fn clock_and_mode_parsing() {
-        assert_eq!(clock_text(71.9), "00:01:11");
+        assert_eq!(clock_text(71.4), "00:01:11");
+        // Rounded to the nearest second, as the original's conversion does.
+        assert_eq!(clock_text(71.9), "00:01:12");
         assert_eq!(clock_text(3725.0), "01:02:05");
         assert_eq!(parse_mode("Modern"), Some(true));
         assert_eq!(parse_mode("original"), Some(false));

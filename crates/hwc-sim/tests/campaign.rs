@@ -62,9 +62,15 @@ fn campaign_chain_mission1_to_mission6_with_carry_over() {
             assert_eq!(run.universe.base.players[0].resource_units, c.resource_units, "mission {m} RUs");
             assert_eq!(run.universe.base.players[0].tech.has, c.player.tech.has, "mission {m} technology");
             assert!(run.universe.base.players[0].mothership.is_some(), "mission {m}: mothership in hyperspace");
+            // The game time carries on, the mission clock starts again (moResetTimer).
+            assert_eq!(run.universe.total_time_elapsed.to_bits(), c.total_time.to_bits(), "mission {m} game time");
+            assert_eq!(run.universe.mission_time(), 0.0, "mission {m} clock");
         }
+        let started = run.universe.total_time_elapsed;
         let ending = Autoplay::new(16 * 90).play(&mut run, 16 * 900);
         assert!(matches!(ending, Ending::Hyperspace | Ending::Forced), "mission {m} ended {ending:?}");
+        let ran = run.universe.total_time_elapsed - started;
+        assert!((run.universe.mission_time() - ran).abs() < 0.5, "mission {m}: clock {} after {ran} s", run.universe.mission_time());
         assert!(run.game.ships_have_arrived, "mission {m}: the fleet arrived");
         let c = run.carry().expect("carry-over");
         assert_eq!(c.mission, m);

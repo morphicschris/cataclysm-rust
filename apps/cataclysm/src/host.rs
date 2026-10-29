@@ -275,6 +275,10 @@ impl GameUiHost for SimHost<'_> {
         self.u().total_time_elapsed
     }
 
+    fn mission_time(&self) -> f32 {
+        self.u().mission_time()
+    }
+
     fn factories(&self) -> Vec<Factory> {
         self.factory_ships()
             .into_iter()

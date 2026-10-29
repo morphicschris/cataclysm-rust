@@ -523,6 +523,8 @@ pub trait GameUiHost {
     fn player(&self) -> PlayerInfo;
     /// Game time in seconds (`universe.totaltimeelapsed`).
     fn game_time(&self) -> f32;
+    /// Time since the mission's level loaded (the taskbar clock, `moDrawRUsAndTime`).
+    fn mission_time(&self) -> f32;
     /// Ships that build: index 0 the mothership (if any), then carriers.
     fn factories(&self) -> Vec<Factory>;
     /// The construction list (headings and ships, display order) for this factory
@@ -611,6 +613,8 @@ pub struct MimicMenus {
 pub struct HostView {
     pub player: PlayerInfo,
     pub time: f32,
+    /// [`GameUiHost::mission_time`].
+    pub mission_time: f32,
     pub factories: Vec<Factory>,
     /// Construction list of the selected factory.
     pub build_list: Vec<BuildRow>,
@@ -656,6 +660,7 @@ impl HostView {
         HostView {
             player: host.player(),
             time: host.game_time(),
+            mission_time: host.mission_time(),
             build_list: selected.map(|f| host.build_list(f)).unwrap_or_default(),
             factories,
             jobs: host.build_jobs(),

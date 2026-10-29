@@ -436,6 +436,9 @@ impl GameUiHost for Busy<'_> {
     fn game_time(&self) -> f32 {
         self.0.game_time()
     }
+    fn mission_time(&self) -> f32 {
+        self.0.mission_time()
+    }
     fn factories(&self) -> Vec<Factory> {
         self.0.factories()
     }

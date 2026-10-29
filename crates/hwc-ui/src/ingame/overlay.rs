@@ -1222,15 +1222,14 @@ fn draw_player_info(fe: &Fe, canvas: &mut Canvas, view: &HostView, bar: i32, bd:
     let cx = x + text(canvas, &f, x, y, LABEL_GREY, "RU: ");
     text(canvas, &f, cx, y, WHITE, &p.resource_units.to_string());
     y += h + 10;
-    let t = view.time.max(0.0) as u32;
-    text(
-        canvas,
-        &f,
-        x,
-        y,
-        WHITE,
-        &format!("{:02}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60),
-    );
+    text(canvas, &f, x, y, WHITE, &clock_text(view.mission_time));
+}
+
+/// `moDrawRUsAndTime`'s "%02d:%02d:%02d": the seconds rounded to the nearest (the x87
+/// rounding-mode conversion), ties to even.
+pub fn clock_text(time: f32) -> String {
+    let t = time.max(0.0).round_ties_even() as u32;
+    format!("{:02}:{:02}:{:02}", t / 3600, t / 60 % 60, t % 60)
 }
 
 /// The taskbar view buttons (option "Taskbar buttons").
