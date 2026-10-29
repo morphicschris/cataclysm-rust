@@ -456,7 +456,10 @@ impl InGameUi {
                 false
             }
             InputEvent::KeyDown(code) => {
-                let repeat = !self.held.insert(code);
+                // A text entry with the keyboard eats the key (`regKeysFocussed`): it is not
+                // held for the game's polled keys (zoom, pan) either.
+                let typing = self.fe.game.ig.manager.is_some() && self.fe.keys_focussed();
+                let repeat = !typing && !self.held.insert(code);
                 if self.fe.game.ig.manager.is_some() {
                     if modern_menu::active(&self.fe) && modern_menu::key_down(&mut self.fe, code) {
                         return true;

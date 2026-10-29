@@ -466,6 +466,39 @@ fn mission_one_saves_and_loads_through_the_menus() {
     );
 }
 
+/// The save name's box has the keyboard (`regKeysFocussed`): a held `-` types and does not
+/// zoom the camera, and the keypad's 5 types too.
+#[test]
+fn typing_a_save_name_keeps_the_keys() {
+    let Some(mut rig) = rig("typing") else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut game = rig.mission_one();
+    let g = &mut *game;
+    into_mission(&mut rig, g);
+    rig.pause_menu(g);
+    rig.press(g, "SAVE GAME");
+    assert_eq!(screen(g), "In_game_save");
+    rig.type_text(g, "ab");
+    let distance = g.world.camera.distance;
+    for (code, c) in [(0xbd, '-'), (0x65, '5')] {
+        rig.input(g, InputEvent::KeyDown(code));
+        rig.input(g, InputEvent::Char(c));
+        for _ in 0..10 {
+            rig.frame(g);
+        }
+        rig.input(g, InputEvent::KeyUp(code));
+        rig.frame(g);
+    }
+    let fe = &g.ui.fe;
+    let typed = fe
+        .find_atom("IG_TextEntryWindowInit")
+        .and_then(|a| fe.text_entry(a));
+    assert_eq!(typed, Some("ab-5"));
+    assert_eq!(g.world.camera.distance, distance, "the camera did not zoom");
+}
+
 #[test]
 fn quick_save_and_autosave() {
     let Some(mut rig) = rig("quick") else {

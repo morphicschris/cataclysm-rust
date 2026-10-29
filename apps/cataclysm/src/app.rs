@@ -545,6 +545,34 @@ fn event_code(event: &winit::event::KeyEvent) -> Option<u16> {
         if let Some(n) = digit {
             return Some(0x30 + n as u16);
         }
+        // The keypad's own codes (`VK_NUMPAD0`.., `VK_ADD`...). Its digits and point are
+        // those only with Num Lock on (the logical key is then a character); read without
+        // the modifiers they would be the cursor keys, and the 5 (`VK_CLEAR`) no key at all,
+        // so a text entry never saw it.
+        let typed = matches!(event.logical_key, Key::Character(_));
+        let pad = [
+            KeyCode::Numpad0,
+            KeyCode::Numpad1,
+            KeyCode::Numpad2,
+            KeyCode::Numpad3,
+            KeyCode::Numpad4,
+            KeyCode::Numpad5,
+            KeyCode::Numpad6,
+            KeyCode::Numpad7,
+            KeyCode::Numpad8,
+            KeyCode::Numpad9,
+        ]
+        .iter()
+        .position(|&d| d == c);
+        match (c, pad) {
+            (_, Some(n)) if typed => return Some(0x60 + n as u16),
+            (KeyCode::NumpadDecimal, _) if typed => return Some(0x6e),
+            (KeyCode::NumpadMultiply, _) => return Some(0x6a),
+            (KeyCode::NumpadAdd, _) => return Some(0x6b),
+            (KeyCode::NumpadSubtract, _) => return Some(0x6d),
+            (KeyCode::NumpadDivide, _) => return Some(0x6f),
+            _ => {}
+        }
     }
     key_code(&event.key_without_modifiers())
 }
@@ -571,6 +599,7 @@ fn key_code(k: &Key) -> Option<u16> {
             NamedKey::Control => key::CONTROL,
             NamedKey::Alt => key::ALT,
             NamedKey::CapsLock => 0x14,
+            NamedKey::Clear => 0x0c,
             NamedKey::Insert => 0x2d,
             NamedKey::F1 => 0x70,
             NamedKey::F2 => 0x71,

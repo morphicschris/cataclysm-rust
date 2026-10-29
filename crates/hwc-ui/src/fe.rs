@@ -740,6 +740,11 @@ impl<G> FrontEnd<G> {
         }
     }
 
+    /// Whether a text entry has the keyboard (`regKeysFocussed`).
+    pub fn keys_focussed(&self) -> bool {
+        self.keys_focussed
+    }
+
     pub fn list_mut(&mut self, atom: AtomRef) -> Option<&mut ListWindow> {
         let id = self.atom(atom).region?;
         match &mut self.regions.get_mut(id)?.control {
