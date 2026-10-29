@@ -747,3 +747,103 @@ fn time_compression_keys() {
     assert_eq!(g.speed_level, 1);
     assert_eq!(last(g), "1/2 X Time Compression");
 }
+
+/// Orders are acknowledged by the ships as in the original: the first selected ship answers
+/// a tactics change, an attack order and a cancelled attack, and only the local player's
+/// ships speak.
+#[test]
+fn ships_acknowledge_orders() {
+    use hwc_sim::speech::event;
+    use hwc_ui::ingame::host::Command;
+    use hwc_ui::ingame::InputEvent;
+    let Some((mut game, mut rig)) = mission_one((800, 600), false) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    if rig.audio.is_none() {
+        eprintln!("skipped: no sound data");
+        return;
+    }
+    let g = &mut *game;
+    let mut frames = 0;
+    while g.ui.fleet_intel || frames < 16 * 20 {
+        if g.ui.fleet_intel && frames % 16 == 0 {
+            g.input(InputEvent::KeyDown(0x1b), &mut rig.audio);
+            g.input(InputEvent::KeyUp(0x1b), &mut rig.audio);
+        }
+        rig.frame(g);
+        frames += 1;
+        assert!(frames < 16 * 600, "the opening intel never ended");
+    }
+    // Let the intel's own lines finish.
+    for _ in 0..16 * 30 {
+        rig.frame(g);
+    }
+    let u = g.world.universe();
+    let mothership = u.base.players[crate::host::PLAYER]
+        .mothership
+        .expect("mothership");
+    let own: Vec<_> = u
+        .ship_list
+        .iter()
+        .copied()
+        .filter(|&id| id != mothership && crate::host::selectable(u, id))
+        .collect();
+    // The Kiithid fleet the script hands over (`SwitchOwner` without control, specialFlags2
+    // 0x100000) neither takes orders nor speaks, as in the original.
+    let (silent, own): (Vec<_>, Vec<_>) = own.into_iter().partition(|&id| {
+        u.ship(id)
+            .is_some_and(|s| s.special_flags2 & 0x10_0000 != 0)
+    });
+    let ships = hwc_sim::command::attack_capable(u, &own);
+    assert!(
+        !ships.is_empty(),
+        "Mission 1 has no fighting ships of the player's own"
+    );
+    let ty = u.ship(ships[0]).expect("ship").ship_type;
+    eprintln!("speaking ship: {ty:?}");
+    let acolyte = ty.index() as i32;
+    let speaking = |rig: &Rig| rig.audio.as_ref().and_then(|a| a.speaking(0));
+
+    g.selection = ships.clone();
+    g.command(Command::TacticsAggressive, &mut rig.audio);
+    rig.frame(g);
+    assert_eq!(speaking(&rig), Some((event::TACTICS_AGGRESSIVE, acolyte)));
+
+    g.attack(&[mothership]);
+    rig.frame(g);
+    assert_eq!(speaking(&rig), Some((event::ATTACK, acolyte)));
+    let attacking = g
+        .world
+        .universe()
+        .ship(ships[0])
+        .and_then(|s| s.command)
+        .is_some();
+    assert!(attacking, "the attack order was not given");
+
+    g.command(Command::Cancel, &mut rig.audio);
+    rig.frame(g);
+    assert_eq!(speaking(&rig), Some((event::ATTACK_CANCELLED, acolyte)));
+
+    // A ship of the handed-over fleet stays silent.
+    let before = speaking(&rig);
+    if let Some(&k) = silent.first() {
+        hwc_sim::speech::by_ship(g.world.universe_mut(), k, event::MOVE_CANCELLED);
+        rig.frame(g);
+        assert_eq!(speaking(&rig), before);
+    }
+
+    // An enemy ship asked to speak stays silent.
+    let before = speaking(&rig);
+    let u = g.world.universe_mut();
+    if let Some(enemy) = u
+        .ship_list
+        .iter()
+        .copied()
+        .find(|&id| u.ship(id).is_some_and(|s| s.player != crate::host::PLAYER))
+    {
+        hwc_sim::speech::by_ship(u, enemy, event::MOVE);
+        rig.frame(g);
+        assert_eq!(speaking(&rig), before);
+    }
+}

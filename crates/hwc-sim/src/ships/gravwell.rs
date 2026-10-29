@@ -298,7 +298,8 @@ pub fn special_activate(u: &mut Universe, id: ShipId) -> bool {
     }
     if g.time_on < st_.operation_time {
         g.field_on = true;
-        // (The opening animation and speech are presentation.)
+        // (The opening animation is presentation.)
+        crate::speech::queue(u, Some(id), crate::speech::event::GRAVWELL_ON, 0);
         start_field_effect(u, id);
     }
     true

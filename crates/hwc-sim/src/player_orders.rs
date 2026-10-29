@@ -102,6 +102,34 @@ pub fn not_disabled(u: &Universe, list: &mut Vec<ShipId>) {
     });
 }
 
+/// `makeShipsNotIncludeLargeCapitals` (0x50d790): motherships, carriers, the dreadnought,
+/// destroyers, processors and heavy cruisers leave.
+pub fn not_large_capitals(u: &Universe, list: &mut Vec<ShipId>) {
+    retain_swap(list, |id| u.ships.get(id).is_some_and(|s| !matches!(s.ship_type.index(), 0x0a | 0x0c | 0x10 | 0x12 | 0x19 | 0x2e | 0x2f | 0x33 | 0x35)));
+}
+
+/// `mrSetTactics` (0x5605e0): the selection's ships that are not disabled take the tactics
+/// (0 evasive, 1 neutral, 2 aggressive; large capital ships are never evasive), and the
+/// first selected ship acknowledges.
+pub fn mr_set_tactics(u: &mut Universe, selection: &[ShipId], tactics: usize) {
+    use crate::speech::event;
+    let mut sel = selection.to_vec();
+    not_disabled(u, &mut sel);
+    if tactics == 0 {
+        not_large_capitals(u, &mut sel);
+    }
+    if sel.is_empty() {
+        return;
+    }
+    let e = match tactics {
+        0 => event::TACTICS_EVASIVE,
+        1 => event::TACTICS_NEUTRAL,
+        _ => event::TACTICS_AGGRESSIVE,
+    };
+    crate::speech::by_first(u, selection, e);
+    crate::command::cl_set_tactics(u, &sel, tactics);
+}
+
 /// `makeShipsHaveUpgrade` (0x50d6f0).
 pub fn with_upgrade(u: &Universe, list: &mut Vec<ShipId>, bit: u32) {
     retain_swap(list, |id| u.ships.get(id).is_some_and(|s| has_upgrade(s, bit)));
@@ -118,8 +146,8 @@ pub fn with_force_field(u: &Universe, list: &mut Vec<ShipId>) {
 /// upgrade guard each of `targets` in turn in a field sphere, twelve at most to a ship (a
 /// ship already in a field sphere keeps its sentinels and gets more up to twelve; an ordinary
 /// sphere guarding it turns into a delta); a ship needs three. Sentinels are not shielded.
-/// Without targets, three or more of the sentinels form a field wall. (The speech and the
-/// "force field" message are left out.)
+/// Without targets, three or more of the sentinels form a field wall. The sentinels
+/// acknowledge, or say there are too few of them. (The "force field" message is left out.)
 pub fn mr_protect_ships(u: &mut Universe, selection: &[ShipId], targets: Option<&[ShipId]>) {
     use crate::formation::kind;
     let mut sel = selection.to_vec();
@@ -129,7 +157,10 @@ pub fn mr_protect_ships(u: &mut Universe, selection: &[ShipId], targets: Option<
     }
     let Some(targets) = targets.filter(|t| !t.is_empty()) else {
         if sel.len() > 2 {
+            crate::speech::by_first(u, &sel, crate::speech::event::FORCE_FIELD);
             crate::command::cl_formation(u, &sel, kind::SENTINEL_WALL);
+        } else {
+            crate::speech::by_first(u, &sel, crate::speech::event::NOT_ENOUGH);
         }
         return;
     };
@@ -170,8 +201,11 @@ pub fn mr_protect_ships(u: &mut Universe, selection: &[ShipId], targets: Option<
         }
         sel.retain(|s| !field.contains(s));
         if field.len() >= 3 {
+            crate::speech::by_first(u, &field, crate::speech::event::FORCE_FIELD);
             crate::command::cl_wrap_protect(u, &field, &[t]);
             crate::command::cl_formation(u, &field, kind::SENTINEL_SPHERE);
+        } else {
+            crate::speech::by_first(u, &field, crate::speech::event::NOT_ENOUGH);
         }
     }
 }
@@ -659,12 +693,16 @@ pub fn special_target_order(u: &mut Universe, player: usize, selection: &[ShipId
     };
     match targets {
         Some(t) => {
+            let all = t.len();
             let t: Vec<ShipId> = match order {
                 TargetOrder::Salvage => t.iter().copied().filter(|&x| crate::salvage::can_salvage_target(u, player, x)).collect(),
                 _ => t.to_vec(),
             };
             if !t.is_empty() {
                 run(u, &sel, &t);
+                if order == TargetOrder::Salvage && t.len() == all {
+                    speak_support_craft(u, &sel);
+                }
             }
         }
         None => {
@@ -677,9 +715,21 @@ pub fn special_target_order(u: &mut Universe, player: usize, selection: &[ShipId
             for &ship in &sel {
                 if let Some(t) = find_nearest_special_target(u, player, ship, kind) {
                     run(u, &[ship], &[t]);
+                    if order == TargetOrder::Salvage {
+                        speak_support_craft(u, &[ship]);
+                    }
                 }
             }
         }
+    }
+}
+
+/// `clPlaySpeechEventsForSupportCraft` (0x444b80): the first worker of the player's ships
+/// (`sWorker` and the other races' workers: types 0x0e, 0x31, 0x48, 0x59) acknowledges.
+fn speak_support_craft(u: &mut Universe, ships: &[ShipId]) {
+    let worker = ships.iter().copied().find(|&id| u.ships.get(id).is_some_and(|s| matches!(s.ship_type.index(), 0x0e | 0x31 | 0x48 | 0x59)));
+    if let Some(w) = worker {
+        crate::speech::by_ship(u, w, crate::speech::event::SUPPORT);
     }
 }
 

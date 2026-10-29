@@ -783,6 +783,15 @@ pub fn cl_formation(u: &mut Universe, selection: &[ShipId], formation_type: u32)
 /// `clHalt`: stop the selection where it is (the command is replaced by a halt order that
 /// ends once the ships are steady).
 pub fn cl_halt(u: &mut Universe, selection: &[ShipId]) {
+    // The first ship says what it stops doing: moving, attacking.
+    if let Some(&first) = selection.first() {
+        let doing = u.ships.get(first).and_then(|s| s.command).and_then(|c| u.commands.get(c)).map(|c| c.order);
+        match doing {
+            Some(order::MOVE) => crate::speech::by_ship(u, first, crate::speech::event::MOVE_CANCELLED),
+            Some(order::ATTACK) => crate::speech::by_ship(u, first, crate::speech::event::ATTACK_CANCELLED),
+            _ => {}
+        }
+    }
     // The ship types' halt hooks (slot 27) may keep ships out of the order.
     let filtered: Vec<ShipId> = selection.iter().copied().filter(|&s| u.ships.get(s).is_none() || crate::ships::halt_hook(u, s)).collect();
     let selection = &filtered[..];

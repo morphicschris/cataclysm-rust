@@ -171,6 +171,16 @@ pub fn get_state(u: &Universe, id: ShipId) -> Option<u8> {
 pub fn set_state(u: &mut Universe, id: ShipId, mode: u8) {
     if let Some(s) = spec_mut(u, id) {
         s.wanted_mode = mode;
+        // The leech acknowledges the mode (0x40008b1 / 0x40008af / 0x40008b0).
+        let e = match mode {
+            6 => Some(crate::speech::event::LEECH_HOLD),
+            7 => Some(crate::speech::event::LEECH_DRAIN_RUS),
+            8 => Some(crate::speech::event::LEECH_DRAIN_HEALTH),
+            _ => None,
+        };
+        if let Some(e) = e {
+            crate::speech::queue(u, Some(id), e, 0);
+        }
     }
 }
 

@@ -281,9 +281,11 @@ pub fn fire_emp(u: &mut Universe, group: &[ShipId], centre: ShipId) {
         }
     }
     if victims.is_empty() {
-        // (The "no targets in range" speech event.)
+        // "No targets in range".
+        crate::speech::by_ship(u, centre, crate::speech::event::NOT_ENOUGH);
         return;
     }
+    crate::speech::queue(u, Some(centre), crate::speech::event::EMP_FIRED, 0);
     let now = u.total_time_elapsed;
     for &acv in group {
         let radius = statics(u, acv).emp_range;

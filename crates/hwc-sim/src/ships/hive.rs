@@ -308,9 +308,11 @@ pub fn attack(u: &mut Universe, id: ShipId, target: ShipId) {
 }
 
 /// Starts the recall (state 5) unless idle or already recalling, and drops the targets (the
-/// body shared by the special activate and the move/dock hooks).
-fn recall(h: &mut HiveSpec) {
-    if h.state != state::IDLE && h.state != state::RECALLING {
+/// body shared by the special activate and the move/dock hooks). True when a recall started
+/// (the hive then announces it).
+fn recall(h: &mut HiveSpec) -> bool {
+    let started = h.state != state::IDLE && h.state != state::RECALLING;
+    if started {
         h.state = state::PREPARE_RECALL;
     }
     for t in h.targets.iter_mut() {
@@ -319,12 +321,18 @@ fn recall(h: &mut HiveSpec) {
     h.target = None;
     h.targets.clear();
     h.fly = 0;
+    started
+}
+
+/// The hive's "recalling swarmers" line (0x40008aa, variable 0).
+fn speak_recall(u: &mut Universe, id: ShipId) {
+    crate::speech::queue(u, Some(id), crate::speech::event::HIVE_RECALL, 0);
 }
 
 /// `HiveFrigateSpecialActivate` (0x5b0200): recall the swarmers.
 pub fn special_activate(u: &mut Universe, id: ShipId) -> bool {
-    if let Some(h) = spec_mut(u, id) {
-        recall(h);
+    if spec_mut(u, id).is_some_and(recall) {
+        speak_recall(u, id);
     }
     true
 }
@@ -353,21 +361,26 @@ pub fn special_target(u: &mut Universe, id: ShipId, targets: &[ShipId]) -> bool 
     true
 }
 
-/// `HiveFrigateOrderChanged` (0x5b0360).
+/// `HiveFrigateOrderChanged` (0x5b0360): the hive acknowledges the new order.
 pub fn order_changed(u: &mut Universe, id: ShipId) {
     if let Some(h) = spec_mut(u, id) {
         h.fly = 0;
+        crate::speech::queue(u, Some(id), crate::speech::event::HIVE_ORDER, 0);
     }
 }
 
 /// `HiveFrigateSlot20` (0x5b1000), the move hook: a hive flying to its target forgets it.
 /// Keeps the ship in the move order.
 pub fn move_hook(u: &mut Universe, id: ShipId) -> bool {
+    let mut recalled = false;
     if let Some(h) = spec_mut(u, id) {
         if h.state == state::IDLE || h.state == state::FLYING {
-            recall(h);
+            recalled = recall(h);
         }
         h.fly = 0;
+    }
+    if recalled {
+        speak_recall(u, id);
     }
     true
 }
@@ -379,9 +392,12 @@ pub fn dock_hook(u: &mut Universe, id: ShipId, dw: Option<ShipId>) -> bool {
     if h.state == state::IDLE {
         return true;
     }
-    recall(h);
+    let recalled = recall(h);
     h.dock_with = dw;
     h.fly = 2;
+    if recalled {
+        speak_recall(u, id);
+    }
     false
 }
 

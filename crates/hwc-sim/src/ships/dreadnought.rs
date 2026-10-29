@@ -241,6 +241,7 @@ pub fn special_activate(u: &mut Universe, id: ShipId) -> bool {
         let d = spec_mut(u, id).expect("spec");
         d.charging = true;
         d.charge.start(now, CANNON_CHARGE_TIME);
+        crate::speech::queue(u, Some(id), crate::speech::event::CANNON_CHARGING, 0);
     }
     true
 }

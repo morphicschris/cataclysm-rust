@@ -73,6 +73,7 @@ const CAP_LINKED: u32 = 0x40;
 pub fn dock_link_ships_begin(u: &mut Universe, a: ShipId, b: ShipId) {
     u.ships.ship_mut(a).base.link = base::LinkSpec { partner: Some(b), state: state::APPROACH, timer: 0.0 };
     u.ships.ship_mut(b).base.link = base::LinkSpec { partner: Some(a), state: state::PARTNER, timer: 0.0 };
+    crate::speech::by_ship(u, a, crate::speech::event::LINK);
     if u.ships.ship(a).ship_type == ShipType::sMimic {
         crate::ships::mimic::end_disguise(u, a, true);
         crate::ships::mimic::end_disguise(u, b, true);
@@ -177,11 +178,17 @@ pub fn cl_link_ships(u: &mut Universe, selection: &[ShipId]) -> Option<CommandId
 }
 
 /// `dockUnlinkShipBegin` (0x463b00): the linked ship's split starts (an MCV drops its
-/// disguise).
+/// disguise). An MCV announces it; for an ACV the mothership's voice does.
 fn dock_unlink_ship_begin(u: &mut Universe, id: ShipId) {
     let s = u.ships.ship_mut(id);
     s.base.link = base::LinkSpec { partner: Some(id), state: state::NONE, timer: 0.0 };
-    if s.ship_type == ShipType::sMCV {
+    let t = s.ship_type;
+    if matches!(t, ShipType::sACV | ShipType::bACV) {
+        crate::speech::queue(u, None, crate::speech::event::UNLINK, t.index() as i32);
+    } else {
+        crate::speech::by_ship(u, id, crate::speech::event::UNLINK);
+    }
+    if t == ShipType::sMCV {
         crate::ships::mimic::mcv_end_disguise(u, id, true);
     }
 }

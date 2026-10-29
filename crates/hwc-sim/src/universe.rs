@@ -172,6 +172,10 @@ pub struct Universe {
     pub events: Vec<SimEvent>,
     /// What the missiles and ship modules did during the last update.
     pub special_events: Vec<SpecialEvent>,
+    /// Speech the ships and orders asked for, waiting for the front end (which takes them;
+    /// unlike the events they are not cleared by an update). Not saved.
+    #[serde(skip)]
+    pub speech: Vec<crate::speech::Speech>,
     /// KAS `PauseUniverse` (0x8f1fc0): orders and ship movement stop, time goes on.
     pub universe_paused: bool,
     /// `nisIsRunning` (0x8f1f14): an NIS is playing (set by `nisStart`, cleared by `nisStop`).
@@ -245,6 +249,7 @@ impl Universe {
             formation_focus_leader: false,
             events: Vec::new(),
             special_events: Vec::new(),
+            speech: Vec::new(),
             universe_paused: false,
             letterbox: Default::default(),
             nis_running: false,

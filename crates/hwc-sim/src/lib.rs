@@ -67,6 +67,7 @@ pub mod salvage;
 pub mod save;
 pub mod ships;
 pub mod shockwave;
+pub mod speech;
 pub mod statics;
 pub mod tactics;
 pub mod target;

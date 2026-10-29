@@ -777,6 +777,7 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
         state::MORPH_IN => {
             if 1.0 <= m.morph {
                 effect(u, id, state::MORPH_IN);
+                crate::speech::by_ship(u, id, crate::speech::event::DISGUISE);
             }
             let f = ld(m.morph) - ld(MORPH_STEP);
             let mm = spec_mut(u, id).expect("mimic");
@@ -794,6 +795,7 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
         state::MORPH_OUT => {
             if m.morph <= 0.0 {
                 effect(u, id, state::MORPH_OUT);
+                crate::speech::by_ship(u, id, crate::speech::event::UNDISGUISE);
             }
             let f = ld(m.morph) + ld(MORPH_STEP);
             spec_mut(u, id).expect("mimic").morph = st(f);
@@ -833,6 +835,7 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
         state::MORPH_OUT_SPLIT => {
             if m.morph <= 0.0 {
                 effect(u, id, state::MORPH_OUT_SPLIT);
+                crate::speech::by_ship(u, id, crate::speech::event::UNDISGUISE);
             }
             let f = ld(m.morph) + ld(MORPH_STEP);
             spec_mut(u, id).expect("mimic").morph = st(f);

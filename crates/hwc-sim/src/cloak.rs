@@ -89,6 +89,7 @@ pub fn toggle(u: &mut Universe, id: ShipId) {
                 return;
             }
             if c.power < 100.0 {
+                crate::speech::queue(u, Some(id), crate::speech::event::CLOAK_NO_POWER, 0);
                 return;
             }
             let t = fade_start_time(u);
@@ -97,6 +98,7 @@ pub fn toggle(u: &mut Universe, id: ShipId) {
             c.state = state::CLOAKING;
             c.fade = 0.0;
             c.fade_start = t;
+            crate::speech::queue(u, Some(id), crate::speech::event::CLOAK_ON, 0);
         }
         state::CLOAKED => {
             let t = fade_start_time(u);
@@ -106,6 +108,7 @@ pub fn toggle(u: &mut Universe, id: ShipId) {
             c.state = state::DECLOAKING;
             c.fade = 1.0;
             c.fade_start = t;
+            crate::speech::queue(u, Some(id), crate::speech::event::DECLOAK, 0);
         }
         _ => {}
     }

@@ -45,6 +45,26 @@ pub struct Audio {
     /// Per speech stream, the group event playing now, its variable and when it ends
     /// (`speechqueue[channel].current`).
     fleet_current: [Option<(u32, i32, Instant)>; hwc_audio::mixer::NUM_STREAMS],
+    /// The Voice options: commands, status reports, chatter (`bCommandsOn` 0x88b3ec,
+    /// `bStatusOn` 0x88b3f0, `bChatterOn` 0x88b3f4).
+    voices: Voices,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Voices {
+    commands: bool,
+    status: bool,
+    chatter: bool,
+}
+
+impl Voices {
+    /// `speechEventQueue`'s option checks: an event of a type the player turned off is not
+    /// queued.
+    fn allow(self, event: u32) -> bool {
+        !(event & 0x100_0000 != 0 && !self.chatter
+            || event & 0x200_0000 != 0 && !self.status
+            || event & 0x400_0000 != 0 && !self.commands)
+    }
 }
 
 fn explosion_event(class: Option<ShipClass>) -> u32 {
@@ -116,6 +136,11 @@ impl Audio {
             ship: ShipSounds::default(),
             ships: HashMap::new(),
             fleet_current: [None; hwc_audio::mixer::NUM_STREAMS],
+            voices: Voices {
+                commands: true,
+                status: true,
+                chatter: true,
+            },
         })
     }
 
@@ -128,6 +153,12 @@ impl Audio {
         s.set_speech_volume(slider_level(o.get("SpeechVolume")));
         s.set_music_volume(slider_level(o.get("MusicVolume")));
         s.music_level_now();
+        self.voices = Voices {
+            commands: o.get("VoiceCommands") != 0,
+            status: o.get("VoiceStatus") != 0,
+            chatter: o.get("VoiceChatter") != 0,
+        };
+        let s = &mut self.system;
         let mut m = s.mixer();
         let auto = |on: bool| if on { AutoMode::Auto } else { AutoMode::Off };
         m.set_num_voices(
@@ -197,6 +228,38 @@ impl Audio {
                 *slot = Some((event, variable, end));
             }
         }
+    }
+
+    /// `speechEventQueue(ship, event, variable, ...)` for speech the ships and orders asked
+    /// for ([`hwc_sim::speech`]), with its checks: the Voice options, only NIS lines while an
+    /// NIS plays, and only the local `player`'s ships speak (not one under construction or
+    /// flagged silent, `specialFlags2 & 0x100008`). Commands do not need the ship in view.
+    pub fn ship_speech(&mut self, u: &Universe, player: usize, s: hwc_sim::speech::Speech) {
+        let event = s.event;
+        if !self.voices.allow(event) || u.nis_running && event & 0x6000_0000 == 0 {
+            return;
+        }
+        if let Some(id) = s.ship {
+            let Some(ship) = u.ship(id) else { return };
+            if ship.player != player && !u.nis_running {
+                return;
+            }
+            if ship.special_flags2 & 0x0010_0008 != 0 {
+                return;
+            }
+        }
+        self.fleet_speech(event, s.variable.clamp(0, 0x3c));
+    }
+
+    /// The event and variable speech stream `stream` is playing (tests).
+    #[cfg(test)]
+    pub fn speaking(&self, stream: usize) -> Option<(u32, i32)> {
+        self.fleet_current
+            .get(stream)
+            .copied()
+            .flatten()
+            .filter(|c| Instant::now() < c.2)
+            .map(|(e, v, _)| (e, v))
     }
 
     pub fn play_music(&mut self, track: i32) {
@@ -425,6 +488,72 @@ mod tests {
         assert!((slider_level(default) - 0.461_25).abs() < 1e-6);
         assert_eq!(slider_level(100), 1.0);
         assert_eq!(slider_level(-5), 0.0);
+    }
+
+    /// The order acknowledgements have lines for the ships that give them (the variable is
+    /// the speaking ship's type, or the line number the call passes). Some pairs have none in
+    /// the data (a carrier docking, a worker attacking, a sentinel's field), and stay silent
+    /// as in the original (`SEselectsentence` refuses a variable past the sentence's last).
+    #[test]
+    fn order_acknowledgements_have_lines() {
+        use hwc_sim::speech::event as e;
+        use hwc_sim::statics::ShipType as T;
+        let Some(Ok(g)) = GameData::from_env() else {
+            eprintln!("skipped: no game data");
+            return;
+        };
+        let Ok(mut audio) = Audio::open(g, false) else {
+            eprintln!("skipped: no sound data");
+            return;
+        };
+        let by_type = [
+            e::SELECTED,
+            e::MOVE,
+            e::MOVE_CANCELLED,
+            e::DOCK,
+            e::ATTACK,
+            e::ATTACK_CANCELLED,
+            e::ATTACK_OWN_SHIPS,
+            e::ATTACK_RESOURCES,
+            e::TACTICS_EVASIVE,
+            e::TACTICS_NEUTRAL,
+            e::TACTICS_AGGRESSIVE,
+        ];
+        for ev in by_type {
+            for t in [T::sAcolyte, T::sMimic, T::sMothership] {
+                assert!(
+                    audio
+                        .system
+                        .play_speech(ev, t.index() as i32, -1, 0)
+                        .is_some(),
+                    "no line for {ev:#x} by {t:?}"
+                );
+            }
+        }
+        assert!(audio
+            .system
+            .play_speech(e::DOCK, T::sCarrier.index() as i32, -1, 0)
+            .is_none());
+        let fixed = [
+            (e::HARVEST, T::sWorker.index() as i32),
+            (e::SUPPORT, T::sWorker.index() as i32),
+            (e::LINK, T::sAcolyte.index() as i32),
+            (e::UNLINK, T::sACV.index() as i32),
+            (e::DISGUISE, T::sMimic.index() as i32),
+            (e::CLOAK_ON, 0),
+            (e::HIVE_RECALL, 0),
+            (e::GUARD, 0),
+            (e::FORMATION_SET, 0),
+            (e::FORMATION_SET, 8),
+            (e::RETIRE, 0),
+        ];
+        for (ev, v) in fixed {
+            let stream = crate::movie_script::speech_stream(ev);
+            assert!(
+                audio.system.play_speech(ev, v, -1, stream).is_some(),
+                "no line for {ev:#x} variable {v}"
+            );
+        }
     }
 
     /// A second press of a group key (select, then focus) queues no second "Standby group n"

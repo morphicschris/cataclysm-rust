@@ -727,13 +727,9 @@ impl Game {
                 let c = plate.centre;
                 let from = hwc_math::Vector::new(c.x, c.y, c.z);
                 let d = hwc_math::Vector::new(dest.x, dest.y, dest.z);
-                command::cl_move(
-                    self.world.universe_mut(),
-                    &sel,
-                    command::waypoint_mode::ONCE,
-                    from,
-                    &[d],
-                );
+                let u = self.world.universe_mut();
+                command::cl_move(u, &sel, command::waypoint_mode::ONCE, from, &[d]);
+                hwc_sim::speech::by_first(u, &sel, hwc_sim::speech::event::MOVE);
             }
             sound(audio, MOVEMENT_GUI_OFF);
             self.mode = Mode::Select;
@@ -824,6 +820,7 @@ impl Game {
                 }
             }
             self.selection = sel;
+            self.speak_selected();
         }
         sound(audio, CLICK);
     }
@@ -929,7 +926,7 @@ impl Game {
         match (self.classify(h), h) {
             (PointerAction::Harvest, Hover::Resource(r)) => {
                 let sel = self.selection.clone();
-                hwc_sim::resource::cl_collect_resource(self.world.universe_mut(), &sel, Some(r));
+                harvest(self.world.universe_mut(), &sel, Some(r));
                 true
             }
             (PointerAction::Attack, Hover::Ship(t)) => {
@@ -938,7 +935,7 @@ impl Game {
             }
             (PointerAction::Dock, Hover::Ship(t)) => {
                 let sel = self.selection.clone();
-                dock::cl_dock(
+                wrap_dock(
                     self.world.universe_mut(),
                     &sel,
                     dock::purpose::DOCK,
@@ -1482,6 +1479,7 @@ impl Game {
                 let targets =
                     bandbox::attack_targets(&facts, &attackers, mode == Mode::ForceAttack);
                 if !targets.is_empty() {
+                    self.speak_attack(&attackers, &targets);
                     command::cl_attack(self.world.universe_mut(), &attackers, &targets);
                 }
             }
@@ -1492,7 +1490,10 @@ impl Game {
                 let guards = bandbox::hold_capable(self.world.universe(), &self.selection);
                 self.selection = guards.clone();
                 if !guards.is_empty() {
-                    command::cl_protect(self.world.universe_mut(), &guards, &selecting);
+                    // The mothership's voice acknowledges the guard order.
+                    let u = self.world.universe_mut();
+                    hwc_sim::speech::queue(u, None, hwc_sim::speech::event::GUARD, 0);
+                    command::cl_protect(u, &guards, &selecting);
                 }
             }
             Mode::Focus => {
@@ -1526,7 +1527,12 @@ impl Game {
                     self.with_host(|ui, host| ui.open_popup(host, true));
                 }
             }
-            Mode::Select => self.selection = selecting,
+            Mode::Select => {
+                self.selection = selecting;
+                if !self.selection.is_empty() {
+                    self.speak_selected();
+                }
+            }
         }
     }
 
@@ -1613,13 +1619,78 @@ impl Game {
         }
     }
 
-    fn attack(&mut self, targets: &[ShipId]) {
+    pub(crate) fn attack(&mut self, targets: &[ShipId]) {
         if targets.is_empty() || self.selection.is_empty() {
             return;
         }
         let sel = command::attack_capable(self.world.universe(), &self.selection);
         if !sel.is_empty() {
+            self.speak_attack(&sel, targets);
             command::cl_attack(self.world.universe_mut(), &sel, targets);
+        }
+    }
+
+    /// `speechEventAttack`: the first attacker acknowledges. With the force-attack keys held
+    /// the line says what is attacked: the player's own ships, else enemies, else resources
+    /// (and nothing for mines alone).
+    fn speak_attack(&mut self, attackers: &[ShipId], targets: &[ShipId]) {
+        use hwc_sim::speech::event;
+        let u = self.world.universe();
+        let e = if self.ui.action_held(keys::BANDBOX_FORCE_ATTACK) {
+            let (mut own, mut enemy, mut resources) = (0, 0, 0);
+            for &t in targets {
+                if t.mine().is_some() {
+                    continue;
+                }
+                match u.ship(t) {
+                    Some(s) if s.player == PLAYER => own += 1,
+                    Some(_) => enemy += 1,
+                    None => resources += 1,
+                }
+            }
+            if own > 0 {
+                event::ATTACK_OWN_SHIPS
+            } else if enemy > 0 {
+                event::ATTACK
+            } else if resources > 0 {
+                event::ATTACK_RESOURCES
+            } else {
+                return;
+            }
+        } else {
+            event::ATTACK
+        };
+        hwc_sim::speech::by_first(self.world.universe_mut(), attackers, e);
+    }
+
+    /// The selection acknowledges being picked (`mrObjectClick`, `mrBandBoxRelease`): its
+    /// first ship, or, with the player's mothership in it, the mothership's voice.
+    fn speak_selected(&mut self) {
+        let u = self.world.universe_mut();
+        let ms = u.base.players[PLAYER].mothership.filter(|&m| {
+            self.selection.contains(&m)
+                && u.ship(m)
+                    .and_then(|s| u.statics.ship(s.ship_type))
+                    .is_some_and(|st| {
+                        st.ship_class == Some(hwc_sim::statics::ShipClass::Mothership)
+                    })
+        });
+        match ms {
+            Some(m) => {
+                let t = u.ship(m).map_or(0, |s| s.ship_type.index() as i32);
+                hwc_sim::speech::queue(u, None, hwc_sim::speech::event::SELECTED, t);
+            }
+            None => hwc_sim::speech::by_first(u, &self.selection, hwc_sim::speech::event::SELECTED),
+        }
+    }
+
+    /// Plays the speech the orders and ships asked for since the last frame.
+    fn ship_speech(&mut self, audio: &mut Option<Audio>) {
+        let speech = std::mem::take(&mut self.world.universe_mut().speech);
+        if let Some(a) = audio.as_mut() {
+            for s in speech {
+                a.ship_speech(self.world.universe(), PLAYER, s);
+            }
         }
     }
 
@@ -1698,6 +1769,13 @@ impl Game {
                             && (owner == Owner::Enemy) == (s.player != PLAYER)
                     })
                 });
+                // `moProcessClick`: the first of them answers.
+                let sel = self.selection.clone();
+                hwc_sim::speech::by_first(
+                    self.world.universe_mut(),
+                    &sel,
+                    hwc_sim::speech::event::SELECTED,
+                );
             }
             GameRequest::DeselectTypes(types) => {
                 let u = self.world.universe();
@@ -1845,7 +1923,7 @@ impl Game {
         self.world.universe_mut().base.players[PLAYER].resource_units += refund;
     }
 
-    fn command(&mut self, c: Command, audio: &mut Option<Audio>) {
+    pub(crate) fn command(&mut self, c: Command, audio: &mut Option<Audio>) {
         let sel = self.selection.clone();
         if sel.is_empty() {
             return;
@@ -1854,22 +1932,20 @@ impl Game {
         match c {
             Command::Move => self.start_move(audio),
             Command::Cancel => command::cl_halt(u, &sel),
-            Command::Dock => {
-                dock::cl_dock(u, &sel, dock::purpose::DOCK, None);
-            }
-            Command::Retire => {
-                dock::cl_dock(u, &sel, dock::purpose::RETIRE, None);
-            }
-            Command::Harvest => hwc_sim::resource::cl_collect_resource(u, &sel, None),
+            Command::Dock => wrap_dock(u, &sel, dock::purpose::DOCK, None),
+            Command::Retire => wrap_dock(u, &sel, dock::purpose::RETIRE, None),
+            Command::Harvest => harvest(u, &sel, None),
             Command::TacticsEvasive => {
-                command::cl_set_tactics(u, &sel, hwc_sim::object::tactics::EVASIVE)
+                hwc_sim::player_orders::mr_set_tactics(u, &sel, hwc_sim::object::tactics::EVASIVE)
             }
             Command::TacticsNeutral => {
-                command::cl_set_tactics(u, &sel, hwc_sim::object::tactics::NEUTRAL)
+                hwc_sim::player_orders::mr_set_tactics(u, &sel, hwc_sim::object::tactics::NEUTRAL)
             }
-            Command::TacticsAggressive => {
-                command::cl_set_tactics(u, &sel, hwc_sim::object::tactics::AGGRESSIVE)
-            }
+            Command::TacticsAggressive => hwc_sim::player_orders::mr_set_tactics(
+                u,
+                &sel,
+                hwc_sim::object::tactics::AGGRESSIVE,
+            ),
             Command::Formation(f) => {
                 let t = match f {
                     Formation::Delta => formation::kind::DELTA,
@@ -1880,6 +1956,14 @@ impl Game {
                     Formation::Sphere => formation::kind::SPHERE,
                     Formation::Custom | Formation::Parade => formation::kind::CUSTOM,
                 };
+                // `mrSetTheFormation`: the mothership's voice names the formation (custom is
+                // line 7, the parade line 8).
+                let line = match f {
+                    Formation::Custom => 7,
+                    Formation::Parade => 8,
+                    _ => t as i32,
+                };
+                hwc_sim::speech::queue(u, None, hwc_sim::speech::event::FORMATION_SET, line);
                 if sel.len() > 1 {
                     command::cl_formation(u, &sel, t);
                 }
@@ -2447,6 +2531,7 @@ impl Game {
                 self.campaign_step(audio, &mut out);
             }
         }
+        self.ship_speech(audio);
         if let Some(a) = audio.as_mut() {
             let (eye, at) = match &self.nis {
                 Some(n) => {
@@ -3950,6 +4035,69 @@ fn mesh_region(world: &World, size: (u32, u32), ships: &[ShipId]) -> Option<[u32
 fn gpu_profile(renderer: &mut Renderer, name: &'static str) {
     if let Some(ms) = renderer.take_gpu_ms() {
         profile::gpu_ms(name, ms);
+    }
+}
+
+/// `mrHarvestResources`: the selection's harvesters collect `resource`, or each the nearest
+/// one (`FUN_00445260`). The first acknowledges; with nothing left to harvest each says so.
+fn harvest(
+    u: &mut hwc_sim::Universe,
+    sel: &[ShipId],
+    resource: Option<hwc_sim::resource::ResourceId>,
+) {
+    use hwc_sim::speech::{self, event};
+    let enabled = u.single_player
+        || u.base.options.flags & hwc_sim::base::game_flags::HARVESTING_ENABLED != 0;
+    let harvesters: Vec<ShipId> = sel
+        .iter()
+        .copied()
+        .filter(|&id| {
+            enabled
+                && u.ship(id)
+                    .and_then(|s| u.statics.ship(s.ship_type))
+                    .is_some_and(|st| {
+                        st.ship_class == Some(hwc_sim::statics::ShipClass::Resource)
+                            && 0 < st.harvest_amount
+                    })
+        })
+        .collect();
+    let Some(&first) = harvesters.first() else {
+        return;
+    };
+    match resource {
+        Some(_) => speech::by_ship(u, first, event::HARVEST),
+        None => {
+            for &id in &harvesters {
+                let found = hwc_sim::resource::find_nearest_resource(
+                    u,
+                    id,
+                    0.0,
+                    hwc_math::Vector::new(0.0, 0.0, 0.0),
+                );
+                match found {
+                    Some(_) if id == first => speech::by_ship(u, id, event::HARVEST),
+                    Some(_) => {}
+                    None => speech::by_ship(u, id, event::HARVEST_NOTHING),
+                }
+            }
+        }
+    }
+    hwc_sim::resource::cl_collect_resource(u, &harvesters, resource);
+}
+
+/// `clWrapDock`: the dock order, and the first ship's acknowledgement once it has somewhere
+/// to dock (retiring is announced by the mothership's voice, a slipgate trip is a move).
+fn wrap_dock(u: &mut hwc_sim::Universe, sel: &[ShipId], purpose: i32, dock_with: Option<ShipId>) {
+    use hwc_sim::speech::{self, event};
+    dock::cl_dock(u, sel, purpose, dock_with);
+    let Some(&first) = sel.first() else { return };
+    if u.ship(first).and_then(|s| s.base.dock_with).is_none() {
+        return;
+    }
+    match purpose {
+        dock::purpose::RETIRE => speech::queue(u, None, event::RETIRE, 0),
+        dock::purpose::SLIPGATE => speech::by_ship(u, first, event::MOVE),
+        _ => speech::by_ship(u, first, event::DOCK),
     }
 }
 
