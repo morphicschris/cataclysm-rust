@@ -302,6 +302,8 @@ pub struct World {
     pub camera: OrbitCamera,
     /// Blend between the last two updates (off: the original shows the latest update).
     pub interpolate: bool,
+    /// The random stream of the sentinels' field flicker.
+    field_random: u32,
     /// Game paused: no universe updates.
     pub paused: bool,
     ticker: TaskTicker,
@@ -490,6 +492,7 @@ impl World {
             background: None,
             camera,
             interpolate: false,
+            field_random: 0x2545_f491,
             paused: false,
             ticker: TaskTicker::new(15),
             tick_carry: 0.0,
@@ -1679,6 +1682,8 @@ impl World {
         if let Some(h) = &self.hwr {
             transforms.retain(|(id, ..)| !h.replaces_hulk(*id));
         }
+        let drawn_at: std::collections::HashMap<ShipId, Mat4> =
+            transforms.iter().map(|&(id, _, m, _)| (id, m)).collect();
         let u = self.sim.universe();
         for (id, t, transform, age) in transforms {
             let Some(s) = u.ship(id) else { continue };
@@ -1936,6 +1941,28 @@ impl World {
             }
         }
         self.combat_effects(&mut frame.effects, glow_texture);
+        let u = self.sim.universe();
+        let seed = &mut self.field_random;
+        crate::sentinel_field::draw(
+            u,
+            frame.ids.iter().filter_map(|(id, _)| *id),
+            |id| {
+                drawn_at
+                    .get(&id)
+                    .copied()
+                    .or_else(|| u.ship(id).map(|s| Self::transform_of(s).1))
+            },
+            eye,
+            glow_texture,
+            &mut || {
+                // The particle stream (`ranRandomFn(0)`) is not the simulation's.
+                *seed ^= *seed << 13;
+                *seed ^= *seed >> 17;
+                *seed ^= *seed << 5;
+                *seed
+            },
+            &mut frame.effects,
+        );
         if let Some(mut h) = self.hwr.take() {
             let u = self.sim.universe();
             let now = f64::from(u.total_time_elapsed) + f64::from(self.alpha()) * f64::from(TICK);

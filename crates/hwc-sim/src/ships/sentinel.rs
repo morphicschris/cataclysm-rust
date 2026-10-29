@@ -12,9 +12,9 @@
 //!
 //! The per-sentinel field state lives in [`SentinelSpec`] (`+0x638..+0x988`).
 //!
-//! Not reproduced: the field drawing and hit effects (`SentinelQueueFieldHit`,
-//! `SentinelProcessFieldHitsNear`, `SentinelFlushFieldHits`, `SentinelUpdateFieldSegment(s)`,
-//! `SentinelFieldHitEffect` are render-only).
+//! The field drawing (`SentinelQueueFieldHit`, `SentinelProcessFieldHitsNear`,
+//! `SentinelFlushFieldHits`, `SentinelUpdateFieldSegment(s)`, `SentinelFieldHitEffect`) is
+//! render-only; the game draws it from [`SentinelSpec`] (`apps/cataclysm`, `sentinel_field`).
 //!
 //! The player raises a field with the Force Field special action ([`crate::player_orders::mr_protect_ships`]):
 //! with ships band-boxed, up to 12 sentinels guard each one in a field sphere (laid out by

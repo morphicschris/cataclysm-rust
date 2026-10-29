@@ -53,6 +53,7 @@ mod saves;
 #[cfg(test)]
 mod screen_shots;
 mod sensors;
+mod sentinel_field;
 mod ship_preview;
 #[cfg(test)]
 mod smoke;
