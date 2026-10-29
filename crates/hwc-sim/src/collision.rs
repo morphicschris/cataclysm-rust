@@ -401,6 +401,7 @@ fn check_bullets_in_blob(u: &mut Universe, bi: usize) {
         match hit {
             Some((tid, tt, FIELD_HIT)) => {
                 crate::ships::sentinel::field_take_damage(u, tid, &b);
+                crate::ships::sentinel::note_field_hit(u, tid, b.posinfo.position, b.heading, tt);
                 crate::damage::bullet_collided_with_target(u, false, tid, bid, tt, 6);
                 crate::bullet::delete(u, bid);
             }
@@ -519,6 +520,7 @@ fn check_beam(u: &mut Universe, own_blob: usize, bid: BulletId) {
                 crate::damage::bullet_collided_with_mine(u, true, mid, bid, best.0, best.2);
             } else if best.2 == FIELD_HIT {
                 crate::ships::sentinel::field_take_damage(u, tid, &beam);
+                crate::ships::sentinel::note_field_hit(u, tid, beam.posinfo.position, beam.heading, best.0);
                 crate::damage::bullet_collided_with_target(u, false, tid, bid, best.0, 1);
             } else {
                 crate::damage::bullet_collided_with_target(u, true, tid, bid, best.0, best.2);

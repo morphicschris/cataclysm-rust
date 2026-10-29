@@ -480,6 +480,7 @@ impl Game {
             .set_smooth_trails(options.get("hwcSmoothTrails") != 0);
         g.world
             .set_glows_in_proportion(options.get("hwcGlowsInProportion") != 0);
+        g.world.modern_fields = options.get("hwcModernFields") != 0;
         g.world.ship_look = ship_look(&options);
         let mut subs = Subtitles::load(&res, true, &g.world.team_schemes());
         if let Some(s) = subs.as_mut() {
@@ -526,6 +527,7 @@ impl Game {
             .set_smooth_trails(options.get("hwcSmoothTrails") != 0);
         self.world
             .set_glows_in_proportion(options.get("hwcGlowsInProportion") != 0);
+        self.world.modern_fields = options.get("hwcModernFields") != 0;
         self.world.ship_look = ship_look(options);
     }
 

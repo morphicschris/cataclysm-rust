@@ -166,6 +166,7 @@ pub const ENTRIES: &[Entry] = &[
         2,
         Control::Toggle,
     ),
+    entry("hwcModernFields", "MODERN FORCE FIELDS", 2, Control::Toggle),
     entry(
         "hwcRenderList",
         "DRAW DISTANCE",

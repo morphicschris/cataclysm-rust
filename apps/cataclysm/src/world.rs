@@ -304,6 +304,10 @@ pub struct World {
     pub interpolate: bool,
     /// The random stream of the sentinels' field flicker.
     field_random: u32,
+    /// Sentinel fields drawn as energy bubbles (`hwcModernFields`) or as the original's
+    /// triangles; the bubbles' textures and ripples.
+    pub modern_fields: bool,
+    fields_look: Option<crate::sentinel_field::Modern>,
     /// Game paused: no universe updates.
     pub paused: bool,
     ticker: TaskTicker,
@@ -493,6 +497,8 @@ impl World {
             camera,
             interpolate: false,
             field_random: 0x2545_f491,
+            modern_fields: true,
+            fields_look: None,
             paused: false,
             ticker: TaskTicker::new(15),
             tick_carry: 0.0,
@@ -872,6 +878,9 @@ impl World {
         if self.engine_fx.is_none() {
             self.engine_fx = Some(renderer.load_engine_effects(&self.src));
         }
+        if self.fields_look.is_none() {
+            self.fields_look = Some(crate::sentinel_field::Modern::new(renderer));
+        }
         if let Some(h) = &mut self.hwr {
             h.prepare(renderer);
         }
@@ -1043,6 +1052,9 @@ impl World {
         // Ships built or arriving since the last update need their art.
         if let Err(e) = self.load_art() {
             eprintln!("cataclysm: {e}");
+        }
+        if let Some(m) = &mut self.fields_look {
+            m.note_hits(self.sim.universe());
         }
         let now = self.universe().total_time_elapsed;
         self.effects.retain(|e| {
@@ -1961,8 +1973,14 @@ impl World {
                 *seed ^= *seed << 5;
                 *seed
             },
+        let field_time = self.universe().total_time_elapsed + (self.alpha() - 1.0) * TICK;
             &mut frame.effects,
         );
+        let modern = self
+            .fields_look
+            .as_ref()
+            .filter(|_| self.modern_fields)
+            .map(|m| (m, field_time));
         if let Some(mut h) = self.hwr.take() {
             let u = self.sim.universe();
             let now = f64::from(u.total_time_elapsed) + f64::from(self.alpha()) * f64::from(TICK);
@@ -1981,6 +1999,7 @@ impl World {
             let (sensors, render_list, limits, look_at, eye, far) = (
                 self.sensors_open,
                 self.render_list,
+            modern,
                 self.render_limits,
                 self.camera.look_at,
                 self.camera.eye(),

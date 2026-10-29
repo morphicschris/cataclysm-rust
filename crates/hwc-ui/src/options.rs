@@ -185,6 +185,9 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // 1: capital-ship engine glows keep their size relative to the hull at every zoom (a
     // user-requested change); 0: the original's glows that grow with distance.
     ("hwcGlowsInProportion", 1),
+    // 1: sentinel force fields drawn as glowing energy bubbles with a hexagon pattern and hit
+    // ripples (a user-requested change); 0: the original's flat triangles.
+    ("hwcModernFields", 1),
     // 1: hulls drawn with the modern ship look, worked out from the game's own meshes and
     // textures (mipmapped textures, per-pixel light with a highlight, a bump from the
     // texture, smoothed facets; a user-requested change); 0: the original's per-vertex light.

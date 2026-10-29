@@ -212,6 +212,12 @@ pub fn field_take_damage(u: &mut Universe, id: ShipId, bullet: &Bullet) {
     u.special_events.push(SpecialEvent::Special { ship: id, effect: Effect::FieldHit });
 }
 
+/// Where the field was hit, for the front end ([`Universe::field_hits`]): `t` along `dir`
+/// from `from`.
+pub fn note_field_hit(u: &mut Universe, id: ShipId, from: Vector, dir: Vector, t: f32) {
+    u.field_hits.push((id, Vector::new(from.x + dir.x * t, from.y + dir.y * t, from.z + dir.z * t)));
+}
+
 /// `SentinelFieldDamageEffect` (0x5c1650): a missile hits the field (whole points of its
 /// damage), showing the missile's hit effect where it is.
 fn field_missile_damage(u: &mut Universe, id: ShipId, missile: &crate::missile::Missile) {
@@ -221,6 +227,7 @@ fn field_missile_damage(u: &mut Universe, id: ShipId, missile: &crate::missile::
         f.last_hit = now;
     }
     field_hit_effect(u, id, missile);
+    note_field_hit(u, id, missile.posinfo.position, Vector::ZERO, 0.0);
     let Some(f) = spec_mut(u, id) else { return };
     f.strength = st(ld(f.strength) - ftol(ld(damage)) as Ext);
     if f.strength < 0.0 {
@@ -351,6 +358,7 @@ pub fn absorbs_hit(u: &mut Universe, target: ShipId, bullet: &Bullet) -> bool {
         return false;
     }
     field_take_damage(u, target, bullet);
+    note_field_hit(u, target, bullet.posinfo.position, Vector::ZERO, 0.0);
     true
 }
 

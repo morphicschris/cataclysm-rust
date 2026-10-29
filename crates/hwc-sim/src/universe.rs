@@ -174,6 +174,10 @@ pub struct Universe {
     /// not saved).
     #[serde(skip)]
     pub battle_losses: Vec<(ShipId, crate::battle_status::Loss)>,
+    /// Where sentinel force fields were hit in the last update, by sentinel (presentation;
+    /// not saved).
+    #[serde(skip)]
+    pub field_hits: Vec<(ShipId, Vector)>,
     /// What the missiles and ship modules did during the last update.
     pub special_events: Vec<SpecialEvent>,
     /// Speech the ships and orders asked for, waiting for the front end (which takes them;
@@ -266,6 +270,7 @@ impl Universe {
             speech_handles: 0,
             events: Vec::new(),
             battle_losses: Vec::new(),
+            field_hits: Vec::new(),
             special_events: Vec::new(),
             speech: Vec::new(),
             universe_paused: false,
@@ -324,6 +329,7 @@ impl Universe {
         let dt = UNIVERSE_UPDATE_PERIOD;
         self.events.clear();
         self.battle_losses.clear();
+        self.field_hits.clear();
         self.special_events.clear();
         self.total_time_elapsed = st(ld(self.total_time_elapsed) + ld(dt));
         self.update_counter = self.update_counter.wrapping_add(1);

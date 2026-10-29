@@ -321,6 +321,7 @@ fn sentinel_field_sphere_guards_a_ship() {
     assert_eq!(segments, 20, "the twelve slots of the sphere own twenty field triangles");
     let mut up_at = None;
     let mut hits = 0;
+    let mut located = 0;
     for tick in 0..1500u32 {
         run.step();
         let up = ids.iter().filter(|&&i| sentinel::field_is_up(&run.universe, i)).count();
@@ -328,7 +329,15 @@ fn sentinel_field_sphere_guards_a_ship() {
             up_at = Some(tick);
         }
         hits += run.universe.special_events.iter().filter(|e| matches!(e, SpecialEvent::Special { effect: Effect::FieldHit, .. })).count();
+        // Each hit says where it met the field, near the sentinel hit (for the ripples).
+        for &(sid, at) in &run.universe.field_hits {
+            let p = run.universe.ship(sid).unwrap().posinfo.position;
+            let d = ((at.x - p.x).powi(2) + (at.y - p.y).powi(2) + (at.z - p.z).powi(2)).sqrt();
+            assert!(d < 3000.0, "field hit {d} from its sentinel");
+            located += 1;
+        }
     }
+    assert!(located > 0, "the field hits were located");
     let up = up_at.expect("the field sphere came up");
     assert!(up < 1000, "field up at tick {up}");
     let clamped = ids.iter().filter(|&&i| run.universe.ship(i).unwrap().base.clamp.as_ref().and_then(|c| c.host) == Some(guarded)).count();
