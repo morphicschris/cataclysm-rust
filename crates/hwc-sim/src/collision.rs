@@ -731,8 +731,11 @@ fn bump(u: &mut Universe, a: ShipId, b: ShipId, ra: f32, rb: f32) {
     if !ka && !kb {
         crate::ships::ramming::collide(u, a, b);
         // (`ApplyDamageToCollidingObjects` only damages ships with the killer-collision
-        // attribute; the salvage, leech and RKO exclusions guard that path.)
-        killer_collision(u, a, b);
+        // attribute; the salvage, leech and RKO exclusions guard that path. A Leech that had
+        // a target in the last five seconds takes and gives no such damage.)
+        if !crate::ships::leech::ignores_collision_damage(u, a, b) {
+            killer_collision(u, a, b);
+        }
     } else {
         crate::damage::apply_damage_to_target(u, a, dmg[0], 0, cause[0].0, cause[0].1, Some(b));
         crate::damage::apply_damage_to_target(u, b, dmg[1], 0, cause[1].0, cause[1].1, Some(a));

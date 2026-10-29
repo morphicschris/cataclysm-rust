@@ -873,6 +873,61 @@ pub fn mr_hive_stop_launch(u: &mut Universe, selection: &[ShipId]) {
     }
 }
 
+/// `makeShipsLeechCapable(list, 1)` (0x50d5b0): the ships with the leech upgrade, the disabled
+/// ones only while they leech.
+fn leech_capable(u: &Universe, list: &mut Vec<ShipId>) {
+    retain_swap(list, |id| u.ships.get(id).is_some_and(|s| has_upgrade(s, leech::UPGRADE_LEECH) && (!s.base.disabled || leech::is_active(u, id))));
+}
+
+/// `mrLeechSet` (0x560e20, the Spy / Leech / Vent keys `kbcbLeechSpy` 6, `kbcbLeechLeech` 7,
+/// `kbcbLeechVent` 8, also the "Select Leech" submenu): the selection's Leeches take the drain
+/// mode (`LeechSetState`, each acknowledging it). False when none could (the original only
+/// has a debug note there).
+pub fn mr_leech_set(u: &mut Universe, selection: &[ShipId], mode: u8) -> bool {
+    let mut sel = selection.to_vec();
+    leech_capable(u, &mut sel);
+    not_disabled(u, &mut sel);
+    for &id in &sel {
+        leech::set_state(u, id, mode);
+    }
+    !sel.is_empty()
+}
+
+/// `mrLeechStop` (0x560ec0, the UnLeech key and the "Unleech" item): the selection's leeching
+/// Leeches let go (`RemoveShipsFromDoingStuff`).
+pub fn mr_leech_stop(u: &mut Universe, selection: &[ShipId]) -> bool {
+    let mut sel = selection.to_vec();
+    retain_swap(&mut sel, |id| u.ships.get(id).is_some_and(|s| has_upgrade(s, leech::UPGRADE_LEECH)) && leech::is_active(u, id));
+    not_disabled(u, &mut sel);
+    if sel.is_empty() {
+        return false;
+    }
+    crate::command::remove_ships_from_doing_stuff(u, &sel);
+    true
+}
+
+/// `selGetCommandAvailability`'s leech state (entry 0x28): the drain mode the selection's
+/// Leeches (the disabled ones left out) all have asked for (`LeechGetState`), 0 when they
+/// differ or there are none. The "Select Leech" submenu ticks it (`pmBuildMenuItems`).
+pub fn leech_state(u: &Universe, selection: &[ShipId]) -> u8 {
+    let mut sel = selection.to_vec();
+    not_disabled(u, &mut sel);
+    let mut state: Option<u8> = None;
+    for &id in &sel {
+        let Some(s) = u.ships.get(id) else { continue };
+        if !has_upgrade(s, leech::UPGRADE_LEECH) {
+            continue;
+        }
+        let m = leech::get_state(u, id).unwrap_or(0);
+        state = Some(match state {
+            Some(x) if x != m => 0,
+            Some(x) => x,
+            None => m,
+        });
+    }
+    state.unwrap_or(0)
+}
+
 impl SpecialItem {
     /// What the item's context target is (`pmSetContextTarget`'s kinds); `None` for the
     /// items without one.
@@ -902,7 +957,7 @@ pub fn repair_key(u: &mut Universe, player: usize, selection: &[ShipId]) {
 
 /// `pmExecuteSpecialItem` (0x4e8480) for the items the simulation carries out. `targets` are
 /// the band-boxed targets (or the menu's context target); returns false for items it does not
-/// handle (the submenus, the siege cannon's targeting, the Mimic and leech toggles).
+/// handle (the submenus, the siege cannon's targeting, the Mimic toggles).
 pub fn execute_special(u: &mut Universe, player: usize, selection: &[ShipId], item: SpecialItem, targets: &[ShipId]) -> bool {
     use SpecialItem as I;
     let t = (!targets.is_empty()).then_some(targets);
@@ -940,7 +995,10 @@ pub fn execute_special(u: &mut Universe, player: usize, selection: &[ShipId], it
             mr_protect_ships(u, selection, (!friendly.is_empty()).then_some(&friendly[..]));
         }
         I::UnlinkForceField => mr_formation_revert_special(u, selection),
-        I::SelectLeech | I::Unleech | I::SelectMimic | I::MimicItem | I::BigGun | I::CancelBigGun => {
+        I::Unleech => {
+            mr_leech_stop(u, selection);
+        }
+        I::SelectLeech | I::SelectMimic | I::MimicItem | I::BigGun | I::CancelBigGun => {
             return false;
         }
     }

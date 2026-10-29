@@ -364,6 +364,12 @@ pub enum Command {
     Link,
     Unlink,
     Leech,
+    /// The "Select Leech" submenu (the leech upgrade).
+    SelectLeech,
+    /// Leeching Leeches let go (`mrLeechStop`).
+    Unleech,
+    /// The Leeches' drain mode: 6 Spy, 7 Leech, 8 Vent (`mrLeechSet`).
+    LeechMode(u8),
     /// The "Select Mimic" and "Mimic" submenus (the disguise upgrade).
     Mimic,
     /// Drop the disguise (`mrMimicUndisguise`).
@@ -600,6 +606,12 @@ pub trait GameUiHost {
     fn mimic_menus(&self) -> MimicMenus {
         MimicMenus::default()
     }
+
+    /// The drain mode all the selected Leeches have (6, 7 or 8; 0 when they differ or there
+    /// are none): the "Select Leech" submenu ticks it.
+    fn leech_state(&self) -> u8 {
+        0
+    }
 }
 
 /// The disguise menus the special-action menu offers (`pmBuildMenuItems`, items 0x21 / 0x22).
@@ -645,6 +657,8 @@ pub struct HostView {
     pub hyperspace_label: Option<String>,
     pub roll_call: Option<RollCall>,
     pub mimic: MimicMenus,
+    /// [`GameUiHost::leech_state`].
+    pub leech_state: u8,
     /// [`GameUiHost::placing_waypoints`].
     pub waypoints: Option<u8>,
 }
@@ -691,6 +705,7 @@ impl HostView {
             hyperspace_label: host.hyperspace_label(),
             roll_call: host.roll_call(),
             mimic: host.mimic_menus(),
+            leech_state: host.leech_state(),
             waypoints: host.placing_waypoints(),
         }
     }

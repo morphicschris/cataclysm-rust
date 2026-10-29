@@ -7,6 +7,8 @@
 //! type flag 0x4000000; the variable is the speaking ship's type (`ship+0x2b0`), so the line
 //! names the ship ("Acolytes moving").
 
+use hwc_math::fpu::{ld, st};
+
 use crate::object::ShipId;
 use crate::universe::Universe;
 
@@ -185,5 +187,105 @@ pub fn by_ship(u: &mut Universe, ship: ShipId, event: u32) {
 pub fn by_first(u: &mut Universe, selection: &[ShipId], event: u32) {
     if let Some(&id) = selection.first() {
         by_ship(u, id, event);
+    }
+}
+
+/// A line for the local player's message panel (`moMessageAdd(string, colour)`): `key` names
+/// the string in the language's string table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Message {
+    pub key: &'static str,
+    pub colour: [u8; 4],
+}
+
+/// Fleet command's enemy-sighting warnings (status, speaker flag 0x1000).
+pub mod sighting {
+    /// A cloaked ship sighted (0xaaeb60).
+    pub const CLOAKED: u32 = 0x200_104c;
+    /// A disguised Mimic sighted (0xaaeb64).
+    pub const MIMIC: u32 = 0x200_10ba;
+    /// An enemy Leech on one of the player's ships (0xaaeb54).
+    pub const LEECH: u32 = 0x200_10bb;
+}
+
+/// The sighting flags waiting to be said and when the last warning was (0xaaeb54..0xaaeb68,
+/// cleared by `speechEnemySightingsReset` at the level reset).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Sightings {
+    pub cloaked: bool,
+    pub mimic: bool,
+    pub leech: bool,
+    pub last: f32,
+}
+
+/// `speechEnemyShipSighted` (0x51dce0): `player` (only the local player counts) sees an
+/// enemy stealth ship: a disguised Mimic or MCV (or the P1 standard corvette), a cloaker, or
+/// a Leech that is leeching something.
+pub fn enemy_ship_sighted(u: &mut Universe, ship: ShipId, player: usize) {
+    use crate::statics::ShipType as T;
+    if player != u.chatter.local_player {
+        return;
+    }
+    let Some(s) = u.ships.get(ship) else { return };
+    if u.players.get(player).is_some_and(|p| p.is_ally(s.player)) {
+        return;
+    }
+    match s.ship_type {
+        T::sMimic | T::sMCV | T::p1StandardCorvette => u.sightings.mimic = true,
+        T::sLeech => {
+            if crate::ships::leech::is_active(u, ship) && crate::ships::leech::target(u, ship).is_some() {
+                u.sightings.leech = true;
+            }
+        }
+        T::bCloakedFighter | T::bIonArrayFrigate | T::p1IonArrayFrigate => u.sightings.cloaked = true,
+        _ => {}
+    }
+}
+
+/// The Leech check of `soundEventUpdate` (0x517e30): an active Leech in the render list whose
+/// target is below a fifth of its health is reported to the target's owner. It runs only with
+/// a front end that plays sound (a [`SpeechGate`] that is not off).
+pub fn leeches_in_view(u: &mut Universe) {
+    let Some(g) = &u.speech_gate else { return };
+    if g.off {
+        return;
+    }
+    let leeches: Vec<ShipId> = g
+        .in_view
+        .iter()
+        .copied()
+        .filter(|&id| u.ships.get(id).is_some_and(|s| s.ship_type == crate::statics::ShipType::sLeech))
+        .collect();
+    for id in leeches {
+        if !crate::ships::leech::is_active(u, id) {
+            continue;
+        }
+        let Some(t) = crate::ships::leech::target(u, id).and_then(|t| u.ships.get(t)) else { continue };
+        let max = u.statics.ship(t.ship_type).map_or(0.0, |x| x.health.max_health);
+        if st(ld(t.health) / ld(max)) < 0.2 {
+            let owner = t.player;
+            enemy_ship_sighted(u, id, owner);
+        }
+    }
+}
+
+/// `speechEnemySightingsUpdate` (0x51de00): at most one round of warnings a minute, each
+/// pending flag said once by fleet command.
+pub fn sightings_update(u: &mut Universe) {
+    let now = u.total_time_elapsed;
+    if !(u.sightings.last + 60.0 < now) {
+        return;
+    }
+    for (pending, event) in [(u.sightings.cloaked, sighting::CLOAKED), (u.sightings.mimic, sighting::MIMIC), (u.sightings.leech, sighting::LEECH)] {
+        if pending {
+            queue(u, None, event, -1);
+            u.sightings.last = now;
+        }
+    }
+    let s = &mut u.sightings;
+    if s.last == now {
+        s.cloaked = false;
+        s.mimic = false;
+        s.leech = false;
     }
 }

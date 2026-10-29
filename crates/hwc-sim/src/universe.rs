@@ -194,6 +194,18 @@ pub struct Universe {
     /// The last speech handle given out (`SNDcreatehandle`).
     #[serde(skip)]
     pub speech_handles: u32,
+    /// The enemy-sighting warnings waiting to be said (`speechEnemyShipSighted`; the
+    /// original's globals, reset with the level: not saved).
+    #[serde(skip)]
+    pub sightings: crate::speech::Sightings,
+    /// The Leech's "nonviable target" note (`LeechChooseTarget` / `LeechHouseKeep` globals
+    /// 0x91b67c..0x91b684, reset by `universeReset`: not saved).
+    #[serde(skip)]
+    pub leech_note: crate::ships::leech::LeechNote,
+    /// Status messages for the local player's message panel (`moMessageAdd`), waiting for the
+    /// front end (which takes them). Not saved.
+    #[serde(skip)]
+    pub messages: Vec<crate::speech::Message>,
     /// KAS `PauseUniverse` (0x8f1fc0): orders and ship movement stop, time goes on.
     pub universe_paused: bool,
     /// `nisIsRunning` (0x8f1f14): an NIS is playing (set by `nisStart`, cleared by `nisStop`).
@@ -268,6 +280,9 @@ impl Universe {
             chatter: Default::default(),
             speech_gate: None,
             speech_handles: 0,
+            sightings: Default::default(),
+            leech_note: Default::default(),
+            messages: Vec::new(),
             events: Vec::new(),
             battle_losses: Vec::new(),
             field_hits: Vec::new(),
@@ -388,6 +403,10 @@ impl Universe {
         crate::resource::delete_dead_resources(self);
         crate::missile::delete_dead(self);
         // (Resource regrowth and bounties follow.)
+        // The sound task's Leech check and the enemy-sighting warnings (`soundEventUpdate`,
+        // `speechEnemySightingsUpdate`), run here once an update.
+        crate::speech::leeches_in_view(self);
+        crate::speech::sightings_update(self);
     }
 
     /// `univUpdateAllPosVelShips` (0x53ffe0): per ship, the state checks, the physics step and

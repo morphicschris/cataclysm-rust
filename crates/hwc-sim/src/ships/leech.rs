@@ -120,6 +120,23 @@ impl Default for LeechSpec {
     }
 }
 
+/// The local player's "nonviable Leech target" note (0x91b67c..0x91b684): a target search
+/// that found nothing shows `strLEECHCANTLEECH`, unless another search in the same half
+/// second found one; then no new note for two seconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct LeechNote {
+    /// Some search found a target (0x91b67c), some found none (0x91b67d).
+    pub found: bool,
+    pub none_found: bool,
+    /// No notes before this (0x91b680).
+    pub quiet_until: f32,
+    /// When the pending note is decided (0x91b684, 0 none).
+    pub due: f32,
+}
+
+/// The message colour (`0xff2e3def`).
+const NOTE_COLOUR: [u8; 4] = [0xef, 0x3d, 0x2e, 0xff];
+
 /// Per-type statics (`LeechStaticInit` 0x5b2510 reads nothing; the drain rates are the
 /// targets' `leechRUsPerSecond` / `leechHPsPerSecond`).
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -148,6 +165,19 @@ fn spec_mut(u: &mut Universe, id: ShipId) -> Option<&mut LeechSpec> {
 
 fn l(u: &mut Universe, id: ShipId) -> &mut LeechSpec {
     spec_mut(u, id).expect("leech")
+}
+
+/// The ship being leeched (`LeechGetSpec(ship)->target`).
+pub fn target(u: &Universe, id: ShipId) -> Option<ShipId> {
+    spec(u, id).and_then(|s| s.target)
+}
+
+/// Whether a bump between `a` and `b` does no killer-collision damage
+/// (`collCheckShipShipColl` / `collCheckBigShipSmallShipColl`): the first of them that is a
+/// Leech had a target in the last five seconds.
+pub fn ignores_collision_damage(u: &Universe, a: ShipId, b: ShipId) -> bool {
+    let first = [a, b].into_iter().find(|&x| spec(u, x).is_some());
+    first.and_then(|x| spec(u, x)).is_some_and(|s| s.recent_target.is_some())
 }
 
 /// `LeechInit` (0x5b2540).
@@ -272,12 +302,31 @@ fn choose_target(u: &mut Universe, id: ShipId) -> bool {
     let s = l(u, id);
     s.target = None;
     let mode = s.mode;
-    let Some(list) = s.targets.clone() else {
-        return false;
-    };
-    if list.is_empty() {
-        return false;
+    if let Some(list) = s.targets.clone() {
+        if list.is_empty() {
+            return false;
+        }
+        pick_target(u, id, mode, &list);
     }
+    // The local player's note.
+    let now = u.total_time_elapsed;
+    if u.ships.ship(id).player == u.chatter.local_player && u.leech_note.quiet_until < now {
+        let found = l(u, id).target.is_some();
+        let n = &mut u.leech_note;
+        if found {
+            n.found = true;
+        } else {
+            n.none_found = true;
+        }
+        if n.due == 0.0 {
+            n.due = st(ld(now) + 0.5);
+        }
+    }
+    l(u, id).target.is_some()
+}
+
+/// The search of [`choose_target`].
+fn pick_target(u: &mut Universe, id: ShipId, mode: u8, list: &[ShipId]) {
     let mut cands = Vec::new();
     for (i, &t) in list.iter().enumerate() {
         let Some(ts) = u.ships.get(t) else { continue };
@@ -306,7 +355,6 @@ fn choose_target(u: &mut Universe, id: ShipId) -> bool {
         let r = u.randy.random(RAN_GAME);
         l(u, id).target = Some(list[cands[(r % cands.len() as u32) as usize]]);
     }
-    l(u, id).target.is_some()
 }
 
 /// `LeechReserveDockPoint` (0x5b1620): a random free leech point of the target (stream 10),
@@ -792,7 +840,15 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
             s.recent_target = None;
         }
     }
-    // (The "no target" status message of the local player is not modelled.)
+    // The local player's note: "Hull type nonviable Leech target" when the searches of the
+    // last half second found nothing.
+    let n = u.leech_note;
+    if u.ships.ship(id).player == u.chatter.local_player && n.due != 0.0 && n.due < now {
+        if n.none_found && !n.found {
+            u.messages.push(crate::speech::Message { key: "strLEECHCANTLEECH", colour: NOTE_COLOUR });
+        }
+        u.leech_note = LeechNote { quiet_until: st(ld(now) + 2.0), ..LeechNote::default() };
+    }
     if l(u, id).clamp_now {
         l(u, id).clamp_now = false;
         if let Some(t) = l(u, id).target.filter(|t| u.ships.get(*t).is_some()) {

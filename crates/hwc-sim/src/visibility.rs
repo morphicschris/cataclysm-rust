@@ -79,6 +79,7 @@ pub fn set_visible(u: &mut Universe, id: ShipId, player: usize, visible: bool, q
     };
     if announce {
         u.special_events.push(SpecialEvent::EnemyShipSighted { ship: id, player });
+        crate::speech::enemy_ship_sighted(u, id, player);
     }
     u.ships.ship_mut(id).visible_to[player] = visible;
     // The disguise checks read the flag just stored (they need the ship hidden from the player).

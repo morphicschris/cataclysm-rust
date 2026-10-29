@@ -313,6 +313,130 @@ fn leech_latches_and_drains() {
     assert_eq!(h1, h2, "leech runs differ");
 }
 
+fn leech_spec(u: &Universe, id: ShipId) -> &leech::LeechSpec {
+    match &u.ships.ship(id).spec {
+        ShipSpec::Leech(x) => x,
+        _ => panic!("not a leech"),
+    }
+}
+
+/// The player's Leech orders (`mrLeechSet`, `mrLeechStop`) and what the Leech reports: Spy
+/// (6) latches without draining and is acknowledged, the submenu's tick follows the mode, a
+/// latched Leech on a ship below a fifth of its health makes fleet command warn the victim's
+/// player (`speechEnemyShipSighted`, once a minute), Unleech lets go, and a target with no
+/// leech point gives the "nonviable Leech target" note.
+#[test]
+fn leech_orders_and_warnings() {
+    use hwc_sim::player_orders::{leech_state, mr_leech_set, mr_leech_stop};
+    use hwc_sim::speech::{event, sighting};
+    let Some(d) = data() else { return };
+    let s = scenario(
+        "leech orders",
+        vec![ShipRace::Somtaaw, ShipRace::Taiidan],
+        vec![
+            Spawn { ship_type: ShipType::sLeech, player: 0, position: Vector::new(-1500.0, 200.0, 0.0) },
+            Spawn { ship_type: ShipType::tIonCannonFrigate, player: 1, position: Vector::new(0.0, 0.0, 0.0) },
+        ],
+        vec![(1, Order::Special { ships: vec![0], targets: vec![1] })],
+    );
+    let mut run = start(s, |r| upgrade(r, 0, leech::UPGRADE_LEECH)).unwrap();
+    let (l, f) = (run.ids[0], run.ids[1]);
+    // Spy: acknowledged, ticked in the submenu; a ship without the upgrade takes no mode.
+    assert_eq!(leech_state(&run.universe, &[l]), leech::state::DRAIN_HEALTH);
+    assert!(!mr_leech_set(&mut run.universe, &[f], 6));
+    assert!(mr_leech_set(&mut run.universe, &[l, f], 6));
+    assert_eq!(leech_state(&run.universe, &[l, f]), 6);
+    assert!(run.universe.speech.iter().any(|x| x.ship == Some(l) && x.event == event::LEECH_HOLD));
+    run.universe.speech.clear();
+    let mut attached = false;
+    for _ in 0..1600 {
+        run.step();
+        if leech_spec(&run.universe, l).state == leech::state::ATTACHED {
+            attached = true;
+            break;
+        }
+    }
+    assert!(attached, "the Leech latched on in spy mode");
+    let health = run.universe.ships.ship(f).health;
+    for _ in 0..64 {
+        run.step();
+    }
+    assert_eq!(run.universe.ships.ship(f).health, health, "spying drains nothing");
+    // The frigate's player hears about the Leech once its ship is badly hurt.
+    let max = d.statics.ship(ShipType::tIonCannonFrigate).unwrap().health.max_health;
+    run.universe.chatter.local_player = 1;
+    run.universe.speech_gate = Some(hwc_sim::speech::SpeechGate {
+        chatter: true,
+        status: true,
+        commands: true,
+        in_view: [l, f].into_iter().collect(),
+        ..Default::default()
+    });
+    // (No warnings in a level's first minute: the last one is taken to be at time 0.)
+    run.universe.sightings.last = -60.0;
+    run.step();
+    assert!(!run.universe.speech.iter().any(|x| x.event == sighting::LEECH), "no warning above a fifth");
+    run.universe.ships.ship_mut(f).health = max * 0.1;
+    run.step();
+    let warnings = |u: &Universe| u.speech.iter().filter(|x| x.ship.is_none() && x.event == sighting::LEECH).count();
+    assert_eq!(warnings(&run.universe), 1, "fleet command warns of the Leech");
+    for _ in 0..16 * 30 {
+        run.step();
+    }
+    assert_eq!(warnings(&run.universe), 1, "at most one warning a minute");
+    run.universe.chatter.local_player = 0;
+    run.universe.speech_gate = None;
+    // Unleech.
+    assert!(mr_leech_stop(&mut run.universe, &[l, f]));
+    for _ in 0..16 {
+        run.step();
+    }
+    assert!(!leech::is_active(&run.universe, l), "the Leech let go");
+    assert!(!mr_leech_stop(&mut run.universe, &[l]), "nothing left to unleech");
+    assert_eq!(run.universe.ships.ship(l).base.clamp.as_ref().and_then(|c| c.host), None);
+}
+
+/// A Leech sent at a ship with no leech point finds no target: "Hull type nonviable Leech
+/// target" (`LeechChooseTarget` / `LeechHouseKeep`), half a second later.
+#[test]
+fn leech_nonviable_target_note() {
+    let Some(d) = data() else { return };
+    let viable = |t: ShipType| {
+        d.statics.ship(t).is_some_and(|s| {
+            s.dock.as_ref().is_some_and(|dk| dk.points.iter().any(|p| p.dock_type == Some(hwc_sim::statics::DockPointType::Leech)))
+        })
+    };
+    let Some(t) = (0..ShipType::COUNT).filter_map(ShipType::from_index).find(|&t| {
+        d.statics.ship(t).is_some_and(|s| {
+            s.ship_race != ShipRace::Somtaaw
+                && !matches!(s.ship_class.map(|c| c.index()), None | Some(5 | 6 | 10 | 11))
+                && !viable(t)
+        })
+    }) else {
+        println!("no ship without leech points");
+        return;
+    };
+    println!("nonviable target: {t:?}");
+    let s = scenario(
+        "leech nonviable",
+        vec![ShipRace::Somtaaw, ShipRace::Taiidan],
+        vec![
+            Spawn { ship_type: ShipType::sLeech, player: 0, position: Vector::new(-1500.0, 200.0, 0.0) },
+            Spawn { ship_type: t, player: 1, position: Vector::new(0.0, 0.0, 0.0) },
+        ],
+        vec![(1, Order::Special { ships: vec![0], targets: vec![1] })],
+    );
+    let mut run = start(s, |r| upgrade(r, 0, leech::UPGRADE_LEECH)).unwrap();
+    let mut notes = Vec::new();
+    for _ in 0..32 {
+        run.step();
+        notes.append(&mut run.universe.messages);
+    }
+    assert_eq!(notes.len(), 1, "one note: {notes:?}");
+    assert_eq!(notes[0].key, "strLEECHCANTLEECH");
+    assert!(!leech::is_active(&run.universe, run.ids[0]));
+}
+
 fn cloak_of(u: &Universe, id: ShipId) -> hwc_sim::cloak::Cloak {
     *hwc_sim::ships::cloak_ref(u.ships.ship(id)).expect("cloaker")
 }

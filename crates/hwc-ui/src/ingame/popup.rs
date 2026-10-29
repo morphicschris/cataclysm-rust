@@ -235,11 +235,12 @@ fn main_items(fe: &Fe) -> Vec<Item> {
 fn special_items(fe: &Fe) -> Vec<Item> {
     let view = &fe.game.ig.view;
     let mut v = Vec::new();
-    let specials: [(Command, &str, Action, u8); 17] = [
+    let specials: [(Command, &str, Action, u8); 18] = [
         (Command::Harvest, "Harvest", keys::HARVEST, 12),
         (Command::Repair, "Repair", keys::REPAIR, 12),
         (Command::Salvage, "Salvage", keys::SALVAGE, 12),
         (Command::Leech, "Leech", keys::LEECH, 13),
+        (Command::Unleech, "Unleech", keys::UNLEECH, 13),
         (Command::Link, "Link", keys::LINK, 14),
         (Command::Unlink, "Unlink", keys::UNLINK, 14),
         (
@@ -270,10 +271,11 @@ fn special_items(fe: &Fe) -> Vec<Item> {
         (Command::Kamikaze, "Kamikaze", keys::KAMIKAZE, 18),
     ];
     for (c, label, a, g) in specials {
+        // `pmBuildMenuItems`: "Select Leech" comes before the Leech item, with or without it.
+        if c == Command::Leech && has(view, Command::SelectLeech) {
+            v.push(sub("Select Leech", Submenu::Leech, g));
+        }
         if has(view, c) {
-            if c == Command::Leech {
-                v.push(sub("Select Leech", Submenu::Leech, g));
-            }
             v.push(item(label, Some(a), g));
         }
         // `pmBuildMenuItems`: the Mimic items come after the link items.
@@ -346,13 +348,14 @@ fn submenu_items(fe: &Fe, s: Submenu) -> Vec<Item> {
         .iter()
         .map(|(l, a)| item(l, Some(Action(*a)), 0))
         .collect(),
+        // The mode all the selected Leeches have is ticked.
         Submenu::Leech => [
-            ("Spy", keys::LEECH_SPY),
-            ("Leech", keys::LEECH_LEECH),
-            ("Vent", keys::LEECH_VECT),
+            ("Spy", keys::LEECH_SPY, 6),
+            ("Leech", keys::LEECH_LEECH, 7),
+            ("Vent", keys::LEECH_VECT, 8),
         ]
         .iter()
-        .map(|(l, a)| item(l, Some(*a), 0))
+        .map(|(l, a, m)| checked(item(l, Some(*a), 0), view.leech_state == *m))
         .collect(),
         // `"%d. %s"` of the slot or the entry and its name (`pmBuildMenuItems`).
         Submenu::MimicType => view

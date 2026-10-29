@@ -1719,6 +1719,18 @@ impl Game {
 
     /// Plays the speech the orders and ships asked for since the last frame.
     fn ship_speech(&mut self, audio: &mut Option<Audio>) {
+        // The simulation's status messages (`moMessageAdd`), such as the Leech's
+        // "nonviable target" note.
+        let notes = std::mem::take(&mut self.world.universe_mut().messages);
+        for m in notes {
+            let text = self.strings.text(m.key).trim().to_string();
+            self.messages.push(GameMessage {
+                text,
+                colour: m.colour,
+                ship: None,
+                time: self.world.universe().total_time_elapsed,
+            });
+        }
         let speech = std::mem::take(&mut self.world.universe_mut().speech);
         if let Some(a) = audio.as_mut() {
             for s in speech {
@@ -2011,6 +2023,11 @@ impl Game {
                 if hwc_sim::player_orders::mr_kamikaze(u, &mut self.selection) {
                     sound(audio, CLICK);
                 }
+            }
+            // `mrLeechSet` (the Spy / Leech / Vent keys and the "Select Leech" submenu): the
+            // selected Leeches take the drain mode.
+            Command::LeechMode(m) => {
+                hwc_sim::player_orders::mr_leech_set(u, &sel, m);
             }
             // `mrScuttle`: a first press asks, a second within the reconfirm time scuttles.
             Command::Scuttle => {

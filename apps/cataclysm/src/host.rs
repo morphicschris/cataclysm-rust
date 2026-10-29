@@ -658,6 +658,10 @@ impl GameUiHost for SimHost<'_> {
     /// `pmBuildMenuItems`' Mimic submenus: the valid disguise menus
     /// (`MimicIsValidDisguisePlayer`, named by `MimicGetDisguisePlayerData`) and the picked
     /// one's entries the selection may take (`MimicGetDisguiseTypeNiceName`).
+    fn leech_state(&self) -> u8 {
+        hwc_sim::player_orders::leech_state(self.u(), self.selection)
+    }
+
     fn mimic_menus(&self) -> hwc_ui::ingame::host::MimicMenus {
         let Some(g) = self.game() else {
             return Default::default();
@@ -754,6 +758,8 @@ pub fn special_command(item: hwc_sim::player_orders::SpecialItem) -> Option<Comm
         I::Repair => Command::Repair,
         I::Salvage => Command::Salvage,
         I::Leech => Command::Leech,
+        I::Unleech => Command::Unleech,
+        I::SelectLeech => Command::SelectLeech,
         I::Link => Command::Link,
         I::Unlink => Command::Unlink,
         I::SelectMimic | I::MimicItem => Command::Mimic,
