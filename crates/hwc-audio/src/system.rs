@@ -172,13 +172,11 @@ pub struct GameContext {
     pub closest_distance: f32,
     /// Something is going on (selects the "active" music level curve).
     pub active: bool,
-    /// Number of single-player (mission) speech events in progress.
-    pub mission_speech: i32,
 }
 
 impl Default for GameContext {
     fn default() -> Self {
-        Self { main_screen: true, sensors: false, closest_distance: f32::MAX, active: false, mission_speech: 0 }
+        Self { main_screen: true, sensors: false, closest_distance: f32::MAX, active: false }
     }
 }
 
@@ -853,7 +851,7 @@ impl SoundSystem {
             return None;
         }
         let mut vol = self.speech_level() * 255.0;
-        if self.context.mission_speech < 1 || event & 0x1000_0000 != 0 {
+        if self.single_player_speaking() < 1 || event & 0x1000_0000 != 0 {
             if event & 0x800 != 0 {
                 vol *= 0.75;
             }
@@ -897,6 +895,17 @@ impl SoundSystem {
             volume: round_vol(vol),
             subtitles,
         })
+    }
+
+    /// `numSinglePlayerEvents`: speech streams playing a single-player (mission) event,
+    /// `SPEECH_TYPE_SINGLE_PLAYER` (0x1000_0000). Only while one plays are other voices
+    /// (NIS and animatic lines, chatter) turned down by `SPEECH_SINGLEPLAYER_RATIO`.
+    fn single_player_speaking(&self) -> usize {
+        let m = self.mixer();
+        (0..crate::mixer::NUM_STREAMS - 1)
+            .map(|i| m.stream_handle(i))
+            .filter(|&h| !m.stream_over(h) && m.stream_playing_tag(h).is_some_and(|t| t & 0x1000_0000 != 0))
+            .count()
     }
 
     /// Fade out a speech stream and drop what is queued on it.

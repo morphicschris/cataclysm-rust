@@ -109,7 +109,6 @@ impl Audio {
             sensors: false,
             closest_distance: 0.0,
             active: false,
-            mission_speech: 0,
         };
         Ok(Audio {
             system,
@@ -217,7 +216,6 @@ impl Audio {
     pub fn set_in_game(&mut self, in_game: bool) {
         self.system.context.main_screen = true;
         self.system.context.active = in_game;
-        self.system.context.mission_speech = 0;
         if !in_game {
             self.system.stop_all(0.0, true);
             self.fleet_current = [None; hwc_audio::mixer::NUM_STREAMS];
@@ -249,7 +247,6 @@ impl Audio {
 
     /// A mission speech event on the intel stream; its subtitles and length come back.
     pub fn mission_speech(&mut self, event: u32, variable: i32) -> Option<SpeechStarted> {
-        self.system.context.mission_speech = 1;
         self.system.play_speech(event, variable, -1, 0)
     }
 
@@ -258,7 +255,6 @@ impl Audio {
     /// object or actor) on the stream its speaker class uses. No single-player speech is in
     /// progress while a movie plays, so nothing ducks it.
     pub fn movie_speech(&mut self, event: u32, variable: i32) -> Option<SpeechStarted> {
-        self.system.context.mission_speech = 0;
         let stream = crate::movie_script::speech_stream(event);
         self.system.play_speech(event, variable, -1, stream)
     }

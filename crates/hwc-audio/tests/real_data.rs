@@ -407,6 +407,36 @@ fn speech_sentences_queue_fragments_with_eq() {
     }
 }
 
+/// `speechPlayQueue`: other voices drop to `SPEECH_SINGLEPLAYER_RATIO` only while a
+/// single-player (0x1000_0000) event is playing, so NIS and animatic lines play at their full
+/// level once the mission's own line is over.
+#[test]
+fn single_player_speech_turns_other_voices_down_only_while_it_plays() {
+    let Some(d) = data() else { return };
+    if d.speech(Race::Somtaaw).is_none() {
+        eprintln!("no speech; skipping");
+        return;
+    }
+    let mut s = system(&d);
+    let ev = (0..2048u32).find(|&e| s.play_speech(e, 0, 0, 1).is_some()).expect("no playable sentence");
+    s.stop_speech(1, 0.0);
+    offline::render(&mut s, &[], 0.5, 1);
+    const NIS: u32 = 0x2000_0000;
+    let alone = s.play_speech(ev | NIS, 0, 0, 1).unwrap().volume;
+    s.stop_speech(1, 0.0);
+    offline::render(&mut s, &[], 0.5, 1);
+    let mission = s.play_speech(ev | 0x1000_0000, 0, 0, 0).unwrap();
+    assert_eq!(mission.volume, alone, "a single-player line is not turned down itself");
+    offline::render(&mut s, &[], 0.1, 1);
+    let under = s.play_speech(ev | NIS, 0, 0, 1).unwrap().volume;
+    let ratio = d.tweaks.speech_singleplayer_ratio;
+    assert!((f32::from(under) - f32::from(alone) * ratio).abs() <= 1.0, "{alone} -> {under} (ratio {ratio})");
+    s.stop_speech(0, 0.0);
+    s.stop_speech(1, 0.0);
+    offline::render(&mut s, &[], 0.5, 1);
+    assert_eq!(s.play_speech(ev | NIS, 0, 0, 1).unwrap().volume, alone);
+}
+
 #[test]
 fn scripted_scene_is_deterministic_and_balanced() {
     let Some(d) = data() else { return };

@@ -151,7 +151,6 @@ impl Audio {
 
     /// Speaks a mission speech event on the intel stream.
     pub fn speech(&mut self, ev: u32, variable: i32) -> Option<SpeechStarted> {
-        self.sys.context.mission_speech = 1;
         self.sys.play_speech(ev, variable, -1, 0)
     }
 
