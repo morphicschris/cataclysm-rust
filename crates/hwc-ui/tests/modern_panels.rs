@@ -329,7 +329,13 @@ fn run(size: (i32, i32), tag: &str) {
         a.selected.clone().unwrap(),
     );
     assert!(!b.expanded && !l.expanded && !sl.expanded);
-    assert!(b.rows.is_empty() && l.items.is_empty() && sl.rows.is_empty());
+    assert!(b.rows.is_empty() && sl.rows.is_empty());
+    // Folded, the log shows only live warnings (the red "under attack") above its header.
+    assert!(l
+        .items
+        .iter()
+        .all(|i| host.messages[i.message].colour == modern_log::WARNING));
+    assert!(l.items.iter().all(|i| i.rect.y1 <= l.header.y0));
     assert_eq!(b.panel, b.header, "folded: the header alone");
     assert_eq!(
         l.header.y1, log.panel.y1,

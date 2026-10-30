@@ -573,6 +573,28 @@ fn full_hud(size: (i32, i32), tag: &str) {
     }
     rig.frame(g);
     assert!(rig.shot(g, &format!("m1_full_hud_collapsed_{tag}")));
+    // A warning (the refused jump's) still shows above the folded system log.
+    let time = g.world.universe().total_time_elapsed;
+    g.messages.push(hwc_ui::ingame::host::GameMessage {
+        text: "Complete or Cancel External Construction Before Continuing".into(),
+        colour: modern_log::WARNING,
+        ship: None,
+        time,
+    });
+    rig.frame(g);
+    let view = g.ui.state().view.clone();
+    let log = modern_panel::arrange(&g.ui.fe, size.0, size.1, &view)
+        .log
+        .expect("the folded system log");
+    assert!(!log.expanded, "folded at {tag}");
+    assert_eq!(
+        log.items.last().map(|i| i.message),
+        Some(view.messages.len() - 1),
+        "the warning shows folded at {tag}"
+    );
+    assert!(log.warnings.is_some());
+    assert!(rig.shot(g, &format!("m1_full_hud_collapsed_warning_{tag}")));
+    g.messages.pop();
     for k in [
         modern_build::EXPANDED_KEY,
         modern_research::EXPANDED_KEY,

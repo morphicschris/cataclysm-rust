@@ -11,7 +11,9 @@
 //! every line is full, as in the original. Message colours keep their meaning, lifted towards
 //! white so that the original's pure red, green and blue read on the dark panel. A message
 //! about a ship is clickable as in the original (it focuses the ship). Long messages wrap.
-//! Folded, the header alone is shown, and it flashes when a message comes in. The fold is
+//! Folded, the header alone is shown, and it flashes when a message comes in; a warning (a red
+//! message, such as the refused jump's "Complete or Cancel External Construction") still shows
+//! above the folded header while the original would show it, then goes. The fold is
 //! remembered in the options file as `hwcSystemLogExpanded`.
 
 use crate::canvas::{Canvas, Color, Rect};
@@ -29,6 +31,10 @@ pub const HEADER_TEXT: &str = "SYSTEM LOG";
 pub const HISTORY: usize = 8;
 /// How bright a message stays once it has faded (the original lets it go).
 pub const HISTORY_ALPHA: f32 = 0.5;
+/// The colour of a warning, which shows even with the panel folded.
+pub const WARNING: [u8; 4] = [255, 0, 0, 255];
+/// Warnings shown at most above the folded header.
+pub const FOLDED_WARNINGS: usize = 3;
 
 /// Reference layout, in pixels at 1080 lines.
 const WIDTH: f32 = 400.0;
@@ -52,6 +58,33 @@ pub fn age_alpha(age: f32, scrolled: bool) -> f32 {
     } else {
         1.0 - (1.0 - HISTORY_ALPHA) * (age - MESSAGE_HOLD) / MESSAGE_FADE
     }
+}
+
+/// A folded warning's brightness by age: the original's hold and fade, then gone.
+pub fn warning_alpha(age: f32) -> f32 {
+    if age <= MESSAGE_HOLD {
+        1.0
+    } else {
+        (1.0 - (age - MESSAGE_HOLD) / MESSAGE_FADE).clamp(0.0, 1.0)
+    }
+}
+
+/// The warnings a folded panel shows at `time`: the newest red messages still held or fading
+/// as in the original (none while scrolled back), oldest first, as (index, text).
+pub fn live_warnings(messages: &[GameMessage], time: f32, scroll: usize) -> Vec<(usize, &str)> {
+    if scroll > 0 {
+        return Vec::new();
+    }
+    let mut v: Vec<(usize, &str)> = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, m)| m.colour == WARNING && time - m.time < MESSAGE_HOLD + MESSAGE_FADE)
+        .take(FOLDED_WARNINGS)
+        .map(|(i, m)| (i, m.text.as_str()))
+        .collect();
+    v.reverse();
+    v
 }
 
 /// A message colour made readable on the dark panel: mixed towards white, more so the darker
@@ -81,8 +114,10 @@ pub struct Layout {
     pub header: Rect,
     /// The background (the header when collapsed).
     pub panel: Rect,
-    /// Oldest first.
+    /// Oldest first (folded: the live warnings, see [`fold_warnings`]).
     pub items: Vec<Item>,
+    /// Folded with warnings: the backdrop behind them, above the header.
+    pub warnings: Option<Rect>,
 }
 
 /// The messages the panel lists: up to [`HISTORY`] ending at the newest (less the lines
@@ -160,7 +195,50 @@ pub fn layout(
         header,
         panel,
         items,
+        warnings: None,
     }
+}
+
+/// Puts `warnings` (oldest first) on a folded layout, stacked up from just above its header,
+/// the oldest dropped while they would reach above `top`. The header and the panel stay as
+/// they are, so the fold still hides and shows by the header alone.
+pub fn fold_warnings(l: &mut Layout, warnings: &[(usize, &str)], top: i32, measure: Measure) {
+    if l.expanded || warnings.is_empty() {
+        return;
+    }
+    let s = l.scale;
+    let x0 = l.header.x0;
+    let x1 = x0 + px(s, WIDTH);
+    let text_x = x0 + px(s, TEXT_X);
+    let avail = (x1 - px(s, TEXT_RIGHT) - text_x) as f32;
+    let width = |t: &str| measure(Face::Semibold, TEXT_PX * s, 0.0, t);
+    let line_h = px(s, LINE_H);
+    let y1 = l.header.y0 - px(s, ITEMS_TOP);
+    let mut bottom = y1 - px(s, PAD_BOTTOM);
+    let mut items = Vec::new();
+    for &(index, text) in warnings.iter().rev() {
+        let wrapped = obj::wrap(text, avail, avail, &width);
+        let y = bottom - wrapped.len() as i32 * line_h;
+        if y - px(s, PAD_BOTTOM) < top {
+            break;
+        }
+        let lines = wrapped
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| (text_x, y + i as i32 * line_h + px(s, BASELINE), t))
+            .collect();
+        items.push(Item {
+            message: index,
+            rect: Rect::new(x0, y, x1, bottom),
+            lines,
+        });
+        bottom = y - px(s, ITEM_GAP);
+    }
+    items.reverse();
+    if let Some(first) = items.first() {
+        l.warnings = Some(Rect::new(x0, first.rect.y0 - px(s, PAD_BOTTOM), x1, y1));
+    }
+    l.items = items;
 }
 
 /// The panel's state kept in the overlay: the newest message seen (for the flash) and the
@@ -214,7 +292,20 @@ pub(crate) fn arrange(
     let full = layout(height, top, &list, true, measure);
     let folded = layout(height, top, &list, false, measure);
     let expanded = mp::shown_state(saved, manager, over, full.panel, folded.panel)?;
-    Some(if expanded { full } else { folded })
+    if expanded {
+        return Some(full);
+    }
+    let mut folded = folded;
+    let warnings = live_warnings(&view.messages, view.time, fe.game.ig.overlay.message_scroll);
+    fold_warnings(&mut folded, &warnings, top, measure);
+    // A warning that would reach into a full-screen manager waits for it to close.
+    if let (Some(w), Some(m)) = (folded.warnings, manager) {
+        if modern_hud::overlaps(w, m) {
+            folded.items.clear();
+            folded.warnings = None;
+        }
+    }
+    Some(folded)
 }
 
 /// The header was clicked: collapse or expand. Over a full-screen manager the choice lasts
@@ -246,6 +337,8 @@ pub fn paint(
     let s = l.scale;
     if l.expanded {
         mp::paint_frame(canvas, l.panel, s);
+    } else if let Some(w) = l.warnings {
+        mp::paint_frame(canvas, w, s);
     }
     let hover = l.header.contains(mouse.0, mouse.1);
     let flash = if l.expanded { 0.0 } else { flash };
@@ -264,7 +357,11 @@ pub fn paint(
         let Some(m) = messages.get(item.message) else {
             continue;
         };
-        let a = age_alpha(time - m.time, scrolled);
+        let a = if l.expanded {
+            age_alpha(time - m.time, scrolled)
+        } else {
+            warning_alpha(time - m.time)
+        };
         let over = m.ship.is_some() && item.rect.contains(mouse.0, mouse.1);
         let col = if over { obj::GOLD } else { readable(m.colour) };
         let col = modern_hud::with_alpha(col, a);
@@ -397,6 +494,62 @@ mod tests {
         );
         assert_eq!(f.panel.y1, l.panel.y1, "both end on the bottom margin");
         assert_eq!(f.panel, f.header);
+    }
+
+    #[test]
+    fn a_folded_log_still_shows_live_warnings() {
+        let warn = |text: &str, time: f32| GameMessage {
+            colour: WARNING,
+            ..msg(text, time)
+        };
+        let messages = [
+            warn(
+                "Complete or Cancel External Construction Before Continuing",
+                10.0,
+            ),
+            msg("ACOLYTE built", 11.0),
+            warn("cannot save", 12.0),
+        ];
+        // Red only, oldest first, while the original holds or fades them; none scrolled back.
+        assert_eq!(
+            live_warnings(&messages, 12.0, 0),
+            vec![(0, messages[0].text.as_str()), (2, "cannot save")]
+        );
+        assert_eq!(
+            live_warnings(&messages, 10.0 + MESSAGE_HOLD + MESSAGE_FADE, 0),
+            vec![(2, "cannot save")]
+        );
+        assert!(live_warnings(&messages, 12.0, 1).is_empty());
+        assert_eq!(warning_alpha(MESSAGE_HOLD), 1.0);
+        assert_eq!(warning_alpha(MESSAGE_HOLD + MESSAGE_FADE), 0.0);
+        // Above the folded header, which stays where it was.
+        let list = listed(&messages, 0);
+        let mut f = layout(1080, 0, &list, false, &mono);
+        let header = f.header;
+        let w = live_warnings(&messages, 12.0, 0);
+        fold_warnings(&mut f, &w, 0, &mono);
+        assert!(!f.expanded);
+        assert_eq!((f.header, f.panel), (header, header));
+        assert_eq!(
+            f.items.iter().map(|i| i.message).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        let back = f.warnings.expect("a backdrop");
+        assert!(
+            back.y1 <= header.y0
+                && f.items
+                    .iter()
+                    .all(|i| i.rect.y0 >= back.y0 && i.rect.y1 <= back.y1)
+        );
+        // No room above the header: nothing.
+        let mut g = layout(1080, 0, &list, false, &mono);
+        fold_warnings(&mut g, &w, header.y0 - 4, &mono);
+        assert!(g.items.is_empty() && g.warnings.is_none());
+        // Expanded layouts are left alone.
+        let mut e = layout(1080, 0, &list, true, &mono);
+        let before = e.clone();
+        fold_warnings(&mut e, &w, 0, &mono);
+        assert_eq!(e, before);
     }
 
     #[test]
