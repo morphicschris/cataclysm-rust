@@ -302,3 +302,39 @@ fn mission6_opens_with_the_caal_shto_and_the_base_signal() {
     assert_eq!(said.get(..2), Some(&["SpeechEvent 0x10002142".to_string(), "SpeechEvent 0x10002144".to_string()][..]), "{said:?}");
     assert!(caal_shto(&m6), "the Caal-Shto is in mission 6");
 }
+
+/// A ship keeps its upgrades and veterancy through the jump (the original keeps the ship
+/// object; suPlayerInit clears only the player's side), in the carry-over and its text form.
+#[test]
+fn upgrades_survive_the_jump() {
+    let Some(d) = data() else { return };
+    let mut m1 = start(d, 1, None);
+    while !m1.game.ships_have_arrived {
+        m1.step();
+    }
+    let ms = m1.universe.base.players[0].mothership.expect("mothership");
+    {
+        let s = m1.universe.ships.ship_mut(ms);
+        s.armour_level = 1;
+        s.upgrade_flags = 0x20_0001;
+        s.speed_upgrade_level = 2;
+        s.kills[3] = 5;
+    }
+    m1.force_hyperspace().expect("forced jump");
+    for _ in 0..16 * 60 {
+        m1.step();
+        if m1.mission_complete() {
+            break;
+        }
+    }
+    let c = m1.carry().expect("mission 1 carry-over");
+    let text = Carry::from_text(&c.to_text(), d.statics.clone(), d.tweaks.clone()).unwrap();
+    assert_eq!(text.fleet, c.fleet, "upgrades in the text form");
+    for carry in [&c, &text] {
+        let run = start(d, 2, Some(carry));
+        let ms = run.universe.base.players[0].mothership.expect("mothership in hyperspace");
+        let s = run.universe.ships.ship(ms);
+        assert_eq!((s.armour_level, s.upgrade_flags, s.speed_upgrade_level, s.kills[3]), (1, 0x20_0001, 2, 5));
+        assert!(run.game.fleet_upgrades_kept);
+    }
+}

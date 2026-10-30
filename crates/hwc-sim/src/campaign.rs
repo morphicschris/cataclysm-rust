@@ -262,6 +262,7 @@ fn fleet_entry(u: &Universe, game: &Game, id: ShipId, ms: Option<ShipId>) -> Opt
         color_scheme: Some(s.color_scheme),
         tactics: Some(s.tactics),
         attributes: s.attributes,
+        upgrades: Some(crate::mission::FleetUpgrades::of(s)),
     })
 }
 
@@ -1125,6 +1126,9 @@ fn spawn(u: &mut Universe, f: &FleetShip, outside: bool) -> Result<ShipId, crate
         s.tactics = t;
     }
     s.attributes = f.attributes;
+    if let Some(up) = &f.upgrades {
+        up.apply(s);
+    }
     s.flags |= sof::HIDE;
     Ok(id)
 }
@@ -1237,6 +1241,10 @@ impl Carry {
                 s.tactics.map_or(-1, |c| c as i64),
                 s.attributes
             );
+            if let Some(up) = &s.upgrades {
+                let list = |v: &[u32]| if v.is_empty() { "-".to_string() } else { v.iter().map(u32::to_string).collect::<Vec<_>>().join(",") };
+                let _ = writeln!(o, "upgrades {} {} {} {} {}", up.armour_level, up.upgrade_flags, up.speed_upgrade_level, list(&up.kills), list(&up.gun_levels));
+            }
             for d in &s.docked {
                 ship(o, depth + 1, d, f);
             }
@@ -1328,9 +1336,26 @@ impl Carry {
                         color_scheme: usize::try_from(n(7)?).ok(),
                         tactics: usize::try_from(n(8)?).ok(),
                         attributes: n(9)? as u32,
+                        upgrades: None,
                     };
                     stack.push(s);
                     depths.push(d);
+                }
+                "upgrades" => {
+                    let list = |i: usize| -> Result<Vec<u32>, String> {
+                        match w.get(i).copied() {
+                            Some("-") => Ok(Vec::new()),
+                            Some(v) => v.split(',').map(|x| x.parse::<u32>().map_err(|e| format!("{line}: {e}"))).collect(),
+                            None => Err(format!("short line: {line}")),
+                        }
+                    };
+                    let mut up = crate::mission::FleetUpgrades { armour_level: n(1)? as u32, upgrade_flags: n(2)? as u32, speed_upgrade_level: n(3)? as u32, ..Default::default() };
+                    for (k, v) in up.kills.iter_mut().zip(list(4)?) {
+                        *k = v;
+                    }
+                    up.gun_levels = list(5)?;
+                    let s = stack.last_mut().ok_or(format!("upgrades before a ship: {line}"))?;
+                    s.upgrades = Some(up);
                 }
                 _ => return Err(format!("unknown line: {line}")),
             }

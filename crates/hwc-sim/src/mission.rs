@@ -294,12 +294,49 @@ pub struct FleetShip {
     pub color_scheme: Option<usize>,
     pub tactics: Option<usize>,
     pub attributes: u32,
+    /// The ship's upgrades and veterancy (`None` for a ship made up from the opening NIS).
+    #[serde(default, deserialize_with = "crate::save::added_in_6")]
+    pub upgrades: Option<FleetUpgrades>,
+}
+
+/// What a ship of the fleet has been upgraded to: the original keeps the ship object across the
+/// jump, so its tech level (+0x3f0), upgrade bits (+0x3f4), gun levels, kills (+0x5c8) and
+/// veterancy level (+0x5f8) go with it (`suPlayerInit` only clears the player's side).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FleetUpgrades {
+    pub armour_level: u32,
+    pub upgrade_flags: u32,
+    pub speed_upgrade_level: u32,
+    pub kills: [u32; 12],
+    pub gun_levels: Vec<u32>,
+}
+
+impl FleetUpgrades {
+    pub fn of(s: &crate::object::Ship) -> Self {
+        FleetUpgrades {
+            armour_level: s.armour_level,
+            upgrade_flags: s.upgrade_flags,
+            speed_upgrade_level: s.speed_upgrade_level,
+            kills: s.kills,
+            gun_levels: s.guns.iter().map(|g| g.level).collect(),
+        }
+    }
+
+    pub fn apply(&self, s: &mut crate::object::Ship) {
+        s.armour_level = self.armour_level;
+        s.upgrade_flags = self.upgrade_flags;
+        s.speed_upgrade_level = self.speed_upgrade_level;
+        s.kills = self.kills;
+        for (g, &l) in s.guns.iter_mut().zip(&self.gun_levels) {
+            g.level = l;
+        }
+    }
 }
 
 impl FleetShip {
     /// A ship of the opening NIS's fleet.
     pub fn new(ship_type: ShipType) -> Self {
-        FleetShip { ship_type, offset: Vector::ZERO, docked: Vec::new(), module: false, carried: false, color_scheme: None, tactics: None, attributes: 0 }
+        FleetShip { ship_type, offset: Vector::ZERO, docked: Vec::new(), module: false, carried: false, color_scheme: None, tactics: None, attributes: 0, upgrades: None }
     }
 
     /// Every ship type in this entry and inside it.
@@ -455,6 +492,10 @@ pub struct Game {
     pub sp_state: u32,
     /// The player's fleet in hyperspace.
     pub fleet: Vec<FleetShip>,
+    /// The fleet carried its ships' upgrades into this mission. False in a saved game from
+    /// before the upgrades were carried, whose ships lost them: loading gives them back.
+    #[serde(default, deserialize_with = "crate::save::added_in_6")]
+    pub fleet_upgrades_kept: bool,
     pub arriving: Vec<ArrivingShip>,
     /// A NISlet "playing": (number, finish time).
     pub nislet: Option<(i32, f32)>,
@@ -731,6 +772,19 @@ impl MissionRun {
         // Saves from before a cancelled module build removed its half-built hull.
         for id in crate::construction::remove_orphan_hulls(&mut self.universe) {
             self.game.ship_removed(id);
+        }
+        // Saves from before the fleet carried its upgrades: the ships that came through
+        // hyperspace lost them, so every ship of the player takes what the research gives (as
+        // if each had docked); the kills and veterancy are gone for good.
+        if !self.game.fleet_upgrades_kept {
+            self.game.fleet_upgrades_kept = true;
+            // (`game.fleet` is emptied once the ships start arriving, so go by the mission.)
+            if self.game.config.mission > 1 {
+                let ids: Vec<ShipId> = self.universe.ships.iter().filter(|s| s.player == HUMAN_PLAYER && !s.base.upgrading).map(|s| s.id).collect();
+                for id in ids {
+                    crate::upgrade::apply_upgrades(&mut self.universe, id);
+                }
+            }
         }
         // Saves from before `SlipgateInit`'s flags were ported, and from before a team handed
         // over without control (`TeamSwitchPlayerOwner(0)`) got disable reason 1.
@@ -1178,6 +1232,7 @@ pub(crate) fn empty_game(config: MissionConfig) -> Game {
         intel_ends: Vec::new(),
         sp_state: sp_state::NONE,
         fleet: Vec::new(),
+        fleet_upgrades_kept: true,
         arriving: Vec::new(),
         nislet: None,
         ships_have_arrived: false,

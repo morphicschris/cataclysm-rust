@@ -432,7 +432,7 @@ progress then ends by the original's safety timeout), the sensors manager's own 
 | rest | the payload (`MissionRun` and `UiState`), `bincode` with fixed-size integers and floats as their bits, deflate-compressed |
 
 The header can be read alone (the save list). The version is checked before anything else is decoded:
-a newer version is refused with "saved game format version N; this version of the game reads version 5".
+a newer version is refused with "saved game format version N; this version of the game reads version 6".
 A damaged file, or one whose payload does not match this build's types, is refused ("the saved game is
 damaged or from a different build"); trailing bytes are an error. A save made with a different mission
 script (a re-extracted mission) is refused by the fingerprint. Mission 1 saves are 30-130 KB.
@@ -443,7 +443,7 @@ changes shape, and a field added at version `n` is read with
 `#[serde(default, deserialize_with = "crate::save::added_in_n")]`, which leaves it at its default
 without reading anything when the file is older. Older saves keep loading. Version 1 files were written
 by builds that added fields without raising the version, so they are tried as each shape version 1 had
-(`VERSION_1_SHAPES`, newest first) until one decodes whole. Version 2 added `Universe::letterbox`, version 3 `ShipBase::avoid_exception` (ship +0x608), version 4 `SimTweaks::spheresize_ignore_numdeclinations` (read with `added_in_or`, since an older file takes the compiled 600, not 0), version 5 `Ship::kamikaze_state` / `kamikaze_vector` (ship +0x2e4 / +0x2e8) and `CombatTweaks::kamikaze_speed_burst` (older files take the shipped script's 3.5).
+(`VERSION_1_SHAPES`, newest first) until one decodes whole. Version 2 added `Universe::letterbox`, version 3 `ShipBase::avoid_exception` (ship +0x608), version 4 `SimTweaks::spheresize_ignore_numdeclinations` (read with `added_in_or`, since an older file takes the compiled 600, not 0), version 5 `Ship::kamikaze_state` / `kamikaze_vector` (ship +0x2e4 / +0x2e8) and `CombatTweaks::kamikaze_speed_burst` (older files take the shipped script's 3.5), version 6 `FleetShip::upgrades` (a carried ship's tech level, upgrade bits, gun levels, kills and veterancy, which the original keeps with the ship object) and `Game::fleet_upgrades_kept` (false in an older file: its carried ships lost their upgrades, so `MissionRun::after_load` gives every player ship what the research allows, once).
 Fields that are not saved (`#[serde(skip)]`, rebuilt on load) need none of this.
 
 ### Where
