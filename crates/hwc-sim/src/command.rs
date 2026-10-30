@@ -1485,14 +1485,26 @@ pub fn cl_process(u: &mut Universe) {
             }
             order::LAUNCH_SHIP => {
                 if crate::dock::process_launch_ship_to_do(u, cid) {
-                    // (The launched ship would join the host's formation or military parade.)
+                    let (ship, from) = (cmd.selection.first().copied(), cmd.launch_from);
                     delete_command(u, cid);
+                    if let (Some(ship), Some(from)) = (ship, from) {
+                        group_ship(u, ship, from);
+                    }
+                    // (aiplayerShipLaunchedCallback: the computer player has no port yet.)
                 }
             }
             order::COLLECT_RESOURCE => {
                 if crate::resource::process_collect_resource(u, cid) {
-                    // (CreateMilitaryGroupAroundShip: the harvester would join the parade.)
+                    let ship = cmd.selection.first().copied();
                     delete_command(u, cid);
+                    // The harvester joins the parade around its player's mothership
+                    // (GroupShipIntoMilitaryParade, inlined).
+                    if let Some(ship) = ship {
+                        let ms = u.ships.get(ship).and_then(|s| u.base.players.get(s.player)).and_then(|p| p.mothership);
+                        if let Some(ms) = ms {
+                            group_ship_into_military_parade(u, ship, ms);
+                        }
+                    }
                 }
             }
             order::SPECIAL => {
@@ -3119,9 +3131,11 @@ pub fn military_group_around(u: &Universe, around: ShipId) -> Option<CommandId> 
 }
 
 /// `GroupShipIntoMilitaryParade` (0x446c60): `ship` joins the parade around `around` (one is
-/// created when there is none: `CreateMilitaryGroupAroundShip`).
+/// created when there is none: `CreateMilitaryGroupAroundShip`). Cataclysm leaves components
+/// (shipclass 10) out of parades.
 pub fn group_ship_into_military_parade(u: &mut Universe, ship: ShipId, around: ShipId) {
-    if u.ships.get(ship).is_none() || u.ships.get(around).is_none() {
+    let Some(s) = u.ships.get(ship) else { return };
+    if u.ships.get(around).is_none() || crate::base::class_of(u, s.ship_type) == Some(crate::statics::ShipClass::Component) {
         return;
     }
     if let Some(cid) = military_group_around(u, around) {
@@ -3145,6 +3159,28 @@ pub fn group_ship_into_military_parade(u: &mut Universe, ship: ShipId, around: S
     let cid = u.commands.add(cmd);
     prepare_ships(u, cid);
     init_ship_ai(u, ship);
+}
+
+/// `GroupShip` (0x446dc0): a ship that has launched joins the formation its host flies in
+/// (`AddShipToFormationGroup`), otherwise the military parade around the host. Cataclysm
+/// dropped HW1's research ship docking here.
+pub fn group_ship(u: &mut Universe, ship: ShipId, around: ShipId) {
+    if u.ships.get(ship).is_none() || u.ships.get(around).is_none() {
+        return;
+    }
+    let formation = u.ships.ship(around).command.filter(|&c| u.commands.get(c).is_some_and(|c| c.attributes & attr::FORMATION != 0));
+    if let Some(cid) = formation {
+        // AddShipToFormationGroup: AddShipToGroup, FillInShipFormationStuff, then the offsets.
+        u.commands.get_mut(cid).expect("command").selection.push(ship);
+        let s = u.ships.ship_mut(ship);
+        s.command = Some(cid);
+        s.retreating = false;
+        aiship::row_remove_ship(s);
+        content_has_changed(u, cid);
+        init_ship_ai(u, ship);
+        return;
+    }
+    group_ship_into_military_parade(u, ship, around);
 }
 
 /// `clSetMilitaryParade` (0x446cc0): the ships of the selection join the parade around its
