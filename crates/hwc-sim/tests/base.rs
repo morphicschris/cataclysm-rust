@@ -141,8 +141,15 @@ fn build_a_ship_and_launch_it() {
     let s = u.ship(recon).unwrap();
     assert!(u.ship_list.contains(&recon));
     assert_eq!(s.base.dock_state, hwc_sim::dock::state::FLY_OUT);
-    run_until(&mut run, 400, |r| r.universe.ship(recon).is_some_and(|s| s.command.is_none())).expect("launch completes");
+    // When the launch completes it joins the military parade around the mothership (GroupShip).
+    use hwc_sim::command::order;
+    let order_of = |r: &Run| r.universe.ship(recon).and_then(|s| s.command).and_then(|c| r.universe.commands.get(c)).map(|c| c.order);
+    run_until(&mut run, 400, |r| order_of(r) != Some(order::LAUNCH_SHIP)).expect("launch completes");
+    let ms_id = run.ids[0];
     let s = run.universe.ship(recon).unwrap();
+    let c = run.universe.commands.get(s.command.expect("a parade command")).unwrap();
+    assert_eq!(c.order, order::MILITARY_PARADE);
+    assert_eq!(c.parade.as_ref().unwrap().around, ms_id);
     assert_eq!(s.base.dock_point, -1);
     assert!(s.base.dock_with.is_none());
     let ms = run.universe.ship(run.ids[0]).unwrap();
