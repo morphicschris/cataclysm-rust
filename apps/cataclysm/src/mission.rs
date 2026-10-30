@@ -89,6 +89,21 @@ pub fn level_presentation(level: &LevelState) -> (Option<String>, Option<String>
     (find("Background"), find("Lighting"))
 }
 
+/// The theta and phi (degrees) after the name on the level's `Background` line, which turn the
+/// sky (`scriptSetBackgroundCB`: commas removed, then `"%s %f %f"`, missing numbers 0).
+pub fn background_turn(level: &LevelState) -> [f32; 2] {
+    let Some((_, v)) = level
+        .unmodelled
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("Background"))
+    else {
+        return [0.0; 2];
+    };
+    let v = v.replace(',', " ");
+    let mut nums = v.split_whitespace().skip(1).map_while(|t| t.parse::<f32>().ok());
+    [nums.next().unwrap_or(0.0), nums.next().unwrap_or(0.0)]
+}
+
 /// Missions the simulation can start: the campaign's seventeen (mission 1 from the opening
 /// NIS, the others with the fleet carried over from the mission before, or the `warp.script`
 /// fleet when started directly).
@@ -247,5 +262,16 @@ mod tests {
         assert!(supported(17));
         assert!(!supported(0));
         assert!(!supported(18));
+    }
+
+    #[test]
+    fn background_line_turns_the_sky() {
+        let mut level = LevelState::default();
+        assert_eq!(background_turn(&level), [0.0; 2]);
+        level.unmodelled.push(("Background".into(), "NIS03, 200, -10".into()));
+        assert_eq!(background_turn(&level), [200.0, -10.0]);
+        assert_eq!(level_presentation(&level).0.as_deref(), Some("NIS03"));
+        level.unmodelled[0].1 = "Mission06, 140".into();
+        assert_eq!(background_turn(&level), [140.0, 0.0]);
     }
 }

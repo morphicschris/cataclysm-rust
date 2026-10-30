@@ -298,6 +298,8 @@ pub struct World {
     fx: BTreeMap<ShipId, ShipFx>,
     pub lighting: SceneLighting,
     background_path: Option<String>,
+    /// The level's background theta and phi in degrees.
+    background_turn: [f32; 2],
     background: Option<GpuBackground>,
     pub camera: OrbitCamera,
     /// Blend between the last two updates (off: the original shows the latest update).
@@ -444,6 +446,7 @@ impl World {
         player_colors: Option<([u8; 3], [u8; 3])>,
     ) -> Result<Self, String> {
         let (bg, light) = crate::mission::level_presentation(sim.level());
+        let background_turn = crate::mission::background_turn(sim.level());
         let start = sim
             .level()
             .point(hwc_kas::kas_hash("StartPointPlayer"))
@@ -493,6 +496,7 @@ impl World {
             fx: BTreeMap::new(),
             lighting: SceneLighting::default(),
             background_path,
+            background_turn,
             background: None,
             camera,
             interpolate: false,
@@ -958,7 +962,7 @@ impl World {
         }
         if self.background.is_none() {
             if let Some(p) = &self.background_path {
-                match Background::load(&self.src, p) {
+                match Background::load_turned(&self.src, p, self.background_turn) {
                     Ok(bg) => self.background = Some(renderer.upload_background(&bg)),
                     Err(e) => {
                         eprintln!("warning: {e}");
