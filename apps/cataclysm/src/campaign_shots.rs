@@ -1905,3 +1905,122 @@ fn mission_six_nis_fog() {
     }
     assert!(shots.iter().all(|s| s.2), "NIS 4 ended before the fog");
 }
+
+/// Mission 7's slipgates: no icons and not selectable (`SlipgateInit`), each with its effect
+/// (the permanent glow, then the opening vortex as the convoy comes through), and convoy
+/// ships the script hands over without control are not selectable and drawn as allies.
+/// `cargo test --release -p cataclysm mission_seven_slipgates -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn mission_seven_slipgates() {
+    use hwc_sim::ships::slipgate;
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(7, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    for _ in 0..16 {
+        rig.frame(g);
+    }
+    let u = g.world.universe();
+    let gates: Vec<_> = u
+        .ships
+        .iter()
+        .filter(|s| slipgate::is_slipgate_type(s.ship_type))
+        .map(|s| s.id)
+        .collect();
+    assert!(!gates.is_empty(), "mission 7 has no slipgates");
+    for &id in &gates {
+        let s = u.ship(id).expect("gate");
+        assert_eq!(
+            s.flags & hwc_sim::object::sof::SELECTABLE,
+            0,
+            "{id:?} selectable"
+        );
+        assert!(!crate::host::selectable(u, id));
+        assert!(
+            hwc_sim::effects::slot(u, id, 0x644).is_some(),
+            "{id:?} ({:?}) has no effect",
+            s.ship_type
+        );
+    }
+    // A ship of the player's beside each gate, so the gates are seen (and drawn).
+    {
+        let u = g.world.universe_mut();
+        let mothership = u.base.players[crate::host::PLAYER].mothership;
+        let own: Vec<_> = u
+            .ship_list
+            .iter()
+            .copied()
+            .filter(|&id| Some(id) != mothership && crate::host::selectable(u, id))
+            .collect();
+        for (&gate, &ship) in gates.iter().zip(&own) {
+            let p = u.ship(gate).expect("gate").posinfo.position;
+            let new = hwc_math::Vector::new(p.x + 6000.0, p.y, p.z);
+            hwc_sim::base::set_ship_position(u, ship, new);
+        }
+    }
+    let look = |g: &mut Game, id| {
+        let p = g.world.universe().ship(id).expect("ship").posinfo.position;
+        g.world.follow_focus = false;
+        g.world.camera.look_at = Vec3::new(p.x, p.y, p.z);
+        g.world.camera.distance = 30_000.0;
+    };
+    look(g, gates[0]);
+    for _ in 0..4 {
+        rig.frame(g);
+    }
+    rig.shot(g, "20_m7_slipgate_closed");
+    // Wait for a gate to open.
+    let mut opened = None;
+    let mut handed = None;
+    for _ in 0..16 * 900 {
+        rig.frame(g);
+        let u = g.world.universe();
+        if handed.is_none() {
+            handed = u
+                .ship_list
+                .iter()
+                .copied()
+                .find(|&id| u.ship(id).is_some_and(crate::host::handed_over));
+        }
+        if opened.is_none() {
+            opened = gates
+                .iter()
+                .copied()
+                .find(|&id| slipgate::state(u, id) != slipgate::gate_state::CLOSED);
+            if let Some(gate) = opened {
+                look(g, gate);
+                g.world.camera.distance = 12_000.0;
+                for i in 0..96 {
+                    rig.frame(g);
+                    if i % 16 == 15 {
+                        rig.shot(g, &format!("21_m7_slipgate_opening_{}", i / 16));
+                    }
+                }
+            }
+        }
+        if opened.is_some() && handed.is_some() {
+            break;
+        }
+    }
+    assert!(opened.is_some(), "no slipgate opened");
+    if let Some(id) = handed {
+        let u = g.world.universe();
+        let s = u.ship(id).expect("ship");
+        assert!(s.base.disable_reasons[1], "handed-over ship takes orders");
+        assert!(!crate::host::selectable(u, id));
+        eprintln!("handed over: {id:?} {:?}", s.ship_type);
+        look(g, id);
+        g.world.camera.distance = 20_000.0;
+        for _ in 0..4 {
+            rig.frame(g);
+        }
+        rig.shot(g, "22_m7_convoy_handed_over");
+    } else {
+        eprintln!("no convoy ship was handed over in the time allowed");
+    }
+}

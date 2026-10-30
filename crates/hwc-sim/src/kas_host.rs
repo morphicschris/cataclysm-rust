@@ -513,6 +513,11 @@ impl KasRuntime for SimHost<'_> {
                 s.attributes |= 0x100;
                 s.flags &= !sof::SELECTABLE;
             } else {
+                // `SelectionSwitchPlayerOwner` (0x48f5a0): without control the ship also gets
+                // disable reason 1, so the player's orders leave it out.
+                if b_make_controllable == 0 {
+                    crate::base::set_disable_reason(s, true, 1);
+                }
                 s.attributes &= !0x100;
                 s.player = HUMAN_PLAYER;
                 s.flags = (s.flags & !sof::DISABLED) | sof::SELECTABLE;

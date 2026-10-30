@@ -293,6 +293,7 @@ pub fn close(u: &mut Universe, id: ShipId) {
         Module::Leech => leech::close(u, id),
         Module::Ramming => ramming::close(u, id),
         Module::GravWell => gravwell::close(u, id),
+        Module::Slipgate => slipgate::close(u, id),
         _ => {}
     }
 }

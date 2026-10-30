@@ -732,6 +732,18 @@ impl MissionRun {
         for id in crate::construction::remove_orphan_hulls(&mut self.universe) {
             self.game.ship_removed(id);
         }
+        // Saves from before `SlipgateInit`'s flags were ported, and from before a team handed
+        // over without control (`TeamSwitchPlayerOwner(0)`) got disable reason 1.
+        let ids: Vec<ShipId> = self.universe.ships.iter().map(|s| s.id).collect();
+        for id in ids {
+            let s = self.universe.ships.ship_mut(id);
+            if crate::ships::slipgate::is_slipgate_type(s.ship_type) {
+                crate::ships::slipgate::apply_init_flags(s);
+            }
+            if s.player == HUMAN_PLAYER && s.special_flags2 & 0x0010_0000 != 0 {
+                crate::base::set_disable_reason(s, true, 1);
+            }
+        }
     }
 
     /// Restores what the build manager may offer in a loaded game, which lives in the statics a

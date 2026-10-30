@@ -784,12 +784,32 @@ pub fn special_item(c: Command) -> Option<hwc_sim::player_orders::SpecialItem> {
         .find(|&i| special_command(i) == Some(c))
 }
 
-/// Whether the local player may select this ship.
+/// Whether the local player may select this ship. Ships a script handed over without control
+/// (`TeamSwitchPlayerOwner(0)`, `MakeShipsControllable(0)`: specialFlags2 0x100000, such as
+/// Mission 1's Kiithid fleet and Mission 7's colony convoy) are left out: the original lets
+/// them be selected but refuses them orders (CrasH asked that they not be selectable at all).
 pub fn selectable(u: &Universe, id: ShipId) -> bool {
     u.ship(id).is_some_and(|s| {
-        s.player == PLAYER && s.flags & (sof::HIDE | sof::DEAD) == 0 && s.flags & SOF_MODULE == 0
+        s.player == PLAYER
+            && s.flags & (sof::HIDE | sof::DEAD) == 0
+            && s.flags & SOF_MODULE == 0
+            && !handed_over(s)
     })
 }
+
+/// One of the local player's ships a script keeps out of the player's control
+/// (specialFlags2 0x100000). The original's tactical overlay and sensors draw them in the
+/// allied colour (`toAllShipsDraw`, `smShipsDraw`); here [`HANDED_OVER_COLOR`].
+pub fn handed_over(s: &hwc_sim::object::Ship) -> bool {
+    s.player == PLAYER && s.special_flags2 & NOT_PLAYER_CONTROLLED != 0
+}
+
+/// specialFlags2 0x100000: not player controlled.
+pub const NOT_PLAYER_CONTROLLED: u32 = 0x0010_0000;
+
+/// The overlay and sensors colour of [`handed_over`] ships: yellow (the player's `TOColor`
+/// in teamcolors.script, 255,255,60) where the original uses `AlliedColor` (0,192,255).
+pub const HANDED_OVER_COLOR: [u8; 4] = [255, 255, 60, 255];
 
 /// `spMissionEndLabelGet` for a mission.
 pub fn mission_end_label(strings: &Strings, mission: u32) -> String {

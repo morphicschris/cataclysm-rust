@@ -57,10 +57,32 @@ fn spec_mut(u: &mut Universe, id: ShipId) -> Option<&mut SlipgateSpec> {
     }
 }
 
-/// `SlipgateInit`.
+/// `SlipgateInit` (0x5c1bd0): the gate cannot be selected, is invulnerable, never
+/// retaliates and lets allies dock (its effect sizes and colour, +0x648..0x650, are
+/// [`effect_params`]).
 pub fn init(u: &mut Universe, id: ShipId) {
     if let Some(s) = u.ships.get_mut(id) {
         s.spec = crate::ships::ShipSpec::Slipgate(SlipgateSpec::default());
+        apply_init_flags(s);
+    }
+}
+
+/// The flags `SlipgateInit` sets. Saves made before they were ported get them on load.
+pub fn apply_init_flags(s: &mut crate::object::Ship) {
+    s.special_flags |= 0x0004_0000;
+    s.flags2 |= crate::object::flags2::INVULNERABLE;
+    s.flags &= !crate::object::sof::SELECTABLE;
+    s.special_flags2 |= crate::base::special2::ALLY_DOCKABLE;
+}
+
+/// `SlipgateInit`'s per-type effect parameters: the radius of the opening and closing
+/// effects (+0x64c), the radius of the permanent one (+0x648) and the colour (+0x650, RGBA).
+pub fn effect_params(t: ShipType) -> Option<(f32, f32, [u8; 4])> {
+    match t {
+        ShipType::dSlipgateSmall => Some((1250.0, 5000.0, [255, 0, 0, 255])),
+        ShipType::dSlipgateMedium => Some((2600.0, 10400.0, [255, 255, 0, 255])),
+        ShipType::dSlipgateLarge => Some((11100.0, 44400.0, [0, 0, 255, 255])),
+        _ => None,
     }
 }
 
@@ -81,17 +103,71 @@ pub fn state(u: &Universe, id: ShipId) -> u8 {
     spec(u, id).map_or(gate_state::CLOSED, |s| s.state)
 }
 
-/// `SlipgateSetEffectState` (0x5c1920): the state and the end time of its effect.
+/// The gate's effect (+0x644) among the per-ship effect slots.
+const GATE_EFFECT: u32 = 0x644;
+/// `EGT_SLIPGATE_OPENING_EFFECT`, `EGT_SLIPGATE_CLOSING_EFFECT` and
+/// `EGT_SLIPGATE_PERMANENT_EFFECT` in the special-purpose effect table.
+const OPENING_EFFECT_SLOT: usize = 29;
+const CLOSING_EFFECT_SLOT: usize = 30;
+const PERMANENT_EFFECT_SLOT: usize = 31;
+
+/// `SlipgateSetEffectState` (0x5c1920): the state and the end time of its effect. The old
+/// effect is deleted and the state's own started on the gate: the permanent glow while
+/// closed, the opening vortex while opening or open, the closing one while closing.
 pub fn set_effect_state(u: &mut Universe, id: ShipId, state: u8) {
     let now = u.total_time_elapsed;
-    let Some(s) = spec_mut(u, id) else { return };
-    match state {
-        gate_state::CLOSED => s.state_end = 0.0,
-        gate_state::OPENING | gate_state::OPEN => s.state_end = st(ld(now) + 2.25),
-        gate_state::CLOSING => s.state_end = st(ld(now) + 0.625),
-        _ => return,
+    if spec(u, id).is_none() {
+        return;
     }
-    s.state = state;
+    let slot = match state {
+        gate_state::CLOSED => PERMANENT_EFFECT_SLOT,
+        gate_state::OPENING | gate_state::OPEN => OPENING_EFFECT_SLOT,
+        gate_state::CLOSING => CLOSING_EFFECT_SLOT,
+        _ => return,
+    };
+    crate::effects::delete_slot(u, id, GATE_EFFECT);
+    if let Some(s) = spec_mut(u, id) {
+        s.state_end = match state {
+            gate_state::CLOSED => 0.0,
+            gate_state::CLOSING => st(ld(now) + 0.625),
+            _ => st(ld(now) + 2.25),
+        };
+    }
+    start_effect(u, id, slot, state);
+    if let Some(s) = spec_mut(u, id) {
+        s.state = state;
+    }
+}
+
+/// `etgEffectCreate(effect, gate, ..., EAF_Full, 3, radius, 0, colour)`: the closed gate's
+/// effect gets the permanent radius (+0x648), the others the opening radius (+0x64c); the
+/// line-of-fire offset is 0.
+fn start_effect(u: &mut Universe, id: ShipId, slot: usize, state: u8) {
+    let Some(t) = u.ships.get(id).map(|s| s.ship_type) else { return };
+    let Some((open_radius, permanent_radius, colour)) = effect_params(t) else { return };
+    let Some(fx) = u.effects.as_ref() else { return };
+    let Some(effect) = fx.pick_clamped(fx.tables.special_effect(slot)) else { return };
+    let radius = if state == gate_state::CLOSED { permanent_radius } else { open_radius };
+    let colour = u32::from_le_bytes(colour);
+    let params = [crate::effects::pf(radius), 0, colour];
+    let e = crate::effects::create(u, effect, Some(id.into()), None, None, None, 0.0, crate::effects::attach::FULL, &params);
+    crate::effects::set_slot(u, id, GATE_EFFECT, e);
+}
+
+/// Whether the gate has its effect (+0x644 set). Without an effect system, or without the
+/// slipgate effects in its tables, every gate counts as having one, so the gates still open
+/// and close on time.
+fn has_effect(u: &Universe, id: ShipId) -> bool {
+    let Some(fx) = u.effects.as_ref() else { return true };
+    if fx.pick_clamped(fx.tables.special_effect(PERMANENT_EFFECT_SLOT)).is_none() {
+        return true;
+    }
+    crate::effects::slot(u, id, GATE_EFFECT).is_some_and(|e| crate::effects::exists(u, e))
+}
+
+/// `SlipgateClose`: the gate's effect goes with it.
+pub fn close(u: &mut Universe, id: ShipId) {
+    crate::effects::delete_slot(u, id, GATE_EFFECT);
 }
 
 /// `SlipgateOpen` (0x5c1a60): asks the gate (and its partner, unless the gate is hidden) to
@@ -165,7 +241,7 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
     let now = u.total_time_elapsed;
     let Some(s) = spec(u, id).cloned() else { return };
     // Four seconds after the last use the gate (and its partner) close.
-    if s.last_open != 0.0 && st(ld(s.last_open) + 4.0) < now {
+    if has_effect(u, id) && s.last_open != 0.0 && st(ld(s.last_open) + 4.0) < now {
         set_effect_state(u, id, gate_state::CLOSING);
         let hidden = u.ships.get(id).is_some_and(|sh| sh.flags & crate::object::sof::NIS_SHIP != 0);
         if !hidden {
@@ -183,6 +259,15 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
             sp.state = if s.state == gate_state::OPENING { gate_state::OPEN } else { gate_state::CLOSED };
             sp.state_end = 0.0;
         }
+        // A gate that has closed loses the closing effect (the permanent one starts below).
+        if s.state == gate_state::CLOSING {
+            crate::effects::delete_slot(u, id, GATE_EFFECT);
+        }
+    }
+    // A gate without its effect gets its state's (at level start the permanent one).
+    if !has_effect(u, id) {
+        let state = state(u, id);
+        set_effect_state(u, id, state);
     }
 }
 

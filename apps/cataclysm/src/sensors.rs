@@ -1484,8 +1484,19 @@ impl Sensors {
             if !crystal && !self.ship_drawn(inp, &fog, id) {
                 continue;
             }
+            // Slipgates (static capability 0x4000) get neither a point nor an icon.
+            if u.statics
+                .ship(s.ship_type)
+                .is_some_and(|st| st.capability_flags & hwc_sim::dock::CAP_SLIPGATE != 0)
+            {
+                continue;
+            }
             let own = s.player == PLAYER;
-            let color = if own {
+            // Own ships a script keeps out of the player's control: the original draws them
+            // as allies; here they are yellow (CrasH asked).
+            let color = if crate::host::handed_over(s) {
+                crate::host::HANDED_OVER_COLOR
+            } else if own {
                 let harvester = u.statics.ship(s.ship_type).and_then(|st| st.ship_class)
                     == Some(ShipClass::Resource);
                 if harvester {

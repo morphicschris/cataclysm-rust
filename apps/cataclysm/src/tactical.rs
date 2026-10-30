@@ -444,11 +444,21 @@ fn shown(u: &Universe, fog: &Fog, id: ShipId) -> bool {
     if st.is_some_and(|st| st.ship_class == Some(ShipClass::Component)) {
         return false;
     }
+    // Slipgates (static capability 0x4000) get no overlay mark (`toAllShipsDraw`).
+    if st.is_some_and(|st| st.capability_flags & hwc_sim::dock::CAP_SLIPGATE != 0) {
+        return false;
+    }
     sensors::ship_visible(u, fog, id)
 }
 
+/// `toAllShipsDraw`'s colours: own ships green, allies light blue, others red. Own ships a
+/// script keeps out of the player's control (specialFlags2 0x100000, which the original
+/// draws as allies) are yellow, as CrasH asked: [`crate::host::HANDED_OVER_COLOR`].
 fn icon_color(u: &Universe, id: ShipId) -> Color {
-    if u.ship(id).is_some_and(|s| s.player == PLAYER) {
+    let handed_over = u.ship(id).is_some_and(crate::host::handed_over);
+    if handed_over {
+        crate::host::HANDED_OVER_COLOR
+    } else if u.ship(id).is_some_and(|s| s.player == PLAYER) {
         [0, 255, 0, 255]
     } else if sensors::looks_allied(u, id) {
         [0, 192, 255, 255]

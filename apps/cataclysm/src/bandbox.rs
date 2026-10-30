@@ -142,7 +142,7 @@ impl Facts {
         Some(Facts {
             own,
             ally,
-            selectable: s.flags & sof::SELECTABLE != 0,
+            selectable: s.flags & sof::SELECTABLE != 0 && !crate::host::handed_over(s),
             targetable: s.flags & (sof::SELECTABLE | sof::TARGETABLE) != 0,
             hidden: s.flags & sof::HIDE != 0,
             dead: s.flags & sof::DEAD != 0,
