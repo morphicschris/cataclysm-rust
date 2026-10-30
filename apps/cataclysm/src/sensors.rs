@@ -1492,8 +1492,7 @@ impl Sensors {
                 continue;
             }
             let own = s.player == PLAYER;
-            // Own ships a script keeps out of the player's control: the original draws them
-            // as allies; here they are yellow (CrasH asked).
+            // Own ships a script keeps out of the player's control are drawn as allies.
             let color = if crate::host::handed_over(s) {
                 crate::host::HANDED_OVER_COLOR
             } else if own {

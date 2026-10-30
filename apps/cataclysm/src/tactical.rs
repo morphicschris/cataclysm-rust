@@ -452,8 +452,8 @@ fn shown(u: &Universe, fog: &Fog, id: ShipId) -> bool {
 }
 
 /// `toAllShipsDraw`'s colours: own ships green, allies light blue, others red. Own ships a
-/// script keeps out of the player's control (specialFlags2 0x100000, which the original
-/// draws as allies) are yellow, as CrasH asked: [`crate::host::HANDED_OVER_COLOR`].
+/// script keeps out of the player's control (specialFlags2 0x100000) are drawn as allies:
+/// [`crate::host::HANDED_OVER_COLOR`].
 fn icon_color(u: &Universe, id: ShipId) -> Color {
     let handed_over = u.ship(id).is_some_and(crate::host::handed_over);
     if handed_over {

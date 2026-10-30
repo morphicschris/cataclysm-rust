@@ -799,7 +799,7 @@ pub fn selectable(u: &Universe, id: ShipId) -> bool {
 
 /// One of the local player's ships a script keeps out of the player's control
 /// (specialFlags2 0x100000). The original's tactical overlay and sensors draw them in the
-/// allied colour (`toAllShipsDraw`, `smShipsDraw`); here [`HANDED_OVER_COLOR`].
+/// allied colour (`toAllShipsDraw`, `smShipsDraw`): [`HANDED_OVER_COLOR`].
 pub fn handed_over(s: &hwc_sim::object::Ship) -> bool {
     s.player == PLAYER && s.special_flags2 & NOT_PLAYER_CONTROLLED != 0
 }
@@ -807,9 +807,9 @@ pub fn handed_over(s: &hwc_sim::object::Ship) -> bool {
 /// specialFlags2 0x100000: not player controlled.
 pub const NOT_PLAYER_CONTROLLED: u32 = 0x0010_0000;
 
-/// The overlay and sensors colour of [`handed_over`] ships: yellow (the player's `TOColor`
-/// in teamcolors.script, 255,255,60) where the original uses `AlliedColor` (0,192,255).
-pub const HANDED_OVER_COLOR: [u8; 4] = [255, 255, 60, 255];
+/// The overlay and sensors colour of [`handed_over`] ships: the allied colour
+/// (`AlliedColor` in teamcolors.script, light blue).
+pub const HANDED_OVER_COLOR: [u8; 4] = [0, 192, 255, 255];
 
 /// `spMissionEndLabelGet` for a mission.
 pub fn mission_end_label(strings: &Strings, mission: u32) -> String {
