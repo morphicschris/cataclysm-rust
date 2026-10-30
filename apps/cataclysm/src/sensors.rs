@@ -1481,6 +1481,9 @@ impl Sensors {
                 s.ship_type,
                 hwc_sim::statics::ShipType::dCrystal0 | hwc_sim::statics::ShipType::dCrystal1
             );
+            // Crystals are drawn whatever hides other ships: `smShipsDraw` (0x505620) draws a
+            // ship when `CrystalIsCrystal` (0x5aaa70) or its visibility test passes, so the
+            // fog of war, cloaking, the hidden flag and the selection blink never hide them.
             if !crystal && !self.ship_drawn(inp, &fog, id) {
                 continue;
             }

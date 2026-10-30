@@ -451,6 +451,13 @@ fn shown(u: &Universe, fog: &Fog, id: ShipId) -> bool {
     sensors::ship_visible(u, fog, id)
 }
 
+/// Whether a ship carries a class icon: a shown ship that is not a crystal. `toAllShipsDraw`
+/// (0x523b50) gives crystals no overlay mark (`CrystalIsCrystal`, 0x5aaa70: ship types
+/// dCrystal0/1); the sensors manager still draws them (`smShipsDraw`).
+fn icon_shown(u: &Universe, fog: &Fog, id: ShipId) -> bool {
+    shown(u, fog, id) && !hwc_sim::ships::crystal::is_crystal(u, id)
+}
+
 /// `toAllShipsDraw`'s colours: own ships green, allies light blue, others red. Own ships a
 /// script keeps out of the player's control (specialFlags2 0x100000) are drawn as allies:
 /// [`crate::host::HANDED_OVER_COLOR`].
@@ -489,7 +496,7 @@ pub fn draw_icons(
     let eye = world.camera.eye();
     let half = (size.1 as f32 / 1080.0 * 9.0).max(6.0);
     for &id in &u.ship_list {
-        if !shown(u, &fog, id) {
+        if !icon_shown(u, &fog, id) {
             continue;
         }
         let s = u.ship(id).expect("shown");
@@ -564,6 +571,39 @@ mod tests {
         for m in seen {
             assert_eq!(IconMode::from_option(m.to_option()), m);
         }
+    }
+
+    /// Over the real game data (`HWC_GAME_DIR`; skipped without it): crystals get no class
+    /// icon (`toAllShipsDraw` leaves them out), another player's ship does.
+    #[test]
+    fn crystals_get_no_icon() {
+        use hwc_formats::big::BigArchive;
+        use hwc_math::Vector;
+        use hwc_sim::statics::{LoadOptions, ShipRace, ShipType, StaticWorld};
+        let Ok(dir) = std::env::var("HWC_GAME_DIR") else {
+            eprintln!("skipped: HWC_GAME_DIR not set");
+            return;
+        };
+        let src = BigArchive::open(std::path::Path::new(&dir).join("cataclysm.big"))
+            .expect("cataclysm.big");
+        let statics = std::sync::Arc::new(StaticWorld::load_from(&src, LoadOptions::default()));
+        let tweaks = hwc_sim::SimTweaks::load(&src);
+        let mut u = Universe::new(statics, tweaks, &[ShipRace::Somtaaw, ShipRace::Taiidan]);
+        let mut spawn = |t: ShipType, x: f32| {
+            hwc_sim::base::spawn_ship(&mut u, t, 1, Vector::new(x, 0.0, 0.0), None).expect("ship")
+        };
+        let crystal = spawn(ShipType::dCrystal0, 0.0);
+        let big_crystal = spawn(ShipType::dCrystal1, 2000.0);
+        let enemy = spawn(ShipType::sAcolyte, 4000.0);
+        let fog = Fog::of(&u);
+        for id in [crystal, big_crystal] {
+            assert!(shown(&u, &fog, id), "a crystal is in view");
+            assert!(!icon_shown(&u, &fog, id), "a crystal has an icon");
+        }
+        assert!(
+            icon_shown(&u, &fog, enemy),
+            "another player's ship has no icon"
+        );
     }
 
     #[test]
