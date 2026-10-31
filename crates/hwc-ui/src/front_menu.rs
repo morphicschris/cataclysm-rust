@@ -112,14 +112,6 @@ pub fn centre_on(l: &mut Layout, over: Rect, width: i32, height: i32) {
     l.shift(x - p.x0, y - p.y0);
 }
 
-/// Where the scene behind should centre what it shows (0..1 of the width): the middle of
-/// the space right of the panel.
-pub fn focus_x(l: &Layout, width: i32) -> f32 {
-    let w = width.max(1) as f32;
-    let right = l.frame.panel.x1.clamp(0, width) as f32;
-    ((right + w) / 2.0 / w).clamp(0.5, 0.8)
-}
-
 /// Under the panels: the scene darkened towards the left, where they stand.
 pub fn draw_under(canvas: &mut Canvas, l: &Layout) {
     shade_left(canvas, l.frame.panel.x1);

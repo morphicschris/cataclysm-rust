@@ -174,18 +174,6 @@ impl Session {
         self.fe.game.credits.is_none() && modern_menu::active(&self.fe)
     }
 
-    /// Where the scene behind the modern screens should centre what it shows (0..1 of the
-    /// width): right of the panel.
-    pub fn backdrop_focus(&self) -> f32 {
-        let (w, h) = self.fe.screen_size();
-        match modern_menu::model(&self.fe) {
-            Some(m) if self.modern() => {
-                crate::front_menu::focus_x(&modern_menu::layout_for(&self.fe, &m, w, h), w)
-            }
-            _ => 0.5,
-        }
-    }
-
     pub fn mouse_move(&mut self, x: f64, y: f64) {
         let (cx, cy) = self.placement.to_canvas(x, y);
         self.mouse = (cx, cy);

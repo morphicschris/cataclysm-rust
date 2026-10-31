@@ -37,10 +37,6 @@ use crate::world::{Sim, World};
 
 /// How often a second the 3D view is drawn at most.
 pub const RENDER_HZ: f32 = 30.0;
-/// The most render scale the backdrop draws at, whatever the options say: it sits behind the
-/// menu, and on an integrated GPU a full-size picture with the modern look costs about 7 ms at
-/// 1920x1080 (0.75 with the heat haze off, about 5).
-pub const MAX_SCALE: f32 = 0.75;
 /// The workers harvesting round the mothership.
 const WORKERS: usize = 6;
 /// Asteroids added round the mothership (Mission 1's own field near the start point has only
@@ -317,6 +313,16 @@ pub struct MenuScene {
     base_angle: f32,
     /// The last picture's milliseconds: frame preparation, drawing with the read-back, copy.
     draw_ms: [f64; 3],
+    /// What [`MenuScene::set_options`] last applied.
+    applied: Option<(hwc_render::RenderQuality, hwc_render::ShipLook, [bool; 5])>,
+}
+
+/// The command line's quality switches for this run (`None`: the options decide).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct QualityOverrides {
+    pub scale: Option<f32>,
+    pub msaa: Option<u32>,
+    pub fxaa: Option<bool>,
 }
 
 impl MenuScene {
@@ -347,21 +353,17 @@ impl MenuScene {
             radius,
             base_angle,
             draw_ms: [0.0; 3],
+            applied: None,
         };
         s.place_camera();
         s
     }
 
-    /// Where the ship sits horizontally, 0..1 of the width (0.62 by default: clear of a menu
-    /// panel on the left third).
-    pub fn set_focus_x(&mut self, x: f32) {
-        self.focus_x = x.clamp(0.0, 1.0);
-    }
-
     /// The 3D view's quality and the ship look from the options, as the game reads them
-    /// (`Game::apply_modern_options`), with the render scale at most [`MAX_SCALE`] and no heat
-    /// haze (the engines are far off; it is the dearest post effect).
-    pub fn set_options(&mut self, options: &hwc_ui::options::Options) {
+    /// (`Game::apply_modern_options`), with the command line's `--render-scale`, `--msaa`
+    /// and `--fxaa` over them as in a mission, and no heat haze (the engines are far off; it
+    /// is the dearest post effect). Only a change draws a new picture at once.
+    pub fn set_options(&mut self, options: &hwc_ui::options::Options, over: QualityOverrides) {
         let mut quality = hwc_render::RenderQuality {
             post: crate::game::post_fx(options),
             ..hwc_render::RenderQuality::from_options(
@@ -370,8 +372,28 @@ impl MenuScene {
                 options.get("hwcFxaa"),
             )
         };
-        quality.scale = quality.scale.min(MAX_SCALE);
+        if let Some(s) = over.scale {
+            quality.scale = hwc_render::quality::clamp_scale(s);
+        }
+        if let Some(n) = over.msaa {
+            quality.msaa = n;
+        }
+        if let Some(v) = over.fxaa {
+            quality.fxaa = v;
+        }
         quality.post.heat = 0.0;
+        let look = crate::game::ship_look(options);
+        let flags = [
+            options.get("enableLensFlare") != 0,
+            options.get("hwcFullDetailShips") != 0,
+            options.get("hwcModernFields") != 0,
+            options.get("hwcSmoothTrails") != 0,
+            options.get("hwcGlowsInProportion") != 0,
+        ];
+        if self.applied == Some((quality, look, flags)) {
+            return;
+        }
+        self.applied = Some((quality, look, flags));
         self.quality = quality;
         let w = &mut self.world;
         w.lens_flares = options.get("enableLensFlare") != 0;
@@ -544,8 +566,10 @@ mod tests {
             eprintln!("load step {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
         };
         eprintln!("loaded in {:.2} s", t0.elapsed().as_secs_f64());
-        scene.set_options(&hwc_ui::options::Options::default());
-        scene.set_focus_x(0.62);
+        scene.set_options(
+            &hwc_ui::options::Options::default(),
+            QualityOverrides::default(),
+        );
         {
             let u = scene.world.universe();
             for s in u.ships.iter() {

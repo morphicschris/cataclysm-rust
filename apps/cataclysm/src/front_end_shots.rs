@@ -30,7 +30,6 @@ fn save(s: &Session, name: &str) {
 fn frame(s: &mut Session, scene: &mut MenuScene, r: &mut Renderer) -> f64 {
     let t = Instant::now();
     s.update(DT);
-    scene.set_focus_x(s.backdrop_focus());
     scene.update(DT);
     scene.render(r, s.canvas_mut()).expect("scene");
     s.render_over_backdrop();
@@ -41,7 +40,13 @@ fn click(s: &mut Session, scene: &mut MenuScene, r: &mut Renderer, label: &str) 
     for _ in 0..30 {
         frame(s, scene, r);
     }
-    let m = menu::model(&s.fe).unwrap_or_else(|| panic!("no modern screen: {:?} modern {}", s.fe.stack_names(), s.modern()));
+    let m = menu::model(&s.fe).unwrap_or_else(|| {
+        panic!(
+            "no modern screen: {:?} modern {}",
+            s.fe.stack_names(),
+            s.modern()
+        )
+    });
     let (w, h) = s.fe.screen_size();
     let l = menu::layout_for(&s.fe, &m, w, h);
     let i = m.find(label).unwrap_or_else(|| panic!("no {label}"));

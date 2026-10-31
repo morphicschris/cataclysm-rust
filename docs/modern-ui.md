@@ -337,8 +337,8 @@ the front end adds:
 * **Placement:** the panels stand in a column on the left (a margin of 4.5% of the width),
   the main menu under the game's name, pop-ups over the middle of the screen under them
   (which stays drawn, darkened). The scene is not dimmed; it is shaded towards the left only,
-  and its camera keeps the ship centred in the room right of the panel, sliding across when a
-  wider screen comes up.
+  and its camera keeps the same framing whatever screen is up (the ship right of the main
+  menu).
 * **Tabs:** the column of buttons down the right of the option and single-player screens
   (AUDIO / VIDEO / GAMEPLAY / KEY BINDINGS; NEW GAME / PLAYER SETUP / LOAD GAME) is a row of
   tabs at the top of the panel; the screen's own (the one that is not a link) is the current
@@ -352,7 +352,9 @@ the front end adds:
   toggles) is a swatch on the modern control.
 * **Difficulty:** the five difficulty radio buttons are segments (labels under the buttons
   are found as well as labels beside them; segments now take up to five short choices).
-* **The scene:** loaded a step a frame (the menus stay live), faded in over 1.2 s; a plain
+* **The scene:** drawn with the 3D view's quality options and the command line's
+  `--render-scale`, `--msaa` and `--fxaa` as a mission is (heat haze off), at most 30 pictures
+  a second; loaded a step a frame (the menus stay live), faded in over 1.2 s; a plain
   dark backdrop until then, or if it cannot load. It is dropped when a game starts and loaded
   again on the way back.
 

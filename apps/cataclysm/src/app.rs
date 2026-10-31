@@ -166,8 +166,6 @@ struct Backdrop {
     age: f32,
     /// Loading failed: the plain backdrop stays.
     failed: bool,
-    /// Where the scene centres the ship (eased towards where the menus leave room).
-    focus: Option<f32>,
 }
 
 impl Backdrop {
@@ -178,7 +176,6 @@ impl Backdrop {
         self.loader = None;
         self.scene = None;
         self.age = 0.0;
-        self.focus = None;
     }
 }
 
@@ -1042,12 +1039,15 @@ impl App {
             self.session.render();
             return;
         };
-        // The ship slides to where the menus leave room.
-        let want = self.session.backdrop_focus();
-        let f = b.focus.get_or_insert(want);
-        *f += (want - *f) * (1.0 - (-dt * 3.0).exp());
-        scene.set_focus_x(*f);
-        scene.set_options(&self.session.fe.game.options);
+        // The camera keeps its framing whatever screen is up (the ship right of the main menu).
+        scene.set_options(
+            &self.session.fe.game.options,
+            crate::menu_scene::QualityOverrides {
+                scale: self.render_scale,
+                msaa: self.msaa,
+                fxaa: self.fxaa,
+            },
+        );
         crate::watchdog::checkpoint("front end: scene");
         scene.update(dt);
         if let Err(e) = scene.render(r, self.session.canvas_mut()) {
