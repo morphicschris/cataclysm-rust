@@ -334,6 +334,8 @@ fn intro_tour(data: Rc<GameData>, dir: &Path) -> Result<(), String> {
 
 pub fn run(mut s: Session, data: Rc<GameData>, args: &Args, dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    // The walk-through shows the original front end.
+    s.use_original_look();
     if args.intro {
         intro_tour(data, dir)?;
     }

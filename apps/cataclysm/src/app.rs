@@ -152,6 +152,34 @@ struct App {
     no_vsync: bool,
     /// `--frame-times`: the 3D frame's draw times, printed every few seconds.
     frame_times: Option<FrameTimes>,
+    /// The live scene behind the modern front end.
+    backdrop: Backdrop,
+}
+
+/// The live scene behind the modern front end (a modern addition): loaded a step a frame
+/// once the modern menus are up, faded in when ready, dropped while a game runs.
+#[derive(Default)]
+struct Backdrop {
+    loader: Option<crate::menu_scene::MenuSceneLoader>,
+    scene: Option<crate::menu_scene::MenuScene>,
+    /// Seconds since the scene became ready (it fades in).
+    age: f32,
+    /// Loading failed: the plain backdrop stays.
+    failed: bool,
+    /// Where the scene centres the ship (eased towards where the menus leave room).
+    focus: Option<f32>,
+}
+
+impl Backdrop {
+    /// How long the scene takes to fade in.
+    const FADE: f32 = 1.2;
+
+    fn drop_scene(&mut self) {
+        self.loader = None;
+        self.scene = None;
+        self.age = 0.0;
+        self.focus = None;
+    }
 }
 
 /// Draw times of the mission's frames (`--frame-times`): the time `Game::render` takes, which
@@ -288,6 +316,7 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
         sensors_focus_stays: args.sensors_focus_stays,
         no_vsync: args.no_vsync,
         frame_times: args.frame_times.then(FrameTimes::default),
+        backdrop: Backdrop::default(),
     };
     if app.intro.is_none() {
         app.front_end_start();
@@ -793,6 +822,7 @@ impl App {
 
     /// `singlePlayerStartGame`: the menus go, the loading screen comes up.
     fn start_loading(&mut self, mission: u32, difficulty: i32) {
+        self.backdrop.drop_scene();
         self.session.fe.all_screens_delete();
         let size = self.session.placement.canvas;
         match Loading::new(self.data.clone(), &self.session, mission, difficulty, size) {
@@ -810,6 +840,7 @@ impl App {
     /// `utyLoadMultiSinglePlayerGame` / `gpLoadGame`: a saved game loads behind its mission's
     /// loading screen (the game running, if any, ends first and the music stops).
     fn load_saved_game(&mut self, path: &std::path::Path) {
+        self.backdrop.drop_scene();
         self.end_game();
         self.loading = None;
         if let Some(a) = &mut self.audio {
@@ -956,6 +987,86 @@ impl App {
         self.session.fe.screen_start(hwc_ui::session::MAIN_SCREEN);
     }
 
+    /// The 3D renderer on the window's device, made the first time it is needed (a mission,
+    /// or the scene behind the modern front end).
+    fn make_renderer(renderer: &mut Option<hwc_render::Renderer>, gpu: &Gpu) {
+        if renderer.is_some() {
+            return;
+        }
+        let mut r =
+            hwc_render::Renderer::new(&gpu.device, &gpu.queue, hwc_render::OFFSCREEN_FORMAT);
+        r.set_msaa_support(&gpu.msaa_counts);
+        if crate::profile::enabled() && !r.set_gpu_timing(true) {
+            eprintln!("cataclysm: --profile: no GPU timestamp queries here, CPU times only");
+        }
+        *renderer = Some(r);
+    }
+
+    /// The front end's picture: the modern menus over the live scene (loading it a step a
+    /// frame, the plain backdrop until it is ready), else the original screens.
+    fn front_end_frame(&mut self, dt: f32) {
+        if !self.session.modern() {
+            self.backdrop.drop_scene();
+            self.session.render();
+            return;
+        }
+        let b = &mut self.backdrop;
+        if let (Some(gpu), false) = (self.gpu.as_ref(), b.failed) {
+            Self::make_renderer(&mut self.renderer, gpu);
+        }
+        let Some(r) = self.renderer.as_mut().filter(|_| !b.failed) else {
+            self.session.render();
+            return;
+        };
+        if b.scene.is_none() {
+            let colors = crate::play::player_colors(&self.session);
+            let loader = b.loader.get_or_insert_with(|| {
+                crate::menu_scene::MenuSceneLoader::new(self.data.clone(), colors)
+            });
+            crate::watchdog::checkpoint("front end: scene loading");
+            match loader.advance(r) {
+                Ok(Some(scene)) => {
+                    b.scene = Some(scene);
+                    b.loader = None;
+                    b.age = 0.0;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("cataclysm: menu scene: {e}");
+                    b.failed = true;
+                    b.loader = None;
+                }
+            }
+        }
+        let Some(scene) = b.scene.as_mut() else {
+            self.session.render();
+            return;
+        };
+        // The ship slides to where the menus leave room.
+        let want = self.session.backdrop_focus();
+        let f = b.focus.get_or_insert(want);
+        *f += (want - *f) * (1.0 - (-dt * 3.0).exp());
+        scene.set_focus_x(*f);
+        scene.set_options(&self.session.fe.game.options);
+        crate::watchdog::checkpoint("front end: scene");
+        scene.update(dt);
+        if let Err(e) = scene.render(r, self.session.canvas_mut()) {
+            eprintln!("cataclysm: menu scene: {e}");
+            b.failed = true;
+            b.drop_scene();
+            self.session.render();
+            return;
+        }
+        b.age += dt;
+        if b.age < Backdrop::FADE {
+            let a = (255.0 * (1.0 - b.age / Backdrop::FADE)) as u8;
+            let c = self.session.canvas_mut();
+            let all = hwc_ui::Rect::new(0, 0, c.width, c.height);
+            c.blend_rect(all, [3, 4, 8, a]);
+        }
+        self.session.render_over_backdrop();
+    }
+
     /// One frame of the loading screen or the mission; true when one of them is up.
     fn game_frame(&mut self, dt: f32) -> Result<bool, String> {
         let size = self.session.placement.canvas;
@@ -963,20 +1074,7 @@ impl App {
             let viewport = self.session.placement.viewport;
             if let Some(gpu) = self.gpu.as_mut() {
                 gpu.present(l.render(size), viewport);
-                if self.renderer.is_none() {
-                    let mut r = hwc_render::Renderer::new(
-                        &gpu.device,
-                        &gpu.queue,
-                        hwc_render::OFFSCREEN_FORMAT,
-                    );
-                    r.set_msaa_support(&gpu.msaa_counts);
-                    if crate::profile::enabled() && !r.set_gpu_timing(true) {
-                        eprintln!(
-                            "cataclysm: --profile: no GPU timestamp queries here, CPU times only"
-                        );
-                    }
-                    self.renderer = Some(r);
-                }
+                Self::make_renderer(&mut self.renderer, gpu);
             }
             crate::watchdog::checkpoint("loading: advance");
             match l.advance(&self.session, self.renderer.as_mut(), dt) {
@@ -1428,6 +1526,12 @@ impl App {
                 self.request(event_loop, r);
             }
         }
+        if self.gpu.is_none() {
+            return Ok(());
+        }
+        if self.intro.is_none() && self.preview.is_none() {
+            self.front_end_frame(dt);
+        }
         let Some(gpu) = self.gpu.as_mut() else {
             return Ok(());
         };
@@ -1451,7 +1555,7 @@ impl App {
                 let viewport = self.session.placement.viewport;
                 let canvas = match &mut self.preview {
                     Some(p) => p.render(&self.session),
-                    None => self.session.render(),
+                    None => &self.session.canvas,
                 };
                 gpu.present(canvas, viewport);
             }
@@ -1715,7 +1819,7 @@ impl ApplicationHandler for App {
                 if down {
                     if let Some(text) = &event.text {
                         for c in text.chars() {
-                            self.session.fe.char_typed(c);
+                            self.session.char_typed(c);
                         }
                     }
                 }
@@ -1782,7 +1886,7 @@ impl ApplicationHandler for App {
                     }
                     match &mut self.preview {
                         Some(p) => p.input(InputEvent::Wheel { up: y > 0.0 }),
-                        None => self.session.fe.wheel(y > 0.0),
+                        None => self.session.wheel(y > 0.0),
                     }
                 }
             }

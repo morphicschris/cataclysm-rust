@@ -265,6 +265,12 @@ pub const ENTRIES: &[Entry] = &[
         )
     },
     entry(
+        crate::front_menu::OPTION_KEY,
+        "MODERN MAIN MENU WITH A LIVE SCENE",
+        5,
+        Control::Toggle,
+    ),
+    entry(
         "hwcOriginalLetterbox",
         "CUTSCENE LETTERBOX",
         5,
@@ -333,6 +339,7 @@ pub fn locked(fe: &Fe, key: &str) -> Option<i32> {
         modern_build_manager::OPTION_KEY => modern_build_manager::overridden(),
         modern_research_manager::OPTION_KEY => modern_research_manager::overridden(),
         menu::OPTION_KEY => menu::overridden(),
+        crate::front_menu::OPTION_KEY => crate::front_menu::overridden(),
         _ => None,
     };
     switch.map(i32::from).or_else(|| {
@@ -354,7 +361,7 @@ pub fn current(fe: &Fe, e: &Entry) -> i32 {
     }
 }
 
-/// Opens the modern options over the hub.
+/// Opens the modern options over the hub (in the front end, over the option screen on top).
 pub fn open(fe: &mut Fe) {
     let values = ENTRIES.iter().map(|e| current(fe, e)).collect();
     let display = fe.game.display;
@@ -363,6 +370,7 @@ pub fn open(fe: &mut Fe) {
         focus: 0,
         display,
     });
+    fe.game.ig.mmenu.page_screen = fe.current_screen_name().unwrap_or("").to_string();
     fe.game.ig.mmenu.dropdown = None;
 }
 
@@ -464,6 +472,8 @@ fn item(kind: Kind, label: &str, source: Source, k: usize) -> Item {
         focused: false,
         note: None,
         at: crate::canvas::Rect::new(0, k as i32 * 10, 640, k as i32 * 10 + 10),
+        tab: None,
+        swatch: None,
     }
 }
 

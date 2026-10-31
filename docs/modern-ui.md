@@ -1,13 +1,15 @@
 # The modern UI: managers, menus and options in the modern HUD style
 
-Three parts, all user-requested changes, **on by default**, each with a switch back to the
+Four parts, all user-requested changes, **on by default**, each with a switch back to the
 original screens:
 
 * the build and research managers (below);
 * the in-game menus: the escape menu and every screen behind it, the objectives screen, and
   the systems manager ([Menus and the systems manager](#menus-and-the-systems-manager));
 * the modern options screen, ENHANCEMENTS, in the in-game options
-  ([The modern options](#the-modern-options)).
+  ([The modern options](#the-modern-options));
+* the front end: the main menu and every screen behind it, over a live scene of the Kuun-Lan
+  ([The front end](#the-front-end)).
 
 ## Build and research managers
 
@@ -229,7 +231,7 @@ drop-downs' opening and closing and the ENHANCEMENTS screen are handled by the m
 |---|---|
 | Button | button with its hot key in a key cap; the footer's default button gold |
 | Check box | a row with the label and an on / off switch (the whole row clicks) |
-| Radio group | segments (up to four short choices), else a drop-down (the speakers) |
+| Radio group | segments (up to five short choices), else a drop-down (the speakers) |
 | Horizontal slider | a row with the label, a slider with a knob, the value (percent, or the user region's figure) and the LO / HI words |
 | Vertical slider (equalizer) | a bank of vertical sliders with their frequencies |
 | List window | a list in a well with a thin scroll bar; key bindings in columns (group, action, key caps; NONE in red; PRESS A KEY while binding) |
@@ -305,8 +307,65 @@ radio group), Home / End, Space, Return (the default button, else the focused on
   segments 1 / 2 / 3 instead of the red / green / blue bitmaps (`R1_SysN_*.lif`), the Beast's
   choices are rows instead of radio buttons beside labels; the docked list shows the original
   list window's page (11 rows).
-* **Only in-game:** the front end's own option screens (from the main menu) keep the original
-  look.
+* **The front end** uses the same menus, with a few things of its own (below).
+
+## The front end
+
+The main menu (`Front_End.fib`: `Main_game_screen`) and every screen behind it: training and
+its lessons, single player (new game with the team colour preview and the difficulty, player
+setup with the colour picker and the previous colours, load game), the options (audio and its
+advanced speech and equalizer screens, video and its custom effects and texture memory
+screens, gameplay, key bindings) and every pop-up (quit, delete, overwrite, invalid key, the
+display-mode countdown, the tutorial alert). Behind them, a live scene: the Kuun-Lan as it is
+in Mission 1, still carrying its ore can, in an asteroid field with workers harvesting
+(`apps/cataclysm/src/menu_scene.rs`).
+
+| | |
+|---|---|
+| Switches | `--front-end modern\|original`; options file `hwcModernFrontEnd` (default 1); ENHANCEMENTS > INTERFACE: MODERN MAIN MENU WITH A LIVE SCENE (applies at once). Independent of the HUD |
+| Code | `crates/hwc-ui/src/front_menu.rs` (the switch, the left-hand placement, pop-ups over the screen under them, the game's name and version, the shading towards the menus, the backdrop until the scene is ready, the zoomed copies of the original's pictures), the in-game menus' `modern_menu.rs` (the model now finds tabs, pictures and swatches on the front end's screens; `layout_for` places them; `State::front_end`), `session.rs` (input, drawing, the modern options' ACCEPT), `apps/cataclysm`: `menu_scene.rs` (the scene), `app.rs` (`Backdrop`: loads it a step a frame once the modern menus are up, fades it in, drops it while a game runs; the menus over it), `main.rs` (`--front-end`, `--help`) |
+| Tests | `crates/hwc-ui/tests/modern_front_end.rs` (game files: every screen walked with the mouse at four sizes, the panels on the left and inside the window, the tabs, ENHANCEMENTS switching back to the original at once); the original front end's tests (`tests/game_data.rs`, `--tour`) run with the original look (`Session::use_original_look`) |
+| Screenshots | `screenshots/front_end/` (the menus, `HWC_SCREENSHOTS=1`), `screenshots/menu_scene/` (the scene) |
+
+### How it works
+
+As the in-game menus: the original screens run underneath, undrawn, and each modern screen is
+built every frame from their atoms; clicks are handed on to the original controls, so every
+callback, rule and key is the original's (hot keys, Tab and the arrows, Return, Escape). What
+the front end adds:
+
+* **Placement:** the panels stand in a column on the left (a margin of 4.5% of the width),
+  the main menu under the game's name, pop-ups over the middle of the screen under them
+  (which stays drawn, darkened). The scene is not dimmed; it is shaded towards the left only,
+  and its camera keeps the ship centred in the room right of the panel, sliding across when a
+  wider screen comes up.
+* **Tabs:** the column of buttons down the right of the option and single-player screens
+  (AUDIO / VIDEO / GAMEPLAY / KEY BINDINGS; NEW GAME / PLAYER SETUP / LOAD GAME) is a row of
+  tabs at the top of the panel; the screen's own (the one that is not a link) is the current
+  tab. The options get one more, ENHANCEMENTS, which opens the modern options over the screen
+  it was picked from (CANCEL or ACCEPT come back to it).
+* **Pictures:** what the original screens draw themselves (the team colour preview, the
+  colour picker and its value bar, the base and stripe colour bars, the countdown box) is
+  shown from the original's own drawing, zoomed 1.6 times at 1080 lines with filtering; the
+  mouse over it is handed on to the same place on the original, so picking colours works as
+  before. A picture on a button or check box (a previous colour, the base / secondary colour
+  toggles) is a swatch on the modern control.
+* **Difficulty:** the five difficulty radio buttons are segments (labels under the buttons
+  are found as well as labels beside them; segments now take up to five short choices).
+* **The scene:** loaded a step a frame (the menus stay live), faded in over 1.2 s; a plain
+  dark backdrop until then, or if it cannot load. It is dropped when a game starts and loaded
+  again on the way back.
+
+### What is not 1:1
+
+* **The look** is the modern one; the original's frames, logo and decorations are not drawn.
+  The game's name over the main menu is set in the HUD's font, not the original's logo
+  bitmap (whose pieces carry the original's cables and frame with them).
+* **The original's pictures** are zoomed from the original's 640x480 drawing, so they are
+  softer than the rest.
+* **ENHANCEMENTS** has no hot key in the front end (E is the video screen's CUSTOM EFFECTS).
+* **The credits** are the original's slide show.
+* **The scene** is new: the original front end has no 3D view.
 
 ## The modern options
 
@@ -333,6 +392,7 @@ own options, each an options-file key that a command-line switch can also set:
 | | MODERN BUILD MANAGER | `hwcModernBuildManager` | `--build-ui` |
 | | MODERN RESEARCH MANAGER | `hwcModernResearchManager` | `--research-ui` |
 | | MODERN MENUS AND SYSTEMS MANAGER | `hwcModernMenus` | `--menus` |
+| | MODERN MAIN MENU WITH A LIVE SCENE | `hwcModernFrontEnd` | `--front-end` |
 | | CUTSCENE LETTERBOX: TALL / ORIGINAL | `hwcOriginalLetterbox` | `--letterbox` |
 
 It works as the original option screens do: the changes wait until ACCEPT (A, or Return),

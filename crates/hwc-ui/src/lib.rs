@@ -17,6 +17,7 @@ pub mod credits;
 pub mod display;
 pub mod fe;
 pub mod fer;
+pub mod front_menu;
 pub mod ingame;
 pub mod known;
 pub mod letterbox;

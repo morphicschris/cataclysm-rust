@@ -60,13 +60,19 @@ pub fn parse_mode(s: &str) -> Option<bool> {
     mm::parse_mode(s)
 }
 
-/// Whether a modern menu is up now (enabled, and the escape menu or objectives open).
+/// Whether a modern menu is up now: enabled, and the escape menu or objectives open; in the
+/// front end ([`State::front_end`]), the modern front end enabled ([`crate::front_menu`]).
 pub fn active(fe: &Fe) -> bool {
+    if fe.current_screen().is_none() {
+        return false;
+    }
+    if fe.game.ig.mmenu.front_end {
+        return crate::front_menu::enabled(&fe.game.options);
+    }
     matches!(
         fe.game.ig.manager,
         Some(Manager::EscMenu | Manager::Objectives)
     ) && enabled(&fe.game.options)
-        && fe.current_screen().is_some()
 }
 
 /// The options hub, where the modern options are added.
@@ -161,6 +167,12 @@ pub enum Kind {
     Value {
         text: String,
     },
+    /// A picture the original screen draws itself (the front end's team colour preview and
+    /// colour picker): its rectangle on the screen, shown scaled up from the original's
+    /// drawing, with the mouse handed on to it.
+    Embed {
+        rect: Rect,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -181,6 +193,12 @@ pub struct Item {
     pub note: Option<String>,
     /// Where it is on the original's 640x480 layout.
     pub at: Rect,
+    /// One of the front end's tabs (the original's column of buttons along the right of the
+    /// options and single-player screens): whether it is the screen's own.
+    pub tab: Option<bool>,
+    /// A small picture the original draws on the control (a previous colour's swatch): its
+    /// rectangle on the screen.
+    pub swatch: Option<Rect>,
 }
 
 impl Item {
@@ -196,6 +214,8 @@ impl Item {
             focused: false,
             note: None,
             at,
+            tab: None,
+            swatch: None,
         }
     }
 }
@@ -296,6 +316,8 @@ enum Tag {
     List,
     Entry,
     User,
+    /// Pictures the original draws itself (the front end only).
+    Embed,
 }
 
 /// A control found on the screen, while its labels are being found.
@@ -311,6 +333,10 @@ struct Ctl {
     hi: String,
     /// A figure drawn beside it by a user region (the channel count).
     value: Option<String>,
+    /// Its rectangle on the screen (a picture of the original's own drawing) and a swatch
+    /// the original draws on it.
+    shown: Option<Rect>,
+    swatch: Option<Rect>,
 }
 
 #[derive(Debug, Clone)]
@@ -319,6 +345,15 @@ struct Txt {
     text: String,
     big: bool,
     used: bool,
+}
+
+fn union(a: Rect, b: Rect) -> Rect {
+    Rect::new(
+        a.x0.min(b.x0),
+        a.y0.min(b.y0),
+        a.x1.max(b.x1),
+        a.y1.max(b.y1),
+    )
 }
 
 fn on_layout(r: Rect) -> bool {
@@ -352,6 +387,20 @@ fn right_label(texts: &mut [Txt], c: Rect) -> Option<String> {
         texts[i].used = true;
     }
     Some(s)
+}
+
+/// The text right under a radio button, centred on it (the front end's difficulty).
+fn below_label(texts: &mut [Txt], c: Rect) -> Option<String> {
+    let cx = (c.x0 + c.x1) / 2;
+    let i = (0..texts.len()).find(|&i| {
+        let t = &texts[i];
+        !t.used
+            && t.r.y0 >= c.y1 - 4
+            && t.r.y0 - c.y1 <= 10
+            && ((t.r.x0 + t.r.x1) / 2 - cx).abs() <= 30
+    })?;
+    texts[i].used = true;
+    Some(texts[i].text.clone())
 }
 
 /// The nearest unused text above `c`, at most `gap` over it and starting within `left`
@@ -424,6 +473,9 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
     let mut texts: Vec<Txt> = Vec::new();
     let mut ctls: Vec<Ctl> = Vec::new();
     let mut radios: Vec<(String, Vec<AtomRef>)> = Vec::new();
+    // The front end's user regions that draw pictures: (atom, layout rect, screen rect).
+    let mut pictures: Vec<(AtomRef, Rect, Rect)> = Vec::new();
+    let front_end = fe.game.ig.mmenu.front_end;
     for (i, atom) in s.atoms.iter().enumerate().skip(1) {
         let a = AtomRef { screen, atom: i };
         let r = atom.layout_rect();
@@ -467,6 +519,15 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
             {
                 Tag::User
             }
+            FA_USER_REGION if front_end => {
+                let name = atom.name.as_deref().unwrap_or("");
+                if !crate::front_menu::DRAWN_ELSEWHERE.contains(&name) {
+                    if let Some(sr) = region_rect(fe, a) {
+                        pictures.push((a, r, sr));
+                    }
+                }
+                continue;
+            }
             _ => continue,
         };
         ctls.push(Ctl {
@@ -478,6 +539,8 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
             lo: String::new(),
             hi: String::new(),
             value: None,
+            shown: None,
+            swatch: None,
         });
     }
     for (_, mut atoms) in radios {
@@ -506,6 +569,51 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
             lo: String::new(),
             hi: String::new(),
             value: None,
+            shown: None,
+            swatch: None,
+        });
+    }
+
+    // The pictures: one on a button or check box is its swatch; the others, side by side
+    // where they touch, are shown as they are drawn, and the texts over them go with them.
+    let mut groups: Vec<(Rect, Rect)> = Vec::new();
+    for &(_, r, sr) in &pictures {
+        let (cx, cy) = ((r.x0 + r.x1) / 2, mid_y(r));
+        if let Some(c) = ctls
+            .iter_mut()
+            .find(|c| matches!(c.tag, Tag::Button | Tag::Toggle) && c.r.contains(cx, cy))
+        {
+            c.swatch = Some(sr);
+            continue;
+        }
+        let near = |g: &Rect| {
+            r.x0 <= g.x1 + 12 && g.x0 <= r.x1 + 12 && r.y0 <= g.y1 + 4 && g.y0 <= r.y1 + 4
+        };
+        match groups.iter_mut().find(|(g, _)| near(g)) {
+            Some((g, gs)) => {
+                *g = union(*g, r);
+                *gs = union(*gs, sr);
+            }
+            None => groups.push((r, sr)),
+        }
+    }
+    for (r, sr) in groups {
+        for t in texts.iter_mut() {
+            if r.contains((t.r.x0 + t.r.x1) / 2, mid_y(t.r)) {
+                t.used = true;
+            }
+        }
+        ctls.push(Ctl {
+            tag: Tag::Embed,
+            atoms: vec![pictures[0].0],
+            r,
+            label: String::new(),
+            options: Vec::new(),
+            lo: String::new(),
+            hi: String::new(),
+            value: None,
+            shown: Some(sr),
+            swatch: None,
         });
     }
 
@@ -564,8 +672,11 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
     for c in ctls.iter_mut().filter(|c| c.tag == Tag::Radio) {
         for &a in &c.atoms {
             let r = fe.atom(a).layout_rect();
-            c.options
-                .push(right_label(&mut texts, r).unwrap_or_default());
+            c.options.push(
+                right_label(&mut texts, r)
+                    .or_else(|| below_label(&mut texts, r))
+                    .unwrap_or_default(),
+            );
         }
     }
     for c in ctls.iter_mut().filter(|c| c.tag == Tag::Toggle) {
@@ -781,6 +892,9 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
                 text: fe.text_entry(a).unwrap_or("").to_string(),
                 focused: region_has(fe, a, RSF_KEY_CAPTURE),
             },
+            Tag::Embed => Kind::Embed {
+                rect: c.shown.unwrap_or_default(),
+            },
             Tag::User => {
                 let name = atom.name.clone().unwrap_or_default();
                 let v = user_value(fe, &name).unwrap_or_default();
@@ -799,9 +913,10 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
             }
         };
         let mut it = Item::new(kind, c.label.clone(), Source::Atom(a), c.r);
-        if c.tag == Tag::Radio {
+        if matches!(c.tag, Tag::Radio | Tag::Embed) {
             it.source = Source::Nothing;
         }
+        it.swatch = c.swatch;
         it.key = hot_key_name(atom.hotkeys[lang]);
         if c.tag != Tag::Button {
             it.key.clear();
@@ -850,10 +965,57 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
         }
     }
 
+    // The front end's tabs: the column of buttons down the right of a form (AUDIO, VIDEO...,
+    // NEW GAME, PLAYER SETUP, LOAD GAME); the screen's own is the one that is not a link.
+    if front_end && style == Style::Form {
+        let tabs: Vec<usize> = (0..items.len())
+            .filter(|&i| {
+                let it = &items[i];
+                matches!(it.kind, Kind::Button { .. })
+                    && !it.footer
+                    && it.at.x0 >= 480
+                    && it.at.y1 <= 250
+            })
+            .collect();
+        if tabs.len() >= 2 {
+            for &i in &tabs {
+                let own = match items[i].source {
+                    Source::Atom(a) => fe
+                        .atom(a)
+                        .name
+                        .as_deref()
+                        .is_none_or(|n| !n.contains("-TO-")),
+                    _ => false,
+                };
+                items[i].tab = Some(own);
+                items[i].section = 0;
+            }
+            if crate::front_menu::OPTION_TABS.contains(&s.name.as_str()) {
+                let last = tabs
+                    .iter()
+                    .map(|&i| items[i].at)
+                    .max_by_key(|r| r.y0)
+                    .unwrap_or_default();
+                let at = Rect::new(last.x0, last.y1 + 18, last.x1, last.y1 + 50);
+                let mut e = Item::new(
+                    Kind::Button {
+                        primary: false,
+                        back: false,
+                    },
+                    mo::HUB_LABEL.to_string(),
+                    Source::Extra(Extra::Enhancements),
+                    at,
+                );
+                e.tab = Some(false);
+                items.push(e);
+            }
+        }
+    }
+
     // Sections: each control goes under the nearest heading above it in its column.
     let mut sections = vec![String::new()];
     sections.extend(headings.iter().map(|h| h.text.clone()));
-    for it in items.iter_mut().filter(|i| !i.footer) {
+    for it in items.iter_mut().filter(|i| !i.footer && i.tab.is_none()) {
         let best = headings
             .iter()
             .enumerate()
@@ -879,7 +1041,14 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
     } else {
         order.sort_by_key(|&i| {
             let it = &items[i];
-            (it.footer, it.section, columns[i], it.at.y0, it.at.x0)
+            (
+                it.footer,
+                it.tab.is_none(),
+                it.section,
+                columns[i],
+                it.at.y0,
+                it.at.x0,
+            )
         });
     }
     let mut items: Vec<Item> = order.into_iter().map(|i| items[i].clone()).collect();
@@ -908,6 +1077,10 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
         );
         e.key = mo::HUB_KEY.to_string();
         items.insert(back, e);
+    }
+    // A front-end screen without a title of its own (the main menu, the pop-ups).
+    if front_end && title.is_empty() {
+        title = crate::front_menu::title_for(&s.name).to_string();
     }
     Model {
         name: s.name.clone(),
@@ -988,6 +1161,19 @@ const CONTROL_W: f32 = 320.0;
 const SWITCH_W: f32 = 46.0;
 const SWITCH_H: f32 = 24.0;
 const READOUT_W: f32 = 54.0;
+/// The front end's row of tabs, and the narrowest a tab is.
+const TAB_ROW_H: f32 = 54.0;
+const TAB_MIN_W: f32 = 158.0;
+/// How much bigger than on the screen a picture of the original's own drawing is shown (at
+/// 1080 lines; the 640x480 layout's pixels are about twice as big there).
+const EMBED_ZOOM: f32 = 1.6;
+
+/// A picture's size in reference pixels: zoomed, and no wider than the column.
+fn embed_size(r: Rect, col_w: f32) -> (f32, f32) {
+    let (w, h) = (r.width().max(1) as f32, r.height().max(1) as f32);
+    let z = EMBED_ZOOM.min(col_w / w);
+    (w * z, h * z)
+}
 
 /// Where an item is drawn.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1121,6 +1307,8 @@ enum Line {
     One(usize),
     Side(Vec<usize>),
     Bank(Vec<usize>),
+    /// The front end's tabs, along the top of the body.
+    Tabs(Vec<usize>),
 }
 
 fn text_height(paragraphs: &[String], width: f32) -> f32 {
@@ -1147,7 +1335,9 @@ fn line_height(m: &Model, l: &Line, col_w: f32) -> f32 {
         Line::Heading(_) => HEADING_H,
         Line::Side(_) => BUTTON_ROW_H,
         Line::Bank(_) => VBANK_H,
+        Line::Tabs(_) => TAB_ROW_H,
         Line::One(i) => match &m.items[*i].kind {
+            Kind::Embed { rect } => embed_size(*rect, col_w).1 + 16.0,
             Kind::Button { .. } => BUTTON_ROW_H,
             Kind::Slider { .. } => SLIDER_H,
             Kind::Entry { .. } => ENTRY_H,
@@ -1252,6 +1442,18 @@ fn menu_layout(m: &Model, width: i32, height: i32) -> Layout {
 fn form_lines(m: &Model) -> Vec<Vec<Line>> {
     let mut out: Vec<Vec<Line>> = Vec::new();
     let body: Vec<usize> = (0..m.items.len()).filter(|&i| !m.items[i].footer).collect();
+    let tabs: Vec<usize> = body
+        .iter()
+        .copied()
+        .filter(|&i| m.items[i].tab.is_some())
+        .collect();
+    let body: Vec<usize> = body
+        .into_iter()
+        .filter(|&i| m.items[i].tab.is_none())
+        .collect();
+    if !tabs.is_empty() {
+        out.push(vec![Line::Tabs(tabs)]);
+    }
     let mut k = 0;
     while k < body.len() {
         let i = body[k];
@@ -1305,7 +1507,7 @@ fn form_lines(m: &Model) -> Vec<Vec<Line>> {
 
 /// Whether a radio group's choices fit as segments in `w` reference pixels.
 pub fn segments_fit(labels: &[String], w: f32) -> bool {
-    if labels.is_empty() || labels.len() > 4 {
+    if labels.is_empty() || labels.len() > 5 {
         return false;
     }
     let each = w / labels.len() as f32;
@@ -1320,7 +1522,8 @@ fn form_layout(m: &Model, width: i32, height: i32) -> Layout {
         .items
         .iter()
         .any(|i| matches!(i.kind, Kind::List { .. } | Kind::Text { .. }));
-    let one_col_w = if wide { LIST_FORM_W } else { FORM_W1 };
+    let tabs = m.items.iter().filter(|i| i.tab.is_some()).count() as f32;
+    let one_col_w = if wide { LIST_FORM_W } else { FORM_W1 }.max(tabs * TAB_MIN_W + 2.0 * PAD);
     let heights = |w: f32| -> Vec<f32> {
         sections
             .iter()
@@ -1400,6 +1603,18 @@ fn form_layout(m: &Model, width: i32, height: i32) -> Layout {
                     for (n, &i) in v.iter().enumerate() {
                         let bx = x + n as f32 * (w + gap);
                         let b = frame.at(bx, y + 6.0, w, h - 12.0);
+                        placed[i] = Placed {
+                            row: b,
+                            control: b,
+                            ..Default::default()
+                        };
+                    }
+                }
+                Line::Tabs(v) => {
+                    let gap = 6.0;
+                    let w = (col_w - gap * (v.len() as f32 - 1.0)) / v.len() as f32;
+                    for (n, &i) in v.iter().enumerate() {
+                        let b = frame.at(x + n as f32 * (w + gap), y + 4.0, w, h - 16.0);
                         placed[i] = Placed {
                             row: b,
                             control: b,
@@ -1557,6 +1772,14 @@ fn place(m: &Model, f: &Frame, i: usize, x: f32, y: f32, w: f32, h: f32) -> Plac
             control: f.at(cx, y, cw, h),
             ..Default::default()
         },
+        Kind::Embed { rect } => {
+            let (ew, eh) = embed_size(*rect, w);
+            Placed {
+                row,
+                control: f.at(x + (w - ew) / 2.0, y + 8.0, ew, eh),
+                ..Default::default()
+            }
+        }
     }
 }
 
@@ -1628,6 +1851,7 @@ pub fn hit(m: &Model, l: &Layout, open: Option<usize>, canvas_h: i32, x: i32, y:
                 return Hit::Item(i)
             }
             Kind::Toggle { .. } if p.row.contains(x, y) => return Hit::Item(i),
+            Kind::Embed { .. } if p.control.contains(x, y) => return Hit::Item(i),
             Kind::Slider { .. } if slider_zone(l, p).contains(x, y) => return Hit::Item(i),
             Kind::VSlider { .. } if p.row.contains(x, y) => return Hit::Item(i),
             Kind::Choice { .. } => {
@@ -1684,6 +1908,9 @@ pub fn target(fe: &Fe, m: &Model, l: &Layout, at: Hit) -> Option<Target> {
     match at {
         Hit::Item(i) => {
             let it = m.items.get(i)?;
+            if let Kind::Embed { rect } = it.kind {
+                return Some(Target::new(l.placed[i].control, rect));
+            }
             let Source::Atom(a) = it.source else {
                 return None;
             };
@@ -1778,13 +2005,23 @@ pub struct State {
     pub page: Option<mo::Page>,
     /// Escape left a text entry: it goes on to the screen's back button next frame.
     escape_again: bool,
+    /// These are the front end's screens (the main menu and every screen behind it), not
+    /// the in-game ones: set once by [`crate::session::Session`].
+    pub front_end: bool,
+    /// The screen the modern options were opened from (they close when it goes).
+    pub(crate) page_screen: String,
+    /// The original screens drawn off screen, for the pictures they draw themselves
+    /// ([`Kind::Embed`], swatches).
+    original: Option<Canvas>,
 }
 
 /// Opening the escape menu or the objectives: a fresh state.
 pub fn reset(fe: &mut Fe) {
     let mouse = fe.game.ig.mmenu.mouse;
+    let front_end = fe.game.ig.mmenu.front_end;
     fe.game.ig.mmenu = State {
         mouse,
+        front_end,
         ..State::default()
     };
 }
@@ -1792,8 +2029,53 @@ pub fn reset(fe: &mut Fe) {
 fn current(fe: &Fe) -> Option<(Model, Layout)> {
     let m = model(fe)?;
     let (w, h) = fe.screen_size();
-    let l = layout(&m, w, h);
+    let l = layout_for(fe, &m, w, h);
     Some((m, l))
+}
+
+/// [`layout`], placed where the front end has its panels when these are its screens.
+pub fn layout_for(fe: &Fe, m: &Model, width: i32, height: i32) -> Layout {
+    let mut l = layout(m, width, height);
+    if fe.game.ig.mmenu.front_end {
+        crate::front_menu::place(&mut l, m, width, height);
+        // A pop-up stands over the middle of the screen under it.
+        if let Some(b) = popup_below(fe).filter(|&b| fe.screens[b].name != m.name) {
+            let bm = screen_model(fe, b);
+            let mut bl = layout(&bm, width, height);
+            crate::front_menu::place(&mut bl, &bm, width, height);
+            crate::front_menu::centre_on(&mut l, bl.frame.panel, width, height);
+        }
+    }
+    l
+}
+
+impl Layout {
+    /// Moves everything by (`dx`, `dy`) pixels.
+    pub fn shift(&mut self, dx: i32, dy: i32) {
+        let mv = |r: &mut Rect| *r = Rect::new(r.x0 + dx, r.y0 + dy, r.x1 + dx, r.y1 + dy);
+        let f = &mut self.frame;
+        mv(&mut f.panel);
+        mv(&mut f.header);
+        f.title_x += dx;
+        f.title_baseline += dy;
+        f.footer_line += dy;
+        for p in &mut self.placed {
+            mv(&mut p.row);
+            mv(&mut p.control);
+            p.parts.iter_mut().for_each(mv);
+            if let Some(t) = p.track.as_mut() {
+                mv(t);
+            }
+        }
+        for (_, r) in &mut self.headings {
+            mv(r);
+        }
+        self.messages.iter_mut().for_each(mv);
+        if let Some(b) = self.body.as_mut() {
+            mv(&mut b.view);
+            mv(&mut b.track);
+        }
+    }
 }
 
 fn hit_now(fe: &Fe, m: &Model, l: &Layout) -> Hit {
@@ -2062,6 +2344,7 @@ pub fn key_down(fe: &mut Fe, code: u16) -> bool {
         return false;
     }
     if fe.current_screen_name() == Some(HUB)
+        && !fe.game.ig.mmenu.front_end
         && !typing
         && !mods
         && code == u16::from(mo::HUB_KEY.as_bytes()[0])
@@ -2086,8 +2369,10 @@ pub fn tick(fe: &mut Fe) {
         }
         return;
     }
-    // The modern options belong to the hub.
-    if fe.game.ig.mmenu.page.is_some() && fe.current_screen_name() != Some(HUB) {
+    // The modern options belong to the screen they were opened from (the hub in-game).
+    if fe.game.ig.mmenu.page.is_some()
+        && fe.current_screen_name() != Some(fe.game.ig.mmenu.page_screen.as_str())
+    {
         fe.game.ig.mmenu.page = None;
     }
     let name = match &fe.game.ig.mmenu.page {
@@ -2124,13 +2409,51 @@ pub fn draw(fe: &mut Fe, canvas: &mut Canvas) {
         return;
     };
     let (w, h) = (canvas.width, canvas.height);
-    if let Some(below) = popup_below(fe) {
-        let m = screen_model(fe, below);
-        let l = layout(&m, w, h);
-        draw_model(fe, canvas, &pen, &m, &l, false);
-    }
+    let below = popup_below(fe).map(|b| {
+        let m = screen_model(fe, b);
+        let l = layout_for(fe, &m, w, h);
+        (m, l)
+    });
     let Some(m) = model(fe) else { return };
-    let l = layout(&m, w, h);
+    let l = layout_for(fe, &m, w, h);
+    // The pictures the original screens draw themselves: the screens drawn off screen.
+    let pictures = |m: &Model| {
+        m.items
+            .iter()
+            .any(|i| i.swatch.is_some() || matches!(i.kind, Kind::Embed { .. }))
+    };
+    if pictures(&m) || below.as_ref().is_some_and(|(b, _)| pictures(b)) {
+        let mut c = fe
+            .game
+            .ig
+            .mmenu
+            .original
+            .take()
+            .unwrap_or_else(|| Canvas::new(w, h));
+        if (c.width, c.height) != (w, h) {
+            c.resize(w, h);
+        }
+        fe.render(&mut c);
+        fe.game.ig.mmenu.original = Some(c);
+    } else {
+        fe.game.ig.mmenu.original = None;
+    }
+    let front_end = fe.game.ig.mmenu.front_end;
+    if front_end {
+        let ul = below.as_ref().map_or(&l, |(_, bl)| bl);
+        crate::front_menu::draw_under(canvas, ul);
+    }
+    if let Some((bm, bl)) = &below {
+        draw_model(fe, canvas, &pen, bm, bl, false);
+        if front_end {
+            crate::front_menu::draw_over(canvas, &pen, bm, bl, &fe.game.version);
+            // The pop-up stands out over the screen under it.
+            canvas.blend_rect(bl.frame.panel, [0, 0, 0, 120]);
+            canvas.blend_rect(l.frame.panel, [6, 8, 12, 230]);
+        }
+    } else if front_end {
+        crate::front_menu::draw_over(canvas, &pen, &m, &l, &fe.game.version);
+    }
     let (mx, my) = fe.game.ig.mmenu.mouse;
     let at = hit(&m, &l, fe.game.ig.mmenu.dropdown, h, mx, my);
     let pressed = fe.game.ig.mmenu.pressed;
@@ -2306,6 +2629,19 @@ fn draw_item(fe: &Fe, canvas: &mut Canvas, pen: &Pen, m: &Model, l: &Layout, i: 
     let pressed = live && fe.game.ig.mmenu.pressed == Some(Hit::Item(i));
     let focused = live && it.focused;
     match &it.kind {
+        Kind::Button { .. } if it.tab.is_some() => {
+            let t = TabLook {
+                label: it.label.clone(),
+                enabled: !it.disabled,
+                current: it.tab == Some(true),
+                hover: hv,
+                ..Default::default()
+            };
+            draw_tab(canvas, pen, f, p.control, &t);
+            if focused {
+                focus_row(canvas, f, p.control);
+            }
+        }
         Kind::Button { primary, back } => {
             let b = ButtonLook {
                 label: &it.label,
@@ -2319,6 +2655,9 @@ fn draw_item(fe: &Fe, canvas: &mut Canvas, pen: &Pen, m: &Model, l: &Layout, i: 
             };
             let _ = back;
             draw_button(canvas, pen, f, p.control, &b);
+            if let Some(sw) = it.swatch {
+                draw_swatch(fe, canvas, f, p.control, sw);
+            }
         }
         Kind::Toggle { on } => {
             row_band(canvas, f, p.row, false, hv * 0.8, 0.0);
@@ -2329,6 +2668,10 @@ fn draw_item(fe: &Fe, canvas: &mut Canvas, pen: &Pen, m: &Model, l: &Layout, i: 
                 f32::from(u8::from(*on))
             };
             draw_switch(canvas, f, p.control, knob, hv, it.disabled);
+            if let Some(sw) = it.swatch {
+                let r = Rect::new(p.row.x0, p.row.y0, p.control.x0 - f.px(8.0), p.row.y1);
+                draw_swatch(fe, canvas, f, r, sw);
+            }
             if focused {
                 focus_row(canvas, f, p.row);
             }
@@ -2470,6 +2813,18 @@ fn draw_item(fe: &Fe, canvas: &mut Canvas, pen: &Pen, m: &Model, l: &Layout, i: 
             draw_field(canvas, pen, f, p.control, &look);
         }
         Kind::Text { paragraphs } => draw_text(canvas, pen, f, p.control, paragraphs),
+        Kind::Embed { rect } => {
+            if let Some(o) = &fe.game.ig.mmenu.original {
+                crate::front_menu::copy_scaled(canvas, o, *rect, p.control);
+            }
+            rounded_outline(
+                canvas,
+                p.control,
+                3.0 * f.scale,
+                f.scale,
+                lerp([255, 255, 255, 40], alpha(GOLD, 0.7), hv),
+            );
+        }
         Kind::Value { text } => {
             draw_label(canvas, pen, f, it, p, 0.0);
             let vpx = f.text(VALUE_PX);
@@ -2487,6 +2842,19 @@ fn draw_item(fe: &Fe, canvas: &mut Canvas, pen: &Pen, m: &Model, l: &Layout, i: 
             );
         }
     }
+}
+
+/// A swatch the original draws on a control, at the right end of `r` (left of a key cap).
+fn draw_swatch(fe: &Fe, canvas: &mut Canvas, f: &Frame, r: Rect, sw: Rect) {
+    let Some(o) = &fe.game.ig.mmenu.original else {
+        return;
+    };
+    let h = (r.height() - f.px(16.0)).max(4);
+    let w = (h * sw.width().max(1) / sw.height().max(1)).min(r.width() / 3);
+    let x1 = r.x1 - f.px(48.0);
+    let dst = Rect::new(x1 - w, (r.y0 + r.y1 - h) / 2, x1, (r.y0 + r.y1 + h) / 2);
+    crate::front_menu::copy_scaled(canvas, o, sw, dst);
+    rounded_outline(canvas, dst, 2.0 * f.scale, f.scale, [255, 255, 255, 60]);
 }
 
 /// Paragraphs wrapped into `r`, cut with "..." when they do not fit.

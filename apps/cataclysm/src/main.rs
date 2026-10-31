@@ -15,6 +15,8 @@ mod campaign_shots;
 mod crash;
 mod data;
 mod draw_check;
+#[cfg(test)]
+mod front_end_shots;
 mod game;
 #[cfg(test)]
 mod hang_checks;
@@ -30,6 +32,7 @@ mod intro;
 mod loading;
 #[cfg(test)]
 mod m1_checks;
+mod menu_scene;
 #[cfg(test)]
 mod menus_shots;
 mod mission;
@@ -226,6 +229,10 @@ options:
                         below, applied at once) or original (the original screens); options
                         file: hwcModernMenus = 1/0. The original HUD brings back the
                         original screens too
+  --front-end <mode>    modern (default, a user-requested change: the main menu and every
+                        screen behind it in the modern HUD's look over a live scene of the
+                        Kuun-Lan, same controls, keys and actions) or original (the
+                        original front end); options file: hwcModernFrontEnd = 1/0
   --letterbox <mode>    tall (default, a user-requested change: the cutscene and fleet-intel
                         bars are never thinner than on a 4:3 screen of the same height, 14%
                         of it each) or original (bars around a 1.85:1 picture: on a 16:9
@@ -523,6 +530,12 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
                 let modern = hwc_ui::ingame::modern_menu::parse_mode(&v)
                     .ok_or_else(|| format!("unknown --menus mode {v}"))?;
                 hwc_ui::ingame::modern_menu::set_override(Some(modern));
+            }
+            "--front-end" => {
+                let v = value("--front-end")?;
+                let modern = hwc_ui::front_menu::parse_mode(&v)
+                    .ok_or_else(|| format!("unknown --front-end mode {v}"))?;
+                hwc_ui::front_menu::set_override(Some(modern));
             }
             "--research-ui" => {
                 let v = value("--research-ui")?;

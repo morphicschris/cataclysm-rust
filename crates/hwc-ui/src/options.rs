@@ -243,6 +243,9 @@ pub const DEFAULTS: &[(&str, i32)] = &[
     // screen (`--menus`); 0: the original screens. The original HUD brings back the
     // original too.
     ("hwcModernMenus", 1),
+    // 1: the main menu and every screen behind it in the modern HUD's style, over a live
+    // scene (`--front-end`); 0: the original front end. Independent of the HUD.
+    ("hwcModernFrontEnd", 1),
     // The screen mode (`--window` / `--borderless` / `--fullscreen`, `--display-mode`):
     // 0 a window at screenWidth x screenHeight, 1 a borderless window covering the monitor
     // at its own resolution (the default, a user-requested change), 2 exclusive full screen

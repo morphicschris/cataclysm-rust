@@ -177,6 +177,8 @@ pub struct Frame {
     pub ref_h: f32,
     /// It has a footer (its hairline and buttons along the bottom).
     pub footer: bool,
+    /// The scene around it is dimmed (not in the front end, where the scene is the point).
+    pub dim: bool,
 }
 
 impl Frame {
@@ -212,6 +214,7 @@ impl Frame {
             ref_w,
             ref_h,
             footer,
+            dim: true,
         }
     }
 
@@ -583,7 +586,9 @@ pub fn fit(pen: &Pen, face: Face, px: f32, spacing: f32, s: &str, avail: f32) ->
 /// The frame: the dimmed scene around, the shadow, the panel with its accent strip, the gold
 /// wash under the header and the header's and footer's hairlines.
 pub fn draw_frame(canvas: &mut Canvas, f: &Frame) {
-    dim_around(canvas, f.panel);
+    if f.dim {
+        dim_around(canvas, f.panel);
+    }
     shadow(canvas, f.panel, f.px(18.0).max(6));
     canvas.blend_rect(f.panel, PANEL);
     let accent = Rect::new(

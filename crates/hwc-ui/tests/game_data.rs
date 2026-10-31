@@ -26,6 +26,8 @@ fn session(src: Rc<dyn AssetSource>, options: Option<std::path::PathBuf>) -> Ses
         },
     )
     .expect("session");
+    // The original front end's screens (the modern one has tests of its own).
+    s.use_original_look();
     s.resize(640, 480);
     s
 }

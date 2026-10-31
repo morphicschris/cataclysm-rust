@@ -9,6 +9,7 @@ use crate::assets::{AssetSource, Language, Resources};
 use crate::canvas::{BlitMode, Canvas, Image};
 use crate::cataclysm::{self, Cataclysm, Request};
 use crate::fe::FrontEnd;
+use crate::ingame::modern_menu;
 use crate::options::Options;
 use crate::scale::{Placement, ScaleMode};
 
@@ -49,6 +50,11 @@ pub struct Session {
     /// Whether the pointer is drawn (`mouseCursorShow` / `mouseCursorHide`; the application
     /// also hides it while the system pointer is outside the window).
     pub cursor_visible: bool,
+    /// The pointer in canvas pixels (the modern screens hand the screens a pointer of their
+    /// own, moved onto the original control under it).
+    mouse: (i32, i32),
+    /// The modern screens were up last frame.
+    was_modern: bool,
 }
 
 impl Session {
@@ -107,6 +113,8 @@ impl Session {
         game.display = crate::display::Setting::from_options(&game.options);
         let cursor = res.image(CURSOR_BITMAP);
         let mut fe = FrontEnd::new(game, res);
+        // The modern menus here are the front end's ([`crate::front_menu`]).
+        fe.game.ig.mmenu.front_end = true;
         cataclysm::register(&mut fe);
         fe.load_fib_data(&fib_data)
             .map_err(|e| format!("{FRONT_END_FIB}: {e}"))?;
@@ -121,6 +129,8 @@ impl Session {
             skip_credits: false,
             cursor,
             cursor_visible: true,
+            mouse: (0, 0),
+            was_modern: false,
         };
         s.fe.screen_start(MAIN_SCREEN);
         Ok(s)
@@ -152,21 +162,71 @@ impl Session {
         self.resize(w, h);
     }
 
+    /// Keeps this front end in the original look whatever the options say (the original's
+    /// walk-through and its tests).
+    pub fn use_original_look(&mut self) {
+        self.fe.game.ig.mmenu.front_end = false;
+    }
+
+    /// Whether the front end is in the modern look now ([`crate::front_menu`]): the
+    /// application draws the scene behind it and calls [`Session::render_over_backdrop`].
+    pub fn modern(&self) -> bool {
+        self.fe.game.credits.is_none() && modern_menu::active(&self.fe)
+    }
+
+    /// Where the scene behind the modern screens should centre what it shows (0..1 of the
+    /// width): right of the panel.
+    pub fn backdrop_focus(&self) -> f32 {
+        let (w, h) = self.fe.screen_size();
+        match modern_menu::model(&self.fe) {
+            Some(m) if self.modern() => {
+                crate::front_menu::focus_x(&modern_menu::layout_for(&self.fe, &m, w, h), w)
+            }
+            _ => 0.5,
+        }
+    }
+
     pub fn mouse_move(&mut self, x: f64, y: f64) {
         let (cx, cy) = self.placement.to_canvas(x, y);
+        self.mouse = (cx, cy);
         self.fe.mouse_move(cx, cy);
+        if self.modern() {
+            modern_menu::mouse_move(&mut self.fe, cx, cy);
+        }
     }
 
     pub fn mouse_button(&mut self, left: bool, down: bool) {
         if down && self.fe.game.credits.is_some() {
             self.skip_credits = true;
         }
+        if self.modern() {
+            modern_menu::mouse_button(&mut self.fe, left, down);
+            return;
+        }
         self.fe.mouse_button(left, down);
+    }
+
+    pub fn wheel(&mut self, up: bool) {
+        if self.modern() {
+            modern_menu::wheel(&mut self.fe, up);
+            return;
+        }
+        self.fe.wheel(up);
+    }
+
+    pub fn char_typed(&mut self, c: char) {
+        if self.modern() && self.fe.game.ig.mmenu.page.is_some() {
+            return;
+        }
+        self.fe.char_typed(c);
     }
 
     pub fn key_down(&mut self, code: u16) {
         if code == crate::consts::key::ESCAPE && self.fe.game.credits.is_some() {
             self.skip_credits = true;
+            return;
+        }
+        if self.modern() && modern_menu::key_down(&mut self.fe, code) {
             return;
         }
         self.fe.key_down(code);
@@ -192,8 +252,27 @@ impl Session {
         }
         self.fe.process(dt);
         cataclysm::tick(&mut self.fe, dt);
+        modern_menu::tick(&mut self.fe);
+        // The modern screens have gone (switched off): the screens' pointer, which they
+        // moved onto the original controls, is the player's again.
+        let modern = self.modern();
+        if self.was_modern && !modern {
+            self.fe.mouse_move(self.mouse.0, self.mouse.1);
+        }
+        self.was_modern = modern;
         let mut out = std::mem::take(&mut self.pending);
         self.take_sounds(&mut out);
+        // The modern options' ACCEPT: the options are saved; apply them (and switch to a
+        // screen mode or resolution changed there).
+        for r in std::mem::take(&mut self.fe.game.ig.requests) {
+            if let crate::ingame::host::GameRequest::ApplyOptions = r {
+                out.push(Request::ApplyOptions);
+                let wanted = crate::display::Setting::from_options(&self.fe.game.options);
+                if wanted != self.fe.game.display {
+                    out.push(Request::DisplayMode(wanted));
+                }
+            }
+        }
         for r in std::mem::take(&mut self.fe.game.requests) {
             // No game yet: report, then come back to the main menu like the engine does when a
             // game ends.
@@ -213,8 +292,31 @@ impl Session {
     }
 
     pub fn render(&mut self) -> &Canvas {
+        self.render_frame(false)
+    }
+
+    /// The canvas, for the application to draw the scene behind the modern screens into
+    /// before [`Session::render_over_backdrop`].
+    pub fn canvas_mut(&mut self) -> &mut Canvas {
+        &mut self.canvas
+    }
+
+    /// Draws the front end; the modern screens go over what the canvas holds (the scene the
+    /// application has just drawn).
+    pub fn render_over_backdrop(&mut self) -> &Canvas {
+        self.render_frame(true)
+    }
+
+    fn render_frame(&mut self, backdrop: bool) -> &Canvas {
         match &self.fe.game.credits {
             Some(c) => c.render(&mut self.canvas),
+            None if self.modern() => {
+                if !backdrop {
+                    crate::front_menu::draw_backdrop(&mut self.canvas);
+                }
+                self.canvas.set_clip(None);
+                modern_menu::draw(&mut self.fe, &mut self.canvas);
+            }
             None => self.fe.render(&mut self.canvas),
         }
         self.draw_cursor();
@@ -235,7 +337,11 @@ impl Session {
             return;
         }
         if let Some(img) = &self.cursor {
-            let (x, y) = self.fe.mouse_pos();
+            let (x, y) = if self.modern() {
+                self.mouse
+            } else {
+                self.fe.mouse_pos()
+            };
             self.canvas.set_clip(None);
             self.canvas.blit(img, x, y, BlitMode::Blend);
         }
