@@ -304,6 +304,19 @@ pub struct CombatTweaks {
     /// older files take the shipped script's 3.5.
     #[serde(default = "kamikaze_speed_burst", deserialize_with = "kamikaze_speed_burst_v5")]
     pub kamikaze_speed_burst: f32,
+    /// `burstRange` (Tactics.script, 0xa585f8): how near the point a heavy corvette's burst
+    /// fires from. Saved from version 7; older files take the shipped scripts' values.
+    #[serde(default = "burst_range", deserialize_with = "burst_range_v7")]
+    pub burst_range: f32,
+    /// `burstChargeTime` (0xa5861c).
+    #[serde(default = "burst_charge_time", deserialize_with = "burst_charge_time_v7")]
+    pub burst_charge_time: f32,
+    /// `burstCoolDownTime` (0xa58884).
+    #[serde(default = "burst_cool_down_time", deserialize_with = "burst_cool_down_time_v7")]
+    pub burst_cool_down_time: f32,
+    /// `TW_BURST_ATTACK_FORCE_MODIFIER` (Tweak.script, 0xa47fdc): scales the push of a burst.
+    #[serde(default = "burst_force_modifier", deserialize_with = "burst_force_modifier_v7")]
+    pub burst_force_modifier: f32,
     /// Missile target loss (Tweak.script): frame mask, checks per missile, distance,
     /// miss chance by the target's tactics, bonus when it dodges or manoeuvres.
     pub missile_target_loss_rate: u32,
@@ -394,6 +407,10 @@ impl Default for CombatTweaks {
             crazy_rock: [[-10.0, 10.0]; 3],
             kamikaze_damage: vec![0.0; ShipType::COUNT],
             kamikaze_speed_burst: 0.0,
+            burst_range: 0.0,
+            burst_charge_time: 0.0,
+            burst_cool_down_time: 0.0,
+            burst_force_modifier: 0.0,
             missile_target_loss_rate: 0,
             missile_num_times_check: 0,
             missile_min_dist_before_target_loss: 0.0,
@@ -535,6 +552,10 @@ const BINDINGS: &[(&str, &str, Conv, Target)] = &[
     (FILE_TACTICS, "tacticsGuardReturnToGuardingDistance", Real, F(|t| &mut t.tactics_guard_return_to_guarding_distance)),
     (FILE_TACTICS, "tacticsGuardConditionCheckRate", Real, F(|t| &mut t.tactics_guard_condition_check_rate)),
     (FILE_TACTICS, "tacticsGuardConditionCheckFrame", Real, F(|t| &mut t.tactics_guard_condition_check_frame)),
+    (FILE_TACTICS, "burstRange", Real, F(|t| &mut t.burst_range)),
+    (FILE_TACTICS, "burstChargeTime", Real, F(|t| &mut t.burst_charge_time)),
+    (FILE_TACTICS, "burstCoolDownTime", Real, F(|t| &mut t.burst_cool_down_time)),
+    (FILE_TWEAK, "TW_BURST_ATTACK_FORCE_MODIFIER", Real, F(|t| &mut t.burst_force_modifier)),
     (FILE_TACTICS, "burstSpeed", Real, F(|t| &mut t.burst_speed)),
     (FILE_TACTICS, "burstRadius", Real, F(|t| &mut t.burst_radius)),
     (FILE_TACTICS, "holdFormationDuringBattle[Evasive]", Int, U(|t| &mut t.hold_formation_during_battle[0])),
@@ -706,6 +727,32 @@ const BINDINGS: &[(&str, &str, Conv, Target)] = &[
     (FILE_FLIGHTMAN, "FLIGHTMAN_NUM_EVASIVEPURE_MANEUVERS[Neutral]", Int, W(|t| &mut t.flightman.num_evasivepure_maneuvers[1])),
     (FILE_FLIGHTMAN, "FLIGHTMAN_NUM_EVASIVEPURE_MANEUVERS[Aggressive]", Int, W(|t| &mut t.flightman.num_evasivepure_maneuvers[2])),
 ];
+
+/// The shipped scripts' burst settings, for files older than version 7.
+fn burst_range() -> f32 {
+    5000.0
+}
+fn burst_charge_time() -> f32 {
+    0.1
+}
+fn burst_cool_down_time() -> f32 {
+    7.5
+}
+fn burst_force_modifier() -> f32 {
+    0.2
+}
+fn burst_range_v7<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    crate::save::added_in_or(7, d, burst_range)
+}
+fn burst_charge_time_v7<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    crate::save::added_in_or(7, d, burst_charge_time)
+}
+fn burst_cool_down_time_v7<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    crate::save::added_in_or(7, d, burst_cool_down_time)
+}
+fn burst_force_modifier_v7<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    crate::save::added_in_or(7, d, burst_force_modifier)
+}
 
 /// `kamikazeSpeedBurst` as the shipped Tactics.script sets it.
 fn kamikaze_speed_burst() -> f32 {

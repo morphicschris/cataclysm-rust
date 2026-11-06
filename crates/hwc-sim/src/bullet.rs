@@ -293,8 +293,14 @@ pub fn update_all(u: &mut Universe) {
         }
         if update_pos_vel(u, bid) {
             crate::effects::bullet_expired(u, bid);
-            // (Burst bullets explode at the end of their flight: pointExplosionInSpace with
-            // the burst radius; the burst attack is not modelled.)
+            // `pointExplosionInSpace` with the burst radius, for the damage scaled by the
+            // upgrades of the bullet's type (`suGetUpgradeMultiplier`).
+            if let Some(b) = u.bullets.get(bid).filter(|b| b.burst) {
+                let (at, player) = (b.posinfo.position, b.player);
+                let damage = hwc_math::fpu::st(hwc_math::fpu::ld(crate::damage::weapon_damage(b.bullet_type, 0)) * hwc_math::fpu::ld(b.damage));
+                let radius = u.tweaks.combat.burst_radius;
+                crate::damage::point_explosion_in_space(u, at, radius, damage, player as i32);
+            }
             delete(u, bid);
         }
     }

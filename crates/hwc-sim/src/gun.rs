@@ -240,10 +240,15 @@ pub fn ready(u: &mut Universe, id: ShipId, gi: usize) -> bool {
 /// enough to fire. Gimbal guns only check the muzzle cone; visible turrets turn towards the
 /// target at their tracking rates.
 pub fn orient_gimble(u: &mut Universe, id: ShipId, gi: usize, target: ShipId) -> bool {
+    let Some(t) = crate::target::get(u, target) else { return false };
+    orient_gimble_at(u, id, gi, &t)
+}
+
+/// [`orient_gimble`] on what the gun reads of its target.
+fn orient_gimble_at(u: &mut Universe, id: ShipId, gi: usize, t: &crate::target::Target) -> bool {
     let statics = u.statics.clone();
     let dt = u.phys_time_elapsed;
     let below = u.tweaks.combat.dont_use_velocity_pred_if_below;
-    let Some(t) = crate::target::get(u, target) else { return false };
     let s = u.ships.ship(id);
     let Some(stat) = statics.ship(s.ship_type) else { return false };
     let Some(gs) = gun_static(stat, gi) else { return false };
@@ -257,7 +262,7 @@ pub fn orient_gimble(u: &mut Universe, id: ShipId, gi: usize, target: ShipId) ->
     let coordsys = s.rotinfo.coordsys;
     match gs.gun_type {
         Some(GunType::Gimble) => {
-            let traj = aiship::trajectory_with_vel_prediction(s, &t, speed, below);
+            let traj = aiship::trajectory_with_vel_prediction(s, t, speed, below);
             let mut local = coordsys.vec_mul(traj);
             local = Vector::new(local.x - gs.position.x, local.y - gs.position.y, local.z - gs.position.z);
             local.normalize();
@@ -288,7 +293,7 @@ pub fn orient_gimble(u: &mut Universe, id: ShipId, gi: usize, target: ShipId) ->
                 }
             }
             let s = u.ships.ship(id);
-            let traj = aiship::trajectory_with_vel_prediction(s, &t, speed, below);
+            let traj = aiship::trajectory_with_vel_prediction(s, t, speed, below);
             let mut local = coordsys.vec_mul(traj);
             local = Vector::new(local.x - gs.position.x, local.y - gs.position.y, local.z - gs.position.z);
             local.normalize();
@@ -482,6 +487,36 @@ pub fn shoot_guns_at_target(u: &mut Universe, id: ShipId, target: ShipId, range:
             }
             Some(GunType::Fixed | GunType::Gimble | GunType::NewGimble) => {}
             None => {}
+        }
+    }
+    shot
+}
+
+/// `gunShootGunsAtTarget` from `doBurstFire` (0x5afb10): the guns fire at a point in space (the
+/// original's dummy target, at rest and with no line-of-sight test for a corvette). Launchers do
+/// not take part: no type with a burst attack has any.
+pub fn shoot_guns_at_point(u: &mut Universe, id: ShipId, point: Vector) -> bool {
+    let statics = u.statics.clone();
+    let Some(s) = u.ships.get(id) else { return false };
+    let Some(stat) = statics.ship(s.ship_type) else { return false };
+    let Some(guns) = stat.guns.as_ref() else { return false };
+    let Some(mut dummy) = crate::target::get(u, id) else { return false };
+    dummy.posinfo.position = point;
+    dummy.posinfo.velocity = Vector::ZERO;
+    dummy.coll.coll_position = point;
+    let mut shot = false;
+    for (gi, gs) in guns.iter().enumerate() {
+        let start_type = static_bullet_type(gs, false);
+        if start_type == 0x13 || start_type == 0x12 || !ready(u, id, gi) {
+            continue;
+        }
+        let aimed = match gs.gun_type {
+            Some(GunType::Gimble) | Some(GunType::NewGimble) => orient_gimble_at(u, id, gi, &dummy),
+            _ => false,
+        };
+        if aimed {
+            shoot(u, id, gi, None);
+            shot = true;
         }
     }
     shot

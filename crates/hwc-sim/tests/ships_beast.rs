@@ -385,3 +385,30 @@ fn infection_beam_effect_spans_source_to_target() {
     }
     assert!(checked > 0, "a beam was seen");
 }
+
+#[test]
+fn heavy_corvette_fires_a_burst_at_the_middle_of_its_targets() {
+    use hwc_sim::ships::heavy_corvette::state;
+    use hwc_sim::ships::ShipSpec;
+    let v = Vector::new;
+    let spawns = vec![
+        Spawn { ship_type: ShipType::bHeavyCorvette, player: 0, position: v(0.0, 0.0, 0.0) },
+        Spawn { ship_type: ShipType::tResourceCollector, player: 1, position: v(9000.0, 0.0, 0.0) },
+    ];
+    let orders = vec![(1, Order::Special { ships: vec![0], targets: vec![1] })];
+    let Some(mut run) = new_run(scenario("burst", vec![ShipRace::Beast, ShipRace::Taiidan], spawns, orders)) else { return };
+    let id = run.ids[0];
+    let (mut bursts, mut cooled, mut flew) = (0, false, false);
+    for _ in 0..1600 {
+        run.step();
+        bursts = bursts.max(run.universe.bullets.iter().filter(|b| b.burst).count());
+        if let ShipSpec::HeavyCorvette(c) = &run.universe.ships.ship(id).spec {
+            flew |= c.burst_state == state::FLY_TO_FIRE_POINT;
+            cooled |= c.cooldown;
+        }
+    }
+    assert!(flew, "the corvette flies to its firing point");
+    assert!(bursts >= 2, "both guns fire a burst bullet, saw {bursts}");
+    assert!(cooled, "the guns cool after a burst");
+    assert!(run.universe.ships.ship(id).posinfo.position.x > 3000.0, "it closed to burst range");
+}

@@ -39,6 +39,7 @@ pub mod crystal;
 pub mod dfg;
 pub mod dreadnought;
 pub mod gravwell;
+pub mod heavy_corvette;
 pub mod hive;
 pub mod leech;
 pub mod mimic;
@@ -90,6 +91,7 @@ pub enum Module {
     SalCap,
     /// The slipgates (`dSlipgateSmall/Medium/Large`).
     Slipgate,
+    HeavyCorvette,
     /// Everything else (no ship-specific callbacks beyond the combat routines).
     Generic,
 }
@@ -135,6 +137,7 @@ pub fn module_of(t: ShipType) -> Module {
         sWorker | bWorker => Module::Worker,
         kSalCapCorvette | tSalCapCorvette => Module::SalCap,
         dSlipgateSmall | dSlipgateMedium | dSlipgateLarge => Module::Slipgate,
+        bHeavyCorvette | kHeavyCorvette => Module::HeavyCorvette,
         _ => Module::Generic,
     }
 }
@@ -166,6 +169,7 @@ pub enum ShipSpec {
     Crystal(crystal::CrystalSpec),
     BeastMothership(beast::BeastMothershipSpec),
     Slipgate(slipgate::SlipgateSpec),
+    HeavyCorvette(heavy_corvette::HeavyCorvetteSpec),
 }
 
 /// Per-type statics the modules' static initialisers read from the ship files
@@ -281,6 +285,7 @@ pub fn init(u: &mut Universe, id: ShipId) {
         Module::HeavyCruiser | Module::Carrier | Module::BeastMothership => beast::init(u, id),
         Module::Worker => worker_repair::init(u, id),
         Module::Slipgate => slipgate::init(u, id),
+        Module::HeavyCorvette => heavy_corvette::init(u, id),
         _ => {}
     }
 }
@@ -398,7 +403,8 @@ pub fn has_special_target(t: ShipType) -> bool {
             | Module::MissileDestroyer
             | Module::SalCap
             | Module::BeastMothership
-    ) || matches!(t, ShipType::bHeavyCorvette | ShipType::kHeavyCorvette | ShipType::kAdvanceSupportFrigate | ShipType::tAdvanceSupportFrigate | ShipType::tResourceCollector)
+            | Module::HeavyCorvette
+    ) || matches!(t, ShipType::kAdvanceSupportFrigate | ShipType::tAdvanceSupportFrigate | ShipType::tResourceCollector)
 }
 
 /// Slot 7, `CustShipSpecialActivate`. Returns whether the special is done (types without the
@@ -427,6 +433,7 @@ pub fn special_target(u: &mut Universe, id: ShipId, cid: crate::object::CommandI
     let Some(m) = module(u, id) else { return true };
     match m {
         Module::Acolyte => acolyte::special_target(u, id, targets),
+        Module::HeavyCorvette => heavy_corvette::special_target(u, id, targets),
         Module::Acv => acv::special_target(u, id, targets),
         Module::Mimic => mimic::special_target(u, id, targets),
         Module::Mcv => mimic::mcv_special_target(u, id, targets),
@@ -450,6 +457,7 @@ pub fn order_changed(u: &mut Universe, id: ShipId) {
     let Some(m) = module(u, id) else { return };
     match m {
         Module::Leech => leech::order_changed(u, id),
+        Module::HeavyCorvette => heavy_corvette::order_changed(u, id),
         Module::P1StandardCorvette => mimic::p1_order_changed(u, id),
         Module::Hive => hive::order_changed(u, id),
         Module::Minelayer => minelayer::order_changed(u, id),
@@ -484,6 +492,7 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
         Module::ProximitySensor => proximity::housekeep(u, id),
         Module::NomadMoon => nomad::housekeep(u, id),
         Module::Slipgate => slipgate::housekeep(u, id),
+        Module::HeavyCorvette => heavy_corvette::housekeep(u, id),
         _ => {}
     }
     if u.ships.get(id).is_some_and(|s| s.base.depot.is_some()) {

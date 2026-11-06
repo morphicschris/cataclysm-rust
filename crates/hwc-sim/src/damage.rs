@@ -398,6 +398,65 @@ fn shockwave(u: &mut Universe, id: ShipId, scuttle: bool) {
     }
 }
 
+/// `pointExplosionInSpace` (0x541820), a burst bullet ending: every impactable, mobile ship within
+/// `radius` of the point is pushed and rocked by how near it is, and takes `damage` if it can be
+/// hurt (`SOF_Targetable`, as its own killer).
+pub fn point_explosion_in_space(u: &mut Universe, at: Vector, radius: f32, damage: f32, player: i32) {
+    let statics = u.statics.clone();
+    let tw = u.tweaks.combat.clone();
+    let r = ld(radius);
+    let list = u.space_obj_list.clone();
+    for obj in list {
+        let ObjRef::Ship(oid) = obj else { continue };
+        let Some(o) = u.ships.get(oid) else { continue };
+        if o.flags & sof::IMPACTABLE == 0 || o.flags & sof::NOT_BUMPABLE != 0 {
+            continue;
+        }
+        let mut d = Vector::new(
+            st(ld(o.coll.coll_position.x) - ld(at.x)),
+            st(ld(o.coll.coll_position.y) - ld(at.y)),
+            st(ld(o.coll.coll_position.z) - ld(at.z)),
+        );
+        let neg = -radius;
+        if !(neg <= d.x && d.x <= radius && neg <= d.y && d.y <= radius && neg <= d.z && d.z <= radius) {
+            continue;
+        }
+        let mut dsq = st((ld(d.x) * ld(d.x) + ld(d.y) * ld(d.y)) + ld(d.z) * ld(d.z));
+        if !(ld(dsq) <= r * r) {
+            continue;
+        }
+        let Some(ostat) = statics.ship(o.ship_type) else { continue };
+        if ostat.header.immobile {
+            continue;
+        }
+        if dsq < 1.0 {
+            dsq = 1.0;
+        }
+        let f = st(1.0 - fsqrt(ld(dsq)) / r);
+        d.normalize_to_length(st(ld(tw.blast_constant) * ld(f)));
+        let fe = ld(f);
+        for axis in 0..3 {
+            let rv = u.randy.frandom_between_ext(RAN_GAME, tw.explosion_rock[axis][0], tw.explosion_rock[axis][1]);
+            let s = u.ships.ship_mut(oid);
+            let t = match axis {
+                0 => &mut s.rotinfo.torque.x,
+                1 => &mut s.rotinfo.torque.y,
+                _ => &mut s.rotinfo.torque.z,
+            };
+            *t = st(rv * fe + ld(*t));
+        }
+        let m = ld(tw.burst_force_modifier);
+        let s = u.ships.ship_mut(oid);
+        let fo = &mut s.posinfo.force;
+        fo.x = st(m * ld(d.x) + ld(fo.x));
+        fo.y = st(m * ld(d.y) + ld(fo.y));
+        fo.z = st(m * ld(d.z) + ld(fo.z));
+        if s.flags & sof::TARGETABLE != 0 {
+            apply_damage_to_target(u, oid, damage, 0, how::KILLED_BY_SHOCKWAVE, player, Some(oid));
+        }
+    }
+}
+
 /// `univDeleteDeadShips` / `univDeleteDeadShip`: everything that refers to the dead ships lets
 /// go of them and their explosions start; then they leave the universe (with effects, they
 /// stay as hulks until the explosion deletes them).
