@@ -2149,3 +2149,41 @@ fn mission_seven_slipgates() {
         eprintln!("no convoy ship was handed over in the time allowed");
     }
 }
+
+/// Every saved game in the player's folder reads with this build (`--ignored`). Run it after any
+/// change to saved state: nothing else tests files written by older builds.
+#[test]
+#[ignore]
+fn the_players_saved_games_still_load() {
+    let Some(mut rig) = rig() else { return };
+    let dir = std::path::PathBuf::from(std::env::var("APPDATA").unwrap()).join("hwc-cataclysm/saves/SinglePlayer");
+    let mut l = rig.loading(1, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    let statics = g.world.universe().statics.clone();
+    let assets = crate::data::Assets(rig.data.clone());
+    let (mut ok, mut bad) = (0, 0);
+    let mut names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+    names.sort();
+    for path in names {
+        let Ok(h) = hwc_sim::save::read_header(&path) else { println!("NOHEADER {}", path.display()); bad += 1; continue };
+        let Ok(relink) = crate::saves::relink(&assets, statics.clone(), h.mission) else { println!("NORELINK {}", path.display()); bad += 1; continue };
+        let raw = std::fs::read(&path).unwrap();
+        let v = u32::from_le_bytes(raw[8..12].try_into().unwrap());
+        match crate::saves::read(&path, &relink) {
+            Ok((_, mut payload)) => {
+                ok += 1;
+                // And plays on: a few seconds of the simulation from where it was saved.
+                payload.run.after_load();
+                for _ in 0..16 * 5 {
+                    payload.run.step();
+                }
+                println!("OK v{v} {}", path.file_name().unwrap().to_string_lossy());
+            }
+            Err(err) => { println!("BAD v{v} {}: {err}", path.file_name().unwrap().to_string_lossy()); bad += 1; }
+        }
+    }
+    println!("saved games: {ok} load, {bad} do not");
+    assert_eq!(bad, 0);
+}

@@ -173,6 +173,7 @@ pub struct Effects {
     /// The effect of each bullet (`bullet->effect`, +0x134).
     pub bullet_effect: BTreeMap<BulletId, EffectId>,
     /// The beam of each ship being consumed (ship +0x594).
+    #[serde(default, deserialize_with = "crate::save::added_in_7")]
     pub consume_beam: BTreeMap<ShipId, EffectId>,
     /// The hit-effect LOD list of each bullet (`bullet->hitEffect`, +0x130): race and bullet
     /// type of the gun that fired it.

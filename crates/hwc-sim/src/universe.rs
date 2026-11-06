@@ -81,10 +81,10 @@ pub enum SpecialEvent {
     EnemyShipSighted { ship: ShipId, player: usize },
     /// The local player's ship `by` discovered an enemy in unexplored space.
     EnemyDiscovered { by: ShipId, ship: ShipId },
-    /// `soundEventPlay(ship, event, 0)`.
-    ShipSound { ship: ShipId, event: u32 },
     /// A ship-module event for presentation (`ships::Effect`: EMP blasts, field hits, beams...).
     Special { ship: ShipId, effect: crate::ships::Effect },
+    /// `soundEventPlay(ship, event, 0)`. (Saved games hold these events: new ones go last.)
+    ShipSound { ship: ShipId, event: u32 },
 }
 
 /// Game-mode work that runs inside [`Universe::update_with`] (`singlePlayerGameUpdate` and the

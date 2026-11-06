@@ -717,7 +717,7 @@ pub enum BaseEvent {
     Salvaged { ship: ShipId, player: usize },
     /// Two ships linked into one.
     Linked { new_ship: ShipId },
-    /// A linked ship split into two.
+    /// A linked ship split into two. (Saved games hold these events: new ones go last.)
     Unlinked { old: ShipId, a: ShipId, b: ShipId },
 }
 
