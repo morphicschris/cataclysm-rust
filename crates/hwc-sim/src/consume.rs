@@ -29,6 +29,7 @@ pub struct Consume {
 pub const DEFAULT_TIME: f32 = 10.0;
 /// `etgSpecialPurposeEffectTable`: the beam and its sparks.
 const BEAM_EFFECT_SLOT: usize = 35;
+const SPARK_EFFECT_SLOT: usize = 34;
 /// 0x86e66c..0x86e678: sparks per update, and the weights that place them on the cut.
 const SPARKS: i32 = 5;
 const SPARK_CENTRE_WEIGHT: f32 = 0.5;
@@ -151,7 +152,7 @@ pub fn update(u: &mut Universe, id: ShipId) {
 
 /// `consumeSpawnSparks` (0x45bb40): each spark at a random blend of the points of the cut.
 fn sparks(u: &mut Universe, id: ShipId, cut: &[Vector]) {
-    let Some(effect) = u.effects.as_ref().and_then(|fx| fx.pick(fx.tables.special_effect(BEAM_EFFECT_SLOT))) else { return };
+    let Some(effect) = u.effects.as_ref().and_then(|fx| fx.pick(fx.tables.special_effect(SPARK_EFFECT_SLOT))) else { return };
     let n = cut.len() as f32;
     let centre = cut.iter().fold(Vector::ZERO, |a, b| Vector::new(a.x + b.x, a.y + b.y, a.z + b.z));
     let centre = Vector::new(centre.x / n, centre.y / n, centre.z / n);

@@ -1910,6 +1910,51 @@ fn mission_six_nis_fog() {
 /// (the permanent glow, then the opening vortex as the convoy comes through), and convoy
 /// ships the script hands over without control are not selectable and drawn as allies.
 /// `cargo test --release -p cataclysm mission_seven_slipgates -- --ignored --nocapture`
+/// Fleet looks: a crystal half eaten by a depot's beam, a hive frigate with its wings open, a
+/// retrofit in progress and a cloaked fighter fading.
+#[test]
+#[ignore]
+fn fleet_looks() {
+    use hwc_sim::statics::ShipType as T;
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(1, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    for _ in 0..16 {
+        rig.frame(g);
+    }
+    let u = g.world.universe_mut();
+    let p = u.ships.iter().find(|s| s.player == crate::host::PLAYER).map_or(hwc_math::Vector::ZERO, |s| s.posinfo.position);
+    let at = |x: f32, y: f32| hwc_math::Vector::new(p.x + x, p.y + y, p.z);
+    let crystal = hwc_sim::base::create_ship(u, T::dCrystal0, crate::host::PLAYER, at(4000.0, 0.0), Default::default()).expect("crystal");
+    hwc_sim::consume::start(u, crystal, at(3000.0, 0.0), 10.0);
+    let hive = hwc_sim::base::create_ship(u, T::sHiveFrigate, crate::host::PLAYER, at(4000.0, 1800.0), Default::default()).expect("hive");
+    if let hwc_sim::ships::ShipSpec::Hive(h) = &mut u.ships.ship_mut(hive).spec {
+        h.state = 1;
+    }
+    let look = |g: &mut Game, id: hwc_sim::ShipId, d: f32| {
+        let p = g.world.universe().ship(id).expect("ship").posinfo.position;
+        g.world.follow_focus = false;
+        g.world.camera.look_at = Vec3::new(p.x, p.y, p.z);
+        g.world.camera.distance = d;
+    };
+    look(g, crystal, 2500.0);
+    for _ in 0..16 * 5 {
+        rig.frame(g);
+    }
+    assert!(hwc_sim::consume::is_active(g.world.universe(), crystal));
+    rig.shot(g, "30_fleet_crystal_half_eaten");
+    look(g, hive, 1800.0);
+    for _ in 0..8 {
+        rig.frame(g);
+    }
+    rig.shot(g, "31_fleet_hive_wings_open");
+}
+
 #[test]
 #[ignore]
 fn mission_seven_slipgates() {

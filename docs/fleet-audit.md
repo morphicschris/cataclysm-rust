@@ -16,49 +16,40 @@ How it was checked:
 * `crates/hwc-sim/tests/fleet_coverage.rs`: each type with all its upgrades, through attack,
   special, halt and dock. No type panics.
 
-## Simulation gaps
+## Done
 
-- [ ] 1. Beast heavy corvette burst attack: `HeavyCorvetteSpecialTarget` 0x5af8a0, `doBurstFire`
-      0x5afb10, housekeep 0x5afcc0, order changed 0x5afd10, and the burst bullets exploding at the
-      end of their flight (`bullet.rs`). The type has no module at all today.
-- [ ] 2. Somtaaw destroyer missile regeneration: `StandardDestroyerHouseKeep` 0x5c2180.
-- [ ] 3. Crystal harvesting at a depot: `salvDepotProcessCrystal` 0x4f4bb0 and the `consume*` code
-      0x45b7b0..0x45c200 (clamp, beam, the crystal dissolving into RUs, `G_CrystalsHarvested`, the
-      two fleet lines). Crystals take the generic convert today.
-- [ ] 4. Beast depot process `salvDepotProcessBeast` 0x4f4a60 (the Beast infects what it salvages)
-      and big gun depot process `salvDepotProcessBigGun` 0x4f4ec0.
-- [ ] 5. The bombing run bombers make on non-ship targets (`GenericInterceptorAttack`).
-- [ ] 6. `salvReleaseTarget` 0x4f5a00 and the rest of `salvHouseKeep` 0x4f7170: the "no depot"
-      messages and letting go of a target for everyone at once. `salvageFlyToDistance` is not read.
-- [ ] 7. Beast carrier does no damage in `fleet_coverage` (12 hidden gimbal guns, the Somtaaw
-      carrier hits for 24000 in the same run): find out why. The gun-opening gate
-      (`madOpenGunsShip`) is not modelled either.
-- [ ] 8. Dreadnought: cannon reclamp after building (`cmDreadnoughtPostBuildReclamp` 0x451260) and
-      `salvCheckDocked` on its clamped ships.
-- [ ] 9. Link and unlink: the animations and the turn are skipped, and the merge happens on a timer
-      (`processLinkToDo`, `processUnlinkToDo`).
+Simulation: the heavy corvette burst attack and `pointExplosionInSpace`, the Somtaaw destroyer's
+missile regeneration, crystal harvesting (`salvDepotProcessCrystal`, `consume*`), the Beast and big
+gun depot processes, `salvReleaseTarget`, `salvHouseKeep`, `salvCheckDocked`, the Dreadnought
+cannon's reclamp.
 
-## Player control gaps
+Player control: Siege Cannon targeting and cancel, Cancel Swarm, the Beast mothership systems
+buttons, module repair priorities, enter slipgate (key and cursor), the Beast voice set.
 
-- [ ] 10. Siege Cannon: the menu item shows but does nothing. `mrBigGunBeginTargeting` 0x560cf0,
-      `mrBigGunCancel` 0x55f1c0, the targeting mode and the keys are missing; the simulation side
-      (`mothership::cl_big_gun`) is there.
-- [ ] 11. Beast mothership systems setting: `lmBeastSystemsSet` 0x49b210 (the launch manager's radio
-      buttons, `mothership::set_damage_mode` has no caller).
-- [ ] 12. Enter slipgate: `mrEnterNearestSlipgate` 0x560f50, `mrDockAtSlipgate` 0x5620f0.
-- [ ] 13. Every command that still ends in "not available yet" in `Game::command`.
-- [ ] 14. A Beast player end to end: build, research, launch manager, speech, parade. Beast is only
-      ever an enemy in the campaign, so none of it has run with a real Beast player.
+Presentation: the crystal's clip plane and beam, the retrofit phase blend, cloak fade, the animations
+the ship modules start (hive wings, sentinels, ramming frigates, leech, carrier doors, the Siege
+Cannon's recoil, ion array, Mimic link).
 
-## Presentation gaps
+Checked and not gaps: bombers' bombing run (`GenericInterceptorAttack` can never reach it: it needs
+a non-ship target of a ship class). The Beast carrier and the processors doing no damage head on in
+`fleet_coverage` is the data: their guns point sideways, with cones that do not reach the nose. `trail2*`,
+`scaleCap`, `badAI` and `fightmanAIP` in the `.shp` files are not read by the original either.
 
-- [ ] 15. Mesh animations started by the game: carrier and mothership doors, dock latch and unlatch
-      (`dockLatchAnimForShipType`), hive open and close, Mimic link, sentinels, ramming frigates
-      (`madLinkIn*` 0x4a0800..0x4a1310). Gun ports and harvesting already play.
-- [ ] 16. Sounds, chatter and trail scaling of the hive and ramming frigates.
-- [ ] 17. The Somtaaw carrier's second trail (`trail2*`).
-- [ ] 18. Ships under the Naggarok's EMP (`rndShipUnderNaggarokEMP` 0x5704d0).
-- [ ] 19. Remaining unread `.shp` keys: `scaleCap`, `badAI`, `fightmanAIP`.
+## Still open
+
+- [ ] Animation timing the simulation should wait for. The original holds the first shot until the
+      guns have opened (`madOpenGunsShip`), docking until a carrier's doors are open
+      (`CarrierDockDoorCheck`), and a link until both animations end. The port has no animation clock
+      in the simulation, so these play without holding anything up. Fixing it needs the `.mad`
+      durations in the statics. It does not break lockstep, as every peer runs the same code.
+- [ ] Unlink: the split animation and turn are skipped (`processUnlinkToDo`).
+- [ ] The sounds and chatter of hive and ramming animations (`madLinkInUpdateMeshAnimations` plays
+      them with the animation).
+- [ ] Ships under the Naggarok's EMP (`rndShipUnderNaggarokEMP` 0x5704d0). Campaign only.
+- [ ] Salvage messages in `mrSpecialTargetOrder` when nothing can be salvaged, if any are missing.
+- [ ] A Beast player seen on screen: everything is tested without one (`a_beast_player_builds_the_whole_fleet`,
+      the Beast screens in the `hwc-ui` tests), but the campaign never runs one, so the first real look
+      comes with the skirmish setup.
 
 Not gaps: `*_Save/_Load/_Fix/_PreFix` (the port saves differently), `MCV*` wrappers, and helper
 functions the Rust inlines. The AI player for skirmish is multiplayer work and is left for then.

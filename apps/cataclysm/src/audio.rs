@@ -367,6 +367,14 @@ impl Audio {
 
     /// The speech queue's checks the simulation cannot make (`speechEventQueue`): the Voice
     /// options, the playing single-player line (no chatter meanwhile).
+    /// The player's race picks the voice set and the interface sounds (`soundEventSetActorFlag`).
+    pub fn set_player_race(&mut self, beast: bool) {
+        let race = if beast { hwc_audio::Race::Beast } else { hwc_audio::Race::Somtaaw };
+        if self.system.race() != race {
+            self.system.set_race(race);
+        }
+    }
+
     pub fn speech_gate(&self) -> hwc_sim::speech::SpeechGate {
         hwc_sim::speech::SpeechGate {
             chatter: self.voices.chatter,

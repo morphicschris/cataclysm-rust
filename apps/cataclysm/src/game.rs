@@ -1789,6 +1789,10 @@ impl Game {
 
     /// Plays the speech the orders and ships asked for since the last frame.
     fn ship_speech(&mut self, audio: &mut Option<Audio>) {
+        if let Some(a) = audio.as_mut() {
+            let beast = self.world.universe().players.get(PLAYER).is_some_and(|p| p.race == hwc_sim::statics::ShipRace::Beast);
+            a.set_player_race(beast);
+        }
         // The simulation's status messages (`moMessageAdd`), such as the Leech's
         // "nonviable target" note.
         let notes = std::mem::take(&mut self.world.universe_mut().messages);

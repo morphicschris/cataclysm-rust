@@ -150,6 +150,91 @@ fn infection_look(u: &Universe, s: &hwc_sim::object::Ship) -> Option<(ShipType, 
     Some((to, infection_progress(now, timer, duration)))
 }
 
+/// The `madAnimationStart` calls of the ship modules, read from the state the simulation keeps:
+/// `(state seen, animation, flags)` when the state moved on from `last`. The animation is
+/// `usize::MAX` for a state with nothing to start (a ship's first state starts nothing either
+/// unless it is a change from rest).
+fn scripted_anim(u: &Universe, s: &hwc_sim::object::Ship, last: Option<u32>) -> Option<(u32, usize, u32)> {
+    use hwc_render::ANIM_STOP_AT_END;
+    use hwc_sim::ships::{leech, ramming, ShipSpec};
+    const NONE: usize = usize::MAX;
+    let (key, index, flags): (u32, usize, u32) = match &s.spec {
+        // `HiveFrigateHouseKeep`: WingsOpen to launch, WingsClose when they are home.
+        ShipSpec::Hive(h) => {
+            if matches!(h.state, 1..=6) {
+                (1, 0, 0)
+            } else {
+                (0, 1, 0)
+            }
+        }
+        // `SentinelFormationChanged`.
+        ShipSpec::Sentinel(f) => {
+            if f.field_on {
+                (1, 0, 0)
+            } else {
+                (0, 1, ANIM_STOP_AT_END)
+            }
+        }
+        // `RammingFrigateSetState`, `RammingFrigateHouseKeep`, `RammingFrigateCheckBump`: the
+        // afterburners light for the charge and the nose collapses to push.
+        ShipSpec::Ramming(r) => {
+            let was = last.unwrap_or(0) as u8;
+            let now = r.state;
+            let index = if now == was {
+                NONE
+            } else if now == ramming::state::CHARGING {
+                2
+            } else if now == ramming::state::PUSHING {
+                0
+            } else if was == ramming::state::PUSHING {
+                1
+            } else if was == ramming::state::CHARGING {
+                4
+            } else {
+                NONE
+            };
+            (u32::from(now), index, 0)
+        }
+        // `LeechUpdate`, `LeechDetach`.
+        ShipSpec::Leech(l) => {
+            use leech::state::*;
+            match l.state {
+                LATCH | ATTACHED | DRAIN_RUS | DRAIN_HEALTH => (1, 0, 0),
+                DETACH | FULL | DONE | TARGET_SPENT => (2, 1, ANIM_STOP_AT_END),
+                _ => (last.unwrap_or(0), NONE, 0),
+            }
+        }
+        _ => match s.ship_type {
+            // `CarrierHouseKeep`, `CarrierDockDoorCheck`: the doors stand open while a ship uses
+            // the bay.
+            ShipType::sCarrier => {
+                let used = s.base.occupancy.as_ref().is_some_and(|o| o.used_per_type.iter().skip(6).take(2).any(|&c| c != 0));
+                if used {
+                    (1, 0, 0)
+                } else {
+                    (0, 1, 0)
+                }
+            }
+            // `MothershipFireBigGun`: the module's barrel recoils as the shell goes.
+            ShipType::sMothershipBigGun => {
+                let host = s.base.clamp.as_ref().and_then(|c| c.host)?;
+                let gi = hwc_sim::ships::mothership::big_gun_index(u, host)?;
+                let fired = u.ship(host)?.guns.get(gi)?.last_time_fired;
+                (fired.to_bits(), if fired > 0.0 { 0 } else { NONE }, 0)
+            }
+            _ => return None,
+        },
+    };
+    if last == Some(key) {
+        return None;
+    }
+    // A ship at rest starts nothing: only a change from a state it has been seen in does.
+    match last {
+        None if key == 0 => Some((key, NONE, 0)),
+        _ => Some((key, index, flags)),
+    }
+}
+
 /// `rndRenderObject`'s cloak fade (`meshSetFade(5, ..)`): fading in and out by the cloak's level.
 /// The player's own fully cloaked ship is drawn see-through (flag 0x8f18b2).
 fn cloak_fade(s: &hwc_sim::object::Ship) -> f32 {
@@ -189,6 +274,8 @@ struct ShipFx {
     lod: usize,
     tint: ShipTint,
     last_mad: i32,
+    /// What [`scripted_anim`] last asked for.
+    scripted: Option<u32>,
     attacking: bool,
     link_state: u32,
     harvesting: bool,
@@ -790,9 +877,9 @@ impl World {
             }
             let clip = load_mad_clip(&self.src, &def);
             let anims = clip.as_ref().map_or(AnimIds::default(), |c| AnimIds {
-                combat_in: c.find("CombatIn"),
-                combat_out: c.find("CombatOut"),
-                link: c.find("Link"),
+                combat_in: c.find("CombatIn").or_else(|| c.find("Array_Open")),
+                combat_out: c.find("CombatOut").or_else(|| c.find("Array_Close")),
+                link: c.find("Link").or_else(|| c.find("link")),
                 idle_loop: c.find("GravRotate"),
                 harvest_loop: c.find("BladesSpin"),
             });
@@ -1233,6 +1320,7 @@ impl World {
                 lod: 0,
                 tint: ShipTint::default(),
                 last_mad: -1,
+                scripted: None,
                 attacking: false,
                 link_state: 0,
                 harvesting: false,
@@ -1245,6 +1333,13 @@ impl World {
                     if mad >= 0 {
                         fx.anim.play(clip, mad as usize, 0);
                     }
+                }
+                // The animations the ship modules start themselves.
+                if let Some((key, index, flags)) = scripted_anim(u, s, fx.scripted) {
+                    if index != usize::MAX {
+                        fx.anim.play(clip, index, flags);
+                    }
+                    fx.scripted = Some(key);
                 }
                 // Gun ports open when the ship goes into combat and close after.
                 let attacking = s.attack.target.is_some();
