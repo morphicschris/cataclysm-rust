@@ -216,49 +216,45 @@ fn ships_enter_the_slipgates_they_fit() {
     assert_eq!(mr_enter_nearest_slipgate(&mut run.universe, 0, &[acolyte], true), None);
 }
 
-/// A Beast player from scratch, as multiplayer gives one: every buildable Beast type comes out of
-/// the factories, with its research done.
+/// A Beast player from scratch, as multiplayer gives one: with its research done, each type of the
+/// Beast's build table comes out of a mothership.
 #[test]
 fn a_beast_player_builds_the_whole_fleet() {
     use hwc_sim::construction::{build_table, queue_build};
     let Some(d) = data() else { return };
-    let spawns = vec![Spawn { ship_type: ShipType::bMothership, player: 0, position: Vector::new(0.0, 0.0, 0.0) }];
-    let s = Scenario { name: "beast", players: vec![ShipRace::Beast], spawns, orders: Vec::new(), resources: Vec::new(), resource_units: Vec::new() };
-    let mut run = Run::new(d.statics.clone(), d.tweaks.clone(), s).unwrap();
-    let ms = run.ids[0];
     let table = build_table(ShipRace::Beast, true);
-    println!("Beast build table: {table:?}");
     assert!(!table.is_empty(), "the Beast has a build table");
-    run.universe.base.players[0].resource_units = 10_000_000;
-    for tech in 0..hwc_sim::base::NUM_TECHS {
-        hwc_sim::fow::tech_add(&mut run.universe, 0, tech);
-    }
-    for (flag, t) in table.iter().copied() {
-        if flag == 2 {
-            run.universe.base.players[0].acquired[usize::from(t)] = true;
+    let mut failed = Vec::new();
+    for (flag, t) in table.iter().copied().filter(|(f, _)| *f != 0) {
+        let t = ShipType::from_index(usize::from(t)).unwrap();
+        let spawns = vec![Spawn { ship_type: ShipType::bMothership, player: 0, position: Vector::new(0.0, 0.0, 0.0) }];
+        let s = Scenario { name: "beast", players: vec![ShipRace::Beast], spawns, orders: Vec::new(), resources: Vec::new(), resource_units: Vec::new() };
+        let mut run = Run::new(d.statics.clone(), d.tweaks.clone(), s).unwrap();
+        let ms = run.ids[0];
+        run.universe.base.players[0].resource_units = 10_000_000;
+        // (A cruiser needs more support than a bare mothership has.)
+        run.universe.base.players[0].su_capacity = 1000;
+        for tech in 0..hwc_sim::base::NUM_TECHS {
+            hwc_sim::fow::tech_add(&mut run.universe, 0, tech);
         }
-    }
-    let mut refused = Vec::new();
-    for (flag, t) in table.iter().copied() {
-        if flag == 0 {
+        if flag == 2 {
+            run.universe.base.players[0].acquired[t.index()] = true;
+        }
+        if queue_build(&mut run.universe, ms, t, 1) == 0 {
+            failed.push((t, "refused"));
             continue;
         }
-        let t = ShipType::from_index(usize::from(t)).unwrap();
-        if queue_build(&mut run.universe, ms, t, 1) == 0 {
-            refused.push(t);
+        let mut built = false;
+        for _ in 0..16 * 600 {
+            run.step();
+            built = run.universe.ships.iter().any(|s| s.ship_type == t && s.special_flags2 & hwc_sim::base::special2::UNDER_CONSTRUCTION == 0);
+            if built {
+                break;
+            }
+        }
+        if !built {
+            failed.push((t, "never finished"));
         }
     }
-    // A ship built outside the hull waits for the build point: one at a time.
-    for _ in 0..12 {
-        run.run(16 * 240);
-        // (Once the fleet has used up the support units a ship needs, it is rightly refused.)
-        let u = &mut run.universe;
-        refused.retain(|&t| hwc_sim::construction::player_has_support_units_for_type(u, t, 0, 0) && queue_build(u, ms, t, 1) == 0);
-    }
-    run.run(16 * 240);
-    assert!(refused.is_empty(), "never accepted: {refused:?}");
-    let built: Vec<_> = run.universe.ships.iter().filter(|s| s.player == 0).map(|s| s.ship_type).collect();
-    let missing: Vec<_> = table.iter().filter(|(f, _)| *f != 0).filter_map(|(_, t)| ShipType::from_index(usize::from(*t))).filter(|t| !built.contains(t) && hwc_sim::construction::player_has_support_units_for_type(&run.universe, *t, 0, 0)).collect();
-    assert!(missing.is_empty(), "never built: {missing:?}");
-    println!("built {built:?}");
+    assert!(failed.is_empty(), "{failed:?}");
 }
