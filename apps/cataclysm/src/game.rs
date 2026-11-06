@@ -748,6 +748,12 @@ impl Game {
         }
     }
 
+    /// Campaign mission 15 (`DAT_008e9b4c` and `DAT_00aaf900 == 15`), whose slipgates are out of
+    /// bounds.
+    fn on_mission_15(&self) -> bool {
+        self.world.mission() == 15
+    }
+
     /// `mrBigGunBeginTargeting` (0x560cf0) and `MothershipBigGunBeginTargeting` (0x5b6ae0): the
     /// player's mothership alone is selected and, when its Siege Cannon has recharged, the move
     /// plate opens in the sensors manager to pick the point to fire at.
@@ -1019,6 +1025,15 @@ impl Game {
             }
             (PointerAction::Attack, Hover::Ship(t)) => {
                 self.attack(&[t]);
+                true
+            }
+            (
+                PointerAction::SlipgateSmall | PointerAction::SlipgateMedium | PointerAction::SlipgateLarge,
+                Hover::Ship(t),
+            ) => {
+                let sel = self.selection.clone();
+                let mission_15 = self.on_mission_15();
+                hwc_sim::player_orders::mr_dock_at_slipgate(self.world.universe_mut(), &sel, t, mission_15);
                 true
             }
             (PointerAction::Dock, Hover::Ship(t)) => {
@@ -2047,6 +2062,7 @@ impl Game {
         if sel.is_empty() {
             return;
         }
+        let mission_15 = self.on_mission_15();
         let u = self.world.universe_mut();
         match c {
             Command::Move => self.start_move(audio),
@@ -2088,6 +2104,9 @@ impl Game {
                 }
             }
             Command::Upgrade => hwc_sim::player_orders::mr_upgrade_ships(u, &sel),
+            Command::EnterSlipgate => {
+                hwc_sim::player_orders::mr_enter_nearest_slipgate(u, PLAYER, &sel, mission_15);
+            }
             Command::BigGun => self.begin_big_gun(audio),
             // `mrBigGunCancel`.
             Command::CancelBigGun => {

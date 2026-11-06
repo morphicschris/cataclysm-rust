@@ -1107,6 +1107,98 @@ pub fn mr_mimic_disguise_as_target(u: &mut Universe, selection: &[ShipId], targe
     }
 }
 
+/// `moMessageAdd(.., 0xff0000ff)`.
+const RED_MESSAGE: [u8; 4] = [255, 0, 0, 255];
+
+/// `canShipClassUseSlipgate`: small gates take strike craft, medium ones also the frigates and
+/// destroyers, large ones the rest.
+fn class_fits_slipgate(class: Option<crate::statics::ShipClass>, gate: ShipType) -> bool {
+    let size = match gate {
+        ShipType::dSlipgateSmall => 1,
+        ShipType::dSlipgateMedium => 2,
+        ShipType::dSlipgateLarge => 3,
+        _ => 0,
+    };
+    match class.map(|c| c.index()) {
+        Some(0 | 9) => size > 2,
+        Some(1 | 2 | 3 | 4 | 7) => size > 1,
+        Some(5 | 6 | 8 | 10 | 11) => size != 0,
+        _ => size > 3,
+    }
+}
+
+/// `makeShipsSlipgateCapable(selection, gate, TRUE)`: the ships, not disabled, that fit the gate.
+fn slipgate_capable(u: &Universe, sel: &[ShipId], gate: ShipType) -> Vec<ShipId> {
+    sel.iter()
+        .copied()
+        .filter(|&id| {
+            u.ships.get(id).is_some_and(|s| {
+                !s.base.disabled && class_fits_slipgate(u.statics.ship(s.ship_type).and_then(|st| st.ship_class), gate)
+            })
+        })
+        .collect()
+}
+
+fn player_explored(u: &Universe, player: usize, p: hwc_math::Vector) -> bool {
+    u.fog.grids.get(player).and_then(|g| g.as_ref()).is_none_or(|g| g.point_is_explored(p))
+}
+
+/// `mrEnterNearestSlipgate` (0x560f50): the ships that fit dock into the explored slipgate nearest
+/// their middle. Returns the gate. `mission_15`: that mission's slipgates are not for this key.
+pub fn mr_enter_nearest_slipgate(u: &mut Universe, player: usize, sel: &[ShipId], mission_15: bool) -> Option<ShipId> {
+    let n = sel.len() as f32;
+    let mut mid = hwc_math::Vector::ZERO;
+    for s in sel.iter().filter_map(|&id| u.ships.get(id)) {
+        mid = hwc_math::Vector::new(mid.x + s.posinfo.position.x, mid.y + s.posinfo.position.y, mid.z + s.posinfo.position.z);
+    }
+    let mid = hwc_math::Vector::new(mid.x / n, mid.y / n, mid.z / n);
+    let mut best: Option<(f32, ShipId, ShipType)> = None;
+    if !mission_15 {
+        for s in u.ships.iter() {
+            let caps = u.statics.ship(s.ship_type).map_or(0, |st| st.capability_flags);
+            if caps & crate::dock::CAP_SLIPGATE == 0 || !player_explored(u, player, s.posinfo.position) {
+                continue;
+            }
+            let p = s.posinfo.position;
+            let d = hwc_math::Vector::new(p.x - mid.x, p.y - mid.y, p.z - mid.z).mag_sq().sqrt();
+            if best.is_none_or(|b| d < b.0) {
+                best = Some((d, s.id, s.ship_type));
+            }
+        }
+    }
+    let Some((_, gate, kind)) = best else {
+        u.messages.push(crate::speech::Message { key: "strNoSlipgateFoundNotify", colour: RED_MESSAGE });
+        return None;
+    };
+    let fit = slipgate_capable(u, sel, kind);
+    if fit.is_empty() {
+        return None;
+    }
+    crate::dock::cl_dock(u, &fit, crate::dock::purpose::SLIPGATE, Some(gate));
+    Some(gate)
+}
+
+/// `mrDockAtSlipgate` (0x5620f0): the ships that fit go in; the others say why.
+pub fn mr_dock_at_slipgate(u: &mut Universe, sel: &[ShipId], gate: ShipId, mission_15: bool) {
+    let Some(kind) = u.ships.get(gate).map(|g| g.ship_type) else { return };
+    let fit = slipgate_capable(u, sel, kind);
+    if !fit.is_empty() {
+        crate::dock::cl_dock(u, &fit, crate::dock::purpose::SLIPGATE, Some(gate));
+    }
+    if fit.len() == sel.len() {
+        return;
+    }
+    let too_big = sel.iter().filter_map(|&id| u.ships.get(id)).any(|s| !class_fits_slipgate(u.statics.ship(s.ship_type).and_then(|st| st.ship_class), kind));
+    let key = if mission_15 {
+        "strNotAllShipsCanEnterSlipgateBecauseOfMission15"
+    } else if too_big {
+        "strNotAllShipsCanEnterSlipgate"
+    } else {
+        "strNotAllShipsCanEnterSlipgateBusy"
+    };
+    u.messages.push(crate::speech::Message { key, colour: RED_MESSAGE });
+}
+
 /// `MakeShipsSpecialTargetCapable(selection, 0, TRUE)` (0x50d4d0): ships with a special-target
 /// routine that are not disabled.
 pub fn special_target_capable(u: &Universe, list: &mut Vec<ShipId>) {

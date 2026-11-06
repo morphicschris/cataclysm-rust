@@ -187,3 +187,78 @@ fn a_big_gun_unit_goes_into_the_depot_and_is_counted() {
     assert!(run.universe.ships.get(target).is_none(), "the unit is gone, not converted");
     assert_eq!(run.universe.base.stats.ships_salvaged(ShipType::dBigGunUnit, 0), 1);
 }
+
+#[test]
+fn ships_enter_the_slipgates_they_fit() {
+    use hwc_sim::player_orders::{mr_dock_at_slipgate, mr_enter_nearest_slipgate};
+    let Some(d) = data() else { return };
+    let spawns = vec![
+        Spawn { ship_type: ShipType::sAcolyte, player: 0, position: Vector::new(0.0, 0.0, 0.0) },
+        Spawn { ship_type: ShipType::sCarrier, player: 0, position: Vector::new(0.0, 3000.0, 0.0) },
+        Spawn { ship_type: ShipType::dSlipgateSmall, player: 0, position: Vector::new(4000.0, 0.0, 0.0) },
+        Spawn { ship_type: ShipType::dSlipgateLarge, player: 0, position: Vector::new(-9000.0, 0.0, 0.0) },
+    ];
+    let s = Scenario { name: "gates", players: vec![ShipRace::Somtaaw], spawns, orders: Vec::new(), resources: Vec::new(), resource_units: Vec::new() };
+    let mut run = Run::new(d.statics.clone(), d.tweaks.clone(), s).unwrap();
+    let (acolyte, carrier, small, large) = (run.ids[0], run.ids[1], run.ids[2], run.ids[3]);
+    // The nearest gate is the small one, which only the Acolyte fits.
+    assert_eq!(mr_enter_nearest_slipgate(&mut run.universe, 0, &[acolyte, carrier], false), Some(small));
+    assert_eq!(run.universe.ships.ship(acolyte).base.dock_with, Some(small));
+    assert_eq!(run.universe.ships.ship(carrier).base.dock_with, None);
+    // The large one takes them both.
+    mr_dock_at_slipgate(&mut run.universe, &[acolyte, carrier], large, false);
+    assert_eq!(run.universe.ships.ship(carrier).base.dock_with, Some(large));
+    // The small one says the carrier does not fit.
+    run.universe.messages.clear();
+    mr_dock_at_slipgate(&mut run.universe, &[carrier], small, false);
+    assert_eq!(run.universe.messages.first().map(|m| m.key), Some("strNotAllShipsCanEnterSlipgate"));
+    // Mission 15's are out of bounds for the key.
+    assert_eq!(mr_enter_nearest_slipgate(&mut run.universe, 0, &[acolyte], true), None);
+}
+
+/// A Beast player from scratch, as multiplayer gives one: every buildable Beast type comes out of
+/// the factories, with its research done.
+#[test]
+fn a_beast_player_builds_the_whole_fleet() {
+    use hwc_sim::construction::{build_table, queue_build};
+    let Some(d) = data() else { return };
+    let spawns = vec![Spawn { ship_type: ShipType::bMothership, player: 0, position: Vector::new(0.0, 0.0, 0.0) }];
+    let s = Scenario { name: "beast", players: vec![ShipRace::Beast], spawns, orders: Vec::new(), resources: Vec::new(), resource_units: Vec::new() };
+    let mut run = Run::new(d.statics.clone(), d.tweaks.clone(), s).unwrap();
+    let ms = run.ids[0];
+    let table = build_table(ShipRace::Beast, true);
+    println!("Beast build table: {table:?}");
+    assert!(!table.is_empty(), "the Beast has a build table");
+    run.universe.base.players[0].resource_units = 10_000_000;
+    for tech in 0..hwc_sim::base::NUM_TECHS {
+        hwc_sim::fow::tech_add(&mut run.universe, 0, tech);
+    }
+    for (flag, t) in table.iter().copied() {
+        if flag == 2 {
+            run.universe.base.players[0].acquired[usize::from(t)] = true;
+        }
+    }
+    let mut refused = Vec::new();
+    for (flag, t) in table.iter().copied() {
+        if flag == 0 {
+            continue;
+        }
+        let t = ShipType::from_index(usize::from(t)).unwrap();
+        if queue_build(&mut run.universe, ms, t, 1) == 0 {
+            refused.push(t);
+        }
+    }
+    // A ship built outside the hull waits for the build point: one at a time.
+    for _ in 0..12 {
+        run.run(16 * 240);
+        // (Once the fleet has used up the support units a ship needs, it is rightly refused.)
+        let u = &mut run.universe;
+        refused.retain(|&t| hwc_sim::construction::player_has_support_units_for_type(u, t, 0, 0) && queue_build(u, ms, t, 1) == 0);
+    }
+    run.run(16 * 240);
+    assert!(refused.is_empty(), "never accepted: {refused:?}");
+    let built: Vec<_> = run.universe.ships.iter().filter(|s| s.player == 0).map(|s| s.ship_type).collect();
+    let missing: Vec<_> = table.iter().filter(|(f, _)| *f != 0).filter_map(|(_, t)| ShipType::from_index(usize::from(*t))).filter(|t| !built.contains(t) && hwc_sim::construction::player_has_support_units_for_type(&run.universe, *t, 0, 0)).collect();
+    assert!(missing.is_empty(), "never built: {missing:?}");
+    println!("built {built:?}");
+}
