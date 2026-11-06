@@ -117,6 +117,7 @@ pub fn init(u: &mut Universe, id: ShipId) {
         Some(Module::MissileDestroyer) => {
             s.spec = ShipSpec::MissileShip(MissileShipSpec { last_special: -100_000.0, volley_state: volley::BEGIN, ..Default::default() });
         }
+        Some(Module::SDestroyer) => s.spec = ShipSpec::MissileShip(MissileShipSpec::default()),
         Some(Module::MissileCorvette) => {
             s.side_step = Default::default();
             s.spec = ShipSpec::MissileShip(MissileShipSpec { last_special: -100_000.0, ..Default::default() });

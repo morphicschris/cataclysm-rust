@@ -92,6 +92,8 @@ pub enum Module {
     /// The slipgates (`dSlipgateSmall/Medium/Large`).
     Slipgate,
     HeavyCorvette,
+    /// The Somtaaw destroyer (`StandardDestroyer.c`): its missiles come back one at a time.
+    SDestroyer,
     /// Everything else (no ship-specific callbacks beyond the combat routines).
     Generic,
 }
@@ -138,6 +140,7 @@ pub fn module_of(t: ShipType) -> Module {
         kSalCapCorvette | tSalCapCorvette => Module::SalCap,
         dSlipgateSmall | dSlipgateMedium | dSlipgateLarge => Module::Slipgate,
         bHeavyCorvette | kHeavyCorvette => Module::HeavyCorvette,
+        sDestroyer => Module::SDestroyer,
         _ => Module::Generic,
     }
 }
@@ -218,7 +221,7 @@ pub fn parse_statics(stat: &ShipStaticInfo) -> TypeStatics {
         Module::Dfg => TypeStatics::Dfg(dfg::DfgStatics::parse(stat)),
         Module::GravWell => TypeStatics::GravWell(gravwell::GravWellStatics::parse(stat)),
         Module::Minelayer => TypeStatics::Minelayer(minelayer::MinelayerStatics::parse(stat)),
-        Module::MissileCorvette | Module::MissileDestroyer | Module::CruiseMissile => {
+        Module::MissileCorvette | Module::MissileDestroyer | Module::CruiseMissile | Module::SDestroyer => {
             TypeStatics::MissileShip(missile_ships::MissileShipStatics::parse(stat))
         }
         Module::ProximitySensor => TypeStatics::ProximitySensor(proximity::ProximityStatics::parse(stat)),
@@ -278,7 +281,7 @@ pub fn init(u: &mut Universe, id: ShipId) {
         Module::Dfg => dfg::init(u, id),
         Module::GravWell => gravwell::init(u, id),
         Module::Minelayer => minelayer::init(u, id),
-        Module::MissileCorvette | Module::MissileDestroyer | Module::CruiseMissile => missile_ships::init(u, id),
+        Module::MissileCorvette | Module::MissileDestroyer | Module::CruiseMissile | Module::SDestroyer => missile_ships::init(u, id),
         Module::ProximitySensor => proximity::init(u, id),
         Module::NomadMoon => nomad::init(u, id),
         Module::Crystal => crystal::init(u, id),
@@ -487,6 +490,14 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
         Module::HeavyCruiser | Module::Carrier | Module::BeastMothership => beast::housekeep(u, id),
         Module::Worker => worker_repair::housekeep(u, id),
         Module::MissileCorvette | Module::MissileDestroyer => missile_ships::housekeep(u, id),
+        // `StandardDestroyerHouseKeep` (0x5c2180). Destroyers of a saved game older than this
+        // module have no state yet.
+        Module::SDestroyer => {
+            if matches!(u.ships.ship(id).spec, ShipSpec::None) {
+                missile_ships::init(u, id);
+            }
+            missile_ships::housekeep(u, id);
+        }
         Module::Minelayer => minelayer::housekeep(u, id),
         Module::GravWell => gravwell::housekeep(u, id),
         Module::ProximitySensor => proximity::housekeep(u, id),

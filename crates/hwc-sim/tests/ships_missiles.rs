@@ -371,3 +371,19 @@ fn missile_destroyer_volley_and_regeneration() {
     assert!(counts.windows(2).all(|w| w[1] >= w[0] || w[1] + 4 >= w[0]));
     let _ = run;
 }
+
+#[test]
+fn somtaaw_destroyer_regenerates_its_missiles() {
+    let Some(d) = data() else { return };
+    let spawns = vec![Spawn { ship_type: ShipType::sDestroyer, player: 0, position: Vector::new(0.0, 0.0, 0.0) }];
+    let s = Scenario { name: "regen", players: vec![ShipRace::Somtaaw], spawns, orders: Vec::new(), resources: Vec::new(), resource_units: Vec::new() };
+    let mut run = Run::new(d.statics.clone(), d.tweaks.clone(), s).unwrap();
+    let id = run.ids[0];
+    let launcher = run.universe.ships.ship(id).guns.iter().position(|g| g.num_missiles > 0).expect("a launcher");
+    let full = run.universe.ships.ship(id).guns[launcher].num_missiles;
+    run.universe.ships.ship_mut(id).guns[launcher].num_missiles = 0;
+    // MissileLagVolleyTime 12 s, then one every 3 s.
+    run.run(16 * 20);
+    let n = run.universe.ships.ship(id).guns[launcher].num_missiles;
+    assert!(n > 0 && n <= full, "got {n} of {full} back");
+}
