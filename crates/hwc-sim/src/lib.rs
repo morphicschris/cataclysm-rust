@@ -37,6 +37,7 @@ pub mod combat_statics;
 pub mod combat_tweaks;
 pub mod command;
 pub mod construction;
+pub mod consume;
 pub mod damage;
 pub mod disable;
 pub mod dock;

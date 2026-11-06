@@ -92,3 +92,98 @@ fn every_somtaaw_and_beast_type_takes_orders() {
     }
     println!("armed but did no damage: {mute:?}");
 }
+
+/// A depot with workers set to salvage, the target a little way off.
+fn salvage_run(d: &Data, race: ShipRace, depot: ShipType, worker: ShipType, target: ShipType, owner: usize) -> Run {
+    let mut spawns = vec![
+        Spawn { ship_type: depot, player: 0, position: Vector::new(0.0, 0.0, 0.0) },
+        Spawn { ship_type: target, player: owner, position: Vector::new(1500.0, 0.0, 0.0) },
+    ];
+    for i in 0..4 {
+        spawns.push(Spawn { ship_type: worker, player: 0, position: Vector::new(800.0, 200.0 * i as f32, 0.0) });
+    }
+    let orders = vec![(1, Order::Salvage { ships: vec![2, 3, 4, 5], targets: vec![1] })];
+    let s = Scenario {
+        name: "salvage",
+        players: vec![race, ShipRace::Taiidan],
+        spawns,
+        orders,
+        resources: Vec::new(),
+        resource_units: Vec::new(),
+    };
+    let mut run = Run::new(d.statics.clone(), d.tweaks.clone(), s).unwrap();
+    for i in 0..run.ids.len() {
+        let id = run.ids[i];
+        if i != 1 {
+            let t = run.universe.ships.ship(id).ship_type;
+            run.universe.ships.ship_mut(id).upgrade_flags |= hwc_sim::upgrade::type_mask(t);
+        }
+    }
+    run
+}
+
+/// Runs until the depot takes the target in; the slot's state.
+fn until_in_depot(run: &mut Run, ticks: u32) -> bool {
+    let (depot, target) = (run.ids[0], run.ids[1]);
+    for _ in 0..ticks {
+        run.step();
+        let held = run.universe.ships.ship(depot).base.depot.as_ref().is_some_and(|d| d.iter().any(|s| s.ship == Some(target)));
+        if held {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn a_depot_eats_a_crystal_for_its_resources() {
+    let Some(d) = data() else { return };
+    let mut run = salvage_run(d, ShipRace::Somtaaw, ShipType::sCarrier, ShipType::sWorker, ShipType::dCrystal0, 1);
+    let (depot, crystal) = (run.ids[0], run.ids[1]);
+    run.universe.ships.ship_mut(crystal).player = 1;
+    assert!(until_in_depot(&mut run, 16 * 600), "the workers bring the crystal in");
+    let before = run.universe.base.players[0].resource_units;
+    let mut consumed = false;
+    for _ in 0..16 * 15 {
+        run.step();
+        if run.universe.ships.get(crystal).is_none() {
+            break;
+        }
+        consumed |= hwc_sim::consume::is_active(&run.universe, crystal);
+    }
+    assert!(consumed, "a beam eats the crystal");
+    assert!(run.universe.ships.get(crystal).is_none(), "the crystal is gone after ten seconds");
+    assert!(!run.universe.ships.ship(depot).base.depot.as_ref().unwrap().iter().any(|s| s.ship.is_some()), "the slot is free");
+    let got = run.universe.base.players[0].resource_units - before;
+    // The last payment is the one before the beam finishes, as in the original.
+    assert!((5900..=6000).contains(&got), "its resource value, in pieces: {got}");
+}
+
+#[test]
+fn a_beast_depot_infects_what_it_salvages() {
+    let Some(d) = data() else { return };
+    let mut run = salvage_run(d, ShipRace::Beast, ShipType::bCarrier, ShipType::bWorker, ShipType::tStandardFrigate, 1);
+    let target = run.ids[1];
+    run.universe.ships.ship_mut(target).health = 1.0;
+    assert!(until_in_depot(&mut run, 16 * 600), "the workers bring it in");
+    let mut infected = false;
+    for _ in 0..16 * 30 {
+        run.step();
+        match run.universe.ships.get(target) {
+            Some(s) => infected |= s.flags & hwc_sim::object::sof::CRAZY != 0,
+            None => break,
+        }
+    }
+    assert!(infected, "the depot infects it rather than converting it");
+}
+
+#[test]
+fn a_big_gun_unit_goes_into_the_depot_and_is_counted() {
+    let Some(d) = data() else { return };
+    let mut run = salvage_run(d, ShipRace::Somtaaw, ShipType::sCarrier, ShipType::sWorker, ShipType::dBigGunUnit, 1);
+    let target = run.ids[1];
+    assert!(until_in_depot(&mut run, 16 * 600), "the workers bring it in");
+    run.run(16 * 60);
+    assert!(run.universe.ships.get(target).is_none(), "the unit is gone, not converted");
+    assert_eq!(run.universe.base.stats.ships_salvaged(ShipType::dBigGunUnit, 0), 1);
+}

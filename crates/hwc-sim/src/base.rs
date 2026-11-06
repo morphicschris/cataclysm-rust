@@ -574,6 +574,9 @@ pub struct ShipBase {
     /// avoid this one (a towed message pod's depot, once it is coming up to the bay).
     #[serde(default, deserialize_with = "crate::save::added_in_3")]
     pub avoid_exception: Option<ShipId>,
+    /// +0x570..: being eaten by a beam (`consume*`).
+    #[serde(default, deserialize_with = "crate::save::added_in_7")]
+    pub consume: crate::consume::Consume,
     /// +0x618 / +0x61c: salvage notification and depot re-check times.
     pub salvage_notify_time: f32,
     pub salvage_depot_check: f32,
@@ -633,6 +636,7 @@ impl Default for ShipBase {
             prev_cone_normal: Vector::ZERO,
             depot_point: -1,
             avoid_exception: None,
+            consume: Default::default(),
             salvage_notify_time: f32::from_bits(0x6258_d727),
             salvage_depot_check: 0.0,
             slipgate_timer: 0.0,

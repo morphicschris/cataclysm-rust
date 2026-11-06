@@ -509,6 +509,9 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
     if u.ships.get(id).is_some_and(|s| s.base.depot.is_some()) {
         crate::salvage::depot_housekeep(u, id);
     }
+    if crate::consume::is_active(u, id) {
+        crate::consume::update(u, id);
+    }
 }
 
 /// Slot 11, `CustShipRemoveShipReferences`: `gone` is leaving the universe.

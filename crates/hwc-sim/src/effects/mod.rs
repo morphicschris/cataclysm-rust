@@ -172,6 +172,8 @@ pub struct Effects {
     pub options: EffectOptions,
     /// The effect of each bullet (`bullet->effect`, +0x134).
     pub bullet_effect: BTreeMap<BulletId, EffectId>,
+    /// The beam of each ship being consumed (ship +0x594).
+    pub consume_beam: BTreeMap<ShipId, EffectId>,
     /// The hit-effect LOD list of each bullet (`bullet->hitEffect`, +0x130): race and bullet
     /// type of the gun that fired it.
     pub bullet_hit: BTreeMap<BulletId, (usize, usize)>,
@@ -215,6 +217,7 @@ impl Effects {
             tables: data.tables.clone(),
             options: EffectOptions::default(),
             bullet_effect: BTreeMap::new(),
+            consume_beam: BTreeMap::new(),
             bullet_hit: BTreeMap::new(),
             missile_hit: BTreeMap::new(),
             slots: BTreeMap::new(),

@@ -200,6 +200,12 @@ pub fn added_in_6<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Defaul
     added_in(6, d)
 }
 
+/// `#[serde(default, deserialize_with = "crate::save::added_in_7")]` on a field added at
+/// version 7: [`crate::consume::Consume`] on a ship.
+pub fn added_in_7<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
+    added_in(7, d)
+}
+
 fn current<T>(f: impl FnOnce(&Relink) -> T) -> T {
     RELINK.with(|r| f(r.borrow().as_ref().expect("simulation state deserialised outside save::read (no game data to link it to)")))
 }

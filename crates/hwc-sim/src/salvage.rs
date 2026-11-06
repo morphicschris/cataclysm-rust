@@ -3,8 +3,10 @@
 //! has a salvager the group tows the target to the nearest depot (carrier, processor or
 //! mothership of the salvagers' player), which takes it in, waits a retrofit time and converts
 //! it to its player (`univConvertShipToPlayer`). Message pods and buoys are not converted: they
-//! fly into a bay and are deleted (`salvDepotProcessDockIn`). The crystal, Beast and big gun
-//! depot processes are not modelled (those ships take the generic one).
+//! fly into a bay and are deleted (`salvDepotProcessDockIn`). A crystal is eaten by a beam for its
+//! resources (`salvDepotProcessCrystal`), a big gun unit is taken in and deleted
+//! (`salvDepotProcessBigGun`), and at a Beast depot everything else is infected instead of
+//! converted (`salvDepotProcessBeast`).
 
 use hwc_math::fpu::{ftol_i32, ld, st};
 use hwc_math::Vector;
@@ -806,11 +808,17 @@ pub fn depot_housekeep(u: &mut Universe, depot: ShipId) {
             }
             continue;
         }
-        let docks_in = u.ships.get(t).is_some_and(|x| matches!(x.ship_type, ShipType::dMessagePod | ShipType::dBuoy));
-        if docks_in {
-            depot_process_dock_in(u, depot, i);
-        } else {
-            depot_process_generic(u, depot, i);
+        let Some(tt) = u.ships.get(t).map(|x| x.ship_type) else {
+            // `salvDepotRemoveShip`: the ship is gone (a converted ship is a new one).
+            u.ships.ship_mut(depot).base.depot.as_mut().expect("depot")[i] = DepotSlot::default();
+            continue;
+        };
+        match tt {
+            ShipType::dCrystal0 | ShipType::dCrystal1 => depot_process_crystal(u, depot, i),
+            ShipType::dMessagePod | ShipType::dBuoy => depot_process_dock_in(u, depot, i),
+            ShipType::dBigGunUnit => depot_process_big_gun(u, depot, i),
+            _ if u.ships.ship(depot).ship_race == ShipRace::Beast => depot_process_beast(u, depot, i),
+            _ => depot_process_generic(u, depot, i),
         }
     }
 }
@@ -873,6 +881,129 @@ fn depot_process_dock_in(u: &mut Universe, depot: ShipId, i: usize) {
         _ => {}
     }
 }
+
+/// A time as these processes keep it (the slots hold whole seconds from `salvDepotAddShip`, but
+/// the original's own later waits keep the fraction).
+fn slot_time(t: f32) -> i32 {
+    t.to_bits() as i32
+}
+
+fn slot_time_passed(end: i32, now: f32) -> bool {
+    f32::from_bits(end as u32) < now
+}
+
+/// `salvDepotProcessBeast` (0x4f4a60): two seconds after it arrives the depot infects the ship
+/// (it stays in its slot until the infection has replaced it).
+fn depot_process_beast(u: &mut Universe, depot: ShipId, i: usize) {
+    let now = u.total_time_elapsed;
+    let Some(slot) = u.ships.ship(depot).base.depot.as_ref().map(|d| d[i]) else { return };
+    let Some(t) = slot.ship else { return };
+    match slot.state {
+        0 => {
+            let sl = &mut u.ships.ship_mut(depot).base.depot.as_mut().expect("depot")[i];
+            sl.start = slot_time(now);
+            sl.end = slot_time(st(ld(now) + 2.0));
+            sl.state = 1;
+        }
+        1 if slot_time_passed(slot.end, now) => {
+            crate::ships::beast::infect_ship(u, t, depot);
+            u.ships.ship_mut(depot).base.depot.as_mut().expect("depot")[i].state = 2;
+        }
+        _ => {}
+    }
+}
+
+/// `salvDepotProcessBigGun` (0x4f4ec0): after the retrofit time and three seconds more the unit is
+/// counted as salvaged and goes.
+fn depot_process_big_gun(u: &mut Universe, depot: ShipId, i: usize) {
+    let now = u.total_time_elapsed;
+    let Some(slot) = u.ships.ship(depot).base.depot.as_ref().map(|d| d[i]) else { return };
+    let Some(t) = slot.ship else { return };
+    match slot.state {
+        0 => u.ships.ship_mut(depot).base.depot.as_mut().expect("depot")[i].state = 1,
+        1 if ld(slot.end as f32) <= ld(now) => {
+            let sl = &mut u.ships.ship_mut(depot).base.depot.as_mut().expect("depot")[i];
+            sl.start = slot_time(now);
+            sl.end = slot_time(st(ld(now) + 3.0));
+            sl.state = 2;
+        }
+        2 if !slot_time_passed(slot.end, now) && f32::from_bits(slot.end as u32) != now => {}
+        2 => {
+            let tt = u.ships.ship(t).ship_type;
+            let player = u.ships.ship(depot).player;
+            u.base.stats.add_ship_salvaged(tt, player);
+            crate::damage::really_delete_ship(u, t);
+            u.ships.ship_mut(depot).base.depot.as_mut().expect("depot")[i] = DepotSlot::default();
+        }
+        _ => {}
+    }
+}
+
+/// `salvDepotProcessCrystal` (0x4f4bb0): the crystal is clamped to the depot and a beam from the
+/// depot's crystal point eats it over ten seconds (`DAT_008a230c`), paying its resources as it
+/// goes. Then it is gone without the explosion an unprocessed crystal makes.
+fn depot_process_crystal(u: &mut Universe, depot: ShipId, i: usize) {
+    use crate::statics::DockPointType;
+    let Some(slot) = u.ships.ship(depot).base.depot.as_ref().map(|d| d[i]) else { return };
+    let Some(t) = slot.ship else { return };
+    let d = u.ships.ship(depot);
+    let local = u.statics.ship(d.ship_type).and_then(|st| st.dock.as_ref()).and_then(|dk| {
+        dk.points.get(usize::from(dk.first_of_type[DockPointType::CrystalEffect.index()])).map(|p| p.position)
+    });
+    let w = d.rotinfo.coordsys.mul_vec(local.unwrap_or(Vector::ZERO));
+    let p = d.posinfo.position;
+    let at = Vector::new(st(ld(w.x) + ld(p.x)), st(ld(w.y) + ld(p.y)), st(ld(w.z) + ld(p.z)));
+    let player = d.player;
+    let fleet_line = |u: &mut Universe, event: u32| {
+        if player == 0 {
+            crate::speech::queue(u, None, event, -1);
+        }
+    };
+    match slot.state {
+        0 => {
+            crate::clamp::clamp_obj_to_obj(u, t, depot);
+            crate::consume::start(u, t, at, CRYSTAL_CONSUME_TIME);
+            u.ships.ship_mut(depot).base.depot.as_mut().expect("depot")[i].state = 1;
+            if let Some(c) = crate::ships::crystal::spec_mut(u, t) {
+                c.processing = true;
+            }
+            fleet_line(u, 0x2001054);
+        }
+        1 => {
+            let progress = crate::consume::progress(u, t);
+            if 1.0 <= progress {
+                u.ships.ship_mut(depot).base.depot.as_mut().expect("depot")[i].state = 2;
+                return;
+            }
+            let value = match crate::ships::type_statics(u, u.ships.ship(t).ship_type) {
+                crate::ships::TypeStatics::Crystal(c) => c.resource_value,
+                _ => 0,
+            };
+            let left = ftol_i32(ld(value as f32) * (1.0 - progress));
+            let held = crate::ships::crystal::spec(u, t).map_or(left, |c| c.resources);
+            base::add_resources_to_player(u, player, held - left);
+            if let Some(c) = crate::ships::crystal::spec_mut(u, t) {
+                c.resources = left;
+            }
+            crate::consume::set_target(u, t, at);
+        }
+        _ => {
+            if let Some(c) = crate::ships::crystal::spec_mut(u, t) {
+                c.processed = true;
+                c.processing = false;
+            }
+            release_depot_point(u, t, depot);
+            crate::clamp::unclamp(u, t);
+            crate::consume::delete_beam(u, t);
+            crate::damage::really_delete_ship(u, t);
+            u.ships.ship_mut(depot).base.depot.as_mut().expect("depot")[i] = DepotSlot::default();
+            fleet_line(u, 0x2001055);
+        }
+    }
+}
+
+/// `DAT_008a230c`: how long a depot takes to eat a crystal.
+const CRYSTAL_CONSUME_TIME: f32 = 10.0;
 
 /// `salvDepotProcessGeneric` (0x4f4800): after the retrofit time the ship changes owner.
 fn depot_process_generic(u: &mut Universe, depot: ShipId, i: usize) {

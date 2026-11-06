@@ -89,6 +89,7 @@ pub fn spec_mut(u: &mut Universe, id: ShipId) -> Option<&mut CrystalSpec> {
 /// `CrystalDied` (0x5aab60): an unprocessed crystal explodes (`swCreate(3, ...)`), credited
 /// to the player that destroyed it (ship +0x60c: `whoKilledMe` of a player kill, else -1).
 pub fn died(u: &mut Universe, id: ShipId) {
+    crate::consume::delete_beam(u, id);
     if !spec(u, id).is_some_and(|c| !c.processed) {
         return;
     }
