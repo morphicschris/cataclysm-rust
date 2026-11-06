@@ -14,7 +14,7 @@
 //! Swarmer states (`+0x648`, as [`swarmer_state`] reads them): 0 docked, 1 launching, 2 out,
 //! 3 docking, 4 attacking.
 //!
-//! Not reproduced: the open/close animations, speech and chatter (presentation).
+//! The wings open with the launch and close with the recall (animations 0 and 1).
 
 use hwc_math::fpu::{fild_u32, ld, st};
 
@@ -485,6 +485,7 @@ fn close(u: &mut Universe, id: ShipId) {
         if h.open {
             h.open = false;
             hive_effect(u, id, false);
+            crate::mad::start(u, id, 1, 0);
         }
     }
 }
@@ -572,6 +573,7 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
                 if !h.open {
                     h.open = true;
                     hive_effect(u, id, true);
+                    crate::mad::start(u, id, 0, 0);
                 }
             }
         }

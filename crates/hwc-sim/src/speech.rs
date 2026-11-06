@@ -196,6 +196,8 @@ pub fn by_first(u: &mut Universe, selection: &[ShipId], event: u32) {
 pub struct Message {
     pub key: &'static str,
     pub colour: [u8; 4],
+    /// `moMessageAddWithShip`: the ship the focus key goes to.
+    pub ship: Option<ShipId>,
 }
 
 /// Fleet command's enemy-sighting warnings (status, speaker flag 0x1000).

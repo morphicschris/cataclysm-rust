@@ -36,7 +36,7 @@ use hwc_render::trails::{
 use hwc_render::{
     Background, Blend, CameraTweaks, EffectTexture, EngineEffectAssets, FocusShip, GpuBackground,
     GpuShip, MadClip, OrbitCamera, Renderer, Scene, SceneExtras, SceneLighting, ShipAnimator,
-    ShipDef, ShipInstance, ShipModel, ShipRenderState, TeamColors, TeamPaint, ANIM_STOP_AT_END,
+    ShipDef, ShipInstance, ShipModel, ShipRenderState, TeamColors, TeamPaint,
 };
 use hwc_sim::harness::group_centre;
 use hwc_sim::level::LevelState;
@@ -84,18 +84,6 @@ struct Effect {
     explosion: bool,
 }
 
-/// Named animations of a ship type's `.mad` (ship animation numbers).
-#[derive(Debug, Clone, Copy, Default)]
-struct AnimIds {
-    combat_in: Option<usize>,
-    combat_out: Option<usize>,
-    link: Option<usize>,
-    /// Played continuously (the command module's gravity ring).
-    idle_loop: Option<usize>,
-    /// Played while harvesting (the worker's blades).
-    harvest_loop: Option<usize>,
-}
-
 /// A ship type ready to draw.
 struct ShipArt {
     levels: Vec<ShipModel>,
@@ -104,7 +92,6 @@ struct ShipArt {
     gpu: BTreeMap<usize, GpuShip>,
     trail: ShipTrailDef,
     clip: Option<MadClip>,
-    anims: AnimIds,
     /// Per level: which `.mad` path drives each skeleton object.
     bindings: Vec<Vec<Option<usize>>>,
 }
@@ -150,101 +137,15 @@ fn infection_look(u: &Universe, s: &hwc_sim::object::Ship) -> Option<(ShipType, 
     Some((to, infection_progress(now, timer, duration)))
 }
 
-/// The `madAnimationStart` calls of the ship modules, read from the state the simulation keeps:
-/// `(state seen, animation, flags)` when the state moved on from `last`. The animation is
-/// `usize::MAX` for a state with nothing to start (a ship's first state starts nothing either
-/// unless it is a change from rest).
-fn scripted_anim(u: &Universe, s: &hwc_sim::object::Ship, last: Option<u32>) -> Option<(u32, usize, u32)> {
-    use hwc_render::ANIM_STOP_AT_END;
-    use hwc_sim::ships::{leech, ramming, ShipSpec};
-    const NONE: usize = usize::MAX;
-    let (key, index, flags): (u32, usize, u32) = match &s.spec {
-        // `HiveFrigateHouseKeep`: WingsOpen to launch, WingsClose when they are home.
-        ShipSpec::Hive(h) => {
-            if matches!(h.state, 1..=6) {
-                (1, 0, 0)
-            } else {
-                (0, 1, 0)
-            }
-        }
-        // `SentinelFormationChanged`.
-        ShipSpec::Sentinel(f) => {
-            if f.field_on {
-                (1, 0, 0)
-            } else {
-                (0, 1, ANIM_STOP_AT_END)
-            }
-        }
-        // `RammingFrigateSetState`, `RammingFrigateHouseKeep`, `RammingFrigateCheckBump`: the
-        // afterburners light for the charge and the nose collapses to push.
-        ShipSpec::Ramming(r) => {
-            let was = last.unwrap_or(0) as u8;
-            let now = r.state;
-            let index = if now == was {
-                NONE
-            } else if now == ramming::state::CHARGING {
-                2
-            } else if now == ramming::state::PUSHING {
-                0
-            } else if was == ramming::state::PUSHING {
-                1
-            } else if was == ramming::state::CHARGING {
-                4
-            } else {
-                NONE
-            };
-            (u32::from(now), index, 0)
-        }
-        // `LeechUpdate`, `LeechDetach`.
-        ShipSpec::Leech(l) => {
-            use leech::state::*;
-            match l.state {
-                LATCH | ATTACHED | DRAIN_RUS | DRAIN_HEALTH => (1, 0, 0),
-                DETACH | FULL | DONE | TARGET_SPENT => (2, 1, ANIM_STOP_AT_END),
-                _ => (last.unwrap_or(0), NONE, 0),
-            }
-        }
-        _ => match s.ship_type {
-            // `CarrierHouseKeep`, `CarrierDockDoorCheck`: the doors stand open while a ship uses
-            // the bay.
-            ShipType::sCarrier => {
-                let used = s.base.occupancy.as_ref().is_some_and(|o| o.used_per_type.iter().skip(6).take(2).any(|&c| c != 0));
-                if used {
-                    (1, 0, 0)
-                } else {
-                    (0, 1, 0)
-                }
-            }
-            // `MothershipFireBigGun`: the module's barrel recoils as the shell goes.
-            ShipType::sMothershipBigGun => {
-                let host = s.base.clamp.as_ref().and_then(|c| c.host)?;
-                let gi = hwc_sim::ships::mothership::big_gun_index(u, host)?;
-                let fired = u.ship(host)?.guns.get(gi)?.last_time_fired;
-                (fired.to_bits(), if fired > 0.0 { 0 } else { NONE }, 0)
-            }
-            _ => return None,
-        },
-    };
-    if last == Some(key) {
-        return None;
-    }
-    // A ship at rest starts nothing: only a change from a state it has been seen in does.
-    match last {
-        None if key == 0 => Some((key, NONE, 0)),
-        _ => Some((key, index, flags)),
-    }
+/// `rndRenderObject`'s cloak fade (`meshSetFade(5, ..)`): fading in and out by the cloak's level.
+fn cloak_fade(s: &hwc_sim::object::Ship) -> f32 {
+    hwc_sim::cloak::fade_level(s).map_or(1.0, |level| 1.0 - level)
 }
 
-/// `rndRenderObject`'s cloak fade (`meshSetFade(5, ..)`): fading in and out by the cloak's level.
-/// The player's own fully cloaked ship is drawn see-through (flag 0x8f18b2).
-fn cloak_fade(s: &hwc_sim::object::Ship) -> f32 {
-    /// How see-through the player's own cloaked ship is drawn.
-    const OWN_CLOAKED: f32 = 0.35;
-    match hwc_sim::cloak::fade_level(s) {
-        Some(level) => 1.0 - level,
-        None if hwc_sim::cloak::is_cloaked(s) => OWN_CLOAKED,
-        None => 1.0,
-    }
+/// `rndRenderObject` sets `0x8f18b2` for the player's own fully cloaked ship: the materials drop
+/// their textures.
+fn cloak_untextured(s: &hwc_sim::object::Ship) -> bool {
+    s.player == crate::host::PLAYER && hwc_sim::cloak::fade_level(s).is_none() && hwc_sim::cloak::is_cloaked(s)
 }
 
 /// `rndRenderObject`'s lightning state: the ship's flicker is on and within its window (not
@@ -274,11 +175,8 @@ struct ShipFx {
     lod: usize,
     tint: ShipTint,
     last_mad: i32,
-    /// What [`scripted_anim`] last asked for.
-    scripted: Option<u32>,
-    attacking: bool,
-    link_state: u32,
-    harvesting: bool,
+    /// The simulation's animation start last seen.
+    mad_started: u32,
 }
 
 impl Frame {
@@ -333,8 +231,10 @@ struct Item {
     infection: Option<(ShipType, usize, f32)>,
     /// Electric bolts crawl over the hull.
     lightning: bool,
-    /// Opacity (a cloak fading, the player's own cloaked ships).
+    /// Opacity (a cloak fading).
     fade: f32,
+    /// Drawn without textures.
+    untextured: bool,
     /// A depot retrofitting it: the start and end, the type it becomes and that type's colours.
     retrofit: Option<(f32, f32, ShipType, usize)>,
 }
@@ -876,13 +776,6 @@ impl World {
                 r.recolorize_all(&self.team_trails);
             }
             let clip = load_mad_clip(&self.src, &def);
-            let anims = clip.as_ref().map_or(AnimIds::default(), |c| AnimIds {
-                combat_in: c.find("CombatIn").or_else(|| c.find("Array_Open")),
-                combat_out: c.find("CombatOut").or_else(|| c.find("Array_Close")),
-                link: c.find("Link").or_else(|| c.find("link")),
-                idle_loop: c.find("GravRotate"),
-                harvest_loop: c.find("BladesSpin"),
-            });
             self.art.insert(
                 t,
                 ShipArt {
@@ -891,7 +784,6 @@ impl World {
                     gpu: BTreeMap::new(),
                     trail,
                     clip,
-                    anims,
                     bindings: Vec::new(),
                 },
             );
@@ -1320,69 +1212,28 @@ impl World {
                 lod: 0,
                 tint: ShipTint::default(),
                 last_mad: -1,
-                scripted: None,
-                attacking: false,
-                link_state: 0,
-                harvesting: false,
+                mad_started: 0,
             });
             if let Some(clip) = &art.clip {
-                // Dock and harvest animations the simulation asks for (`ship+0x4bc`).
-                let mad = s.base.mad_anim;
-                if mad != fx.last_mad {
-                    fx.last_mad = mad;
-                    if mad >= 0 {
-                        fx.anim.play(clip, mad as usize, 0);
-                    }
-                }
-                // The animations the ship modules start themselves.
-                if let Some((key, index, flags)) = scripted_anim(u, s, fx.scripted) {
-                    if index != usize::MAX {
-                        fx.anim.play(clip, index, flags);
-                    }
-                    fx.scripted = Some(key);
-                }
-                // Gun ports open when the ship goes into combat and close after.
-                let attacking = s.attack.target.is_some();
-                if attacking != fx.attacking {
-                    fx.attacking = attacking;
-                    let a = if attacking {
-                        art.anims.combat_in
-                    } else {
-                        art.anims.combat_out
-                    };
-                    if let Some(a) = a {
-                        let flags = if attacking { 0 } else { ANIM_STOP_AT_END };
-                        fx.anim.play(clip, a, flags);
-                    }
-                }
-                if s.base.link.state != fx.link_state {
-                    fx.link_state = s.base.link.state;
-                    if fx.link_state == 4 {
-                        if let Some(a) = art.anims.link {
-                            fx.anim.play(clip, a, 0);
+                // The simulation keeps the clock (`hwc_sim::mad`); missions and scenes without it
+                // run their own.
+                let sim = s.base.mad.filter(|m| m.started > 0);
+                if let Some(m) = sim {
+                    if m.started != fx.mad_started {
+                        fx.mad_started = m.started;
+                        if m.current >= 0 {
+                            fx.anim.play(clip, m.current as usize, m.flags);
                         }
                     }
-                }
-                let harvesting = s.base.harvest_effect;
-                if harvesting != fx.harvesting {
-                    fx.harvesting = harvesting;
-                    match (harvesting, art.anims.harvest_loop) {
-                        (true, Some(a)) => {
-                            fx.anim.play(clip, a, hwc_render::ANIM_LOOP);
-                        }
-                        (false, Some(a)) if fx.anim.current == Some(a) => fx.anim.stop(),
-                        _ => {}
+                    if m.current < 0 {
+                        fx.anim.stop();
+                    } else if fx.anim.current == Some(m.current as usize) {
+                        fx.anim.time = m.time;
+                        fx.anim.paused = m.paused;
                     }
+                } else {
+                    fx.anim.update(clip, TICK);
                 }
-                if fx.anim.current.is_none() {
-                    if let Some(a) = art.anims.idle_loop {
-                        fx.anim.play(clip, a, hwc_render::ANIM_LOOP);
-                    }
-                }
-                fx.anim.update(clip, TICK);
-                // TODO(render states): carrier doors (DoorsPortOpen/Close) on launch and dock,
-                // Mimic link, Sentinel and hive-frigate animations once the simulation exposes
-                // the states that start them.
             }
             let (_, transform) = Self::transform_of(s);
             // The nozzles go through the objects of the level drawn (`trailUpdate` reads the
@@ -1979,8 +1830,9 @@ impl World {
                 time: now,
                 construction,
                 infection: infection_look(u, s).map(|(t, p)| (t, s.color_scheme, p)),
-                lightning: lightning_on(u, s),
+                lightning: lightning_on(u, s) || self.naggarok_emp(s),
                 fade: cloak_fade(s),
+                untextured: cloak_untextured(s),
                 retrofit: hwc_sim::salvage::retrofit_look(u, id),
             });
             frame.poses.push(pose);
@@ -2016,6 +1868,7 @@ impl World {
                     infection: None,
                     lightning: false,
                     fade: 1.0,
+                    untextured: false,
                     retrofit: None,
                 });
                 frame.poses.push(None);
@@ -2050,6 +1903,7 @@ impl World {
                 infection: None,
                 lightning: false,
                 fade: 1.0,
+                untextured: false,
                 retrofit: None,
             });
             frame.poses.push(None);
@@ -2100,6 +1954,7 @@ impl World {
                     infection: None,
                     lightning: false,
                     fade: 1.0,
+                    untextured: false,
                     retrofit: None,
                 });
                 frame.poses.push(None);
@@ -2282,6 +2137,17 @@ impl World {
         }
     }
 
+    /// `rndShipMovingUnderNaggarokEMP` (0x570480): the Naggarok under way crawls with bolts once
+    /// the script's `G_NaggarokEMP` counts more than the EMPs that have hit it.
+    fn naggarok_emp(&self, s: &hwc_sim::object::Ship) -> bool {
+        s.ship_type == ShipType::dBeastMothership
+            && s.posinfo.velocity.mag_sq() > 0.01
+            && self
+                .mission_run()
+                .and_then(|r| r.var(None, "G_NaggarokEMP"))
+                .is_some_and(|v| (s.disable.emp_count as i64) < i64::from(v))
+    }
+
     /// The ship instances and their render states for a prepared frame.
     pub fn instances<'a>(
         &'a self,
@@ -2337,6 +2203,7 @@ impl World {
                 infection,
                 emp_lightning: item.lightning,
                 fade: item.fade,
+                untextured: item.untextured,
                 phase,
                 ..Default::default()
             });

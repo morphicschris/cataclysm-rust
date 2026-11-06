@@ -145,6 +145,7 @@ pub fn apply_emp(u: &mut Universe, id: ShipId, charges: i32) {
         if !s.disable.emp_shocked {
             u.ships.ship_mut(id).disable.emp_shocked = true;
             crate::ships::emp_shocked(u, id);
+            crate::mad::close_guns(u, id);
         }
         let duration = st(ld(n as f32) * ld(stat.time_shocked_by_emp));
         if u.ships.ship(id).disable.disabled {

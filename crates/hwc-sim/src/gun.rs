@@ -455,6 +455,11 @@ pub fn shoot_guns_at_target(u: &mut Universe, id: ShipId, target: ShipId, range:
     let Some(s) = u.ships.get(id) else { return false };
     let Some(stat) = statics.ship(s.ship_type) else { return false };
     let Some(guns) = stat.guns.as_ref() else { return false };
+    // Guns that open must be open first (`madOpenGunsShip`).
+    if crate::mad::guns_must_open(u, id) {
+        crate::mad::open_guns(u, id);
+        return false;
+    }
     let mut shot = false;
     for (gi, gs) in guns.iter().enumerate() {
         let s = u.ships.ship(id);
@@ -524,6 +529,10 @@ pub fn shoot_guns_at_point(u: &mut Universe, id: ShipId, point: Vector) -> bool 
 
 /// `gunShootGunsAtMultipleTargets` (0x487cb0): each gun fires at its own target.
 pub fn shoot_guns_at_multiple_targets(u: &mut Universe, id: ShipId) -> bool {
+    if crate::mad::guns_must_open(u, id) {
+        crate::mad::open_guns(u, id);
+        return false;
+    }
     let statics = u.statics.clone();
     let Some(s) = u.ships.get(id) else { return false };
     let Some(stat) = statics.ship(s.ship_type) else { return false };

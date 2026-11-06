@@ -1955,6 +1955,86 @@ fn fleet_looks() {
     rig.shot(g, "31_fleet_hive_wings_open");
 }
 
+/// A Beast player on screen, which the campaign never shows: the Mission 1 player turned Beast,
+/// with a Beast mothership and some of its fleet, and its build, research and launch managers.
+#[test]
+#[ignore]
+fn beast_player_look() {
+    use hwc_sim::statics::{ShipRace, ShipType as T};
+    let Some(mut rig) = rig() else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let mut l = rig.loading(1, false);
+    l.loader.play_nislets = false;
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    let mut frames = 0;
+    while g.ui.fleet_intel || frames < 16 * 3 {
+        if g.ui.fleet_intel && frames % 16 == 0 {
+            rig.key(g, 0x1b);
+        }
+        rig.frame(g);
+        frames += 1;
+        assert!(frames < 16 * 600, "the opening intel never ended");
+    }
+    let player = crate::host::PLAYER;
+    let u = g.world.universe_mut();
+    let own: Vec<_> = u.ships.iter().filter(|s| s.player == player).map(|s| s.id).collect();
+    let p = own.first().and_then(|&id| u.ship(id)).map_or(hwc_math::Vector::ZERO, |s| s.posinfo.position);
+    let at = |x: f32, y: f32| hwc_math::Vector::new(p.x + x, p.y + y, p.z);
+    for id in own {
+        hwc_sim::damage::really_delete_ship(u, id);
+    }
+    u.players[player].race = ShipRace::Beast;
+    u.base.players[player].research_table = hwc_sim::base::ResearchTableKind::Beast;
+    // As a multiplayer game sets a Beast player up: its own research table and lab.
+    // (Mission 1's level file excludes the Beast's types; a skirmish level does not.)
+    hwc_sim::level::flag_everything_needed(u);
+    u.single_player = false;
+    hwc_sim::research::init_player(u, player, 0);
+    u.base.players[player].resource_units = 5000;
+    let ms = hwc_sim::base::create_ship(u, T::bMothership, player, at(0.0, 0.0), Default::default()).expect("mothership");
+    u.base.players[player].mothership = Some(ms);
+    for (i, t) in [T::bCarrier, T::bHeavyCruiser, T::bRammingFrigate, T::bHiveFrigate, T::bIonArrayFrigate, T::bHeavyCorvette, T::bACV, T::bAcolyte, T::bWorker]
+        .into_iter()
+        .enumerate()
+    {
+        let x = 3000.0 + 1200.0 * i as f32;
+        hwc_sim::base::create_ship(u, t, player, at(x, 1500.0 * ((i % 3) as f32 - 1.0)), Default::default()).expect("ship");
+    }
+    g.world.follow_focus = false;
+    g.world.camera.look_at = Vec3::new(p.x + 3000.0, p.y, p.z);
+    g.world.camera.distance = 16_000.0;
+    for _ in 0..16 {
+        rig.frame(g);
+    }
+    assert_eq!(g.world.universe().players[player].race, ShipRace::Beast);
+    rig.shot(g, "40_beast_player_fleet");
+    g.selection = vec![ms];
+    rig.key(g, b'B' as u16);
+    for _ in 0..4 {
+        rig.frame(g);
+    }
+    let offered = hwc_sim::level::construction_list(g.world.universe(), ms);
+    assert!(!offered.is_empty(), "the Beast mothership offers ships");
+    rig.shot(g, "41_beast_player_build");
+    rig.key(g, 27);
+    rig.frame(g);
+    rig.key(g, b'R' as u16);
+    for _ in 0..4 {
+        rig.frame(g);
+    }
+    rig.shot(g, "42_beast_player_research");
+    rig.key(g, 27);
+    rig.frame(g);
+    rig.key(g, b'S' as u16);
+    for _ in 0..4 {
+        rig.frame(g);
+    }
+    rig.shot(g, "43_beast_player_launch");
+}
+
 #[test]
 #[ignore]
 fn mission_seven_slipgates() {

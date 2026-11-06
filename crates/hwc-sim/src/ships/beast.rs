@@ -160,6 +160,7 @@ pub fn infect_ship(u: &mut Universe, id: ShipId, infector: ShipId) {
     let Some(stat) = statics.ship(t) else { return };
     let spin = u.tweaks.base.beast_stunned_spin_rate;
     let dur = infect_duration(u, t);
+    crate::mad::stop(u, id);
     let now = u.total_time_elapsed;
     u.ships.ship_mut(id).flags |= sof::DISABLED | sof::CRAZY;
     let r = u.randy.random(RAN_ETG);

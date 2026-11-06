@@ -81,6 +81,8 @@ pub enum SpecialEvent {
     EnemyShipSighted { ship: ShipId, player: usize },
     /// The local player's ship `by` discovered an enemy in unexplored space.
     EnemyDiscovered { by: ShipId, ship: ShipId },
+    /// `soundEventPlay(ship, event, 0)`.
+    ShipSound { ship: ShipId, event: u32 },
     /// A ship-module event for presentation (`ships::Effect`: EMP blasts, field hits, beams...).
     Special { ship: ShipId, effect: crate::ships::Effect },
 }
@@ -479,6 +481,12 @@ impl Universe {
         for &id in &list {
             if self.ships.get(id).is_some_and(|s| s.flags & sof::DEAD == 0) {
                 crate::ships::housekeep(self, id);
+            }
+        }
+        let dt = self.phys_time_elapsed;
+        for &id in &list {
+            if self.ships.get(id).is_some_and(|s| s.flags & sof::DEAD == 0) {
+                crate::mad::update(self, id, dt);
             }
         }
     }

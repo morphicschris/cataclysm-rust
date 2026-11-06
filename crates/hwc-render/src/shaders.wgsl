@@ -30,7 +30,8 @@ struct Object {
     clip_plane: vec4<f32>,
     // x: fade alpha, y: tint enabled, z: clip enabled, w: glow exponent
     params: vec4<f32>,
-    // x: glow darkening offset (-0.15 x glow), y: flash level, z: construction ghost
+    // x: glow darkening offset (-0.15 x glow), y: flash level, z: construction ghost,
+    // w: drawn without textures (the player's own cloaked ships)
     tint: vec4<f32>,
     // Engine glow level per trail slot.
     engine_glow: vec4<f32>,
@@ -284,7 +285,7 @@ fn fs_ship(in: ShipOut, @builtin(front_facing) front_facing: bool) -> @location(
             shade = clamp(shade, vec3<f32>(0.0), vec3<f32>(1.0));
         }
         let spec = highlight(n, in.world, shadow) * (1.0 - in.occlusion);
-        if (material.flags.y < 0.5) {
+        if (material.flags.y < 0.5 || object.tint.w > 0.5) {
             return vec4<f32>(tone(shade + spec), material.diffuse.a * fade);
         }
         if (material.flags.x > 0.5) {
@@ -295,7 +296,7 @@ fn fs_ship(in: ShipOut, @builtin(front_facing) front_facing: bool) -> @location(
         return vec4<f32>(tone(t.rgb * shade + spec * gloss), t.a * material.diffuse.a * fade);
     }
     let shade = select(in.back, in.front, front_facing);
-    if (material.flags.y < 0.5) {
+    if (material.flags.y < 0.5 || object.tint.w > 0.5) {
         return vec4<f32>(shade, material.diffuse.a * fade);
     }
     if (material.flags.x > 0.5) {

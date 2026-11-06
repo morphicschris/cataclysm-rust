@@ -650,6 +650,7 @@ pub fn nav_light_on(t: f32, flash_on: f32, flash_off: f32, start_delay: f32) -> 
 #[derive(Clone, Copy)]
 struct InstanceParams {
     clip_plane: Option<Vec4>,
+    untextured: bool,
     fade: f32,
     tint_enabled: bool,
     tint: [f32; 4],
@@ -664,6 +665,7 @@ impl Default for InstanceParams {
     fn default() -> Self {
         Self {
             clip_plane: None,
+            untextured: false,
             fade: 1.0,
             tint_enabled: false,
             tint: [0.0; 4],
@@ -687,7 +689,7 @@ fn object_uniform(model: Mat4, p: &InstanceParams) -> ObjectUniform {
             f32::from(u8::from(p.clip_plane.is_some())),
             p.exponent,
         ],
-        tint: [p.tint[0], p.tint[1], f32::from(u8::from(p.ghost)), p.tint[3]],
+        tint: [p.tint[0], p.tint[1], f32::from(u8::from(p.ghost)), f32::from(u8::from(p.untextured))],
         engine_glow: p.engine_glow,
         team: p.team,
     }
@@ -1544,6 +1546,7 @@ impl Renderer {
             let tint = &state.tint;
             let base = InstanceParams {
                 clip_plane: state.clip_plane.map(|p| plane_to_world(inst.transform, p)),
+                untextured: state.untextured,
                 fade: state.fade.clamp(0.0, 1.0),
                 tint_enabled: tint.enabled,
                 tint: [-0.15 * tint.glow.clamp(0.0, 1.0), tint.flash, 0.0, 0.0],

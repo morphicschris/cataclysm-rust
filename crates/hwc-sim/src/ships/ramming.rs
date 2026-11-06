@@ -15,7 +15,7 @@
 //! (`EGT_RAMMING_FRIGATE_IMPACT_EFFECT`), the vents of its collapsing bow
 //! (`EGT_RAM_VENT`) and the cutting beam while it pushes (`EGT_BULLET_CUTTING_BEAM`).
 //!
-//! Not reproduced: the animations, sounds, chatter and trail scaling of the original
+//! Not reproduced: the chatter and trail scaling of the original
 //! (presentation only; the state changes are reported as [`Effect::State`] events), and the
 //! ray tests against the target's polygon mesh (`meshShipSegmentCollide`: the snap point and the
 //! cutting beam's length), which use the target's collision box here (they test the
@@ -265,7 +265,17 @@ pub fn set_state(u: &mut Universe, id: ShipId, new: u8) {
     let now = u.total_time_elapsed;
     let wait = ram_statics(u, t).wait_after_push;
     crate::effects::delete_slot(u, id, SLOT_CUTTING_BEAM);
+    if old == state::CHARGING && new != state::CHARGING && new != state::PUSHING {
+        crate::mad::start(u, id, 4, 0);
+    }
+    if new == state::CHARGING && old != state::CHARGING {
+        crate::mad::start(u, id, 2, 0);
+    }
+    if new == state::PUSHING && old != state::PUSHING {
+        crate::mad::start(u, id, 0, 0);
+    }
     if old == state::PUSHING && new != state::PUSHING {
+        crate::mad::start(u, id, 1, 0);
         crate::clamp::unclamp(u, id);
         if let Some(r) = spec_mut(u, id) {
             r.recover_timer.start(now, wait);

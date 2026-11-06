@@ -188,8 +188,7 @@ pub fn restore_after_unlink(u: &mut Universe, id: ShipId, state: i32) {
 fn link_launch_ready(u: &Universe, id: ShipId) -> bool {
     let Some(a) = spec(u, id) else { return false };
     let Some(s) = u.ships.get(id) else { return false };
-    // (The pod animation is always finished here.)
-    is_link_acolyte(s.ship_type) && !a.pods_folded && a.link_attack && has_link_missiles(u, id)
+    is_link_acolyte(s.ship_type) && !a.pods_folded && crate::mad::finished(u, id) && a.link_attack && has_link_missiles(u, id)
 }
 
 /// Both launchers fire their link missile at `target` when ready.
@@ -206,7 +205,7 @@ fn launch_link_missiles(u: &mut Universe, id: ShipId, target: ShipId) {
 pub fn fire(u: &mut Universe, id: ShipId, target: ShipId) {
     let Some(t) = u.ships.get(id).map(|s| s.ship_type) else { return };
     let folded = spec(u, id).is_none_or(|a| a.pods_folded);
-    if t != ShipType::dAcolyte || !folded {
+    if t != ShipType::dAcolyte || (!folded && crate::mad::finished(u, id)) {
         crate::attack::interceptor_fire(u, id, target);
     }
     if link_launch_ready(u, id) {
@@ -327,6 +326,11 @@ fn pods_update(u: &mut Universe, id: ShipId) {
         a.pods_folded = !attacking;
         a.pods_opened = attacking;
         a.pod_change_pending = false;
+        if attacking {
+            crate::mad::start(u, id, 0, 0);
+        } else {
+            crate::mad::start(u, id, 1, crate::mad::STOP_AT_END);
+        }
         return;
     }
     let d = pod_delay(u, if attacking { 0.0 } else { 2.0 });

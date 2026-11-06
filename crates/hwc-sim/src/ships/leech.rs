@@ -429,6 +429,7 @@ fn detach(u: &mut Universe, id: ShipId) {
     }
     if l(u, id).latch_open {
         l(u, id).latch_open = false;
+        crate::mad::start(u, id, 1, crate::mad::STOP_AT_END);
     }
     crate::clamp::unclamp(u, id);
 }
@@ -513,6 +514,7 @@ fn reached(u: &Universe, id: ShipId, dest: Vector, bounds: f32) -> bool {
 fn open_latch_near(u: &mut Universe, id: ShipId, dest: Vector) {
     if !l(u, id).latch_open && reached(u, id, dest, 50.0) {
         l(u, id).latch_open = true;
+        crate::mad::start(u, id, 0, 0);
     }
 }
 
@@ -735,6 +737,7 @@ fn update(u: &mut Universe, id: ShipId, targets: &[ShipId], start: u8) -> bool {
             let tpos = u.ships.ship(target).posinfo.position;
             if l(u, id).latch_open && reached(u, id, tpos, p.min_dist) {
                 l(u, id).latch_open = false;
+                crate::mad::start(u, id, 1, crate::mad::STOP_AT_END);
             }
             if !reached(u, id, dest, st(ld(p.min_dist) * 0.2)) {
                 return false;
@@ -773,7 +776,10 @@ fn update(u: &mut Universe, id: ShipId, targets: &[ShipId], start: u8) -> bool {
         }
         state::DONE | state::DONE2 => {
             remember_target(u, id);
-            l(u, id).latch_open = false;
+            if l(u, id).latch_open {
+                l(u, id).latch_open = false;
+                crate::mad::start(u, id, 1, crate::mad::STOP_AT_END);
+            }
             release_point(u, id);
             let s = u.ships.ship_mut(id);
             s.flags &= !sof::NO_BUMPS;
@@ -845,7 +851,7 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
     let n = u.leech_note;
     if u.ships.ship(id).player == u.chatter.local_player && n.due != 0.0 && n.due < now {
         if n.none_found && !n.found {
-            u.messages.push(crate::speech::Message { key: "strLEECHCANTLEECH", colour: NOTE_COLOUR });
+            u.messages.push(crate::speech::Message { key: "strLEECHCANTLEECH", colour: NOTE_COLOUR, ship: None });
         }
         u.leech_note = LeechNote { quiet_until: st(ld(now) + 2.0), ..LeechNote::default() };
     }

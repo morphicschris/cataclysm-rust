@@ -139,6 +139,7 @@ fn until_in_depot(run: &mut Run, ticks: u32) -> bool {
 fn a_depot_eats_a_crystal_for_its_resources() {
     let Some(d) = data() else { return };
     let mut run = salvage_run(d, ShipRace::Somtaaw, ShipType::sCarrier, ShipType::sWorker, ShipType::dCrystal0, 1);
+    run.universe.base.options.flags |= 0x20;
     let (depot, crystal) = (run.ids[0], run.ids[1]);
     run.universe.ships.ship_mut(crystal).player = 1;
     assert!(until_in_depot(&mut run, 16 * 600), "the workers bring the crystal in");
@@ -162,7 +163,7 @@ fn a_depot_eats_a_crystal_for_its_resources() {
 #[test]
 fn a_beast_depot_infects_what_it_salvages() {
     let Some(d) = data() else { return };
-    let mut run = salvage_run(d, ShipRace::Beast, ShipType::bCarrier, ShipType::bWorker, ShipType::tStandardFrigate, 1);
+    let mut run = salvage_run(d, ShipRace::Beast, ShipType::bCarrier, ShipType::bWorker, ShipType::sMultiBeamFrigate, 1);
     let target = run.ids[1];
     run.universe.ships.ship_mut(target).health = 1.0;
     assert!(until_in_depot(&mut run, 16 * 600), "the workers bring it in");
@@ -257,4 +258,114 @@ fn a_beast_player_builds_the_whole_fleet() {
         }
     }
     assert!(failed.is_empty(), "{failed:?}");
+}
+
+#[test]
+fn every_animated_type_loads_its_animations() {
+    let Some(d) = data() else { return };
+    for t in [ShipType::sWorker, ShipType::bWorker, ShipType::sCarrier, ShipType::sAcolyte, ShipType::sLeech, ShipType::bIonArrayFrigate, ShipType::sSentinel, ShipType::sHiveFrigate] {
+        let m = d.statics.ship(t).and_then(|s| s.mad.as_ref());
+        assert!(m.is_some(), "{t:?} has no animations");
+    }
+    let ion = d.statics.ship(ShipType::bIonArrayFrigate).and_then(|s| s.mad.as_ref()).unwrap();
+    assert_eq!(ion.gun_open.len(), 1, "the ion array's guns open");
+    assert!(ion.start_placed.is_some());
+    let w = d.statics.ship(ShipType::sWorker).and_then(|s| s.mad.as_ref()).unwrap();
+    assert_eq!(w.remap.as_ref().map(Vec::len), Some(6));
+    assert!(w.remap.as_ref().unwrap().iter().all(|&i| i >= 0), "{:?}", w.remap);
+}
+
+fn one_run(d: &Data, race: ShipRace, spawns: Vec<Spawn>, orders: Vec<(u32, Order)>) -> Run {
+    let s = Scenario { name: "one", players: vec![race, ShipRace::Taiidan], spawns, orders, resources: Vec::new(), resource_units: Vec::new() };
+    Run::new(d.statics.clone(), d.tweaks.clone(), s).unwrap()
+}
+
+/// The ion array frigate's guns open before its first shot, and close when it stops attacking.
+#[test]
+fn ion_array_guns_open_before_they_fire() {
+    use hwc_sim::mad::gun;
+    let Some(d) = data() else { return };
+    let spawns = vec![
+        Spawn { ship_type: ShipType::bIonArrayFrigate, player: 0, position: Vector::new(0.0, 0.0, 0.0) },
+        Spawn { ship_type: ShipType::tResourceCollector, player: 1, position: Vector::new(2000.0, 0.0, 0.0) },
+    ];
+    let orders = vec![(1, Order::Attack { ships: vec![0], targets: vec![1] }), (16 * 40, Order::Halt { ships: vec![0] })];
+    let mut run = one_run(d, ShipRace::Beast, spawns, orders);
+    let id = run.ids[0];
+    let (mut opening, mut fired_while_shut, mut fired) = (false, false, false);
+    for _ in 0..16 * 39 {
+        run.step();
+        let s = run.universe.ships.ship(id);
+        let state = s.base.mad.map_or(0, |m| m.gun_state);
+        opening |= state == gun::OPENING;
+        let shot = s.guns.iter().any(|g| g.last_time_fired > 0.0);
+        fired_while_shut |= shot && !fired && state != gun::OPEN;
+        fired |= shot;
+    }
+    assert!(opening, "the guns open");
+    assert!(fired, "and fire");
+    assert!(!fired_while_shut, "only once open");
+    run.run(16 * 10);
+    let state = run.universe.ships.ship(id).base.mad.map_or(0, |m| m.gun_state);
+    assert!(matches!(state, gun::CLOSING | gun::CLOSED), "they close after, {state}");
+}
+
+/// A ship leaving a Somtaaw carrier's bay waits for the doors, which shut again later.
+#[test]
+fn carrier_doors_open_for_the_bay_and_shut_after() {
+    let Some(d) = data() else { return };
+    let spawns = vec![
+        Spawn { ship_type: ShipType::sCarrier, player: 0, position: Vector::new(0.0, 0.0, 0.0) },
+        Spawn { ship_type: ShipType::sMultiBeamFrigate, player: 0, position: Vector::new(2500.0, 0.0, 0.0) },
+    ];
+    let orders = vec![(1, Order::Dock { ships: vec![1], purpose: hwc_sim::dock::purpose::DOCK, with: Some(0) })];
+    let mut run = one_run(d, ShipRace::Somtaaw, spawns, orders);
+    let carrier = run.ids[0];
+    let (mut opened, mut shut_again) = (false, false);
+    for _ in 0..16 * 180 {
+        run.step();
+        let m = run.universe.ships.ship(carrier).base.mad;
+        let closed = m.is_none_or(|m| m.door_closed);
+        shut_again |= opened && closed;
+        opened |= !closed;
+    }
+    assert!(opened, "the doors open");
+    assert!(shut_again, "and shut after");
+}
+
+/// An ACV unlinks by turning, then two Acolytes play the split side by side and go free, with the
+/// damage the ACV took shared between them.
+#[test]
+fn an_acv_turns_then_splits_into_two_acolytes() {
+    let Some(d) = data() else { return };
+    let spawns = vec![Spawn { ship_type: ShipType::sACV, player: 0, position: Vector::new(0.0, 0.0, 0.0) }];
+    let mut run = one_run(d, ShipRace::Somtaaw, spawns, Vec::new());
+    let acv = run.ids[0];
+    let max = d.statics.ship(ShipType::sACV).unwrap().health.max_health;
+    run.universe.ships.ship_mut(acv).health = max * 0.5;
+    hwc_sim::link::cl_unlink(&mut run.universe, acv);
+    let mut steps = 0;
+    while run.universe.ships.get(acv).is_some() {
+        run.step();
+        steps += 1;
+        assert!(steps < 16 * 60, "the ACV never split");
+    }
+    let parts: Vec<_> = run.universe.ships.iter().filter(|s| s.ship_type == ShipType::sAcolyte).map(|s| s.id).collect();
+    assert_eq!(parts.len(), 2);
+    let pmax = d.statics.ship(ShipType::sAcolyte).unwrap().health.max_health;
+    for &p in &parts {
+        let s = run.universe.ships.ship(p);
+        assert!(s.health < pmax, "shares the damage: {} of {pmax}", s.health);
+        assert_ne!(s.base.link.state, 0, "in the split");
+    }
+    let split_started = hwc_sim::mad::current(&run.universe, parts[0]);
+    assert_eq!(split_started, 3, "plays Unlink");
+    let dist = |r: &Run| (r.universe.ships.ship(parts[0]).posinfo.position - r.universe.ships.ship(parts[1]).posinfo.position).mag_sq().sqrt();
+    let apart = dist(&run);
+    assert!(apart > 0.0);
+    run.run(16 * 4);
+    for &p in &parts {
+        assert_eq!(run.universe.ships.ship(p).base.link.state, 0, "free after the split");
+    }
+    assert!((dist(&run) - apart).abs() < apart, "they stayed side by side until then");
 }

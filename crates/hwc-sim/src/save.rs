@@ -45,7 +45,7 @@ pub const MAGIC: [u8; 8] = *b"HWCSAVE\0";
 /// removed, reordered or retyped). A field added at version `n` is read with `added_in_<n>`
 /// ([`added_in_2`]), so files of older versions still load with the field at its default;
 /// files of a newer version, or older ones whose shape is not known, are refused.
-pub const FORMAT_VERSION: u32 = 7;
+pub const FORMAT_VERSION: u32 = 8;
 
 /// The oldest version still read.
 pub const OLDEST_VERSION: u32 = 1;
@@ -204,6 +204,12 @@ pub fn added_in_6<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Defaul
 /// version 7: [`crate::consume::Consume`] on a ship.
 pub fn added_in_7<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
     added_in(7, d)
+}
+
+/// `#[serde(default, deserialize_with = "crate::save::added_in_8")]` on a field added at
+/// version 8: the mesh animation clock and what a linked ship remembers of its parts.
+pub fn added_in_8<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
+    added_in(8, d)
 }
 
 fn current<T>(f: impl FnOnce(&Relink) -> T) -> T {

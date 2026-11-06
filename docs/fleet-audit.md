@@ -35,21 +35,32 @@ a non-ship target of a ship class). The Beast carrier and the processors doing n
 `fleet_coverage` is the data: their guns point sideways, with cones that do not reach the nose. `trail2*`,
 `scaleCap`, `badAI` and `fightmanAIP` in the `.shp` files are not read by the original either.
 
+## Done in the second pass
+
+- The animation clock is simulation state (`hwc_sim::mad`, `.mad` windows in the statics, save version
+  7). What waits on it now waits as in the original: the ion array frigates' guns open before they
+  fire and close after, a ship leaving a Somtaaw carrier's bay waits for the doors, a worker's jack
+  and the Acolytes' pods run their real lengths. The view draws from it (`World`), so animations and
+  orders cannot disagree. The animations' sounds come from `madAnimSoundTableInit`.
+- Unlink is the full `processUnlinkToDo`: the turn, the two parts side by side playing the split, the
+  second holding station until it ends, the roll, the health and kills since the link shared out, and
+  the parts staying selected.
+- The player's own cloaked ship draws lit without textures (`0x8f18b2`). The Naggarok under way
+  crawls with bolts after `G_NaggarokEMP` (`rndShipMovingUnderNaggarokEMP`).
+- The `mrSpecialTargetOrder` messages: what cannot be salvaged and why, "nothing found" with the
+  ship to focus on, EMP recharging. `salvCanSalvageTarget` also refuses for want of a crystal
+  processor or an infector, and for a type a Beast depot cannot convert.
+- A Beast player on screen: `campaign_shots::beast_player_look` (`--ignored`) shows the fleet and its
+  build, research and systems managers, all with the Beast's own lists and buttons.
+
 ## Still open
 
-- [ ] Animation timing the simulation should wait for. The original holds the first shot until the
-      guns have opened (`madOpenGunsShip`), docking until a carrier's doors are open
-      (`CarrierDockDoorCheck`), and a link until both animations end. The port has no animation clock
-      in the simulation, so these play without holding anything up. Fixing it needs the `.mad`
-      durations in the statics. It does not break lockstep, as every peer runs the same code.
-- [ ] Unlink: the split animation and turn are skipped (`processUnlinkToDo`).
-- [ ] The sounds and chatter of hive and ramming animations (`madLinkInUpdateMeshAnimations` plays
-      them with the animation).
-- [ ] Ships under the Naggarok's EMP (`rndShipUnderNaggarokEMP` 0x5704d0). Campaign only.
-- [ ] Salvage messages in `mrSpecialTargetOrder` when nothing can be salvaged, if any are missing.
-- [ ] A Beast player seen on screen: everything is tested without one (`a_beast_player_builds_the_whole_fleet`,
-      the Beast screens in the `hwc-ui` tests), but the campaign never runs one, so the first real look
-      comes with the skirmish setup.
+Nothing on the list from the original audit. Two things are knowingly left:
+
+- `MadSpecialCaseAnims` (gravity well generators and proximity sensors): those are Kushan and Taiidan
+  ships, not in either fleet, and keep their own opening logic.
+- Beast research and the build list were checked with the Mission 1 level turned Beast. A real
+  skirmish level comes with the multiplayer work.
 
 Not gaps: `*_Save/_Load/_Fix/_PreFix` (the port saves differently), `MCV*` wrappers, and helper
 functions the Rust inlines. The AI player for skirmish is multiplayer work and is left for then.

@@ -1195,6 +1195,17 @@ impl DisguiseTables {
     }
 }
 
+/// An MCV morphing or disguised other than waiting to split (`+0x760` neither 0 nor 8) holds on
+/// before it splits.
+pub fn is_mid_disguise(u: &Universe, id: ShipId) -> bool {
+    u.ships.get(id).is_some_and(|s| s.ship_type == ShipType::sMCV) && !matches!(state_of(u, id), 0 | state::PENDING)
+}
+
+/// A Mimic that has taken a split MCV's waiting disguise (`+0x760 == 8`).
+pub fn is_pending_split_part(u: &Universe, id: ShipId) -> bool {
+    u.ships.get(id).is_some_and(|s| s.ship_type == ShipType::sMimic) && state_of(u, id) == state::PENDING
+}
+
 /// An MCV whose disguise waits for the split (`processUnlinkToDo` copies it to the Mimics).
 pub fn is_pending_split(u: &Universe, id: ShipId) -> bool {
     u.ships

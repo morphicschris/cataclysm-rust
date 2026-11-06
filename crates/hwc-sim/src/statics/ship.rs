@@ -276,6 +276,8 @@ pub struct ShipStaticInfo {
     /// by the per-type `CustShipStaticInit` handlers of the original, which are not reproduced
     /// yet.
     pub custom_entries: Vec<(String, String)>,
+    /// The type's mesh animations (`madStatic`).
+    pub mad: Option<crate::mad::MadStatic>,
     /// Gun-block keywords the gun table does not bind.
     pub unbound_gun_keywords: Vec<String>,
 }
@@ -401,6 +403,7 @@ impl ShipStaticInfo {
             rko_gets_missiles: 0,
             file,
             custom_entries: Vec::new(),
+            mad: None,
             unbound_gun_keywords: Vec::new(),
         }
     }
@@ -692,8 +695,12 @@ pub(crate) fn load_ship(ld: &mut Loader, ship_type: ShipType) -> Option<ShipStat
     // The ship's keyword table, every line in file order (gun-block lines included; the table
     // has no gun keywords).
     let mut in_block = false;
+    let mut mad_entries = Vec::new();
     for e in script.entries() {
         let (key, raw) = (e.key.as_str(), e.raw.as_str());
+        if matches!(key, "NUMBER_OF_ANIMS" | "ANIM" | "BindAnimations" | "MadStartInfo" | "MadGunAnims" | "madGunOpenDamagedHealthThreshold") {
+            mad_entries.push((key.to_owned(), raw.to_owned()));
+        }
         if key.starts_with('{') {
             in_block = true;
         } else if key.starts_with('}') {
@@ -709,6 +716,8 @@ pub(crate) fn load_ship(ld: &mut Loader, ship_type: ShipType) -> Option<ShipStat
         }
     }
 
+    let mad_file = ld.src.read(&format!("{dir}{}.mad", ship_type.name()));
+    s.mad = crate::mad::MadStatic::load(&mad_entries, mad_file.as_deref());
     if s.fow_radius == 0.0 {
         ld.warn(format!("{file}: no fowRadius"));
     }

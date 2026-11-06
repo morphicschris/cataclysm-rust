@@ -570,6 +570,29 @@ impl Audio {
         }
     }
 
+    /// The sounds the ship modules play (`soundEventPlay(ship, event, 0)`).
+    pub fn ship_sounds(&mut self, u: &Universe) {
+        for e in &u.special_events {
+            let hwc_sim::universe::SpecialEvent::ShipSound { ship, event } = *e else {
+                continue;
+            };
+            let Some(s) = u.ship(ship) else { continue };
+            let Some(st) = u.statics.ship(s.ship_type) else {
+                continue;
+            };
+            let p = s.posinfo.position;
+            let emitter = Emitter {
+                position: [p.x, p.y, p.z],
+                radius: st.header.coll.coll_sphere_size,
+                ship_class: st.ship_class.map_or(0, |c| c.index()),
+                ship_type: s.ship_type.index(),
+                ..Default::default()
+            };
+            let slot = self.ships.entry(ship).or_default();
+            self.system.play_event(Some(&emitter), event, slot);
+        }
+    }
+
     /// Sounds for one universe update's events. `stand_ins`: also the hit and explosion
     /// sounds by ship class (without effects; with them the effect scripts play the
     /// original's).

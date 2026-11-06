@@ -481,6 +481,11 @@ pub fn remove_ship_refs(u: &mut Universe, id: ShipId, gone: ShipId) {
 /// a sentinel formation (or not). Always stays in the formation.
 pub fn formation_changed(u: &mut Universe, id: ShipId, formation_type: u32) -> bool {
     let on = matches!(formation_type, formation_kind::WALL | formation_kind::SPHERE);
+    if on {
+        crate::mad::start(u, id, 0, 0);
+    } else {
+        crate::mad::start(u, id, 1, crate::mad::STOP_AT_END);
+    }
     let s = u.ships.ship_mut(id);
     if on {
         s.special_flags2 |= SPECIAL2_FIELD_FORMATION;

@@ -289,6 +289,9 @@ pub fn init(u: &mut Universe, id: ShipId) {
         Module::Worker => worker_repair::init(u, id),
         Module::Slipgate => slipgate::init(u, id),
         Module::HeavyCorvette => heavy_corvette::init(u, id),
+        Module::ShipModule if u.ships.ship(id).ship_type == ShipType::sMothershipCommand => {
+            crate::mad::start(u, id, 0, crate::mad::LOOP);
+        }
         _ => {}
     }
 }
@@ -511,6 +514,9 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
     }
     if matches!(m, Module::Worker | Module::SalCap | Module::P1StandardCorvette) {
         crate::salvage::housekeep(u, id);
+    }
+    if u.ships.ship(id).ship_type == ShipType::sCarrier {
+        crate::mad::carrier_doors(u, id);
     }
     if crate::consume::is_active(u, id) {
         crate::consume::update(u, id);

@@ -91,6 +91,42 @@ pub fn target_damage_ok(u: &Universe, target: ShipId) -> bool {
     ld(t.health) <= ld(limit) * ld(stat.health.max_health)
 }
 
+/// Why `salvCanSalvageTarget`'s counters say a player's ship cannot take a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The player's depots could not make anything of it.
+    Incompatible,
+    /// No ship of theirs processes crystals.
+    NoCrystalProcessor,
+    /// No ship of theirs infects (Beast).
+    NoInfector,
+}
+
+/// The parts of `salvCanSalvageTarget` (0x4f3290) that say what a target needs of the player.
+pub fn refusal(u: &Universe, player: usize, target: ShipId) -> Option<Refusal> {
+    let t = u.ships.get(target)?;
+    let stat = u.statics.ship(t.ship_type)?;
+    let crystal = crate::ships::crystal::is_crystal(u, target);
+    let race = u.players.get(player)?.race;
+    let owns = |bit: u32, except: Option<ShipType>| {
+        u.ships.iter().any(|s| s.player == player && crate::upgrade::has_upgrade(s, bit) && Some(s.ship_type) != except)
+    };
+    // Crystals are for games with harvesting on (`DAT_0087bfb4 & 0x20`).
+    if crystal && (!owns(0x10_0000, None) || (!u.single_player && u.base.options.flags & 0x20 == 0)) {
+        return Some(Refusal::NoCrystalProcessor);
+    }
+    if race == ShipRace::Beast && !crystal {
+        if !u.single_player && !owns(0x1_0000, Some(ShipType::bHeavyCruiser)) {
+            return Some(Refusal::NoInfector);
+        }
+        let exempt = u.single_player && matches!(t.ship_type, ShipType::dMessagePod | ShipType::dBigGunUnit | ShipType::dBuoy);
+        if !exempt && stat.beast_attacks_required == -1 {
+            return Some(Refusal::Incompatible);
+        }
+    }
+    None
+}
+
 /// `salvCanSalvageTarget` (0x4f3290): the reason counters reduced to the answer.
 pub fn can_salvage_target(u: &Universe, player: usize, target: ShipId) -> bool {
     let Some(t) = u.ships.get(target) else { return false };
@@ -106,6 +142,9 @@ pub fn can_salvage_target(u: &Universe, player: usize, target: ShipId) -> bool {
         return false;
     }
     if !crate::construction::player_has_support_units_for_type(u, t.ship_type, player, 0) {
+        return false;
+    }
+    if refusal(u, player, target).is_some() {
         return false;
     }
     if is_salvager(t.ship_type) && t.base.salvage.target.is_some() {
@@ -252,7 +291,7 @@ fn release_target(u: &mut Universe, ship: ShipId) {
             None
         };
         if let Some(key) = key {
-            u.messages.push(crate::speech::Message { key, colour: [255, 0, 0, 255] });
+            u.messages.push(crate::speech::Message { key, colour: [255, 0, 0, 255], ship: None });
         }
     }
     for s in docked_salvagers(u, t).into_iter().rev() {
@@ -708,11 +747,11 @@ fn special_target(u: &mut Universe, ship: ShipId, _cid: CommandId, targets: &[Sh
                         s.base.salvage.state = 4;
                     }
                     4 => {
-                        if crate::resource::is_worker(s.ship_type) && s.base.mad_anim != 3 {
-                            s.base.mad_anim = 3;
-                            s.base.mad_done = true;
-                        }
                         s.base.salvage.state = 5;
+                        if crate::resource::is_worker(u.ships.ship(ship).ship_type) && crate::mad::current(u, ship) != 3 {
+                            crate::mad::start(u, ship, 3, 0);
+                            crate::mad::pause(u, ship, true);
+                        }
                     }
                     _ => s.base.salvage.state = 7,
                 }

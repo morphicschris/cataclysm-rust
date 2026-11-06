@@ -22,7 +22,27 @@ pub mod state {
     pub const ALIGN: u32 = 3;
     pub const MERGE: u32 = 4;
     pub const PARTNER: u32 = 5;
+    /// Unlinking: the ship turns (+0x654 0).
+    pub const UNLINK_TURN: u32 = 6;
+    /// Unlinking: the second part holds station on the first while they play the split (+0x654 1).
+    pub const UNLINK_SPLIT: u32 = 7;
+    /// Unlinking: the first part, waited on by the second.
+    pub const UNLINK_PART: u32 = 8;
 }
+
+/// What a linked ship remembers of its two parts (ship +0x51c..+0x524, +0x684..+0x6e4): the
+/// unlink shares out what happened to it since.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct LinkedParts {
+    pub merged_health: f32,
+    pub health: [f32; 2],
+    pub kills: [[u32; 12]; 2],
+}
+
+/// How long an unlink's split animation may take (`stopwatchStart(.., 3.0)`).
+const UNLINK_TIME: f32 = 3.0;
+/// `dockUnlinkShipBegin`'s turn accuracy (0x3f7fe5c9).
+const UNLINK_ACCURACY: u32 = 0x3f7f_e5c9;
 
 /// How long the link animation may take before the merge (`stopwatchStart(.., 2.0)`).
 const LINK_TIME: f32 = 2.0;
@@ -181,8 +201,11 @@ pub fn cl_link_ships(u: &mut Universe, selection: &[ShipId]) -> Option<CommandId
 /// disguise). An MCV announces it; for an ACV the mothership's voice does.
 fn dock_unlink_ship_begin(u: &mut Universe, id: ShipId) {
     let s = u.ships.ship_mut(id);
-    s.base.link = base::LinkSpec { partner: Some(id), state: state::NONE, timer: 0.0 };
+    s.base.link = base::LinkSpec { partner: Some(id), state: state::UNLINK_TURN, timer: 0.0 };
     let t = s.ship_type;
+    let cs = s.rotinfo.coordsys;
+    let along = if matches!(t, ShipType::sACV | ShipType::bACV) { 0 } else { 5 };
+    s.base.link_attitude = (crate::dock::direction_vector(2, &cs), crate::dock::direction_vector(along, &cs));
     if matches!(t, ShipType::sACV | ShipType::bACV) {
         crate::speech::queue(u, None, crate::speech::event::UNLINK, t.index() as i32);
     } else {
@@ -274,6 +297,11 @@ pub fn process_link_to_do(u: &mut Universe, cid: CommandId) -> bool {
                     ps.posinfo.position = meet;
                     ps.flags |= sof::NO_BUMPS;
                     base::set_disable_reason(ps, true, 3);
+                    // `madAnimationStart(ship, +0x65c, 0)`: the Link animation (2 on an Acolyte,
+                    // 0 on a Mimic).
+                    let anim = link_animation(u, ship);
+                    crate::mad::start(u, ship, anim, 0);
+                    crate::mad::start(u, p, anim, 0);
                 }
             }
             state::MERGE => {
@@ -319,6 +347,7 @@ fn merge(u: &mut Universe, a: ShipId, b: ShipId) {
     for k in 0..12 {
         n.kills[k] = sa.kills[k] + sb.kills[k];
     }
+    n.base.link_parts = Some(LinkedParts { merged_health: h, health: [sa.health, sb.health], kills: [sa.kills, sb.kills] });
     if let Some(stat) = statics.ship(t) {
         crate::physics::update_obj_rot_info(n, stat);
     }
@@ -335,9 +364,7 @@ pub fn cl_unlink(u: &mut Universe, ship: ShipId) -> bool {
         return false;
     }
     command::remove_ships_from_doing_stuff(u, &[ship]);
-    if u.ships.ship(ship).ship_type == ShipType::sMCV {
-        crate::ships::mimic::mcv_end_disguise(u, ship, true);
-    }
+    dock_unlink_ship_begin(u, ship);
     let mut c = command::new_command_pub(vec![ship]);
     c.order = order::UNLINK;
     let cid = u.commands.add_pub(c);
@@ -345,48 +372,173 @@ pub fn cl_unlink(u: &mut Universe, ship: ShipId) -> bool {
     true
 }
 
-/// `processUnlinkToDo` (0x463bd0), reduced: the two parts appear either side of the linked
-/// ship (the split animation and turn are not modelled).
+/// The Link animation of a type that links.
+fn link_animation(u: &Universe, id: ShipId) -> i32 {
+    match u.ships.get(id).map(|s| s.ship_type) {
+        Some(ShipType::sMimic) => 0,
+        _ => 2,
+    }
+}
+
+/// The part of a linked type and its split animation.
+fn unlink_parts(t: ShipType) -> Option<(ShipType, i32)> {
+    match t {
+        ShipType::sACV => Some((ShipType::sAcolyte, 3)),
+        ShipType::bACV => Some((ShipType::bAcolyte, 3)),
+        ShipType::sMCV => Some((ShipType::sMimic, 1)),
+        _ => None,
+    }
+}
+
+/// `processUnlinkToDo` (0x463bd0). The linked ship turns, the two parts replace it side by side and
+/// play their split, the second keeping station on the first and in the order; then it is free
+/// and given a roll. True when no ship of the command has anything left to do.
 pub fn process_unlink_to_do(u: &mut Universe, cid: CommandId) -> bool {
     let Some(sel) = u.commands.get(cid).map(|c| c.selection.clone()) else { return true };
+    let mut done = true;
+    let now = u.total_time_elapsed;
     for ship in sel {
         let Some(s) = u.ships.get(ship).cloned() else { continue };
-        let part = match s.ship_type {
-            ShipType::sACV => ShipType::sAcolyte,
-            ShipType::sMCV => ShipType::sMimic,
-            ShipType::bACV => ShipType::bAcolyte,
-            _ => continue,
-        };
-        let d = u.statics.ship(part).map_or(50.0, |x| x.link_distance);
-        let up = s.up();
-        let mut parts = Vec::new();
-        for (half, sign) in [1.0f32, -1.0].into_iter().enumerate() {
-            let p = Vector::new(st(ld(s.posinfo.position.x) + ld(sign * d) * ld(up.x)), st(ld(s.posinfo.position.y) + ld(sign * d) * ld(up.y)), st(ld(s.posinfo.position.z) + ld(sign * d) * ld(up.z)));
-            if let Ok(id) = base::create_ship(u, part, s.player, p, CreateOptions::default()) {
-                crate::construction::unit_cap_create_ship(u, id);
-                let n = u.ships.ship_mut(id);
-                n.rotinfo.coordsys = s.rotinfo.coordsys;
-                n.posinfo.velocity = s.posinfo.velocity;
-                if crate::ships::acv::is_acv(s.ship_type) {
-                    let state = crate::ships::acv::link_missile_counter(u, ship, half);
-                    crate::ships::acolyte::restore_after_unlink(u, id, state);
+        match s.base.link.state {
+            state::UNLINK_TURN => {
+                let Some((part, anim)) = unlink_parts(s.ship_type) else { continue };
+                let (want_heading, want_up) = unlink_attitude(&s);
+                let statics = u.statics.clone();
+                let dt = u.phys_time_elapsed;
+                let turned = statics.ship(s.ship_type).is_some_and(|stat| {
+                    aitrack::heading_and_up(u.ships.ship_mut(ship), stat, dt, want_heading, want_up, f32::from_bits(UNLINK_ACCURACY))
+                });
+                done = false;
+                if !turned {
+                    continue;
                 }
-                parts.push(id);
+                // An MCV in the middle of a disguise other than the split it waits for holds on.
+                if crate::ships::mimic::is_mid_disguise(u, ship) {
+                    continue;
+                }
+                split(u, cid, ship, part, anim, now);
             }
+            state::UNLINK_SPLIT => {
+                let Some(first) = s.base.link.partner.filter(|p| u.ships.get(*p).is_some()) else {
+                    leave_unlink(u, cid, ship);
+                    continue;
+                };
+                let f = u.ships.ship(first).clone();
+                let (a, b, c) = (f.rotinfo.coordsys.col(0), f.rotinfo.coordsys.col(1), f.rotinfo.coordsys.col(2));
+                let d = u.statics.ship(s.ship_type).map_or(50.0, |x| x.link_distance);
+                let k = ld(d) + ld(d);
+                let p = f.posinfo.position;
+                let at = Vector::new(st(k * -ld(a.x) + ld(p.x)), st(k * -ld(a.y) + ld(p.y)), st(k * -ld(a.z) + ld(p.z)));
+                let sh = u.ships.ship_mut(ship);
+                sh.rotinfo.coordsys = Matrix::from_cols(neg(a), neg(b), c);
+                base::set_ship_position(u, ship, at);
+                let waiting = (!crate::mad::paused(u, ship) || !crate::mad::paused(u, first))
+                    && ld(now) < ld(s.base.link.timer)
+                    && ld(now) < ld(f.base.link.timer);
+                if waiting {
+                    done = false;
+                    continue;
+                }
+                if crate::ships::mimic::is_pending_split_part(u, ship) {
+                    crate::ships::mimic::start_morph(u, ship);
+                    crate::ships::mimic::start_morph(u, first);
+                }
+                u.ships.ship_mut(first).base.link = base::LinkSpec::default();
+                u.ships.ship_mut(ship).base.link = base::LinkSpec::default();
+                crate::mad::stop(u, ship);
+                crate::mad::stop(u, first);
+                leave_unlink(u, cid, ship);
+                let strength = u.ships.ship(ship).nonstat.rot_strength[4];
+                let torque = if 0.5 <= strength { 0.5 } else { strength };
+                crate::physics::apply_rot(u.ships.ship_mut(ship), torque, 4);
+            }
+            _ => {}
         }
-        // A splitting MCV hands its pending disguise to both Mimics, which morph into it (at
-        // the end of the split animation in the original).
-        if crate::ships::mimic::is_pending_split(u, ship) {
-            for &p in &parts {
-                crate::ships::mimic::copy_disguise_from(u, p, ship);
-            }
-            for &p in &parts {
-                crate::ships::mimic::start_morph(u, p);
-            }
-        }
-        crate::damage::really_delete_ship(u, ship);
     }
-    true
+    done
+}
+
+/// `dockUnlinkShipBegin`'s attitudes, kept fixed while it turns: an ACV rolls onto its side, an MCV
+/// also points its back up.
+fn unlink_attitude(s: &crate::object::Ship) -> (Vector, Vector) {
+    let m = &s.base.link_attitude;
+    (m.0, m.1)
+}
+
+/// Takes a ship out of the unlink order.
+fn leave_unlink(u: &mut Universe, cid: CommandId, ship: ShipId) {
+    if let Some(c) = u.commands.get_mut(cid) {
+        c.selection.retain(|&x| x != ship);
+    }
+    u.ships.ship_mut(ship).command = None;
+}
+
+/// The split: two parts where the linked ship was, one either side, with its share of the health
+/// and kills since the link, tactics, and the link missiles it had left.
+fn split(u: &mut Universe, cid: CommandId, ship: ShipId, part: ShipType, anim: i32, now: f32) {
+    let s = u.ships.ship(ship).clone();
+    let heading = s.rotinfo.coordsys.col(2);
+    let basis = Matrix::coord_sys_from_heading(heading);
+    let (v1, v2) = (basis.col(0), basis.col(1));
+    let d = u.statics.ship(part).map_or(50.0, |x| x.link_distance);
+    let off = Vector::new(st(ld(d) * ld(v1.x)), st(ld(d) * ld(v1.y)), st(ld(d) * ld(v1.z)));
+    let p = s.posinfo.position;
+    let mut made = Vec::new();
+    for (sign, cs) in [(1.0f64, Matrix::from_cols(v1, v2, heading)), (-1.0, Matrix::from_cols(neg(v1), neg(v2), heading))] {
+        let Ok(id) = base::create_ship(u, part, s.player, p, CreateOptions::default()) else { continue };
+        crate::construction::unit_cap_create_ship(u, id);
+        let n = u.ships.ship_mut(id);
+        n.posinfo.velocity = s.posinfo.velocity;
+        n.rotinfo.coordsys = cs;
+        let at = Vector::new(st(sign * ld(off.x) + ld(p.x)), st(sign * ld(off.y) + ld(p.y)), st(sign * ld(off.z) + ld(p.z)));
+        base::set_ship_position(u, id, at);
+        made.push(id);
+    }
+    let [a, b] = made[..] else { return };
+    // A splitting MCV hands its waiting disguise to both Mimics.
+    if crate::ships::mimic::is_pending_split(u, ship) {
+        crate::ships::mimic::copy_disguise_from(u, a, ship);
+        crate::ships::mimic::copy_disguise_from(u, b, ship);
+    }
+    let max = u.statics.ship(s.ship_type).map_or(1.0, |x| x.health.max_health);
+    let pmax = u.statics.ship(part).map_or(1.0, |x| x.health.max_health);
+    let parts = s.base.link_parts.unwrap_or(LinkedParts {
+        merged_health: max,
+        health: [pmax, pmax],
+        kills: [[0; 12]; 2],
+    });
+    let frac = st((ld(s.health) - ld(parts.merged_health)) / ld(max));
+    for (i, &id) in [a, b].iter().enumerate() {
+        let n = u.ships.ship_mut(id);
+        let h = st(ld(frac) * ld(pmax) + ld(parts.health[i]));
+        n.health = if h < 1.0 { 1.0 } else if pmax < h { pmax } else { h };
+        n.tactics = s.tactics;
+        for k in 0..12 {
+            let more = s.kills[k].wrapping_sub(parts.kills[0][k]).wrapping_sub(parts.kills[1][k]) as i32 >> 1;
+            n.kills[k] = parts.kills[i][k].wrapping_add(more as u32);
+        }
+        if crate::ships::acv::is_acv(s.ship_type) {
+            let state = crate::ships::acv::link_missile_counter(u, ship, i);
+            crate::ships::acolyte::restore_after_unlink(u, id, state);
+        }
+        crate::mad::start(u, id, anim, 0);
+    }
+    let until = st(ld(now) + ld(UNLINK_TIME));
+    u.ships.ship_mut(a).base.link = base::LinkSpec { partner: Some(b), state: state::UNLINK_PART, timer: until };
+    u.ships.ship_mut(b).base.link = base::LinkSpec { partner: Some(a), state: state::UNLINK_SPLIT, timer: until };
+    // The second part takes the linked ship's place in the order.
+    if let Some(c) = u.commands.get_mut(cid) {
+        for x in c.selection.iter_mut() {
+            if *x == ship {
+                *x = b;
+            }
+        }
+    }
+    u.ships.ship_mut(ship).command = None;
+    u.ships.ship_mut(b).command = Some(cid);
+    u.base.events.push(BaseEvent::Unlinked { old: ship, a, b });
+    crate::damage::really_delete_ship(u, ship);
+    crate::mad::ship_sound(u, a, 0x835);
 }
 
 /// `FreeLastOrder` for link orders: the pair lets go of each other.

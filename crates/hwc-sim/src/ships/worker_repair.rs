@@ -10,7 +10,7 @@
 //! most damaged module until it is whole; then it picks again. With no targets left the order
 //! is done.
 //!
-//! The worker's jack is a mesh animation in the original (open before the beam starts, closed
+//! The worker's jack is a mesh animation (open before the beam starts, closed
 //! `jackRetractTime` seconds after the last repair). The simulation has no animation clock: an
 //! animation counts as finished one update after it starts.
 //!
@@ -128,10 +128,8 @@ pub fn is_worker(t: ShipType) -> bool {
 }
 
 fn start_anim(u: &mut Universe, id: ShipId, anim: i32) {
-    let w = &mut u.ships.ship_mut(id).worker_repair;
-    w.anim = anim;
-    w.anim_finished = false;
-    w.anim_fresh = true;
+    let flags = if anim == ANIM_CLOSE { crate::mad::STOP_AT_END } else { 0 };
+    crate::mad::start(u, id, anim, flags);
 }
 
 /// `WorkerInit` (0x5c4060), repair part.
@@ -518,14 +516,14 @@ pub fn repair_update(u: &mut Universe, id: ShipId, targets: &mut Vec<ShipId>) ->
         }
         state::OPEN_JACK => {
             move_to_target(u, id);
-            let w = u.ships.ship(id).worker_repair;
-            if w.anim == ANIM_OPEN {
+            let (anim, held) = (crate::mad::current(u, id), crate::mad::paused(u, id));
+            if anim == ANIM_OPEN {
                 u.ships.ship_mut(id).worker_repair.jack_time = st(ld(now) + ld(retract));
-                if w.anim_finished {
+                if held {
                     beam_effect(u, id);
                     u.ships.ship_mut(id).worker_repair.state = state::REPAIRING;
                 }
-            } else if w.anim == -1 || w.anim_finished {
+            } else if anim == -1 || held {
                 start_anim(u, id, ANIM_OPEN);
                 u.ships.ship_mut(id).worker_repair.jack_time = st(ld(now) + ld(retract));
             }
@@ -537,9 +535,9 @@ pub fn repair_update(u: &mut Universe, id: ShipId, targets: &mut Vec<ShipId>) ->
                 crate::shockwave::fx::place(u, e, Some(p), None, None);
             }
             move_to_target(u, id);
-            let w = u.ships.ship(id).worker_repair;
-            let keep_open = if w.anim != ANIM_OPEN {
-                if w.anim == -1 || w.anim_finished {
+            let (anim, held) = (crate::mad::current(u, id), crate::mad::paused(u, id));
+            let keep_open = if anim != ANIM_OPEN {
+                if anim == -1 || held {
                     start_anim(u, id, ANIM_OPEN);
                     true
                 } else {
@@ -609,16 +607,8 @@ pub fn order_changed(u: &mut Universe, id: ShipId) {
 /// repair; the beam starts once in place, or everything stops when the worker is disabled.
 pub fn housekeep(u: &mut Universe, id: ShipId) {
     let now = u.total_time_elapsed;
-    {
-        let w = &mut u.ships.ship_mut(id).worker_repair;
-        // The stand-in animation clock: one update after it started, an animation is over.
-        if w.anim != -1 && !w.anim_fresh {
-            w.anim_finished = true;
-        }
-        w.anim_fresh = false;
-    }
     let w = u.ships.ship(id).worker_repair;
-    if w.jack_time < now && w.anim != ANIM_CLOSE && w.anim_finished {
+    if w.jack_time < now && crate::mad::current(u, id) != ANIM_CLOSE && crate::mad::paused(u, id) {
         start_anim(u, id, ANIM_CLOSE);
         u.ships.ship_mut(id).worker_repair.jack_time = NEVER;
     }

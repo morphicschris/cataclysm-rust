@@ -53,6 +53,7 @@ pub mod kas_host;
 pub mod letterbox;
 pub mod level;
 pub mod link;
+pub mod mad;
 pub mod missile;
 pub mod mission;
 pub mod modules;

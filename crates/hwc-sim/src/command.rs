@@ -1615,6 +1615,7 @@ fn attack_cleanup(u: &mut Universe, cid: CommandId) {
             s.move_from = Vector::ZERO;
         }
         s.special_flags &= !special::ATTACK_SIDESTEP;
+        crate::mad::close_guns(u, id);
     }
 }
 

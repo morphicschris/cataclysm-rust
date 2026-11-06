@@ -529,6 +529,12 @@ fn launch_shell(u: &mut Universe, id: ShipId) {
     if let Some(m) = spec_mut(u, id) {
         m.state = big_gun::RECOVERING;
     }
+    if spec(u, id).is_some_and(|m| m.charge_anim == 1) {
+        let gun = crate::clamp::slaves_of(u, id).into_iter().find(|&g| u.ships.get(g).is_some_and(|x| x.ship_type == ShipType::sMothershipBigGun));
+        if let Some(g) = gun {
+            crate::mad::start(u, g, 0, 0);
+        }
+    }
     u.special_events.push(crate::universe::SpecialEvent::Special { ship: id, effect: super::Effect::BigGunFired });
 }
 

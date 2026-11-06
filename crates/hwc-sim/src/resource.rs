@@ -633,10 +633,12 @@ fn worker_update_beam(u: &mut Universe, ship: ShipId, res: Option<ResourceId>) {
             }
         }
         3 => {
+            let cur = crate::mad::current(u, ship);
+            let held = crate::mad::paused(u, ship);
             let s = u.ships.ship_mut(ship);
-            if s.base.mad_anim == 0 {
+            if cur == 0 {
                 s.base.worker_timer = now;
-                if s.base.mad_done {
+                if held {
                     s.base.harvest_state = match r.kind {
                         ResourceKind::Asteroid(_) => 4,
                         ResourceKind::DustCloud(_) => 5,
@@ -647,10 +649,9 @@ fn worker_update_beam(u: &mut Universe, ship: ShipId, res: Option<ResourceId>) {
                         worker_beam_effect(u, ship, &r, EGT_WORKER_RESOURCE_SOLID);
                     }
                 }
-            } else if s.base.mad_anim == -1 || s.base.mad_done {
-                s.base.mad_anim = 0;
-                s.base.mad_done = true;
+            } else if cur == -1 || held {
                 s.base.worker_timer = now;
+                crate::mad::start(u, ship, 0, 0);
             }
         }
         4..=6 => {

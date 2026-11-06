@@ -763,7 +763,7 @@ impl Game {
         let disabled = self.world.mission_run().is_some_and(|r| r.game.big_gun_disabled);
         let u = self.world.universe_mut();
         if disabled {
-            u.messages.push(hwc_sim::speech::Message { key: "strCantFireBigGun", colour: RED });
+            u.messages.push(hwc_sim::speech::Message { key: "strCantFireBigGun", colour: RED, ship: None });
             return;
         }
         let Some(ms) = u.ships.iter().find(|s| s.player == PLAYER && s.ship_type == ShipType::sMothership).map(|s| s.id) else {
@@ -774,7 +774,7 @@ impl Game {
         }
         self.selection = vec![ms];
         if !mothership::can_begin_targeting(u, ms) {
-            u.messages.push(hwc_sim::speech::Message { key: "strNotifyBigGunCharging", colour: RED });
+            u.messages.push(hwc_sim::speech::Message { key: "strNotifyBigGunCharging", colour: RED, ship: None });
             return;
         }
         let Some((c, size)) = self.plate_centre() else {
@@ -1801,7 +1801,7 @@ impl Game {
             self.messages.push(GameMessage {
                 text,
                 colour: m.colour,
-                ship: None,
+                ship: m.ship.map(crate::host::ui_id),
                 time: self.world.universe().total_time_elapsed,
             });
         }
@@ -2782,6 +2782,7 @@ impl Game {
             }
             if let Some(a) = audio.as_mut() {
                 a.sim_events(self.world.universe(), !self.world.effects_on);
+                a.ship_sounds(self.world.universe());
                 let world = &self.world;
                 a.effect_events(world.universe(), |id| world.remastered_hides_effect(id));
                 a.remastered_sounds(self.world.take_remastered_sounds());
@@ -3124,6 +3125,14 @@ impl Game {
 
     fn after_step(&mut self, audio: &mut Option<Audio>) {
         let u = &self.world.run().universe;
+        // An unlinked ship's parts stay selected and in focus (`processUnlinkToDo`).
+        for e in &u.base.events {
+            if let BaseEvent::Unlinked { old, a, b } = *e {
+                if self.selection.contains(&old) {
+                    self.selection.extend([a, b]);
+                }
+            }
+        }
         self.selection.retain(|&id| selectable(u, id));
         let now = u.total_time_elapsed;
         let mut posts = Vec::new();

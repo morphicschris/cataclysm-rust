@@ -187,6 +187,8 @@ pub struct ShipRenderState<'a> {
     pub fade: f32,
     /// Mesh-space plane; parts of the hull with `plane · (p, 1) < 0` are cut away.
     pub clip_plane: Option<Vec4>,
+    /// Lit but without textures: the player's own cloaked ship.
+    pub untextured: bool,
     pub tint: TintParams,
     /// Beast infection: the infected variant drawn over the hull, scaled by 1.01 and blended
     /// in with the progress (0..1).
@@ -218,6 +220,7 @@ impl Default for ShipRenderState<'_> {
             pose: None,
             fade: 1.0,
             clip_plane: None,
+            untextured: false,
             tint: TintParams::default(),
             infection: None,
             phase: None,

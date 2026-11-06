@@ -578,6 +578,15 @@ pub struct ShipBase {
     /// avoid this one (a towed message pod's depot, once it is coming up to the bay).
     #[serde(default, deserialize_with = "crate::save::added_in_3")]
     pub avoid_exception: Option<ShipId>,
+    /// +0x4bc, +0x300..: the mesh animation clock.
+    #[serde(default, deserialize_with = "crate::save::added_in_8")]
+    pub mad: Option<crate::mad::MadState>,
+    /// +0x660, +0x66c: the heading and up an unlinking ship turns to.
+    #[serde(default, deserialize_with = "crate::save::added_in_8")]
+    pub link_attitude: (Vector, Vector),
+    /// What a linked ship remembers of its two parts, for the unlink.
+    #[serde(default, deserialize_with = "crate::save::added_in_8")]
+    pub link_parts: Option<crate::link::LinkedParts>,
     /// +0x570..: being eaten by a beam (`consume*`).
     #[serde(default, deserialize_with = "crate::save::added_in_7")]
     pub consume: crate::consume::Consume,
@@ -640,6 +649,9 @@ impl Default for ShipBase {
             prev_cone_normal: Vector::ZERO,
             depot_point: -1,
             avoid_exception: None,
+            mad: None,
+            link_parts: None,
+            link_attitude: (Vector::ZERO, Vector::ZERO),
             consume: Default::default(),
             salvage_notify_time: f32::from_bits(0x6258_d727),
             salvage_depot_check: 0.0,
@@ -705,6 +717,8 @@ pub enum BaseEvent {
     Salvaged { ship: ShipId, player: usize },
     /// Two ships linked into one.
     Linked { new_ship: ShipId },
+    /// A linked ship split into two.
+    Unlinked { old: ShipId, a: ShipId, b: ShipId },
 }
 
 impl BaseState {
@@ -834,6 +848,7 @@ pub fn create_ship(
     }
     crate::modules::custom_init(u, id);
     crate::ships::init(u, id);
+    crate::mad::set_up_initial(u, id, opts.builder.is_some());
     crate::salvage::depot_init(u, id);
     crate::construction::add_ship_support_units(u, id);
     if opts.flags & create_flags::NOT_IN_LISTS == 0 {

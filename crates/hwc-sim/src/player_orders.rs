@@ -786,6 +786,9 @@ pub fn special_target_order(u: &mut Universe, player: usize, selection: &[ShipId
                 return;
             }
             retain_swap(&mut sel, |id| !(acv::is_moving_to_emp_target(u, id) || acv::is_firing_emp(u, id)));
+            if sel.is_empty() {
+                u.messages.push(crate::speech::Message { key: "strCantEMPTargets", colour: RED_MESSAGE, ship: None });
+            }
         }
         TargetOrder::Infect => with_upgrade(u, &mut sel, 0x1_0000),
         TargetOrder::Ram => retain_swap(&mut sel, |id| {
@@ -804,6 +807,9 @@ pub fn special_target_order(u: &mut Universe, player: usize, selection: &[ShipId
     match targets {
         Some(t) => {
             let all = t.len();
+            if order == TargetOrder::Salvage {
+                salvage_notes(u, player, t);
+            }
             let t: Vec<ShipId> = match order {
                 TargetOrder::Salvage => t.iter().copied().filter(|&x| crate::salvage::can_salvage_target(u, player, x)).collect(),
                 _ => t.to_vec(),
@@ -822,14 +828,54 @@ pub fn special_target_order(u: &mut Universe, player: usize, selection: &[ShipId
                 TargetOrder::Emp => TargetKind::Empable,
                 _ => TargetKind::Enemy,
             };
+            let mut told = false;
             for &ship in &sel {
                 if let Some(t) = find_nearest_special_target(u, player, ship, kind) {
                     run(u, &[ship], &[t]);
                     if order == TargetOrder::Salvage {
                         speak_support_craft(u, &[ship]);
                     }
+                } else if !told {
+                    told = true;
+                    let key = match order {
+                        TargetOrder::Salvage => "strNoShipToSalvageFound",
+                        TargetOrder::Repair => "strNoShipToRepairFound",
+                        TargetOrder::Leech => "strNoShipToLeechFound",
+                        TargetOrder::Swarm => "strNoShipToSwarmFound",
+                        TargetOrder::Emp => "strNoShipToEMPFound",
+                        TargetOrder::Infect => "strNoShipToInfectFound",
+                        TargetOrder::Ram => "strNoShipToRamFound",
+                        TargetOrder::LinkMissiles => "strNoShipToFireMissileAtFound",
+                    };
+                    u.messages.push(crate::speech::Message { key, colour: RED_MESSAGE, ship: Some(ship) });
                 }
             }
+        }
+    }
+}
+
+/// `mrSpecialTargetOrder`, salvage with targets: each kind of refusal is explained once.
+fn salvage_notes(u: &mut Universe, player: usize, targets: &[ShipId]) {
+    use crate::salvage::{refusal, Refusal};
+    let mut said = Vec::new();
+    for &t in targets {
+        if crate::salvage::can_salvage_target(u, player, t) {
+            continue;
+        }
+        let Some(ship_type) = u.ships.get(t).map(|s| s.ship_type) else { continue };
+        let key = match refusal(u, player, t) {
+            Some(Refusal::Incompatible) => "strSalvageTargetHasIncompatibleTech",
+            Some(Refusal::NoInfector) => "strDepotNeedsInfectionTech",
+            Some(Refusal::NoCrystalProcessor) => "strWorkerNeedsCrystalTech",
+            None if !crate::construction::player_has_support_units_for_type(u, ship_type, player, 0) => {
+                crate::speech::queue(u, None, 0x200103a, -1);
+                "strNotEnoughSupportUnitsToSalvage"
+            }
+            None => continue,
+        };
+        if !said.contains(&key) {
+            said.push(key);
+            u.messages.push(crate::speech::Message { key, colour: RED_MESSAGE, ship: None });
         }
     }
 }
@@ -1167,7 +1213,7 @@ pub fn mr_enter_nearest_slipgate(u: &mut Universe, player: usize, sel: &[ShipId]
         }
     }
     let Some((_, gate, kind)) = best else {
-        u.messages.push(crate::speech::Message { key: "strNoSlipgateFoundNotify", colour: RED_MESSAGE });
+        u.messages.push(crate::speech::Message { key: "strNoSlipgateFoundNotify", colour: RED_MESSAGE, ship: None });
         return None;
     };
     let fit = slipgate_capable(u, sel, kind);
@@ -1196,7 +1242,7 @@ pub fn mr_dock_at_slipgate(u: &mut Universe, sel: &[ShipId], gate: ShipId, missi
     } else {
         "strNotAllShipsCanEnterSlipgateBusy"
     };
-    u.messages.push(crate::speech::Message { key, colour: RED_MESSAGE });
+    u.messages.push(crate::speech::Message { key, colour: RED_MESSAGE, ship: None });
 }
 
 /// `MakeShipsSpecialTargetCapable(selection, 0, TRUE)` (0x50d4d0): ships with a special-target

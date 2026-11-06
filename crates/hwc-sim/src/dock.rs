@@ -888,7 +888,10 @@ fn fly_out_of_cone(u: &mut Universe, ship: ShipId, dw: Option<ShipId>) -> bool {
         n = Vector::new(st(ld(along) * ld(n.x)), st(ld(along) * ld(n.y)), st(ld(along) * ld(n.z)));
         let on_axis = Vector::new(st(ld(n.x) + ld(w.x)), st(ld(n.y) + ld(w.y)), st(ld(n.z) + ld(w.z)));
         base::set_ship_position(u, ship, on_axis);
-        // (CarrierDockDoorCheck: the carrier's doors are always open here.)
+        // The Somtaaw carrier's doors have to be open.
+        if u.ships.ship(dw).ship_type == crate::statics::ShipType::sCarrier && !crate::mad::carrier_door_open(u, dw, p.dock_type) {
+            return false;
+        }
         if (ld(rel.x) * ld(rel.x) + ld(rel.y) * ld(rel.y)) + ld(rel.z) * ld(rel.z) < ld(fly) * ld(fly) {
             fly_to_point_avoiding_objs(u, ship, Some(out), 0, 0.0, None);
             return false;
@@ -1278,12 +1281,11 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
             let Some(p) = reserved_point(u, ship, dw).cloned() else { return false };
             if fly_to_latch_standoff(u, ship, dw, &p) {
                 let s = u.ships.ship_mut(ship);
-                if crate::resource::is_worker(s.ship_type) && s.base.mad_anim != 3 {
-                    s.base.mad_anim = 3;
-                    s.base.mad_done = true;
-                    s.base.mad_paused = true;
-                }
                 s.base.dock_state = state::LATCHING;
+                if crate::resource::is_worker(u.ships.ship(ship).ship_type) && crate::mad::current(u, ship) != 3 {
+                    crate::mad::start(u, ship, 3, 0);
+                    crate::mad::pause(u, ship, true);
+                }
                 return false;
             }
         }
@@ -1393,10 +1395,8 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
         state::FLY_OUT => {
             if fly_out_of_cone(u, ship, Some(dw)) {
                 if latches_to_dock_point(u, ship, purpose_) && crate::resource::is_worker(u.ships.ship(ship).ship_type) {
-                    let s = u.ships.ship_mut(ship);
-                    if s.base.mad_anim != 2 {
-                        s.base.mad_anim = 2;
-                        s.base.mad_done = true;
+                    if crate::mad::current(u, ship) != 2 {
+                        crate::mad::start(u, ship, 2, crate::mad::STOP_AT_END);
                     }
                 }
                 return true;
@@ -1557,9 +1557,8 @@ pub fn remove_ship_from_docking(u: &mut Universe, ship: ShipId) {
     }
     let s = u.ships.ship_mut(ship);
     s.base.dock_with = None;
-    if crate::resource::is_worker(s.ship_type) && s.base.mad_anim == 3 {
-        s.base.mad_anim = 2;
-        s.base.mad_done = true;
+    if crate::resource::is_worker(s.ship_type) && crate::mad::current(u, ship) == 3 {
+        crate::mad::start(u, ship, 2, crate::mad::STOP_AT_END);
     }
 }
 
@@ -1590,6 +1589,7 @@ pub fn remove_ship_from_launching(u: &mut Universe, ship: ShipId) {
 
 /// `InitializeDockVars` (0x45f1e0) / the per-ship part of `clDock`.
 pub fn initialize_dock_vars(u: &mut Universe, ship: ShipId, dw: ShipId, purpose_: i32) {
+    crate::mad::close_guns_to_dock(u, ship);
     if purpose_ == purpose::DOCK_STAY || purpose_ == purpose::INSTANT_STAY {
         u.ships.ship_mut(ship).special_flags |= special::DOCK_STAY;
         if purpose_ == purpose::INSTANT_STAY && u.ships.get(dw).is_some_and(|d| crate::ships::hive::is_hive_type(d.ship_type)) {
