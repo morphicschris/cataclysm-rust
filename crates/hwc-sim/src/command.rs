@@ -2607,6 +2607,30 @@ pub(crate) fn remove_ship_from_being_targeted(u: &mut Universe, dead: ShipId) {
     }
 }
 
+/// `RemoveShipFromBeingTargeted` with flag 0x20 (0x446ef0): the commands of one player stop
+/// attacking the ship, which they are salvaging.
+pub fn stop_attacking(u: &mut Universe, target: ShipId, player: usize) {
+    let todo = u.commands.todo.clone();
+    for cid in todo {
+        let Some(c) = u.commands.get(cid) else { continue };
+        let Some(&first) = c.selection.first() else { continue };
+        if u.ships.get(first).is_none_or(|s| s.player != player) {
+            continue;
+        }
+        let c = u.commands.get_mut(cid).expect("command");
+        if (c.attributes & attr::PASSIVE_ATTACKING != 0 || c.order == order::ATTACK) && remove_from_selection(&mut c.attack_targets, target) {
+            let sel = c.selection.clone();
+            for id in sel {
+                let s = u.ships.ship_mut(id);
+                if s.attack.target == Some(target) {
+                    s.attack.events |= crate::object::attack_event::ENEMY_TARGET_DIED;
+                    s.attack.target = None;
+                }
+            }
+        }
+    }
+}
+
 /// `shipHasJustDisappeared` (`RemoveShipFromBeingTargeted` with flag 8): the ship left the
 /// universe (into hyperspace); attack and special orders drop it as a target whoever sees it,
 /// while docking with it and launches from it carry on.

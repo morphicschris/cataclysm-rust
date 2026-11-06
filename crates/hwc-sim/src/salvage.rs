@@ -234,6 +234,71 @@ fn docked_salvagers(u: &Universe, target: ShipId) -> Vec<ShipId> {
     crate::clamp::slaves_of(u, target).into_iter().filter(|&s| u.ships.get(s).is_some_and(|x| is_salvager(x.ship_type))).collect()
 }
 
+/// `salvReleaseTarget` (0x4f5a00): no depot will take the target. The local player is told why when
+/// they have nothing that could (a crystal needs a ship that processes crystals, a Beast salvager
+/// one that infects); every salvager on it lets go, and every salvager's order forgets it.
+fn release_target(u: &mut Universe, ship: ShipId) {
+    let Some(t) = u.ships.get(ship).and_then(|s| s.base.salvage.target) else { return };
+    let player = u.ships.ship(ship).player;
+    if player == u.chatter.local_player {
+        let has = |u: &Universe, bit: u32, except: Option<ShipType>| {
+            u.ships.iter().any(|s| s.player == player && crate::upgrade::has_upgrade(s, bit) && Some(s.ship_type) != except)
+        };
+        let key = if crate::ships::crystal::is_crystal(u, t) {
+            (!has(u, 0x10_0000, None)).then_some("strWorkerNeedsCrystalTech")
+        } else if u.ships.ship(ship).ship_race == ShipRace::Beast {
+            (!has(u, 0x1_0000, Some(ShipType::bHeavyCruiser))).then_some("strDepotNeedsInfectionTech")
+        } else {
+            None
+        };
+        if let Some(key) = key {
+            u.messages.push(crate::speech::Message { key, colour: [255, 0, 0, 255] });
+        }
+    }
+    for s in docked_salvagers(u, t).into_iter().rev() {
+        let special = u.ships.ship(s).command.and_then(|c| u.commands.get(c)).is_some_and(|c| c.order == order::SPECIAL);
+        if special && is_salvager(u.ships.ship(s).ship_type) {
+            reset(u, s);
+        }
+    }
+    let salvagers: Vec<ShipId> = u.ship_list.iter().copied().filter(|&s| u.ships.get(s).is_some_and(|x| is_salvager(x.ship_type))).collect();
+    for s in salvagers {
+        let Some(c) = u.ships.ship(s).command else { continue };
+        let worker_done = u.ships.ship(s).base.salvage.state != 1 || !matches!(u.ships.ship(s).ship_type, ShipType::sWorker | ShipType::bWorker);
+        if worker_done {
+            if let Some(cmd) = u.commands.get_mut(c).filter(|cmd| cmd.order == order::SPECIAL) {
+                cmd.special_targets.retain(|&x| x != t);
+            }
+        }
+    }
+}
+
+/// `salvHouseKeep` (0x4f7170), on most updates: the salvage party's own attackers leave alone what
+/// it is salvaging, once that is damaged enough.
+pub fn housekeep(u: &mut Universe, id: ShipId) {
+    if u.update_counter & 0x1f == 0 {
+        return;
+    }
+    let Some(s) = u.ships.get(id) else { return };
+    let player = s.player;
+    let Some(cmd) = s.command.and_then(|c| u.commands.get(c)) else { return };
+    if cmd.order != order::SPECIAL || cmd.selection.first() != Some(&id) || cmd.special_targets.is_empty() {
+        return;
+    }
+    let mine = s.base.salvage.target;
+    let targets = cmd.special_targets.clone();
+    if let Some(t) = mine.filter(|&t| target_damage_ok(u, t)) {
+        command::stop_attacking(u, t, player);
+    }
+    for t in targets.into_iter().take(10) {
+        if u.ships.get(t).is_some() && can_salvage_target(u, player, t) && target_damage_ok(u, t) {
+            if let Some(m) = mine {
+                command::stop_attacking(u, m, player);
+            }
+        }
+    }
+}
+
 /// `salvReset` (0x4f3c90): the salvager lets go of its target.
 pub fn reset(u: &mut Universe, ship: ShipId) {
     let Some(s) = u.ships.get(ship) else { return };
@@ -662,6 +727,7 @@ fn special_target(u: &mut Universe, ship: ShipId, _cid: CommandId, targets: &[Sh
             }
             u.ships.ship_mut(ship).base.salvage.depot = depot;
             if depot.is_none() {
+                release_target(u, ship);
                 reset(u, ship);
                 u.ships.ship_mut(ship).base.salvage.state = 0;
                 return false;
@@ -1002,6 +1068,22 @@ fn depot_process_crystal(u: &mut Universe, depot: ShipId, i: usize) {
     }
 }
 
+/// What a salvaged ship shows while the depot retrofits it (`salvDepotProcessGeneric` and
+/// `salvDepotProcessBigGun` set ship +0x504..+0x514, `rndSetupPhaseBlendState` reads them): the
+/// retrofit's start and end, the type it becomes and that type's colours.
+pub fn retrofit_look(u: &Universe, id: ShipId) -> Option<(f32, f32, ShipType, usize)> {
+    let depot = u.ships.get(id)?.base.builder?;
+    let d = u.ships.get(depot)?;
+    let slot = d.base.depot.as_ref()?.iter().find(|s| s.ship == Some(id))?;
+    let tt = u.ships.get(id)?.ship_type;
+    let retrofits = slot.state == 1
+        && (tt == ShipType::dBigGunUnit || (d.ship_race != ShipRace::Beast && !matches!(tt, ShipType::dCrystal0 | ShipType::dCrystal1 | ShipType::dMessagePod | ShipType::dBuoy)));
+    if !retrofits {
+        return None;
+    }
+    Some((slot.start as f32, slot.end as f32, converted_ship_type(u, id, depot)?, d.player))
+}
+
 /// `DAT_008a230c`: how long a depot takes to eat a crystal.
 const CRYSTAL_CONSUME_TIME: f32 = 10.0;
 
@@ -1090,7 +1172,22 @@ pub fn ship_died(u: &mut Universe, id: ShipId) {
             u.ships.ship_mut(s).base.salvage.dock_point = None;
             reset(u, s);
         } else {
+            // The depot died: the party looks for another, or gives the target up.
             u.ships.ship_mut(s).base.salvage.depot = None;
+            let Some(t) = u.ships.ship(s).base.salvage.target else { continue };
+            if u.ships.get(t).is_some_and(|x| x.base.depot_point != -1) {
+                u.ships.ship_mut(t).base.depot_point = -1;
+            }
+            let depot = find_depot(u, s, t);
+            for o in docked_salvagers(u, t) {
+                u.ships.ship_mut(o).base.salvage.depot = depot;
+            }
+            if depot.is_some() {
+                u.ships.ship_mut(s).base.salvage.depot = depot;
+                u.ships.ship_mut(s).base.salvage.state = 9;
+            } else {
+                release_target(u, s);
+            }
         }
     }
 }

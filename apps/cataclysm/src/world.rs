@@ -150,6 +150,18 @@ fn infection_look(u: &Universe, s: &hwc_sim::object::Ship) -> Option<(ShipType, 
     Some((to, infection_progress(now, timer, duration)))
 }
 
+/// `rndRenderObject`'s cloak fade (`meshSetFade(5, ..)`): fading in and out by the cloak's level.
+/// The player's own fully cloaked ship is drawn see-through (flag 0x8f18b2).
+fn cloak_fade(s: &hwc_sim::object::Ship) -> f32 {
+    /// How see-through the player's own cloaked ship is drawn.
+    const OWN_CLOAKED: f32 = 0.35;
+    match hwc_sim::cloak::fade_level(s) {
+        Some(level) => 1.0 - level,
+        None if hwc_sim::cloak::is_cloaked(s) => OWN_CLOAKED,
+        None => 1.0,
+    }
+}
+
 /// `rndRenderObject`'s lightning state: the ship's flicker is on and within its window (not
 /// for a Mimic in disguise).
 fn lightning_on(u: &Universe, s: &hwc_sim::object::Ship) -> bool {
@@ -234,6 +246,10 @@ struct Item {
     infection: Option<(ShipType, usize, f32)>,
     /// Electric bolts crawl over the hull.
     lightning: bool,
+    /// Opacity (a cloak fading, the player's own cloaked ships).
+    fade: f32,
+    /// A depot retrofitting it: the start and end, the type it becomes and that type's colours.
+    retrofit: Option<(f32, f32, ShipType, usize)>,
 }
 
 /// The mission's universe and everything needed to draw it.
@@ -730,7 +746,8 @@ impl World {
             .iter()
             .flat_map(|s| {
                 let infected = infection_look(u, s).map(|(t, _)| t);
-                [Some(s.ship_type), Some(drawn_look(u, s).0), infected]
+                let retrofit = hwc_sim::salvage::retrofit_look(u, s.id).map(|r| r.2);
+                [Some(s.ship_type), Some(drawn_look(u, s).0), infected, retrofit]
             })
             .flatten()
             .collect();
@@ -895,7 +912,8 @@ impl World {
             .flat_map(|s| {
                 let u = self.universe();
                 let infected = infection_look(u, s).map(|(t, _)| (t, s.color_scheme));
-                [Some(drawn_look(u, s)), infected]
+                let retrofit = hwc_sim::salvage::retrofit_look(u, s.id).map(|r| (r.2, r.3));
+                [Some(drawn_look(u, s)), infected, retrofit]
             })
             .flatten()
             .collect();
@@ -1852,6 +1870,10 @@ impl World {
                 .tint
                 .params(team_color, fx.trails.engine_glow_levels(&self.trail_tweaks));
             let construction = st.and_then(|st| construction_state(s, &st.header.coll));
+            // A depot's beam eating the ship (`consumeGetClipPlane`).
+            let clip = hwc_sim::consume::clip_plane(u, id)
+                .map(|(n, d)| Vec4::new(n.x, n.y, n.z, d))
+                .or(clip);
             frame.items.push(Item {
                 kind: ItemKind::Ship(t, color_scheme),
                 transform: transform * Mat4::from_scale(Vec3::splat(nlips)),
@@ -1863,6 +1885,8 @@ impl World {
                 construction,
                 infection: infection_look(u, s).map(|(t, p)| (t, s.color_scheme, p)),
                 lightning: lightning_on(u, s),
+                fade: cloak_fade(s),
+                retrofit: hwc_sim::salvage::retrofit_look(u, id),
             });
             frame.poses.push(pose);
             let mesh = art
@@ -1871,8 +1895,7 @@ impl World {
                 .and_then(|t| t.levels.get(nominal))
                 .is_none_or(|l| l.kind == LodKind::Mesh);
             frame.ids.push((Some(id), mesh));
-            // TODO(render states): cloak fade/wipe, phase blend and the Naggarok's EMP
-            // lightning once the simulation exposes cloaking, phasing and the EMP.
+            // TODO(render states): the Naggarok's EMP lightning once the simulation exposes it.
         }
         // Dead hulls the Remastered death sequences keep in view.
         if let Some(h) = &self.hwr {
@@ -1897,6 +1920,8 @@ impl World {
                     construction: None,
                     infection: None,
                     lightning: false,
+                    fade: 1.0,
+                    retrofit: None,
                 });
                 frame.poses.push(None);
                 frame.ids.push((None, true));
@@ -1929,6 +1954,8 @@ impl World {
                 construction: None,
                 infection: None,
                 lightning: false,
+                fade: 1.0,
+                retrofit: None,
             });
             frame.poses.push(None);
             frame.ids.push((None, false));
@@ -1977,6 +2004,8 @@ impl World {
                     construction: None,
                     infection: None,
                     lightning: false,
+                    fade: 1.0,
+                    retrofit: None,
                 });
                 frame.poses.push(None);
                 frame.ids.push((None, true));
@@ -2189,6 +2218,20 @@ impl World {
                 let infected = self.art.get(&t).and_then(|a| a.gpu.get(&scheme))?;
                 Some((infected, p))
             });
+            let phase = item.retrofit.and_then(|(start, end, t, scheme)| {
+                let art = self.art.get(&t)?;
+                let (stage, value) = hwc_render::render_state::phase_blend_state(item.time, start, end)?;
+                let coll = &self.universe().statics.ship(t)?.header.coll;
+                Some(hwc_render::render_state::PhaseState {
+                    stage,
+                    value,
+                    converted: art.gpu.get(&scheme),
+                    collision_box: CollisionBox {
+                        corner: v3(coll.coll_rect_offset),
+                        extent: Vec3::new(coll.up_length, coll.right_length, coll.forward_length),
+                    },
+                })
+            });
             states.push(ShipRenderState {
                 lod: item.lod,
                 pose: pose.as_deref(),
@@ -2198,6 +2241,8 @@ impl World {
                 construction: item.construction,
                 infection,
                 emp_lightning: item.lightning,
+                fade: item.fade,
+                phase,
                 ..Default::default()
             });
         }
