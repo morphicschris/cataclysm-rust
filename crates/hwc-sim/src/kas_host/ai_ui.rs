@@ -284,6 +284,13 @@ macro_rules! ai_ui_methods {
             }
         }
 
+        /// `kasfDisableBigGunFiring` (0x496250): the Siege Cannon cannot fire in this level;
+        /// logged.
+        fn disable_big_gun(&mut self, _cx: &Cx) {
+            self.g.big_gun_disabled = true;
+            self.log(LogKind::Flow, crate::mission::BIG_GUN_DISABLED_LOG.to_string());
+        }
+
         /// `kasfShowMinesInSensors` (0x493ab0): the sensors manager's show-mines flag (0x900604),
         /// which lets `smMinesDraw` show Mission 3's mines; logged.
         fn show_mines_in_sensors(&mut self, _cx: &Cx, show_mines: i32) {

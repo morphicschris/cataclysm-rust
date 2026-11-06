@@ -235,7 +235,7 @@ fn main_items(fe: &Fe) -> Vec<Item> {
 fn special_items(fe: &Fe) -> Vec<Item> {
     let view = &fe.game.ig.view;
     let mut v = Vec::new();
-    let specials: [(Command, &str, Action, u8); 18] = [
+    let specials: [(Command, &str, Action, u8); 20] = [
         (Command::Harvest, "Harvest", keys::HARVEST, 12),
         (Command::Repair, "Repair", keys::REPAIR, 12),
         (Command::Salvage, "Salvage", keys::SALVAGE, 12),
@@ -257,7 +257,9 @@ fn special_items(fe: &Fe) -> Vec<Item> {
         ),
         (Command::Cloak, "Cloak", keys::CLOAK, 17),
         (Command::Swarmers, "Swarm", keys::LAUNCH_SWARMERS, 18),
+        (Command::CancelSwarmers, "Cancel Swarm", keys::CANCEL_SWARMERS, 18),
         (Command::BigGun, "Siege Cannon", keys::BIG_GUN_ATTACK, 18),
+        (Command::CancelBigGun, "Cancel Siege Cannon", keys::CANCEL_BIG_GUN, 18),
         (Command::BeastAttack, "Infect", keys::BEAST_ATTACK, 18),
         (Command::Emp, "EMP", keys::EMP, 18),
         (Command::Ram, "Ram", keys::RAM, 18),

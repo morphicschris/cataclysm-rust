@@ -848,6 +848,53 @@ fn ships_acknowledge_orders() {
     }
 }
 
+/// The Siege Cannon's menu item: the sensors manager opens with the plate up, the picked point
+/// becomes a big-gun order on the mothership (`mrBigGunBeginTargeting`,
+/// `MothershipBigGunTargetPicked`).
+#[test]
+fn siege_cannon_targets_from_the_sensors() {
+    use hwc_ui::ingame::host::Command;
+    use hwc_ui::ingame::InputEvent;
+    let Some((mut game, mut rig)) = mission_one((800, 600), false) else {
+        eprintln!("skipped: HWC_GAME_DIR or a GPU adapter missing");
+        return;
+    };
+    let g = &mut *game;
+    let mut frames = 0;
+    while g.ui.fleet_intel || frames < 16 * 5 {
+        if g.ui.fleet_intel && frames % 16 == 0 {
+            g.input(InputEvent::KeyDown(0x1b), &mut rig.audio);
+            g.input(InputEvent::KeyUp(0x1b), &mut rig.audio);
+        }
+        rig.frame(g);
+        frames += 1;
+        assert!(frames < 16 * 600, "the opening intel never ended");
+    }
+    let u = g.world.universe_mut();
+    let ms = u.base.players[crate::host::PLAYER].mothership.expect("mothership");
+    let p = u.ship(ms).expect("mothership").posinfo.position;
+    let gun = hwc_sim::base::create_ship(u, hwc_sim::statics::ShipType::sMothershipBigGun, crate::host::PLAYER, p, Default::default()).expect("gun");
+    hwc_sim::clamp::clamp_obj_to_obj(u, gun, ms);
+    assert!(hwc_sim::ships::mothership::has_big_gun_module(u, ms));
+    // Recharged long ago (it recharges for minutes from the start of a level).
+    let gi = hwc_sim::ships::mothership::big_gun_index(u, ms).expect("big gun");
+    u.ships.ship_mut(ms).guns[gi].last_time_fired = -100_000.0;
+    g.selection = vec![ms];
+    g.command(Command::BigGun, &mut rig.audio);
+    assert!(g.sensors.is_open(), "the sensors manager opens");
+    assert!(matches!(g.mode, crate::game::Mode::Move(_)), "with the plate up");
+    for _ in 0..16 * 4 {
+        rig.frame(g);
+    }
+    g.execute_plate(&mut rig.audio);
+    for _ in 0..16 * 4 {
+        rig.frame(g);
+    }
+    assert!(!g.sensors.is_open(), "it closes when the point is picked");
+    let u = g.world.universe();
+    assert!(hwc_sim::ships::mothership::big_gun_is_active(u, ms), "the mothership takes the order");
+}
+
 /// The kamikaze, scuttle and waypoint orders (`kbcbKamikaze`, `mrScuttle`, `mrWaypointMove*`):
 /// waypoints are placed on the plate and flown in the chosen mode, the kamikaze key turns
 /// attacking fighters into rammers, and scuttling takes a second press (never a mothership).

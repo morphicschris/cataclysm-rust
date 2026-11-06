@@ -276,6 +276,10 @@ fn release_target(u: &mut Universe, ship: ShipId) {
 /// `salvHouseKeep` (0x4f7170), on most updates: the salvage party's own attackers leave alone what
 /// it is salvaging, once that is damaged enough.
 pub fn housekeep(u: &mut Universe, id: ShipId) {
+    if u.ships.get(id).is_some_and(|s| s.base.salvage.shaken_off) {
+        u.ships.ship_mut(id).base.salvage.shaken_off = false;
+        command::remove_ships_from_doing_stuff(u, &[id]);
+    }
     if u.update_counter & 0x1f == 0 {
         return;
     }
@@ -296,6 +300,19 @@ pub fn housekeep(u: &mut Universe, id: ShipId) {
                 command::stop_attacking(u, m, player);
             }
         }
+    }
+}
+
+/// `salvCheckDocked` (0x4f8840, from an EMP or a Dreadnought's shock): a salvager latched to its
+/// target gives up at its next housekeeping.
+pub fn check_docked(u: &mut Universe, id: ShipId) {
+    let Some(s) = u.ships.get(id) else { return };
+    if !is_salvager(s.ship_type) {
+        return;
+    }
+    let host = s.base.clamp.as_ref().and_then(|c| c.host);
+    if s.base.salvage.target.is_some() && host == s.base.salvage.target {
+        u.ships.ship_mut(id).base.salvage.shaken_off = true;
     }
 }
 

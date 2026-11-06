@@ -267,6 +267,8 @@ pub struct Game {
     /// The waypoints placed so far while the plate places waypoints (`mrWaypointMoveBegin`:
     /// 0x9def40, count 0x9df030); `None` for a plain move. Only meaningful with the plate up.
     waypoints: Option<Vec<Vec3>>,
+    /// The move plate is picking where the Siege Cannon fires (`piePointModeOnOff(3, ..)`).
+    big_gun_plate: bool,
     /// The waypoint mode (0x91a658): 0 linear, 1 circular, 2 end to end (the command's
     /// [`command::waypoint_mode`]). Kept for the session, as the original keeps it.
     waypoint_mode: u32,
@@ -437,6 +439,7 @@ impl Game {
             last_ship_click: None,
             plate_from_right: false,
             waypoints: None,
+            big_gun_plate: false,
             waypoint_mode: 0,
             waypoint_rings: plate::WaypointRings::default(),
             waypoint_frame: None,
@@ -745,8 +748,60 @@ impl Game {
         }
     }
 
+    /// `mrBigGunBeginTargeting` (0x560cf0) and `MothershipBigGunBeginTargeting` (0x5b6ae0): the
+    /// player's mothership alone is selected and, when its Siege Cannon has recharged, the move
+    /// plate opens in the sensors manager to pick the point to fire at.
+    fn begin_big_gun(&mut self, audio: &mut Option<Audio>) {
+        use hwc_sim::ships::mothership;
+        const RED: [u8; 4] = [255, 0, 0, 255];
+        let disabled = self.world.mission_run().is_some_and(|r| r.game.big_gun_disabled);
+        let u = self.world.universe_mut();
+        if disabled {
+            u.messages.push(hwc_sim::speech::Message { key: "strCantFireBigGun", colour: RED });
+            return;
+        }
+        let Some(ms) = u.ships.iter().find(|s| s.player == PLAYER && s.ship_type == ShipType::sMothership).map(|s| s.id) else {
+            return;
+        };
+        if !mothership::has_big_gun_module(u, ms) {
+            return;
+        }
+        self.selection = vec![ms];
+        if !mothership::can_begin_targeting(u, ms) {
+            u.messages.push(hwc_sim::speech::Message { key: "strNotifyBigGunCharging", colour: RED });
+            return;
+        }
+        let Some((c, size)) = self.plate_centre() else {
+            return;
+        };
+        self.mode = Mode::Move(Plate::new(c, size));
+        self.plate_from_right = false;
+        self.waypoints = None;
+        self.big_gun_plate = true;
+        sound(audio, MOVEMENT_GUI_ON);
+        if !self.sensors.is_open() {
+            self.toggle_sensors(audio);
+        }
+    }
+
     /// Orders the move the plate points at and closes it.
-    fn execute_plate(&mut self, audio: &mut Option<Audio>) {
+    pub(crate) fn execute_plate(&mut self, audio: &mut Option<Audio>) {
+        if let (Mode::Move(plate), true) = (self.mode, self.big_gun_plate) {
+            // `MothershipBigGunTargetPicked` (0x5b6700).
+            self.big_gun_plate = false;
+            let dest = plate.destination();
+            if self.sensors.is_open() {
+                self.close_sensors(audio);
+            }
+            let ms: Vec<ShipId> = self.selection.clone();
+            if dest.is_finite() {
+                let u = self.world.universe_mut();
+                hwc_sim::ships::mothership::cl_big_gun(u, &ms, hwc_math::Vector::new(dest.x, dest.y, dest.z));
+            }
+            sound(audio, MOVEMENT_GUI_OFF);
+            self.mode = Mode::Select;
+            return;
+        }
         if let Mode::Move(plate) = self.mode {
             // `piePointSpecExecute` -> `mrMoveShipsExecute`.
             let dest = plate.destination();
@@ -1895,9 +1950,24 @@ impl Game {
                     }
                 }
             }
-            GameRequest::SetRepairPriority { .. }
-            | GameRequest::BeastSystems(_)
-            | GameRequest::TraderAccept(_)
+            // `lmSlotNProcess` -> the mothership keeps a priority per module type.
+            GameRequest::SetRepairPriority { module_type, priority } => {
+                let u = self.world.universe_mut();
+                if let Some(ms) = u.base.players[PLAYER].mothership {
+                    if let Some(t) = ShipType::from_index(module_type as usize) {
+                        hwc_sim::ships::mothership::set_repair_priority(u, ms, t, priority);
+                    }
+                }
+            }
+            // `lmBeastSystemsSet` (0x49b210): the Beast mothership's emergency power goes where
+            // the buttons say.
+            GameRequest::BeastSystems(v) => {
+                let u = self.world.universe_mut();
+                if let Some(ms) = u.base.players[PLAYER].mothership {
+                    hwc_sim::ships::mothership::set_damage_mode(u, ms, v);
+                }
+            }
+            GameRequest::TraderAccept(_)
             | GameRequest::TraderLeave => {}
         }
     }
@@ -2018,6 +2088,15 @@ impl Game {
                 }
             }
             Command::Upgrade => hwc_sim::player_orders::mr_upgrade_ships(u, &sel),
+            Command::BigGun => self.begin_big_gun(audio),
+            // `mrBigGunCancel`.
+            Command::CancelBigGun => {
+                for &id in &sel {
+                    if hwc_sim::ships::mothership::big_gun_is_active(u, id) {
+                        hwc_sim::ships::cl_special(u, &[id], &[]);
+                    }
+                }
+            }
             // `kbcbKamikaze`: the selection keeps only the ships that can.
             Command::Kamikaze => {
                 if hwc_sim::player_orders::mr_kamikaze(u, &mut self.selection) {
@@ -2129,6 +2208,7 @@ impl Game {
         };
         self.mode = Mode::Move(Plate::new(c, size));
         self.plate_from_right = false;
+        self.big_gun_plate = false;
         self.waypoints = Some(Vec::new());
         sound(audio, MOVEMENT_GUI_ON);
     }
@@ -2198,6 +2278,7 @@ impl Game {
             self.mode = Mode::Move(Plate::new(c, size));
             self.plate_from_right = self.right_click_move;
             self.waypoints = None;
+            self.big_gun_plate = false;
             sound(audio, MOVEMENT_GUI_ON);
         } else {
             self.mode = Mode::Select;

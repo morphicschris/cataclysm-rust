@@ -1379,6 +1379,9 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
                 }
                 crate::clamp::unclamp(u, ship);
                 base::set_disable_reason(u.ships.ship_mut(ship), false, 4);
+                if u.ships.ship(ship).ship_type == crate::statics::ShipType::sDreadnought {
+                    crate::ships::dreadnought::reclamp_cannon(u, ship);
+                }
                 u.ships.ship_mut(ship).base.dock_state = state::FLY_OUT;
                 let caps = statics.ship(u.ships.ship(ship).ship_type).map_or(0, |s| s.capability_flags);
                 if caps & 6 != 0 {

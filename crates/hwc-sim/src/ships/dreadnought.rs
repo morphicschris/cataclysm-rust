@@ -165,12 +165,13 @@ fn regenerate_missile(u: &mut Universe, id: ShipId) {
 }
 
 /// `RKOReleaseDockedShips` (0x5bead0): everything clamped to the hull lets go (rammers stop
-/// pushing, leeches drop off), last first. (`salvCheckDocked` on each is not modelled.)
+/// pushing, leeches drop off, salvagers give up), last first.
 fn release_docked_ships(u: &mut Universe, id: ShipId) {
     let slaves = crate::clamp::slaves_of(u, id);
     for &sid in slaves.iter().rev() {
         let Some(t) = u.ships.get(sid).map(|s| s.ship_type) else { continue };
         super::ramming::stop_pushing(u, sid);
+        crate::salvage::check_docked(u, sid);
         if t == ShipType::sLeech {
             super::leech::emp_shocked(u, sid);
         }
@@ -313,7 +314,7 @@ pub fn create_cannon(u: &mut Universe, id: ShipId) {
 }
 
 /// `DreadnoughtReclampCannon` (0x5abee0): clamp the cannon to the hull again (after the hull
-/// was released from a dock).
+/// was released from a dock, `cmDreadnoughtPostBuildReclamp`).
 pub fn reclamp_cannon(u: &mut Universe, id: ShipId) {
     let Some(c) = spec(u, id).and_then(|d| d.cannon) else { return };
     if u.ships.get(c).is_none() {

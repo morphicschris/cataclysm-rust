@@ -484,6 +484,10 @@ pub struct SalvageSpec {
     pub latching: bool,
     /// [8]: the target's dock point the salvager latches to.
     pub dock_point: Option<usize>,
+    /// [9]: shaken off what it was latched to: it stops at its next housekeeping
+    /// (`salvCheckDocked`).
+    #[serde(default, deserialize_with = "crate::save::added_in_7")]
+    pub shaken_off: bool,
 }
 
 /// Mothership module break-away state (`ShipModule` specifics, +0x638..).

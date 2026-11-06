@@ -687,6 +687,37 @@ pub fn update_damage_mode(u: &mut Universe, id: ShipId) {
 }
 
 /// `clProcessSyncPacket`'s damage-mode command (`FUN_00449bc0`): choose a Beast damage mode.
+/// The panel's repair slot of a module type (`Module` order in `think::repair_modules`).
+fn repair_slot(t: ShipType) -> Option<usize> {
+    Some(match t {
+        ShipType::sMothershipDockingBay => 0,
+        ShipType::sMothershipWeapons => 1,
+        ShipType::sMothershipArmour => 2,
+        ShipType::sMothershipMicro => 3,
+        ShipType::sMothershipSpecial => 4,
+        ShipType::sMothershipSupport => 5,
+        ShipType::sMothershipBigGun => 6,
+        _ => return None,
+    })
+}
+
+/// `FUN_005b7f40` (0x5b7f40): the module type's repair priority (0 first).
+pub fn repair_priority(u: &Universe, id: ShipId, t: ShipType) -> Option<i32> {
+    u.ships.get(id).and_then(|s| Some(s.base.repair_priority[repair_slot(t)?]))
+}
+
+/// `FUN_005b7f70` (0x5b7f70).
+pub fn set_repair_priority(u: &mut Universe, id: ShipId, t: ShipType, priority: i32) {
+    if let (Some(slot), Some(s)) = (repair_slot(t), u.ships.get_mut(id)) {
+        s.base.repair_priority[slot] = priority;
+    }
+}
+
+/// The damage mode the buttons show (ship +0x650).
+pub fn damage_mode(u: &Universe, id: ShipId) -> Option<u32> {
+    spec(u, id).map(|m| m.damage_mode)
+}
+
 pub fn set_damage_mode(u: &mut Universe, id: ShipId, mode: u32) {
     if let Some(m) = spec_mut(u, id) {
         m.damage_mode = mode;

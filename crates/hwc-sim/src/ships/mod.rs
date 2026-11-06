@@ -659,6 +659,7 @@ pub fn halt_hook(u: &mut Universe, id: ShipId) -> bool {
 /// What a ship does when an EMP first shocks it (`ShipApplyEMP`): a leech lets go, a rammer
 /// stops pushing, a salvager checks whether it was docked.
 pub fn emp_shocked(u: &mut Universe, id: ShipId) {
+    crate::salvage::check_docked(u, id);
     match module(u, id) {
         Some(Module::Leech) => leech::emp_shocked(u, id),
         Some(Module::Ramming) => ramming::stop_pushing(u, id),

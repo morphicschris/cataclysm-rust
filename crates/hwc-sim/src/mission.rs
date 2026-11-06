@@ -432,6 +432,10 @@ pub struct Game {
     /// back from the log on load ([`MissionRun::after_load`]) so older saves still read.
     #[serde(skip, default)]
     pub show_mines_in_sensors: bool,
+    /// 0x88a040 (cleared): `DisableBigGun` stopped the Siege Cannon firing in this level. Comes
+    /// back from the log on load, like [`Self::show_mines_in_sensors`].
+    #[serde(skip, default)]
+    pub big_gun_disabled: bool,
     /// 0x91b6b0: the disguise menus `SetCurrentMimicItem` and `SetMCVItemIndex` fill (the
     /// original saves them, `MimicSaveDisguiseTables`); here they come back from the log on load
     /// ([`MissionRun::after_load`]) so older saves still read.
@@ -677,6 +681,9 @@ pub fn opening_nis_fleet(src: &dyn DataSource, statics: &StaticWorld, mission: u
     Ok(fleet)
 }
 
+/// What the log holds once `DisableBigGun` has run.
+pub const BIG_GUN_DISABLED_LOG: &str = "DisableBigGun()";
+
 /// KAS globals of the mission autosave (`kasfSaveLevelDeferred`, `kasAutoSaveOnLoad`).
 pub const AUTO_SAVE: &str = "G_AutoSave";
 /// How the log records a `ShowMinesInSensors` call (followed by the value and `)`).
@@ -744,6 +751,7 @@ impl MissionRun {
             .rev()
             .find_map(|e| e.text.strip_prefix(SHOW_MINES_LOG))
             .is_some_and(|rest| !rest.starts_with("0)"));
+        self.game.big_gun_disabled = self.game.log.iter().any(|e| e.text == BIG_GUN_DISABLED_LOG);
         let mut t = crate::ships::mimic::DisguiseTables::default();
         for e in &self.game.log {
             crate::kas_host::replay_disguise_log(&mut t, &e.text);
@@ -1204,6 +1212,7 @@ pub(crate) fn empty_game(config: MissionConfig) -> Game {
         sensors_open: false,
         sensors_kas_flag: 0,
         show_mines_in_sensors: false,
+        big_gun_disabled: false,
         disguise_tables: Default::default(),
         mimic_slot: 0,
         sensors_look_at: Vector::ZERO,

@@ -549,10 +549,20 @@ impl GameUiHost for SimHost<'_> {
                     ship_type: s.ship_type.index() as u32,
                     name: self.ship_name(s.ship_type),
                     health: if max > 0.0 { s.health / max } else { 1.0 },
-                    repair_priority: None,
+                    repair_priority: u.base.players[PLAYER]
+                        .mothership
+                        .and_then(|ms| hwc_sim::ships::mothership::repair_priority(u, ms, s.ship_type)),
                 })
             })
             .collect()
+    }
+
+    fn beast_systems(&self) -> u32 {
+        let u = self.world.universe();
+        u.base.players[PLAYER]
+            .mothership
+            .and_then(|ms| hwc_sim::ships::mothership::damage_mode(u, ms))
+            .unwrap_or(4)
     }
 
     fn selection(&self) -> Vec<ShipInfo> {
@@ -768,6 +778,9 @@ pub fn special_command(item: hwc_sim::player_orders::SpecialItem) -> Option<Comm
         I::UnlinkForceField => Command::UnlinkForceField,
         I::Cloak => Command::Cloak,
         I::Swarm => Command::Swarmers,
+        I::CancelSwarm => Command::CancelSwarmers,
+        I::BigGun => Command::BigGun,
+        I::CancelBigGun => Command::CancelBigGun,
         I::Infect => Command::BeastAttack,
         I::Emp => Command::Emp,
         I::Ram => Command::Ram,
