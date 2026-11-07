@@ -581,16 +581,24 @@ impl Audio {
                 continue;
             };
             let p = s.posinfo.position;
-            let emitter = Emitter {
-                position: [p.x, p.y, p.z],
-                radius: st.header.coll.coll_sphere_size,
-                ship_class: st.ship_class.map_or(0, |c| c.index()),
-                ship_type: s.ship_type.index(),
-                ..Default::default()
-            };
-            let slot = self.ships.entry(ship).or_default();
-            self.system.play_event(Some(&emitter), event, slot);
+            let class = st.ship_class.map_or(0, |c| c.index());
+            let radius = st.header.coll.coll_sphere_size;
+            self.ship_event(ship, [p.x, p.y, p.z], radius, class, s.ship_type.index(), event);
         }
+    }
+
+    /// `soundEventPlay(ship, event, 0)` for one ship. The handle, `NO_HANDLE` when silent.
+    fn ship_event(&mut self, ship: ShipId, position: [f32; 3], radius: f32, class: usize, ship_type: usize, event: u32) -> i32 {
+        let emitter = Emitter {
+            position,
+            radius,
+            ship_class: class,
+            ship_type,
+            is_ship: true,
+            ..Default::default()
+        };
+        let slot = self.ships.entry(ship).or_default();
+        self.system.play_event(Some(&emitter), event, slot)
     }
 
     /// Sounds for one universe update's events. `stand_ins`: also the hit and explosion
@@ -709,6 +717,42 @@ mod tests {
     /// the speaking ship's type, or the line number the call passes). Some pairs have none in
     /// the data (a carrier docking, a worker attacking, a sentinel's field), and stay silent
     /// as in the original (`SEselectsentence` refuses a variable past the sentence's last).
+    /// The animation sounds the ship modules play (`madAnimSoundTableInit`'s events) are heard:
+    /// every one finds a patch for the ship types that use it.
+    #[test]
+    fn animation_sounds_are_heard() {
+        use hwc_sim::statics::ShipType as T;
+        let Some(Ok(g)) = GameData::from_env() else {
+            eprintln!("skipped: no game data");
+            return;
+        };
+        let Ok(mut audio) = Audio::open(g, false) else {
+            eprintln!("skipped: no sound data");
+            return;
+        };
+        audio.set_in_game(true);
+        // (The unlink sound, 0x835, has no patch in the data: silent in the original too.)
+        let cases = [
+            (T::sAcolyte, 0x81a),
+            (T::sAcolyte, 0x81b),
+            (T::sLeech, 0x822),
+            (T::sLeech, 0x823),
+            (T::sRammingFrigate, 0x81c),
+            (T::sWorker, 0x81e),
+            (T::sWorker, 0x81f),
+            (T::sHiveFrigate, 0x405),
+            (T::sHiveFrigate, 0x406),
+        ];
+        let mut silent = Vec::new();
+        for (i, (t, event)) in cases.into_iter().enumerate() {
+            let h = audio.ship_event(hwc_sim::ShipId(9000 + i as u16), [0.0, 0.0, 100.0], 50.0, 4, t.index(), event);
+            if h == hwc_audio::mixer::NO_HANDLE {
+                silent.push((t, event));
+            }
+        }
+        assert!(silent.is_empty(), "silent: {silent:x?}");
+    }
+
     #[test]
     fn order_acknowledgements_have_lines() {
         use hwc_sim::speech::event as e;

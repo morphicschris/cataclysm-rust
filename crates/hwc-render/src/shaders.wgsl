@@ -285,7 +285,11 @@ fn fs_ship(in: ShipOut, @builtin(front_facing) front_facing: bool) -> @location(
             shade = clamp(shade, vec3<f32>(0.0), vec3<f32>(1.0));
         }
         let spec = highlight(n, in.world, shadow) * (1.0 - in.occlusion);
-        if (material.flags.y < 0.5 || object.tint.w > 0.5) {
+        if (object.tint.w > 0.5) {
+            // The player's own cloaked ship: lit, untextured, solid.
+            return vec4<f32>(tone(shade + spec), fade);
+        }
+        if (material.flags.y < 0.5) {
             return vec4<f32>(tone(shade + spec), material.diffuse.a * fade);
         }
         if (material.flags.x > 0.5) {
@@ -296,7 +300,10 @@ fn fs_ship(in: ShipOut, @builtin(front_facing) front_facing: bool) -> @location(
         return vec4<f32>(tone(t.rgb * shade + spec * gloss), t.a * material.diffuse.a * fade);
     }
     let shade = select(in.back, in.front, front_facing);
-    if (material.flags.y < 0.5 || object.tint.w > 0.5) {
+    if (object.tint.w > 0.5) {
+        return vec4<f32>(shade, fade);
+    }
+    if (material.flags.y < 0.5) {
         return vec4<f32>(shade, material.diffuse.a * fade);
     }
     if (material.flags.x > 0.5) {

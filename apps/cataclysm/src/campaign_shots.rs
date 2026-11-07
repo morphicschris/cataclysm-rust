@@ -1953,6 +1953,64 @@ fn fleet_looks() {
         rig.frame(g);
     }
     rig.shot(g, "31_fleet_hive_wings_open");
+
+    // The player's own cloaked fighter: lit, without textures.
+    let u = g.world.universe_mut();
+    let fighter = hwc_sim::base::create_ship(u, T::bCloakedFighter, crate::host::PLAYER, at(4000.0, -1500.0), Default::default()).expect("fighter");
+    u.ships.ship_mut(fighter).upgrade_flags |= hwc_sim::upgrade::type_mask(T::bCloakedFighter);
+    look(g, fighter, 500.0);
+    for _ in 0..4 {
+        rig.frame(g);
+    }
+    rig.shot(g, "32_fleet_own_fighter_before_cloaking");
+    let u = g.world.universe_mut();
+    hwc_sim::cloak::toggle(u, fighter);
+    let mut cloaked = false;
+    for _ in 0..16 * 8 {
+        rig.frame(g);
+        if hwc_sim::cloak::is_cloaked(g.world.universe().ship(fighter).expect("fighter")) {
+            cloaked = true;
+            break;
+        }
+    }
+    assert!(cloaked, "the fighter cloaks");
+    rig.shot(g, "32b_fleet_own_cloaked_fighter");
+
+    // The special orders explain themselves: nothing to salvage near the workers.
+    let u = g.world.universe_mut();
+    let worker = hwc_sim::base::create_ship(u, T::sWorker, crate::host::PLAYER, at(-2000.0, -2000.0), Default::default()).expect("worker");
+    u.ships.ship_mut(worker).upgrade_flags |= hwc_sim::upgrade::type_mask(T::sWorker);
+    g.messages.clear();
+    hwc_sim::player_orders::special_target_order(
+        g.world.universe_mut(),
+        crate::host::PLAYER,
+        &[worker],
+        None,
+        hwc_sim::player_orders::TargetOrder::Salvage,
+    );
+    rig.frame(g);
+    let said: Vec<String> = g.messages.iter().map(|m| m.text.clone()).collect();
+    println!("messages: {said:?}");
+    assert!(said.iter().any(|m| m.contains("No Salvagable Ships Found")), "{said:?}");
+    assert_eq!(g.messages.last().and_then(|m| m.ship), Some(crate::host::ui_id(worker)), "the message focuses on the worker");
+    rig.shot(g, "34_fleet_nothing_to_salvage");
+    // The Naggarok under way after the script's G_NaggarokEMP: bolts crawl over it.
+    let u = g.world.universe_mut();
+    let nag = hwc_sim::base::create_ship(u, T::dBeastMothership, 1, at(-30_000.0, 0.0), Default::default()).expect("naggarok");
+    let to = at(-30_000.0, 40_000.0);
+    hwc_sim::command::cl_move(u, &[nag], hwc_sim::command::waypoint_mode::ONCE, at(-30_000.0, 0.0), &[to]);
+    g.world.run_mut().set_var(None, "G_NaggarokEMP", 20);
+    for _ in 0..16 * 6 {
+        rig.frame(g);
+    }
+    look(g, nag, 9_000.0);
+    for _ in 0..4 {
+        rig.frame(g);
+    }
+    // (It only moves under its mission's script: the shot gives it a speed.)
+    g.world.universe_mut().ships.ship_mut(nag).posinfo.velocity = hwc_math::Vector::new(0.0, 0.0, 200.0);
+    rig.shot(g, "33_fleet_naggarok_emp");
+
 }
 
 /// A Beast player on screen, which the campaign never shows: the Mission 1 player turned Beast,

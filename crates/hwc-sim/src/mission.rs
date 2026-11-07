@@ -1127,6 +1127,11 @@ impl MissionRun {
     pub fn var(&self, team: Option<&str>, name: &str) -> Option<i32> {
         self.kas.var(team.map(kas_hash), var_hash(name))
     }
+
+    /// Sets a KAS variable, as `VarCreateSet` does.
+    pub fn set_var(&mut self, team: Option<&str>, name: &str, value: i32) {
+        self.kas.set_var(team.map(kas_hash), var_hash(name), value);
+    }
 }
 
 fn fleet_summary(fleet: &[FleetShip]) -> String {
