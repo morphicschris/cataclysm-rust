@@ -792,6 +792,84 @@ fn computer_players_patrol() {
     assert!(answered > 0, "and answers a worker's distress call");
 }
 
+/// A defence team that chases out of the sphere of influence is called back
+/// (`aidCheckSphereOfInfluence`'s `aitRecallGuardTeam`): its attack is dropped and it goes back
+/// to its patrol.
+#[test]
+fn computer_players_recall_guard_teams() {
+    use hwc_sim::ai::team::{AiMove, MoveKind};
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    let mut options = default_game(d);
+    options.cpu_difficulty = 90;
+    options.flags &= !(hwc_sim::multiplayer::mg::RESEARCH_ENABLED | hwc_sim::multiplayer::mg::UNIT_CAPS_ENABLED);
+    let mut s = setup("Coldwar2", &[ShipRace::Somtaaw, ShipRace::Beast], options, 9);
+    for p in &mut s.players {
+        p.computer = true;
+    }
+    let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, s).expect("start");
+    let current = |u: &hwc_sim::universe::Universe, t: usize| {
+        let tm = &u.ai.teams[t].as_ref().unwrap().1;
+        tm.current.map(|c| tm.moves[c].kind.clone())
+    };
+    let mut team = None;
+    for _ in 0..16 * 60 * 3 {
+        run.step();
+        let u = &run.universe;
+        team = u.ai.players[0].as_ref().unwrap().defense.teams.iter().copied().find(|&t| u.ai.teams[t].as_ref().is_some_and(|x| x.1.flags & hwc_sim::ai::roving::flag::FAST != 0));
+        if team.is_some() {
+            break;
+        }
+    }
+    let t = team.expect("a fast roving team");
+    // The team gets fighters and patrols.
+    let u = &mut run.universe;
+    let fighters: Vec<_> = u.ship_list.iter().copied().filter(|&id| {
+        let s = u.ships.ship(id);
+        s.player == 0 && u.statics.ship(s.ship_type).and_then(|st| st.ship_class) == Some(hwc_sim::statics::ShipClass::Fighter)
+    }).take(4).collect();
+    assert!(!fighters.is_empty(), "fighters to hand the team");
+    hwc_sim::ai::team::delete_all_moves(u, t);
+    for &f in &fighters {
+        for (_, tm) in u.ai.teams.iter_mut().flatten() {
+            tm.ships.retain(|&s| s != f);
+        }
+        u.ai.players[0].as_mut().unwrap().new_ships.retain(|&s| s != f);
+        hwc_sim::ai::team_add_ship(u, t, f);
+    }
+    hwc_sim::ai::roving::create_fast(u, 0, t);
+    let tm = &mut u.ai.teams[t].as_mut().unwrap().1;
+    tm.moves.retain(|m| !matches!(m.kind, MoveKind::FancyGetShips { .. }));
+    tm.current = Some(0);
+    for _ in 0..16 * 20 {
+        run.step();
+    }
+    // It goes after the enemy mothership (waiting on the attack); then its leader is out past
+    // the sphere.
+    let u = &mut run.universe;
+    let enemy = u.base.players[1].mothership.expect("enemy mothership");
+    hwc_sim::ai::team::insert_move(u, t, AiMove::new(MoveKind::Attack { targets: vec![enemy] }, 8, 0, true, true));
+    assert!(matches!(current(u, t), Some(MoveKind::Attack { .. })));
+    // Inside the sphere it keeps attacking.
+    for _ in 0..16 * 2 {
+        run.step();
+    }
+    assert!(matches!(current(&run.universe, t), Some(MoveKind::Attack { .. })), "attacking inside the sphere");
+    let u = &mut run.universe;
+    let there = u.ships.ship(enemy).posinfo.position;
+    let lead = u.ai.teams[t].as_ref().unwrap().1.ships[0];
+    u.ships.ship_mut(lead).posinfo.position = there;
+    let mut recalled = false;
+    for _ in 0..16 * 5 {
+        run.step();
+        if !matches!(current(&run.universe, t), Some(MoveKind::Attack { .. })) {
+            recalled = true;
+            break;
+        }
+    }
+    assert!(recalled, "the team is called back: {:?}", current(&run.universe, t));
+}
+
 /// Computer players' hyperspace jumps (`aimProcessHyperspace`, the move `aimProcessFlankAttack`
 /// puts before the attack when an armada team with the hyperspace flag can jump): the team's
 /// ships that can jump do, paid out of the hyperspace savings. (The teams with the flag are the

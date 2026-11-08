@@ -4,9 +4,9 @@
 //! mothership (`aidMothershipDefense`): new dangerous ships and idle teams, then guards and every
 //! team in range when the attackers outnumber them, go after the ships attacking it.
 //!
-//! The roving defence teams of an advanced player are in [`super::roving`]. Not yet ported:
-//! guard teams recalled to the sphere of influence, distress calls from resourcers, and the HW1
-//! races' cloak defence.
+//! The roving defence teams of an advanced player are in [`super::roving`]; defence teams that
+//! chase out of the sphere of influence are called back. Not ported: the HW1 races' cloak
+//! defence.
 
 use hwc_math::fpu::{ld, st};
 
@@ -121,8 +121,9 @@ pub fn manager(u: &mut Universe, p: usize) {
 }
 
 /// `aidCheckSphereOfInfluence` (0x4028d0): the sphere's radius (a quarter of the squared
-/// distance to the enemy mothership, renewed every sixteen seconds), and with the feature the
-/// enemy ships leading into it become distress calls and threats.
+/// distance to the enemy mothership, renewed every sixteen seconds), with the feature the
+/// enemy ships leading into it become distress calls and threats, and defence teams too far
+/// out are recalled.
 fn check_sphere_of_influence(u: &mut Universe, p: usize) {
     let Some(ms) = u.base.players[p].mothership.and_then(|m| u.ships.get(m)).map(|s| s.posinfo.position) else { return };
     if ai(u, p).attack.sphere_of_influence == 0.0 || (u.total_time_elapsed as i64) & 15 == 0 {
@@ -141,6 +142,16 @@ fn check_sphere_of_influence(u: &mut Universe, p: usize) {
             if !d.threats.contains(&id) {
                 d.threats.push(id);
             }
+        }
+    }
+    // A defence team chasing too far out (its first ship past 1.4 times the sphere's squared
+    // radius) is called back to what it was doing.
+    let radius2 = f64::from(ai(u, p).attack.sphere_of_influence) * 1.4;
+    for t in ai(u, p).defense.teams.clone() {
+        let Some(&first) = team_ships(u, t).first() else { continue };
+        let Some(at) = u.ships.get(first).map(|s| s.posinfo.position) else { continue };
+        if radius2 < crate::level::distance_squared(ms, at) {
+            team::recall_guard_team(u, t);
         }
     }
 }

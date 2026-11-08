@@ -572,6 +572,18 @@ pub(super) fn delete_current_move(u: &mut Universe, t: usize) {
     close_move(u, m);
 }
 
+/// `aitRecallGuardTeam` (0x4176c0): the team's attacks (attack, advanced attack, flank
+/// attack) are closed and dropped from the current move on, back to what came after them.
+pub(super) fn recall_guard_team(u: &mut Universe, t: usize) {
+    const ATTACKS: [u32; 3] = [move_type::ATTACK, super::harass::move_type::ADVANCED_ATTACK, move_type::FLANK_ATTACK];
+    while let Some(m) = team(u, t).and_then(|tm| tm.current.map(|c| tm.moves[c].move_type())) {
+        if !ATTACKS.contains(&m) {
+            break;
+        }
+        delete_current_move(u, t);
+    }
+}
+
 pub(super) fn wrap_formation_pub(u: &mut Universe, sel: &[ShipId], formation: i32) {
     wrap_formation(u, sel, formation);
 }

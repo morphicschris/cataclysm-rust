@@ -236,7 +236,12 @@ Resourcers under fire call for help (`airResourceManager`'s `aidSendDistressSign
 feature 0x10): they join the distress calls and the ships to rescue, which the roving teams
 answer the same turn.
 
-Not yet: recalling guard teams to the sphere, the HW1 races' cloak defence.
+Defence teams that chase too far are called back (`aidCheckSphereOfInfluence`'s
+`aitRecallGuardTeam`): a team whose first ship is past 1.4 times the sphere's squared radius
+drops its attacks and goes back to what it was doing. Test:
+`skirmish::computer_players_recall_guard_teams`.
+
+Not ported: the HW1 races' cloak defence (no cloaking ships in Cataclysm).
 
 Test: `skirmish::a_computer_player_defends_its_mothership` (escorts for the resourcers, and
 frigates sent at the mothership are attacked). `a_scripted_game_runs_to_a_winner` now has two
