@@ -18,6 +18,7 @@ pub mod manifest;
 pub mod datadir;
 pub mod gamedata;
 pub mod check;
+pub mod multiplayer;
 
 pub use gamedata::GameData;
 
