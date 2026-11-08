@@ -310,6 +310,8 @@ impl MockHost {
                 race: Race::Somtaaw,
                 resource_units: 3450,
                 multiplayer: false,
+                recording: false,
+                playing: false,
                 paused: false,
                 in_sensors: false,
                 support_capacity: 60,

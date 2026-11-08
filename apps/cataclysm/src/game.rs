@@ -124,6 +124,12 @@ pub enum End {
     Failed,
 }
 
+/// A recording in progress: the saved game it starts from and the orders so far.
+pub(crate) struct Recorder {
+    pub path: std::path::PathBuf,
+    pub recording: hwc_sim::orders::Recording,
+}
+
 pub struct Game {
     pub world: World,
     pub ui: InGameUi,
@@ -153,6 +159,9 @@ pub struct Game {
     pub local_name: Option<String>,
     /// The network game this is, if any: orders go through it and it paces the updates.
     pub net: Option<crate::net_game::NetLink>,
+    /// The game being recorded (`gpSaveTheRecordedGame`) and the recording played back.
+    pub(crate) recording: Option<Recorder>,
+    pub(crate) playback: Option<(hwc_sim::orders::Recording, usize)>,
     /// The statistics shown at the end of a multiplayer game (`gstatOpen`); the game waits
     /// under them until Done.
     pub end_stats: Vec<hwc_ui::ingame::gamestats::StatPlayer>,
@@ -393,6 +402,8 @@ impl Game {
             messages: Vec::new(),
             local_name: None,
             net: None,
+            recording: None,
+            playback: None,
             end_stats: Vec::new(),
             subtitles: None,
             letterbox: Letterbox::default(),
@@ -579,6 +590,8 @@ impl Game {
             special_targets: &self.special_targets,
             messages: &self.messages,
             paused: self.paused,
+            recording: self.recording.is_some(),
+            playing: self.playback.is_some(),
             // Escape first cancels the move plate, the sensors manager or the selection
             // (`kbcbEscape`).
             escape_pending: self.mode != Mode::Select
@@ -1861,13 +1874,68 @@ impl Game {
     /// packet in a network game (applied on every machine at the same update). True when it
     /// was applied now.
     pub(crate) fn give(&mut self, order: Order) -> bool {
+        // A recorded game plays back its own orders only.
+        if self.playback.is_some() {
+            return false;
+        }
         if let Some(n) = self.net.as_mut() {
             n.session.give(order);
             return false;
         }
+        if let Some(r) = self.recording.as_mut() {
+            let at = self.world.universe().update_counter;
+            r.recording.events.push((at, hwc_sim::orders::RecordedEvent::Order { player: player() as u8, order: order.clone() }));
+        }
         let tables = self.world.mission_run().map(|r| r.game.disguise_tables.clone());
         hwc_sim::orders::apply(self.world.universe_mut(), player(), &order, tables.as_ref());
         true
+    }
+
+    /// `gpSaveTheRecordedGame`: the game is saved under the name in the recorded games, and
+    /// every order from now on (in a network game, every player's) is recorded beside it.
+    pub(crate) fn start_recording(&mut self, name: &str) -> Result<std::path::PathBuf, String> {
+        let name = name.trim();
+        if name.chars().count() < hwc_ui::saves::MIN_NAME {
+            return Err(self.string_or("strAtLeast2Chars", "A saved game's name needs at least 2 characters."));
+        }
+        if self.playback.is_some() {
+            return Err("A recorded game cannot be recorded.".into());
+        }
+        self.finish_recording();
+        let dir = self.saves.clone().ok_or("Saved games are not available.")?;
+        let path = dir.path_for(hwc_ui::saves::SaveFolder::Recorded, name);
+        let ui = self.ui_state();
+        let run = self.world.run();
+        let header = crate::saves::header(run, name, false, self.thumb.clone());
+        crate::saves::write(&path, &header, run, &ui).map_err(|e| e.to_string())?;
+        if let Some(g) = self.net.as_mut().and_then(|n| n.session.game.as_mut()) {
+            g.lockstep.record = Some(Vec::new());
+        }
+        self.recording = Some(Recorder { path: path.clone(), recording: hwc_sim::orders::Recording { local_player: player() as u8, events: Vec::new() } });
+        Ok(path)
+    }
+
+    /// Recording stops: the orders are written beside the saved game.
+    pub(crate) fn finish_recording(&mut self) {
+        let Some(mut r) = self.recording.take() else { return };
+        if let Some(g) = self.net.as_mut().and_then(|n| n.session.game.as_mut()) {
+            if let Some(events) = g.lockstep.record.take() {
+                r.recording.events.extend(events);
+            }
+        }
+        let path = crate::saves::recording_path(&r.path);
+        if let Err(e) = r.recording.write(&path) {
+            eprintln!("cataclysm: {}: {e}", path.display());
+        }
+    }
+
+    /// Plays the game back from the recording beside the saved game it was loaded from.
+    pub(crate) fn start_playback(&mut self, save: &std::path::Path) -> Result<(), String> {
+        let path = crate::saves::recording_path(save);
+        let rec = hwc_sim::orders::Recording::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        crate::host::set_player(usize::from(rec.local_player));
+        self.playback = Some((rec, 0));
+        Ok(())
     }
 
     /// The harvest order (`clWrapCollectResource`), the first harvester answering (each that
@@ -2031,6 +2099,23 @@ impl Game {
                 self.report_save(r);
             }
             GameRequest::LoadGame(key) => out.push(Outcome::LoadGame(key.into())),
+            GameRequest::RecordGame(name) => {
+                match self.start_recording(&name) {
+                    Ok(_) => {
+                        let t = self.string_or("strRecordingStarted", "Recording started.");
+                        self.post(&t);
+                    }
+                    Err(e) => {
+                        let time = self.world.universe().total_time_elapsed;
+                        self.messages.push(GameMessage { text: e, colour: RED, ship: None, time });
+                    }
+                }
+            }
+            GameRequest::StopRecording => {
+                self.finish_recording();
+                let t = self.string_or("strRecordingStopped", "Recording stopped.");
+                self.post(&t);
+            }
             GameRequest::Sound(e) => sound(audio, e),
             GameRequest::Speech { event, .. } => {
                 if let Some(a) = audio {
@@ -3026,6 +3111,11 @@ impl Game {
             } else {
                 if let (Some(a), None) = (self.autoplay.as_mut(), &self.nis) {
                     a.tick(self.world.run_mut());
+                }
+                // A recorded game's orders, before the update they came before.
+                if let Some((rec, next)) = self.playback.as_mut() {
+                    let tables = self.world.mission_run().map(|r| r.game.disguise_tables.clone());
+                    rec.apply_due(self.world.universe_mut(), next, tables.as_ref());
                 }
                 self.kas_camera_in();
                 self.world.step();

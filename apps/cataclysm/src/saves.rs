@@ -128,6 +128,11 @@ pub fn header(
     }
 }
 
+/// The orders of a recorded game: beside the saved game it starts from.
+pub fn recording_path(save: &Path) -> PathBuf {
+    save.with_extension("hwcrec")
+}
+
 /// The mission number a skirmish's saved game carries (its level is the map's, saved with it).
 pub const SKIRMISH_MISSION: u32 = u32::MAX;
 
@@ -255,6 +260,7 @@ impl SaveDir {
             SaveFolder::SinglePlayer => "SinglePlayer",
             SaveFolder::Training => "Training",
             SaveFolder::Multiplayer => "MultiPlayer",
+            SaveFolder::Recorded => "RecordedGames",
         })
     }
 
@@ -329,8 +335,12 @@ impl SaveStore for SaveDir {
 
     fn delete(&self, key: &str) -> bool {
         let p = Path::new(key);
-        // Only files of the save folder.
-        p.starts_with(&self.root) && std::fs::remove_file(p).is_ok()
+        // Only files of the save folder (a recorded game's orders go with it).
+        if !p.starts_with(&self.root) {
+            return false;
+        }
+        let _ = std::fs::remove_file(recording_path(p));
+        std::fs::remove_file(p).is_ok()
     }
 
     fn key_for(&self, folder: SaveFolder, name: &str) -> String {

@@ -91,6 +91,60 @@ pub enum Order {
     MpHyperspace { ships: Vec<ShipId>, from: Vector, to: Vector },
 }
 
+/// What a recorded game holds besides its starting saved game (the original's `.pkts`
+/// recordings hold the lockstep packets): every order applied and every player who dropped
+/// out, by the universe update it came before.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum RecordedEvent {
+    Order { player: u8, order: Order },
+    PlayerDropped { player: u8 },
+}
+
+/// A recording: the player it was made by and the events by update counter (applied when the
+/// universe has made that many updates, before the next).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct Recording {
+    pub local_player: u8,
+    pub events: Vec<(u32, RecordedEvent)>,
+}
+
+/// The first bytes of a recording file.
+const RECORDING_MAGIC: &[u8; 8] = b"HWCREC01";
+
+impl Recording {
+    pub fn write(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let mut bytes = RECORDING_MAGIC.to_vec();
+        bytes.extend(bincode::serialize(self).map_err(std::io::Error::other)?);
+        if let Some(d) = path.parent() {
+            std::fs::create_dir_all(d)?;
+        }
+        std::fs::write(path, bytes)
+    }
+
+    pub fn read(path: &std::path::Path) -> std::io::Result<Self> {
+        let bytes = std::fs::read(path)?;
+        if bytes.len() < 8 || &bytes[..8] != RECORDING_MAGIC {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not a recording"));
+        }
+        bincode::deserialize(&bytes[8..]).map_err(std::io::Error::other)
+    }
+
+    /// Applies what was recorded before the update about to run (the universe's update counter
+    /// is the number of updates made); `next` is the first event not yet applied.
+    pub fn apply_due(&self, u: &mut Universe, next: &mut usize, disguises: Option<&DisguiseTables>) {
+        while let Some((at, e)) = self.events.get(*next) {
+            if *at > u.update_counter {
+                break;
+            }
+            match e {
+                RecordedEvent::Order { player, order } => apply(u, usize::from(*player), order, disguises),
+                RecordedEvent::PlayerDropped { player } => crate::multiplayer::player_dropped(u, usize::from(*player)),
+            }
+            *next += 1;
+        }
+    }
+}
+
 /// The player's live ships among `ships`, in order.
 fn own(u: &Universe, player: usize, ships: &[ShipId]) -> Vec<ShipId> {
     ships.iter().copied().filter(|&id| u.ships.get(id).is_some_and(|s| s.player == player && s.flags & crate::object::sof::DEAD == 0)).collect()

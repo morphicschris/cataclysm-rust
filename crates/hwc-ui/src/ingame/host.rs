@@ -50,6 +50,10 @@ pub struct PlayerInfo {
     pub single_player: bool,
     /// A network game (no pause, no saving; the escape menu has no save/load).
     pub multiplayer: bool,
+    /// The game is being recorded / played back from a recording (the escape menu's
+    /// `_recording` and `_playing` variants).
+    pub recording: bool,
+    pub playing: bool,
     /// The game is paused ("PAUSED" is shown).
     pub paused: bool,
     /// The sensors manager is open (pan arrows, menu entries).
@@ -490,6 +494,10 @@ pub enum GameRequest {
     /// Escape menu choices.
     SaveGame(String),
     LoadGame(String),
+    /// `gpSaveTheRecordedGame`: record the game from now, under this name.
+    RecordGame(String),
+    /// `IG_StopRecording`.
+    StopRecording,
     RestartLevel,
     QuitToMain,
     /// Accept the trader's offer for a tech.

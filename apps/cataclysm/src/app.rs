@@ -1417,6 +1417,8 @@ impl App {
     /// (`opOptionsSaveSettings`).
     fn end_game(&mut self) -> Option<Box<Game>> {
         let mut g = self.game.take()?;
+        // A recording ends with the game.
+        g.finish_recording();
         if let Some(n) = g.net.as_mut() {
             n.session.leave();
         }
@@ -1668,6 +1670,13 @@ impl App {
                 self.start_loading(if tutorial { 0 } else { 1 }, difficulty);
             }
             Request::LoadGame(key) => self.load_saved_game(std::path::Path::new(&key)),
+            Request::LoadRecordedGame(key) => {
+                // `gpLoadTheRecordedGame`: the saved game it starts from, then its orders.
+                self.load_saved_game(std::path::Path::new(&key));
+                if let Some(l) = self.loading.as_mut() {
+                    l.playback = true;
+                }
+            }
             Request::Multiplayer => eprintln!("cataclysm: multiplayer is not available yet"),
             Request::StartSkirmish(s) => self.start_skirmish(s),
             Request::Lan(r) => {

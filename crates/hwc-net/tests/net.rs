@@ -117,6 +117,8 @@ fn two_machines_in_lockstep_stay_the_same() {
     assert_eq!(sync_checksum(&runs[0].universe), sync_checksum(&runs[1].universe), "the same start");
     let humans = [true, true, false];
     let mut ls = [Lockstep::new(0, &humans, DEFAULT_DELAY), Lockstep::new(1, &humans, DEFAULT_DELAY)];
+    // Machine 0 records the game (every player's orders, by update).
+    ls[0].record = Some(Vec::new());
     let mut rngs = [Lcg(1), Lcg(2)];
     // In flight: (deliver at step, to, packet).
     let mut wire: VecDeque<(u32, usize, TurnPacket)> = VecDeque::new();
@@ -169,6 +171,17 @@ fn two_machines_in_lockstep_stay_the_same() {
     for t in [10, 500, turns - 1] {
         assert_eq!(ls[0].checksum(t), ls[1].checksum(t), "turn {t}");
     }
+    // The recording played back on a third machine gives the same game.
+    let rec = hwc_sim::orders::Recording { local_player: 0, events: ls[0].record.take().unwrap() };
+    assert!(!rec.events.is_empty());
+    let mut replay = start(d, mk(0));
+    let mut next = 0;
+    while replay.universe.update_counter < runs[0].universe.update_counter {
+        rec.apply_due(&mut replay.universe, &mut next, None);
+        replay.universe.update();
+    }
+    assert_eq!(next, rec.events.len(), "every recorded order applied");
+    assert_eq!(sync_checksum(&replay.universe), a, "the recording replays the game");
 }
 
 /// One machine's world is changed behind the game's back: the other reports it within a few

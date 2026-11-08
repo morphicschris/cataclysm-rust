@@ -75,6 +75,8 @@ pub struct Loading {
     pub saves: Option<Rc<crate::saves::SaveDir>>,
     /// A skirmish to start instead of a mission.
     skirmish: Option<hwc_ui::skirmish::SkirmishRequest>,
+    /// The saved game is a recorded game's start: its recording plays back.
+    pub playback: bool,
     /// The mission number of the saved game being loaded ([`crate::saves::SKIRMISH_MISSION`]
     /// for a skirmish).
     saved_mission: u32,
@@ -127,6 +129,7 @@ impl Loading {
             saves: None,
             skirmish: None,
             saved_mission: 0,
+            playback: false,
             network: None,
         })
     }
@@ -348,6 +351,11 @@ impl Loading {
                             g.restore_ui(ui);
                             if let Some(p) = &self.saved {
                                 g.after_load(p);
+                            }
+                        }
+                        if let (true, Some(p)) = (self.playback, &self.saved) {
+                            if let Err(e) = g.start_playback(p) {
+                                return self.fail(e);
                             }
                         }
                         if let Some((run, fired)) = self.nis.take() {

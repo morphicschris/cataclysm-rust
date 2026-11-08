@@ -63,6 +63,8 @@ pub struct Lockstep {
     drops: BTreeMap<u32, Vec<usize>>,
     /// Desynchronisations and drops found.
     pub events: Vec<Event>,
+    /// When recording: the orders and drops applied, by update counter.
+    pub record: Option<Vec<(u32, orders::RecordedEvent)>>,
 }
 
 impl Lockstep {
@@ -85,6 +87,7 @@ impl Lockstep {
             outbox: Vec::new(),
             drops: BTreeMap::new(),
             events: Vec::new(),
+            record: None,
         }
     }
 
@@ -167,6 +170,9 @@ impl Lockstep {
                 if p < self.waiting_for.len() && self.waiting_for[p] {
                     self.waiting_for[p] = false;
                     hwc_sim::multiplayer::player_dropped(u, p);
+                    if let Some(r) = self.record.as_mut() {
+                        r.push((u.update_counter, orders::RecordedEvent::PlayerDropped { player: p as u8 }));
+                    }
                     self.events.push(Event::PlayerDropped { player: p, turn: t });
                 }
             }
@@ -175,6 +181,9 @@ impl Lockstep {
         for (p, orders) in slot.into_iter().enumerate() {
             for o in orders.into_iter().flatten() {
                 orders::apply(u, p, &o, disguises);
+                if let Some(r) = self.record.as_mut() {
+                    r.push((u.update_counter, orders::RecordedEvent::Order { player: p as u8, order: o }));
+                }
             }
         }
     }

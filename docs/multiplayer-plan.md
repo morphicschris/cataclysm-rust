@@ -83,7 +83,17 @@ number `SKIRMISH_MISSION` marking it (the level is the map's, saved in the game;
 empty skirmish script), listed by Skirmish Load (`Skirmish_Load`, `FE_GameWindowInit`) and the
 in-game load and save screens of a skirmish, and loaded behind the skirmish's loading screen with
 the multiplayer statics (`campaign_shots::skirmish_saves_and_loads`). A network game is not saved
-(its escape menu has none). Still to do: the modern look of these screens, recorded games.
+(its escape menu has none). Recorded games: Record Game in the escape menu (a skirmish's and a
+network game's, `Game_record_save`, `gpSaveTheRecordedGame`) saves the game into
+`SavedGames\RecordedGames` and from then on keeps every order applied (in a network game every
+player's, and the players dropping out, through `Lockstep::record`) by the update it came before;
+Stop Recording, quitting or loading writes them beside the save (`hwc_sim::orders::Recording`,
+`.hwcrec`). The escape menu then has its `_recording` variants. Load Recorded Game
+(`Recorded_Game`, `FE_RecordedGameWindowInit`, `LoadRecordedGame`) loads the save and plays the
+orders back before their updates (`In_game_esc_menu_playing`; the player's own orders are shut
+out). Played back, the game is the same update for update (`campaign_shots::a_recorded_game_plays_back`,
+and in `hwc-net/tests/net.rs` a lockstep recording replayed on a third machine). Our recordings
+are not the original's `.pkts` files. Still to do: the modern look of these screens.
 
 ## 3. Computer players
 

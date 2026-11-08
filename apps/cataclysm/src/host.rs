@@ -52,6 +52,9 @@ pub struct SimHost<'a> {
     pub special_targets: &'a [ShipId],
     pub messages: &'a [GameMessage],
     pub paused: bool,
+    /// The game is being recorded, or played back from a recording.
+    pub recording: bool,
+    pub playing: bool,
     pub escape_pending: bool,
     /// The waypoint mode while waypoints are being placed.
     pub placing_waypoints: Option<u8>,
@@ -281,6 +284,8 @@ impl GameUiHost for SimHost<'_> {
             single_player: !u.mp.active,
             // `multiPlayerGame`: a network game (a skirmish is neither).
             multiplayer: u.mp.active && u.mp.network,
+            recording: self.recording,
+            playing: self.playing,
             paused: self.paused,
             in_sensors: self.in_sensors,
             tutorial: false,

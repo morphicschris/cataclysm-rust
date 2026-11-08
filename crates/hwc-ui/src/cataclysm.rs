@@ -29,6 +29,8 @@ pub enum Request {
     StartGame { tutorial: bool, difficulty: i32 },
     /// Load a saved game (its [`SaveEntry::key`]).
     LoadGame(String),
+    /// Play a recorded game back (its [`SaveEntry::key`]: the saved game it starts from).
+    LoadRecordedGame(String),
     /// Multiplayer screens (not recreated yet).
     Multiplayer,
     /// Open a web page (troubleshooting link).
@@ -91,6 +93,8 @@ pub struct Cataclysm {
     pub training_games: Vec<SaveEntry>,
     /// The skirmish games (the skirmish load screen's list, and in a skirmish).
     pub multiplayer_games: Vec<SaveEntry>,
+    /// The recorded games.
+    pub recorded_games: Vec<SaveEntry>,
     /// Where the saved games are (set by the game; the lists are empty without it).
     pub saves: Option<Rc<dyn SaveStore>>,
     pub colors: ColorPicker,
@@ -130,6 +134,7 @@ impl Cataclysm {
             saved_games: Vec::new(),
             training_games: Vec::new(),
             multiplayer_games: Vec::new(),
+            recorded_games: Vec::new(),
             saves: None,
             colors,
             credits: None,
@@ -355,6 +360,27 @@ pub fn register(fe: &mut Fe) {
         game_list(fe, call, true)
     });
     fe.callback_add("LoadMultiSinglePlayerGameFromMain", load_game);
+    // The recorded games (`Recorded_Game` in the front end, `Game_record_save` in a game).
+    fe.callback_add("FE_RecordedGameWindowInit", |fe, call| {
+        let Some(a) = call.atom else { return };
+        if !fe.first_call(call) {
+            return;
+        }
+        let games = refresh_saves(fe, SaveFolder::Recorded);
+        crate::saves::fill_list(fe, a, &games);
+    });
+    fe.callback_add("LoadRecordedGame", |fe, call| {
+        if fe.first_call(call) || fe.last_call(call) {
+            return;
+        }
+        match selected_save(fe).map(|e| e.key) {
+            Some(key) => {
+                fe.all_screens_delete();
+                fe.game.requests.push(Request::LoadRecordedGame(key));
+            }
+            None => fe.log_once("no recorded game selected".into()),
+        }
+    });
     fe.callback_add("IG_DeleteGame", |fe, call| {
         if fe.first_call(call) || fe.last_call(call) {
             return;
@@ -745,6 +771,7 @@ pub fn refresh_saves(fe: &mut Fe, folder: SaveFolder) -> Vec<SaveEntry> {
         SaveFolder::Training => fe.game.training_games = games.clone(),
         SaveFolder::SinglePlayer => fe.game.saved_games = games.clone(),
         SaveFolder::Multiplayer => fe.game.multiplayer_games = games.clone(),
+        SaveFolder::Recorded => fe.game.recorded_games = games.clone(),
     }
     games
 }
@@ -755,20 +782,30 @@ pub fn save_entries(fe: &Fe, folder: SaveFolder) -> &[SaveEntry] {
         SaveFolder::Training => &fe.game.training_games,
         SaveFolder::SinglePlayer => &fe.game.saved_games,
         SaveFolder::Multiplayer => &fe.game.multiplayer_games,
+        SaveFolder::Recorded => &fe.game.recorded_games,
     }
 }
 
-/// The save list atoms and the folder each shows.
-const LISTS: [(&str, bool); 2] = [
-    ("FE_GameWindowInit", false),
-    ("FE_TutorialGameWindowInit", true),
+/// The save list atoms and the folder each shows (training's list, or none: by
+/// [`list_folder`]).
+const LISTS: [(&str, Option<bool>); 3] = [
+    ("FE_GameWindowInit", Some(false)),
+    ("FE_TutorialGameWindowInit", Some(true)),
+    ("FE_RecordedGameWindowInit", None),
 ];
+
+fn folder_of(fe: &Fe, list: Option<bool>) -> SaveFolder {
+    match list {
+        Some(training) => list_folder(fe, training),
+        None => SaveFolder::Recorded,
+    }
+}
 
 /// The saved game selected in whichever save list is up.
 pub fn selected_save(fe: &Fe) -> Option<SaveEntry> {
-    LISTS.iter().find_map(|&(n, training)| {
+    LISTS.iter().find_map(|&(n, list)| {
         let i = crate::saves::selected_index(fe, n)?;
-        save_entries(fe, list_folder(fe, training)).get(i).cloned()
+        save_entries(fe, folder_of(fe, list)).get(i).cloned()
     })
 }
 
@@ -786,14 +823,14 @@ fn game_list(fe: &mut Fe, call: &Call, training: bool) {
 /// `gpDeleteGame`: the selected saved game is deleted and the list rebuilt in place (the
 /// selection moves up when it was the last row).
 pub fn delete_selected_game(fe: &mut Fe) {
-    for (name, training) in LISTS {
+    for (name, list) in LISTS {
         let Some(a) = fe.find_atom(name) else {
             continue;
         };
         let Some(i) = crate::saves::selected_index(fe, name) else {
             continue;
         };
-        let folder = list_folder(fe, training);
+        let folder = folder_of(fe, list);
         let Some(entry) = save_entries(fe, folder).get(i).cloned() else {
             continue;
         };

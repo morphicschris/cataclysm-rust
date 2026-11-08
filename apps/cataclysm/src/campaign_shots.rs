@@ -2404,3 +2404,64 @@ fn skirmish_saves_and_loads() {
     assert!(game.world.universe().update_counter > frame, "and it runs on");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A recorded game (`gpSaveTheRecordedGame`, `gpLoadTheRecordedGame`): recording saves the
+/// game and keeps every order from then on; played back, the same game unfolds (the same
+/// state, update for update) with the player's own orders shut out.
+#[test]
+#[ignore]
+fn a_recorded_game_plays_back() {
+    use hwc_sim::orders::Order;
+    let Some(mut rig) = rig() else { return };
+    let assets = crate::data::Assets(rig.data.clone());
+    let mut options = hwc_sim::skirmish::game_types(&assets).into_iter().next().expect("Default").options();
+    options.num_computers = 1;
+    let req = hwc_ui::skirmish::SkirmishRequest { map: "Coldwar2".into(), options, race: 1, name: "Tester".into() };
+    let l = Loading::skirmish(rig.data.clone(), &rig.session, req, SIZE).expect("loading");
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    for _ in 0..16 * 2 {
+        rig.frame(g);
+    }
+    let dir = std::env::temp_dir().join(format!("hwc-recording-{}", std::process::id()));
+    let saves = Rc::new(crate::saves::SaveDir::new(&dir));
+    g.set_saves(saves.clone());
+    let save = g.start_recording("Rec Test").expect("recording");
+    assert!(save.starts_with(dir.join("RecordedGames")));
+    // Orders while recording: the player's ships move off.
+    let u = g.world.universe();
+    let ours: Vec<_> = u.ship_list.iter().copied().filter(|&id| u.ships.ship(id).player == crate::host::player()).collect();
+    let from = u.ships.ship(ours[0]).posinfo.position;
+    for k in 0..3 {
+        for _ in 0..16 {
+            rig.frame(g);
+        }
+        let to = from + hwc_math::Vector::new(3000.0 * (k + 1) as f32, 1000.0, 0.0);
+        assert!(g.give(Order::Move { ships: ours.clone(), mode: 0, from, waypoints: vec![to] }));
+    }
+    for _ in 0..16 * 4 {
+        rig.frame(g);
+    }
+    let target = g.world.universe().update_counter;
+    let sum = hwc_sim::orders::sync_checksum(g.world.universe());
+    let recorded = g.recording.as_ref().map_or(0, |r| r.recording.events.len());
+    g.finish_recording();
+    assert_eq!(recorded, 3, "the three orders");
+    assert!(crate::saves::recording_path(&save).exists());
+    drop(game);
+
+    let mut l = Loading::from_save(rig.data.clone(), &rig.session, &save, SIZE).expect("loading the recording");
+    l.playback = true;
+    let mut game = rig.load(l);
+    assert!(game.playback.is_some());
+    // The player's orders are shut out during playback.
+    assert!(!game.give(Order::Halt { ships: ours.clone() }));
+    while game.world.universe().update_counter < target {
+        rig.frame(&mut game);
+    }
+    let u = game.world.universe();
+    println!("played back to update {} (recorded to {target})", u.update_counter);
+    assert_eq!(u.update_counter, target);
+    assert_eq!(hwc_sim::orders::sync_checksum(u), sum, "the same game");
+    let _ = std::fs::remove_dir_all(&dir);
+}

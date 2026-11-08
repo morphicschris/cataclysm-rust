@@ -15,6 +15,8 @@ pub enum SaveFolder {
     Training,
     /// Skirmish games (`SavedGames\MultiPlayer`).
     Multiplayer,
+    /// Recorded games (`SavedGames\RecordedGames`).
+    Recorded,
 }
 
 /// A small RGB picture of a saved game.

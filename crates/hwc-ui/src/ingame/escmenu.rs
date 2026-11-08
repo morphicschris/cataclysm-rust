@@ -37,8 +37,16 @@ pub fn screen_for(fe: &Fe) -> &'static str {
         "In_game_esc_menu_tutorial"
     } else if p.single_player {
         "In_game_esc_menu2"
+    } else if p.playing {
+        "In_game_esc_menu_playing"
     } else if p.multiplayer {
-        "In_game_esc_menu_nosave"
+        if p.recording {
+            "In_game_esc_menu_nosave_recording"
+        } else {
+            "In_game_esc_menu_nosave"
+        }
+    } else if p.recording {
+        "In_game_esc_menu_recording"
     } else {
         "In_game_esc_menu"
     }
@@ -158,6 +166,22 @@ pub fn register(fe: &mut Fe) {
         fe.game.ig.esc.game_over = false;
         close_manager(fe);
         fe.game.ig.request(GameRequest::LoadGame(key));
+    });
+    // `gpSaveTheRecordedGame`: the game is recorded from now under the name typed.
+    fe.callback_add("IG_SaveRecordedGame", |fe, call| {
+        if fe.first_call(call) || fe.last_call(call) {
+            return;
+        }
+        let name = entered_name(fe);
+        close_manager(fe);
+        fe.game.ig.request(GameRequest::RecordGame(name));
+    });
+    fe.callback_add("IG_StopRecording", |fe, call| {
+        if fe.first_call(call) || fe.last_call(call) {
+            return;
+        }
+        close_manager(fe);
+        fe.game.ig.request(GameRequest::StopRecording);
     });
     fe.callback_add("PO_CloseObjectiveWindow", |fe, call| {
         if fe.first_call(call) || fe.last_call(call) {
