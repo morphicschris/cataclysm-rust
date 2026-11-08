@@ -240,6 +240,9 @@ pub struct Universe {
     pub effects: Option<Box<crate::effects::Effects>>,
     /// The level's nebulae (`nebNebulae`, see [`crate::nebula`]).
     pub nebulae: crate::nebula::Nebulae,
+    /// The multiplayer rules (inactive in single player).
+    #[serde(default, deserialize_with = "crate::save::added_in_9")]
+    pub mp: crate::multiplayer::MpState,
 }
 
 impl Universe {
@@ -302,6 +305,7 @@ impl Universe {
             hulks: Vec::new(),
             effects: None,
             nebulae: Default::default(),
+            mp: Default::default(),
         };
         crate::base::init(&mut u);
         u
@@ -353,6 +357,8 @@ impl Universe {
         self.phys_time_elapsed = dt;
         // `nisUpdateTask` steps the letterbox at the same rate.
         self.letterbox.tick();
+        // The multiplayer winner and game-over clocks.
+        crate::multiplayer::update_clocks(self);
         crate::effects::begin_update(self);
         // The multiplayer resource trickle.
         crate::resource::resource_trickle(self);
@@ -378,8 +384,11 @@ impl Universe {
         crate::nebula::set_fog(self);
         // Build manager and research.
         crate::base::after_blobs(self);
+        // Multiplayer resource injections and the lump sum.
+        crate::multiplayer::update_resources(self);
         hooks.before_bullet_collisions(self);
         crate::collision::check_all_bullet_collisions(self);
+        crate::crates::update(self);
         hooks.computer_players(self);
         if !self.universe_paused {
             command::cl_process(self);

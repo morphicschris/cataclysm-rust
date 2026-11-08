@@ -814,7 +814,7 @@ impl MissionRun {
     pub fn restore_ship_availability(&mut self, src: &dyn DataSource) -> Result<(), MissionError> {
         let mission = self.game.config.mission;
         let fleet_modifier = fleet_modifier(&self.game, &self.universe.statics, mission);
-        let ctx = LevelContext { single_player: true, mission, fleet_modifier, resources: ResourceTweaks::load(src) };
+        let ctx = LevelContext { single_player: true, mission, fleet_modifier, resources: ResourceTweaks::load(src), mp: None };
         let (dir, file) = level::mission_paths(mission, None);
         level::reapply_ship_exclusions(&mut self.universe, src, &dir, &file, &ctx)?;
         for f in &self.game.fleet {
@@ -909,7 +909,7 @@ impl MissionRun {
 
         // singlePlayerLoadNewLevel: the fleet strength scales the level (0 for mission 1).
         let fleet_modifier = fleet_modifier(&game, &statics, mission);
-        let ctx = LevelContext { single_player: true, mission, fleet_modifier, resources: ResourceTweaks::load(src) };
+        let ctx = LevelContext { single_player: true, mission, fleet_modifier, resources: ResourceTweaks::load(src), mp: None };
         let (dir, file) = level::mission_paths(mission, None);
         game.log(LogKind::Flow, format!("loading {dir}{file} (fleet modifier {fleet_modifier})"));
         level::load_level(&mut universe, src, &dir, &file, &ctx, &mut game.level)?;

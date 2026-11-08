@@ -29,7 +29,7 @@ fn load(gd: &GameData, statics: &Arc<StaticWorld>, tweaks: &SimTweaks) -> (Unive
     let src = GameDataSource(gd);
     let mut u = Universe::new(statics.clone(), tweaks.clone(), &[ShipRace::Somtaaw, ShipRace::Taiidan]);
     u.single_player = true;
-    let ctx = LevelContext { single_player: true, mission: 6, fleet_modifier: 0.0, resources: ResourceTweaks::load(&src) };
+    let ctx = LevelContext { single_player: true, mission: 6, fleet_modifier: 0.0, resources: ResourceTweaks::load(&src), mp: None };
     let mut st = LevelState::default();
     let (dir, file) = level::mission_paths(6, None);
     level::load_level(&mut u, &src, &dir, &file, &ctx, &mut st).expect("mission 6 loads");

@@ -110,7 +110,7 @@ impl NisLevelRun {
             universe.total_time_elapsed = c.total_time;
         }
         let mut level = LevelState::default();
-        let ctx = LevelContext { single_player: true, mission, fleet_modifier: 0.0, resources: ResourceTweaks::load(src) };
+        let ctx = LevelContext { single_player: true, mission, fleet_modifier: 0.0, resources: ResourceTweaks::load(src), mp: None };
         let (dir, file) = level::mission_paths(mission, Some(nis));
         level::load_level(&mut universe, src, &dir, &file, &ctx, &mut level)?;
         level::preset_ships_to_position(&mut universe);

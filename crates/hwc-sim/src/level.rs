@@ -280,7 +280,56 @@ pub struct LevelContext {
     /// `spFleetModifier` (0x9101dc): 0..1, scales `numShipsUpper` and flagged resources.
     pub fleet_modifier: f32,
     pub resources: ResourceTweaks,
+    /// A multiplayer level: who starts where.
+    pub mp: Option<MpLevel>,
 }
+
+/// What a multiplayer level load needs from the game setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MpLevel {
+    /// The player each of the level's start spheres goes to (`MissionSphere n` goes to player
+    /// `slots[n]`; gameStart's shuffled table 0x95cb60, or the host's at 0x87bfb8). A sphere
+    /// whose player is not in the game is skipped.
+    pub slots: [u8; 8],
+    pub num_players: usize,
+    /// `tpGameCreated.flag` (0x87bfb4).
+    pub flags: u32,
+}
+
+/// `MissionSphere -1`'s contents (resources, derelicts) belong to this player in a
+/// multiplayer game (`MAX_MULTIPLAYER_PLAYERS`); the simulation keeps it right after the
+/// players, so it is index 8 in an eight-player game as in the original.
+pub fn misc_player(mp: &MpLevel) -> usize {
+    mp.num_players
+}
+
+/// The race swap of `scriptSetShipsCB` (0x879bb8): a Somtaaw type's Beast counterpart and back.
+const RACE_SWAP: [u8; 0x3c] = [
+    0x21, 0x22, 0x24, 0x25, 0x26, 0x27, 0x30, 0x29, 0x2a, 0x2b, 0x2e, 0x21, 0x2f, 0x21, 0x31, 0x32, //
+    0x33, 0x34, 0x35, 0x21, 0x21, 0x21, 0x21, 0x21, 0x36, 0x2c, 0x39, 0x21, 0x37, 0x21, 0x21, 0x21, //
+    0x21, 0x00, 0x01, 0x01, 0x02, 0x01, 0x04, 0x05, 0x04, 0x07, 0x08, 0x09, 0x19, 0x07, 0x0a, 0x0c, //
+    0x06, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x18, 0x1c, 0x00, 0x1a, 0x00, 0x00,
+];
+
+/// `scriptSetShipsCB`'s race swap: in a multiplayer MissionMan level a Somtaaw or Beast ship
+/// given to a player of the other race becomes that race's counterpart.
+pub fn race_swapped(t: ShipType, race: ShipRace, player_race: ShipRace) -> ShipType {
+    let two = |r: ShipRace| matches!(r, ShipRace::Somtaaw | ShipRace::Beast);
+    let i = t.index();
+    if !two(race) || !two(player_race) || race == player_race || i >= RACE_SWAP.len() {
+        return t;
+    }
+    // The type's race mask (0x8a74d4): Somtaaw types 0..0x20, Beast types 0x21..0x3b.
+    let own = if i < 0x21 { ShipRace::Somtaaw } else { ShipRace::Beast };
+    if own == player_race {
+        return t;
+    }
+    ShipType::from_index(usize::from(RACE_SWAP[i])).unwrap_or(t)
+}
+
+/// The types that count as a capturable capital ship (`scriptSetMissionSphereCB`'s list):
+/// with `MG_CaptureCapitalShip` a player who has none is given a Hive Frigate.
+const CAPITAL_SHIP_TYPES: [usize; 16] = [0x2d, 0x3c, 0x3f, 0x40, 0x42, 0x45, 0x49, 0x4a, 0x4d, 0x4e, 0x4f, 0x50, 0x53, 0x55, 0x5a, 0x5b];
 
 /// Everything a level created besides ships, and the KAS labels it defined.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -733,10 +782,50 @@ fn mission_sphere(u: &mut Universe, src: &dyn DataSource, dir: &str, field: &str
     let rot_deg = fl(6);
     let contents = v.get(7 + off).and_then(Scanned::str).map(str::to_string).ok_or_else(|| LevelError(format!("bad MissionSphere: {field}")))?;
     let rus = v.get(8 + off).and_then(Scanned::int).unwrap_or(0);
+    // Multiplayer: the sphere's start position goes to the player the slot table names; one
+    // whose player is not in the game is skipped, and (outside MissionMan files) so is one
+    // for another race than the player's.
+    let mut slot_player: Option<usize> = None;
+    if let (false, Some(mp)) = (ctx.single_player, ctx.mp.as_ref()) {
+        if player >= 0 {
+            let p = mp.slots.get(player as usize).copied().map_or(usize::MAX, usize::from);
+            if p >= mp.num_players {
+                return Ok(());
+            }
+            let race_s = v.get(1).and_then(Scanned::str).unwrap_or("");
+            let race = ShipRace::from_name(race_s).ok_or_else(|| LevelError(format!("Bad shiprace in {field}")))?;
+            if !state.mission_man {
+                if race != u.players[p].race {
+                    return Ok(());
+                }
+            } else if race.index() > 3 {
+                u.players[p].race = race;
+            }
+            slot_player = Some(p);
+        }
+    }
     let rotz = if rot_deg < 1000.0 { st(ld(rot_deg) * ld(DEG_TO_RAD)) } else { st(position.y.atan2(position.x) as f64 - std::f64::consts::FRAC_PI_2) };
     // Single player: every sphere's contents belong to the computer player.
-    let owner = if ctx.single_player { COMPUTER_PLAYER } else { player.max(0) as usize };
-    if player >= 0 && (player as usize) < state.resource_units.len() {
+    let owner = match (ctx.single_player, ctx.mp.as_ref()) {
+        (true, _) => COMPUTER_PLAYER,
+        (false, Some(mp)) => slot_player.unwrap_or_else(|| misc_player(mp)),
+        (false, None) => player.max(0) as usize,
+    };
+    if let Some(p) = slot_player {
+        // The player's starting RUs; it is alive.
+        let pl = &mut u.base.players[p];
+        pl.resource_units = rus;
+        pl.state = 0;
+        let st_ = &mut u.base.stats;
+        if st_.players.len() <= p {
+            st_.players.resize(p + 1, crate::base::PlayerStats::default());
+        }
+        st_.players[p].ru_total += rus;
+        if state.resource_units.len() <= p {
+            state.resource_units.resize(p + 1, 0);
+        }
+        state.resource_units[p] = rus;
+    } else if player >= 0 && (player as usize) < state.resource_units.len() {
         state.resource_units[player as usize] = rus;
     }
     let info = SphereInfo { player: owner, position, rotz };
@@ -764,6 +853,33 @@ fn mission_sphere(u: &mut Universe, src: &dyn DataSource, dir: &str, field: &str
             _ => {}
         }
     }
+    if let (Some(p), Some(mp)) = (slot_player, ctx.mp.as_ref()) {
+        if mp.flags & crate::multiplayer::mg::CAPTURE_CAPITAL_SHIP != 0 {
+            give_capital_ship(u, state, ctx, p)?;
+        }
+    }
+    Ok(())
+}
+
+/// `MG_CaptureCapitalShip`: a player with no capturable capital ship gets a Hive Frigate of
+/// its race at the origin, in the parade around its mothership (none without a mothership).
+fn give_capital_ship(u: &mut Universe, state: &mut LevelState, ctx: &LevelContext, player: usize) -> Result<(), LevelError> {
+    let has = u.ships.iter().any(|s| s.player == player && CAPITAL_SHIP_TYPES.contains(&s.ship_type.index()));
+    if has {
+        return Ok(());
+    }
+    let t = match u.players[player].race {
+        ShipRace::Somtaaw => ShipType::sHiveFrigate,
+        ShipRace::Beast => ShipType::bHiveFrigate,
+        _ => return Ok(()),
+    };
+    let Some(ms) = u.base.players[player].mothership else { return Ok(()) };
+    if u.statics.ship(t).is_none() {
+        state.warnings.push(format!("no statics for {t}; capital ship not given"));
+        return Ok(());
+    }
+    let id = create_ship(u, state, ctx.mission, t, player, Vector::ZERO)?;
+    command::group_ship_into_military_parade(u, id, ms);
     Ok(())
 }
 
@@ -834,8 +950,11 @@ fn ships_line(u: &mut Universe, field: &str, info: SphereInfo, ctx: &LevelContex
         num += ftol_i32(diff + 0.5).max(0) as u32;
     }
     let race = ShipRace::from_name(race_s).ok_or_else(|| LevelError(format!("bad ship race in {field}")))?;
-    let ship_type = ShipType::from_name(type_s).ok_or_else(|| LevelError(format!("bad ship type in {field}")))?;
-    let _ = race;
+    let mut ship_type = ShipType::from_name(type_s).ok_or_else(|| LevelError(format!("bad ship type in {field}")))?;
+    let mp = !ctx.single_player && ctx.mp.is_some();
+    if mp && state.mission_man {
+        ship_type = race_swapped(ship_type, race, u.players[player].race);
+    }
 
     let mut parade = false;
     let mut use_as_mothership = false;
@@ -892,8 +1011,23 @@ fn ships_line(u: &mut Universe, field: &str, info: SphereInfo, ctx: &LevelContex
         rotate_yaw(u, id, rot);
         if is_mothership_type(ship_type) || use_as_mothership {
             state.set_mothership(player, id);
+            if mp {
+                u.base.players[player].mothership = Some(id);
+            }
+        } else if parade && mp {
+            let ms = u.base.players[player].mothership.ok_or_else(|| LevelError(format!("Mothership must be defined for parade formation: {field}")))?;
+            command::group_ship_into_military_parade(u, id, ms);
         } else if parade {
             state.warnings.push(format!("{ship_type}: parade formation not modelled"));
+        }
+    } else if num > 1 && parade && mp {
+        // Into the parade around the mothership, all made at the one position.
+        let ms = u.base.players[player].mothership.ok_or_else(|| LevelError(format!("Mothership must be defined for parade formation: {field}")))?;
+        let p = info.place(state.mission_man, pos);
+        for _ in 0..num {
+            let id = create_ship(u, state, ctx.mission, ship_type, player, p)?;
+            finish(u, state, id);
+            command::group_ship_into_military_parade(u, id, ms);
         }
     } else if num > 1 {
         if parade {
@@ -1399,7 +1533,7 @@ smUniverseSizeZ 3000
         ]));
         let mut u = Universe::new(statics, crate::SimTweaks::compiled(), &[ShipRace::Somtaaw, ShipRace::Taiidan]);
         u.single_player = true;
-        let ctx = LevelContext { single_player: true, mission: 1, fleet_modifier: 0.0, resources: ResourceTweaks::default() };
+        let ctx = LevelContext { single_player: true, mission: 1, fleet_modifier: 0.0, resources: ResourceTweaks::default(), mp: None };
         let mut st = LevelState::default();
         let (dir, file) = mission_paths(1, None);
         load_level(&mut u, &src, &dir, &file, &ctx, &mut st).unwrap();
@@ -1456,7 +1590,7 @@ ExcludeShips    RACE_SECT,sMimic
         ]));
         let mut u = Universe::new(statics, crate::SimTweaks::compiled(), &[ShipRace::Somtaaw, ShipRace::Taiidan]);
         u.single_player = true;
-        let ctx = LevelContext { single_player: true, mission: 1, fleet_modifier: 0.0, resources: ResourceTweaks::default() };
+        let ctx = LevelContext { single_player: true, mission: 1, fleet_modifier: 0.0, resources: ResourceTweaks::default(), mp: None };
         let mut st = LevelState::default();
         let (dir, file) = mission_paths(1, None);
         load_level(&mut u, &src, &dir, &file, &ctx, &mut st).unwrap();

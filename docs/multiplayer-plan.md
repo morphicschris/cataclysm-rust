@@ -23,8 +23,31 @@ What a multiplayer game sets up that a mission does not, from `cataclysm.exe`:
 - The rules while it runs: injections and lump sums, crates, victory and defeat (`MG_LastMotherShip`,
   capture, allied victory), a player leaving.
 
-Done when every shipped map (the 11 in `multiplayermissions.script`) loads for each player count it
+Done when every shipped map (the 10 `multiplayermissions.script` lists) loads for each player count it
 allows, with any mix of Somtaaw and Beast, and a headless game runs to a winner under scripted orders.
+
+Status: done in `hwc_sim::skirmish` (setup), `hwc_sim::multiplayer` (rules) and `hwc_sim::crates`,
+tested by `crates/hwc-sim/tests/skirmish.rs`:
+
+- The map list (`spTitleListLoad`: the ten maps the script lists; LiveFireExercise2 is commented
+  out) and the four game types of `gametypes.script`.
+- `gameStart` / `levelInit` for a multiplayer game: players and races (a skirmish's computer
+  players alternate races), the start-position shuffle, unit caps for the player count
+  (`UnitLimitCaps<n>.script`), `scriptSetMissionSphereCB`'s multiplayer path (positions, starting
+  RUs, the level's own objects owned by the player after the last), `scriptSetShipsCB`'s race swap
+  and start fleets in the parade, the Hive Frigate of "capture capital ship", backup motherships,
+  starting resources (computer players get five times as much with harvesting on) and research
+  (everything known when research is off).
+- While it runs: resource injections and the lump sum, players losing (`univKillOtherPlayersIfDead`,
+  "last mothership", `DisableAllPlayersShips`: the loser's ships careen and blow up), the winner and
+  the end of the game (`CheckPlayerWin`, `DeclarePlayerWin`, allied victory in network games), and
+  crates (placement, expiry, ships, technologies or RUs).
+- Every map loads for every player count, Somtaaw first and Beast first; a game with a scripted
+  strike force runs to a winner.
+
+Left for later stages: bounties during the game (`calculatePlayerBounties`), multiplayer hyperspace
+(`MG_Hyperspace`, `UpdateMidLevelHyperspacingShips`), fuel burn, alliances being formed and broken,
+and drawing crates (the simulation has them; the view does not yet).
 
 ## 2. Skirmish front end
 

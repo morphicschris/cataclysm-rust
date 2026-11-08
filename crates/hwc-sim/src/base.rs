@@ -327,6 +327,9 @@ pub struct PlayerStats {
     pub ru_other: i32,
     /// 0xa08358: ships built per class.
     pub built_per_class: [i32; ShipClass::COUNT],
+    /// `totalInjectedResources`: resource units from injections and the lump sum.
+    #[serde(default, deserialize_with = "crate::save::added_in_9")]
+    pub ru_injected: i32,
 }
 
 /// The game-wide statistics.

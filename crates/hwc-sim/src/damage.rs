@@ -487,8 +487,12 @@ fn delete_dead_ship(u: &mut Universe, id: ShipId, death_by: i32) {
     if death_by == 0 {
         crate::battle_status::ship_dying(u, id);
     }
+    let player = u.ships.ship(id).player;
+    let was_mothership = u.base.players.get(player).is_some_and(|p| p.mothership == Some(id));
     let fx = u.effects.is_some();
     retire_dead_ship(u, id, !fx);
+    // `univKillOtherPlayersIfDead`.
+    crate::multiplayer::ship_deleted(u, player, was_mothership);
     // The explosion; it deletes the hulk when it is done (`deleteParentShip`). Without an
     // explosion the ship goes now (the original would leave it in the universe).
     if fx && crate::effects::start_death_effect(u, id, death_by).is_some() {
