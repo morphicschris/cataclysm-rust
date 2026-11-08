@@ -4,9 +4,9 @@
 //! mothership (`aidMothershipDefense`): new dangerous ships and idle teams, then guards and every
 //! team in range when the attackers outnumber them, go after the ships attacking it.
 //!
-//! Not yet ported: the roving defence teams of an advanced player (`aioCreateFast/
-//! SlowRovingDefense`, which patrol), guard teams recalled to the sphere of influence, distress
-//! calls from resourcers, and the HW1 races' cloak defence.
+//! The roving defence teams of an advanced player are in [`super::roving`]. Not yet ported:
+//! guard teams recalled to the sphere of influence, distress calls from resourcers, and the HW1
+//! races' cloak defence.
 
 use hwc_math::fpu::{ld, st};
 
@@ -107,8 +107,12 @@ pub fn manager(u: &mut Universe, p: usize) {
         }
     }
     let f = ai(u, p).defense_features;
-    if f & feature::RESOURCE_DEFENSE != 0 && f & feature::ROVING_DEFENSE == 0 {
-        setup_resource_defense_teams(u, p);
+    if f & feature::RESOURCE_DEFENSE != 0 {
+        if f & feature::ROVING_DEFENSE == 0 {
+            setup_resource_defense_teams(u, p);
+        } else {
+            super::roving::manage(u, p);
+        }
     }
     check_sphere_of_influence(u, p);
     if f & feature::MOTHERSHIP_DEFENSE != 0 {

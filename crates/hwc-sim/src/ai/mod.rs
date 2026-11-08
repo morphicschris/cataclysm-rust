@@ -12,6 +12,7 @@ pub mod attack;
 pub mod defense;
 pub mod harass;
 pub mod recon;
+pub mod roving;
 pub mod takeout;
 pub mod research;
 pub mod resource;

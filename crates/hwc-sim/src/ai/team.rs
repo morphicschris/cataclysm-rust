@@ -115,6 +115,12 @@ pub enum MoveKind {
     VarDestroy { var: String },
     /// `MOVE_GUARDCOOPTEAM`: guard the cooperating team's ships.
     GuardCooperatingTeam,
+    /// `MOVE_ACTIVEPATROL`: patrol paths of the resourcers (kind 0) or support frigates (1).
+    ActivePatrol { kind: u32 },
+    /// `MOVE_PATROLMOVE`: a move to each point of the path, from `start`.
+    PatrolMove { path: Vec<Vector>, start: usize },
+    /// A patrol's move to one point (`MOVE_MOVE` numbered 7).
+    PatrolPoint { destination: Vector },
 }
 
 /// The event handlers a move can carry (`aieHandlerSet*`, `aih*Handler`).
@@ -135,6 +141,13 @@ pub enum Handler {
     KamikazeHealthLow,
     /// `aihPatrolTeamDiedHandler`: the team is destroyed.
     Patrol,
+    /// The roving defence's handlers (`aihFast/SlowDefense*Handler`).
+    FastDefenseTeamDied,
+    SlowDefenseTeamDied,
+    FastDefenseNumbersLow,
+    SlowDefenseNumbersLow,
+    FastDefenseDistress,
+    SlowDefenseDistress,
 }
 
 /// One event of a move (`aieHandlerSet*`): its handler, whether it fires only once and has
@@ -158,6 +171,10 @@ pub struct Events {
     pub disengage: Option<Event>,
     pub health_low: Option<Event>,
     pub numbers_low: Option<Event>,
+    /// The interrupt on the distress calls (+0x140..+0x150): the delay in turns as the
+    /// percentage, the turns left as the base.
+    #[serde(default, deserialize_with = "crate::save::added_in_18")]
+    pub interrupt: Option<Event>,
 }
 
 /// One move (`AITeamMove`, 0x170 bytes).
@@ -208,6 +225,9 @@ impl AiMove {
             MoveKind::VarWait { .. } => super::takeout::move_type::VAR_WAIT,
             MoveKind::VarDestroy { .. } => super::takeout::move_type::VAR_DESTROY,
             MoveKind::GuardCooperatingTeam => super::takeout::move_type::GUARD_COOPERATING_TEAM,
+            MoveKind::ActivePatrol { .. } => super::roving::move_type::ACTIVE_PATROL,
+            MoveKind::PatrolMove { .. } => super::roving::move_type::PATROL_MOVE,
+            MoveKind::PatrolPoint { .. } => super::roving::move_type::PATROL_POINT,
         }
     }
 }
@@ -515,6 +535,22 @@ fn events(u: &mut Universe, t: usize) {
         } else if n * 100 < e.percent * e.base {
             set_fired(u, |e| &mut e.numbers_low);
             super::harass::handle(u, t, e.handler, None);
+            return;
+        }
+    }
+    let p = u.ai.teams[t].as_ref().expect("team").0;
+    if let Some(e) = open(&ev.interrupt) {
+        if !super::ai(u, p).defense.distress.is_empty() {
+            if e.percent == 0 || e.base == 0 {
+                // (The original resets the count after the handler, on the same move.)
+                if let Some(x) = team_mut(u, t).expect("team").moves[c].events.interrupt.as_mut() {
+                    x.fired = true;
+                    x.base = e.percent;
+                }
+                super::harass::handle(u, t, e.handler, None);
+            } else if let Some(x) = team_mut(u, t).expect("team").moves[c].events.interrupt.as_mut() {
+                x.base -= 1;
+            }
         }
     }
 }
@@ -598,6 +634,9 @@ fn process(u: &mut Universe, t: usize) -> bool {
             }
             true
         }
+        MoveKind::ActivePatrol { .. } => super::roving::process_active_patrol(u, t, c),
+        MoveKind::PatrolMove { .. } => super::roving::process_patrol_move(u, t, c),
+        MoveKind::PatrolPoint { destination } => process_move(u, t, c, destination),
         MoveKind::GuardCooperatingTeam => {
             let done = super::takeout::process_guard_cooperating_team(u, t);
             if done {

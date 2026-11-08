@@ -211,8 +211,24 @@ near whoever is hitting it; dangerous new ships form the mothership's defence te
 with dangerous ships defend; with too few defenders the guards, then every team in range, join).
 The moves `GuardShips`, `DefendMothership` and `Formation`, and `aimInsertMove`.
 
-Not yet: the advanced player's roving defence (`aioCreateFast/SlowRovingDefense`, patrol moves),
-recalling guard teams to the sphere, resourcers' distress calls, the HW1 races' cloak defence.
+The advanced player's roving defence (`hwc_sim::ai::roving`): instead of resource escorts,
+`aidDefenseManager` keeps a defence team for every two (later four) points of resourcers (two for
+a carrier or processor, one for a worker), fast (twelve fighters) and slow (three frigates and
+corvettes) in turn. `aimProcessActivePatrol` patrols the points 2500 short of the player's
+resourcers nearest the enemy mothership (`aiuGeneratePatrolPath`,
+`aiuFindClosestVulnerableGoodGuyShips`, `aimProcessPatrolMove`); slow teams patrol HW1's Advance
+Support Frigates only, so in Cataclysm they stay put. The distress interrupt (`aieExecute`'s
+last event, every turn for fast teams, every fourth for slow ones) rescues a processor, then
+attacks the threats to the sphere of influence (a slow team only those within 10000), then (fast)
+rescues a worker (`aiuRescueShipType`, `aiuRescueShip`,
+`aitCheckIfOtherDefTeamAnsweringSignalNeedsHelp`); numbers low (80% fast, 50% slow) sends the
+team home to be topped up; a wiped-out team is made again. Save version 18. Test:
+`skirmish::computer_players_patrol` (a fast team handed fighters patrols; the defence queue's
+requests for types an attack team also waits for are taken by the attack team first, so on its
+own a team waits long for its ships).
+
+Not yet: recalling guard teams to the sphere, resourcers' distress calls (the rescue list is
+never filled yet), the HW1 races' cloak defence.
 
 Test: `skirmish::a_computer_player_defends_its_mothership` (escorts for the resourcers, and
 frigates sent at the mothership are attacked). `a_scripted_game_runs_to_a_winner` now has two

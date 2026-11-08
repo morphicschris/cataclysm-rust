@@ -700,3 +700,83 @@ fn computer_players_take_out_targets() {
     assert!(takeouts > 0, "a target takeout is made");
     assert!(escorts > 0, "mothership takeouts (and fancy target takeouts) have escort teams");
 }
+
+/// The roving defence of a hard computer player (`aioCreateFast/SlowRovingDefense`): fast and
+/// slow defence teams by the number of resourcers, the fast ones patrolling between the
+/// resourcers nearest the enemy.
+#[test]
+fn computer_players_patrol() {
+    use hwc_sim::ai::team::MoveKind;
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    let mut options = default_game(d);
+    options.cpu_difficulty = 90;
+    // No unit caps: with them the support units run out and the defence teams' ships are never
+    // built.
+    options.flags &= !(hwc_sim::multiplayer::mg::RESEARCH_ENABLED | hwc_sim::multiplayer::mg::UNIT_CAPS_ENABLED);
+    let mut s = setup("Coldwar2", &[ShipRace::Somtaaw, ShipRace::Beast], options, 9);
+    for p in &mut s.players {
+        p.computer = true;
+    }
+    let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, s).expect("start");
+    let (mut fast, mut slow, mut patrolling, mut answered) = (0usize, 0usize, 0usize, 0usize);
+    let mut handed = false;
+    for minute in 0..20 {
+        // A fast team handed fighters at once patrols (the teams wait long for theirs: the
+        // attack teams waiting for the same types are served first).
+        if !handed && minute == 2 {
+            let u = &mut run.universe;
+            let team = u.ai.players[0].as_ref().unwrap().defense.teams.iter().copied().find(|&t| u.ai.teams[t].as_ref().is_some_and(|x| x.1.flags & hwc_sim::ai::roving::flag::FAST != 0));
+            if let Some(t) = team {
+                let fighters: Vec<_> = u.ship_list.iter().copied().filter(|&id| {
+                    let s = u.ships.ship(id);
+                    s.player == 0 && u.statics.ship(s.ship_type).and_then(|st| st.ship_class) == Some(hwc_sim::statics::ShipClass::Fighter)
+                }).take(4).collect();
+                if !fighters.is_empty() {
+                    hwc_sim::ai::team::delete_all_moves(u, t);
+                    for &f in &fighters {
+                        for (_, tm) in u.ai.teams.iter_mut().flatten() {
+                            tm.ships.retain(|&s| s != f);
+                        }
+                        u.ai.players[0].as_mut().unwrap().new_ships.retain(|&s| s != f);
+                        hwc_sim::ai::team_add_ship(u, t, f);
+                    }
+                    hwc_sim::ai::roving::create_fast(u, 0, t);
+                    // Without the ships to get: straight to the patrol.
+                    let tm = &mut u.ai.teams[t].as_mut().unwrap().1;
+                    tm.moves.retain(|m| !matches!(m.kind, MoveKind::FancyGetShips { .. }));
+                    tm.current = Some(0);
+                    handed = true;
+                }
+            }
+        }
+        // Plenty of RUs, so the teams get their ships.
+        for p in 0..2 {
+            run.universe.base.players[p].resource_units = run.universe.base.players[p].resource_units.max(20000);
+        }
+        for _ in 0..16 * 60 {
+            run.step();
+            let u = &run.universe;
+            for (_, tm) in u.ai.teams.iter().flatten() {
+                if tm.flags & (hwc_sim::ai::roving::flag::FAST | hwc_sim::ai::roving::flag::SLOW) == 0 {
+                    continue;
+                }
+                if let Some(c) = tm.current {
+                    match tm.moves[c].kind {
+                        MoveKind::PatrolPoint { .. } => patrolling += 1,
+                        MoveKind::AdvancedAttack { .. } => answered += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let u = &run.universe;
+        fast = u.ai.teams.iter().flatten().filter(|(_, t)| t.flags & hwc_sim::ai::roving::flag::FAST != 0).count();
+        slow = u.ai.teams.iter().flatten().filter(|(_, t)| t.flags & hwc_sim::ai::roving::flag::SLOW != 0).count();
+        let teams: Vec<String> = u.ai.teams.iter().flatten().filter(|(_, t)| t.flags & 3 != 0).map(|(p, t)| format!("p{p}:{}:{:?}", t.ships.len(), t.current.map(|c| t.moves[c].move_type()))).collect();
+        println!("min {minute}: fast {fast} slow {slow} patrolling {patrolling} answered {answered} {teams:?}");
+    }
+    assert!(fast > 0 && slow > 0, "fast and slow roving teams");
+    assert!(handed, "a fast team was handed fighters");
+    assert!(patrolling > 0, "the fast team patrols");
+}

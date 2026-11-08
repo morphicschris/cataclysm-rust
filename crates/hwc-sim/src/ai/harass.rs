@@ -470,6 +470,12 @@ pub fn handle(u: &mut Universe, t: usize, h: Handler, rocker: Option<ShipId>) {
             team::wrap_formation_pub(u, &ships, formation);
         }
         Handler::KamikazeHealthLow => kamikaze(u, t),
+        Handler::FastDefenseTeamDied
+        | Handler::SlowDefenseTeamDied
+        | Handler::FastDefenseNumbersLow
+        | Handler::SlowDefenseNumbersLow
+        | Handler::FastDefenseDistress
+        | Handler::SlowDefenseDistress => super::roving::handle(u, t, h),
         Handler::Patrol => {
             if let Some(Some((_, tm))) = u.ai.teams.get_mut(t) {
                 tm.flags |= team_flag::DESTROY;
@@ -568,7 +574,7 @@ fn getting_rocked(u: &mut Universe, t: usize, rocker: Option<ShipId>) {
         e.fired = false;
     }
     let targets = ship_and_its_formation(u, rocker);
-    if not_good_at_killing(u, &ships, &targets) {
+    if not_good_at_killing(u, &ships, &targets, ROCKED_STRENGTH) {
         return;
     }
     let tm = &mut u.ai.teams[t].as_mut().expect("team").1;
@@ -591,7 +597,11 @@ fn ship_and_its_formation(u: &Universe, id: ShipId) -> Vec<ShipId> {
 
 /// `aiuSelectionNotGoodAtKillingTheseTargets` (0x41e740): fighters against ships no good at
 /// shooting fighters, or fewer than 1.5 ships for each target.
-fn not_good_at_killing(u: &Universe, team: &[ShipId], targets: &[ShipId]) -> bool {
+pub(super) fn not_good_at_killing_pub(u: &Universe, team: &[ShipId], targets: &[ShipId], strength: f32) -> bool {
+    not_good_at_killing(u, team, targets, strength)
+}
+
+fn not_good_at_killing(u: &Universe, team: &[ShipId], targets: &[ShipId], strength: f32) -> bool {
     let all_fighters = targets.iter().all(|&id| class(u, id) == Some(ShipClass::Fighter));
     let bad = |id: ShipId| {
         u.ships.get(id).is_some_and(|s| {
@@ -604,7 +614,7 @@ fn not_good_at_killing(u: &Universe, team: &[ShipId], targets: &[ShipId]) -> boo
     if all_fighters && team.iter().all(|&id| bad(id)) {
         return true;
     }
-    relative_strength(team.len(), targets.len()) < f64::from(ROCKED_STRENGTH)
+    relative_strength(team.len(), targets.len()) < f64::from(strength)
 }
 
 /// `aihKamikazeHealthLowHandler` (0x405fe0): the badly hurt fighters and corvettes ram.
