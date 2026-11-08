@@ -277,7 +277,12 @@ fn a_crate_appears_and_is_claimed() {
     let src = GameDataSource(&d.gd);
     let mut options = default_game(d);
     options.flags |= mg::CRATES_ENABLED;
-    let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, setup("Kristalzupacken4", &[ShipRace::Somtaaw, ShipRace::Beast, ShipRace::Somtaaw], options, 9)).expect("start");
+    // No computer players: nothing else spends or builds while the crate is watched.
+    let mut s = setup("Kristalzupacken4", &[ShipRace::Somtaaw, ShipRace::Beast, ShipRace::Somtaaw], options, 9);
+    for p in &mut s.players {
+        p.computer = false;
+    }
+    let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, s).expect("start");
     let tw = run.universe.mp.crates.tweaks;
     assert_eq!((tw.add_check_time, tw.expiry_time, tw.add_prob, tw.min_rus), (240.0, 420.0, 0.25, 2000), "Crates.script is read");
     run.universe.mp.crates.tweaks.add_check_time = 2.0;
@@ -324,5 +329,36 @@ fn a_crate_appears_and_is_claimed() {
         hwc_sim::crates::Reward::Technology(t) => {
             assert!(!before.2.contains(t) && u.base.players[2].tech.contains(t));
         }
+    }
+}
+
+/// Computer players against each other: they build resourcers and harvest, ask for the
+/// Somtaaw mothership's modules and research.
+#[test]
+fn computer_players_build_and_harvest() {
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    for slider in [10u8, 50, 90] {
+        let mut options = default_game(d);
+        options.cpu_difficulty = slider;
+        let mut s = setup("Coldwar2", &[ShipRace::Somtaaw, ShipRace::Beast], options, 11);
+        for p in &mut s.players {
+            p.computer = true;
+        }
+        let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, s).expect("start");
+        let count = |run: &SkirmishRun, p: usize, t: ShipType| run.universe.ship_list.iter().filter(|&&id| run.universe.ships.ship(id).player == p && run.universe.ships.ship(id).ship_type == t).count();
+        let workers0 = (count(&run, 0, ShipType::sWorker), count(&run, 1, ShipType::bWorker));
+        for _ in 0..16 * 60 * 6 {
+            run.step();
+        }
+        let u = &run.universe;
+        let workers = (count(&run, 0, ShipType::sWorker), count(&run, 1, ShipType::bWorker));
+        let collected: Vec<i32> = (0..2).map(|p| u.base.stats.players.get(p).map_or(0, |s| s.ru_collected)).collect();
+        let modules: Vec<ShipType> = u.ship_list.iter().map(|&id| u.ships.ship(id)).filter(|s| s.player == 0 && matches!(s.ship_type, ShipType::sMothershipDockingBay | ShipType::sMothershipMicro | ShipType::sMothershipSpecial | ShipType::sMothershipWeapons | ShipType::sMothershipArmour | ShipType::sMothershipSupport)).map(|s| s.ship_type).collect();
+        let research: Vec<usize> = (0..2).map(|p| u.base.players[p].topics.len() + u.base.players[p].tech.has.iter().filter(|&&h| h == 1).count()).collect();
+        println!("slider {slider}: workers {workers0:?} -> {workers:?}, collected {collected:?}, RUs {:?}, Somtaaw modules {modules:?}, research {research:?}", (0..2).map(|p| u.base.players[p].resource_units).collect::<Vec<_>>());
+        assert!(workers.0 > workers0.0 && workers.1 > workers0.1, "both build resourcers");
+        assert!(collected[0] > 0 && collected[1] > 0, "both harvest");
+        assert!(!modules.is_empty(), "the Somtaaw computer player adds modules");
     }
 }

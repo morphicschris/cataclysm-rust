@@ -98,6 +98,19 @@ pub struct CommandToDo {
     pub holding_start_time: f32,
     pub turn_around_times: i32,
     pub holding_pattern_vec: Vector,
+    /// `buildingship` of a `COMMAND_BUILDING_SHIP` (a computer player's ship on order).
+    #[serde(default, deserialize_with = "crate::save::added_in_10")]
+    pub building: Option<BuildingShip>,
+}
+
+/// A ship on order (`clBuildShip`): made at the creator once the update counter passes
+/// `frame`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BuildingShip {
+    pub ship_type: crate::statics::ShipType,
+    pub player: usize,
+    pub creator: ShipId,
+    pub frame: u32,
 }
 
 /// The dock part of a command.
@@ -210,7 +223,35 @@ fn new_command(selection: Vec<ShipId>) -> CommandToDo {
         holding_start_time: 0.0,
         turn_around_times: 0,
         holding_pattern_vec: Vector::ZERO,
+        building: None,
     }
+}
+
+/// `clBuildShip` (0x446540): the player pays for a ship now and it is made at `creator` after
+/// its build time, one build time more for every ship of the type already on order there.
+pub fn cl_build_ship(u: &mut Universe, t: crate::statics::ShipType, player: usize, creator: ShipId) {
+    if u.base.players.get(player).is_none_or(|p| p.state != 0) {
+        return;
+    }
+    let Some(st) = u.statics.ship(t) else { return };
+    let (cost, time) = (st.build_cost, st.build_time);
+    u.base.players[player].resource_units -= cost;
+    let stats = &mut u.base.stats;
+    if stats.players.len() <= player {
+        stats.players.resize(player + 1, crate::base::PlayerStats::default());
+    }
+    stats.players[player].ru_spent += cost;
+    let queued = u
+        .commands
+        .iter()
+        .filter(|c| c.order == order::BUILDING_SHIP)
+        .filter_map(|c| c.building)
+        .filter(|b| b.player == player && b.ship_type == t && b.creator == creator)
+        .count() as u32;
+    let mut cmd = new_command(Vec::new());
+    cmd.order = order::BUILDING_SHIP;
+    cmd.building = Some(BuildingShip { ship_type: t, player, creator, frame: (time.max(0) as u32).wrapping_mul(queued + 1).wrapping_add(u.update_counter) });
+    u.commands.add(cmd);
 }
 
 /// A fresh command for `selection` (no order yet).
@@ -1319,6 +1360,21 @@ pub fn cl_process(u: &mut Universe) {
     let dt = u.phys_time_elapsed;
     for cid in todo {
         let Some(cmd) = u.commands.get(cid).cloned() else { continue };
+        // `processBuildingShipToDo`: the ship on order is made once its time has come.
+        if cmd.order == order::BUILDING_SHIP {
+            let Some(b) = cmd.building else {
+                u.commands.delete(cid);
+                continue;
+            };
+            if u.ships.get(b.creator).is_none_or(|c| c.flags & sof::DEAD != 0) {
+                u.commands.delete(cid);
+            } else if u.update_counter > b.frame {
+                u.commands.delete(cid);
+                let race = u.players[b.player].race;
+                crate::construction::cl_create_ship(u, b.ship_type, race, b.player, b.creator);
+            }
+            continue;
+        }
         // Commands with crazy or dead ships are skipped this frame.
         if cmd.selection.iter().any(|&id| u.ships.ship(id).flags & (sof::CRAZY | sof::DEAD) != 0) {
             continue;
@@ -1490,7 +1546,9 @@ pub fn cl_process(u: &mut Universe) {
                     if let (Some(ship), Some(from)) = (ship, from) {
                         group_ship(u, ship, from);
                     }
-                    // (aiplayerShipLaunchedCallback: the computer player has no port yet.)
+                    if let Some(ship) = ship {
+                        crate::ai::ship_launched(u, ship);
+                    }
                 }
             }
             order::COLLECT_RESOURCE => {

@@ -243,6 +243,9 @@ pub struct Universe {
     /// The multiplayer rules (inactive in single player).
     #[serde(default, deserialize_with = "crate::save::added_in_9")]
     pub mp: crate::multiplayer::MpState,
+    /// The multiplayer computer players.
+    #[serde(default, deserialize_with = "crate::save::added_in_10")]
+    pub ai: crate::ai::AiState,
 }
 
 impl Universe {
@@ -306,6 +309,7 @@ impl Universe {
             effects: None,
             nebulae: Default::default(),
             mp: Default::default(),
+            ai: Default::default(),
         };
         crate::base::init(&mut u);
         u
@@ -390,6 +394,8 @@ impl Universe {
         crate::collision::check_all_bullet_collisions(self);
         crate::crates::update(self);
         hooks.computer_players(self);
+        // aiplayerUpdateAll's multiplayer computer players.
+        crate::ai::update_all(self);
         if !self.universe_paused {
             command::cl_process(self);
             command::cl_post_process(self);

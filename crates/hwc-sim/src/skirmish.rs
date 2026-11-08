@@ -283,6 +283,23 @@ impl SkirmishRun {
             crate::fow::with_vision_refresh(&mut u, mode, |u| u.base.players[i].tech.set_mode(mode));
             crate::upgrade::player_update_from_research(&mut u, i);
         }
+        // The computer players (aiplayerStartup, aiplayerInit, aiplayerGameStart).
+        u.ai.resource_tweaks = crate::ai::resource::Tweaks::load(src);
+        u.ai.bigotry = u32::from(o.cpu_bigotry) + 10;
+        let humans = setup.players.iter().filter(|p| !p.computer).count();
+        crate::ai::choose_enemies(&mut u, n, humans);
+        u.ai.players = vec![None; n];
+        let level = crate::ai::level_from_slider(o.cpu_difficulty);
+        for (i, p) in setup.players.iter().enumerate() {
+            if p.computer {
+                u.ai.players[i] = Some(crate::ai::AiPlayer::new(&u, i, level));
+            }
+        }
+        for (i, p) in setup.players.iter().enumerate() {
+            if p.computer {
+                crate::ai::game_start(&mut u, i);
+            }
+        }
         // gameStart's last pass: every ship takes its upgrades.
         for id in u.ship_list.clone() {
             crate::upgrade::apply_upgrades(&mut u, id);

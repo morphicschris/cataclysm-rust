@@ -16,6 +16,7 @@
 // deliberately where the binary tests "not less" (true for NaN).
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
+pub mod ai;
 pub mod aimove;
 pub mod aiship;
 pub mod aitrack;
