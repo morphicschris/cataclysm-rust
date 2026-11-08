@@ -58,6 +58,7 @@ pub mod link;
 pub mod mad;
 pub mod missile;
 pub mod mission;
+pub mod mp_hyperspace;
 pub mod modules;
 pub mod multiplayer;
 pub mod nebula;

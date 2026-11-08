@@ -262,6 +262,7 @@ impl SkirmishRun {
             bounty_ship_worth: mpt.bounty_ship_worth,
             bounty_resources: mpt.bounty_resources,
             crates: crate::crates::Crates { tweaks: crate::crates::CrateTweaks::load(src), ..Default::default() },
+            hyperspace: crate::mp_hyperspace::MpHyperspace::load(src),
             ..Default::default()
         };
         // univupdateReset, then ranParametersResetAll (stream 0 goes on).

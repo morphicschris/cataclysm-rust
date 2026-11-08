@@ -128,6 +128,9 @@ pub struct MpState {
     pub bounties_done: bool,
     /// The crates (`MG_CratesEnabled`).
     pub crates: crate::crates::Crates,
+    /// Hyperspace jumps (`MG_Hyperspace`).
+    #[serde(default, deserialize_with = "crate::save::added_in_14")]
+    pub hyperspace: crate::mp_hyperspace::MpHyperspace,
     /// What happened since the front end last took them (not saved).
     #[serde(skip)]
     pub events: Vec<MpEvent>,
@@ -159,6 +162,7 @@ impl Default for MpState {
             bounty_resources: 0.0,
             bounties_done: false,
             crates: Default::default(),
+            hyperspace: Default::default(),
             events: Vec::new(),
         }
     }

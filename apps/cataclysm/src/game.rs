@@ -277,6 +277,9 @@ pub struct Game {
     waypoints: Option<Vec<Vec3>>,
     /// The move plate is picking where the Siege Cannon fires (`piePointModeOnOff(3, ..)`).
     big_gun_plate: bool,
+    /// The move plate is picking where the selection jumps to (a multiplayer game with
+    /// hyperspace on: the sensors manager's hyperspace move).
+    pub(crate) hyperspace_plate: bool,
     /// The waypoint mode (0x91a658): 0 linear, 1 circular, 2 end to end (the command's
     /// [`command::waypoint_mode`]). Kept for the session, as the original keeps it.
     waypoint_mode: u32,
@@ -451,6 +454,7 @@ impl Game {
             plate_from_right: false,
             waypoints: None,
             big_gun_plate: false,
+            hyperspace_plate: false,
             waypoint_mode: 0,
             waypoint_rings: plate::WaypointRings::default(),
             waypoint_frame: None,
@@ -796,6 +800,7 @@ impl Game {
         self.plate_from_right = false;
         self.waypoints = None;
         self.big_gun_plate = true;
+        self.hyperspace_plate = false;
         sound(audio, MOVEMENT_GUI_ON);
         if !self.sensors.is_open() {
             self.toggle_sensors(audio);
@@ -804,6 +809,38 @@ impl Game {
 
     /// Orders the move the plate points at and closes it.
     pub(crate) fn execute_plate(&mut self, audio: &mut Option<Audio>) {
+        if let (Mode::Move(plate), true) = (self.mode, self.hyperspace_plate) {
+            self.hyperspace_plate = false;
+            let dest = plate.destination();
+            let sel = self.selection.clone();
+            if !sel.is_empty() && dest.is_finite() {
+                let c = plate.centre;
+                let from = hwc_math::Vector::new(c.x, c.y, c.z);
+                let to = hwc_math::Vector::new(dest.x, dest.y, dest.z);
+                let u = self.world.universe();
+                let cost = hwc_sim::mp_hyperspace::jump_cost(u, &sel, from, to);
+                let have = u.base.players[player()].resource_units;
+                match cost {
+                    Some(cost) if cost <= have => {
+                        self.give(Order::MpHyperspace { ships: sel, from, to });
+                        let text = format!("Hyperspace jump: {cost} RUs");
+                        self.post(&text);
+                    }
+                    Some(cost) => {
+                        let text = format!("Not enough RUs to hyperspace ({cost} needed)");
+                        let time = self.world.universe().total_time_elapsed;
+                        self.messages.push(GameMessage { text, colour: RED, ship: None, time });
+                    }
+                    None => {}
+                }
+            }
+            if self.sensors.is_open() {
+                self.close_sensors(audio);
+            }
+            sound(audio, MOVEMENT_GUI_OFF);
+            self.mode = Mode::Select;
+            return;
+        }
         if let (Mode::Move(plate), true) = (self.mode, self.big_gun_plate) {
             // `MothershipBigGunTargetPicked` (0x5b6700).
             self.big_gun_plate = false;
@@ -1931,7 +1968,7 @@ impl Game {
                 let bits = if on { bits | bit } else { bits & !bit };
                 self.give(Order::AutoLaunch { bits });
             }
-            GameRequest::Command(Command::Hyperspace) => self.hyperspace_button(),
+            GameRequest::Command(Command::Hyperspace) => self.hyperspace_button(audio),
             GameRequest::Command(c) => self.command(c, audio),
             GameRequest::HyperspaceGoNow => {
                 self.world.run_mut().hyperspace_go_now();
@@ -2041,7 +2078,11 @@ impl Game {
     /// The hyperspace key, objective or menu item (`mrHyperspaceBegin` ->
     /// `HyperspaceRollCallBegin`): nothing while paused or before the mission allows it; a
     /// ship under construction refuses it with a message.
-    fn hyperspace_button(&mut self) {
+    pub(crate) fn hyperspace_button(&mut self, audio: &mut Option<Audio>) {
+        if self.world.universe().mp.active {
+            self.start_hyperspace_plate(audio);
+            return;
+        }
         if self.paused || !self.world.run().game.hyper.player_can_hyperspace {
             return;
         }
@@ -2246,6 +2287,7 @@ impl Game {
         self.mode = Mode::Move(Plate::new(c, size));
         self.plate_from_right = false;
         self.big_gun_plate = false;
+        self.hyperspace_plate = false;
         self.waypoints = Some(Vec::new());
         sound(audio, MOVEMENT_GUI_ON);
     }
@@ -2303,6 +2345,39 @@ impl Game {
         self.post(&text);
     }
 
+    /// The hyperspace move of a multiplayer game: the sensors manager opens with the plate
+    /// on the ships that can jump, and the click picks the destination
+    /// (`clWrapMpHyperspace`).
+    fn start_hyperspace_plate(&mut self, audio: &mut Option<Audio>) {
+        let u = self.world.universe();
+        if self.paused || u.base.options.flags & hwc_sim::multiplayer::mg::HYPERSPACE == 0 {
+            return;
+        }
+        if self.mode != Mode::Select {
+            self.mode = Mode::Select;
+            self.hyperspace_plate = false;
+            sound(audio, MOVEMENT_GUI_OFF);
+            return;
+        }
+        let sel = hwc_sim::mp_hyperspace::hyperspace_capable(u, &self.selection);
+        if sel.is_empty() {
+            return;
+        }
+        self.selection = sel;
+        let Some((c, size)) = self.plate_centre() else {
+            return;
+        };
+        self.mode = Mode::Move(Plate::new(c, size));
+        self.plate_from_right = false;
+        self.waypoints = None;
+        self.big_gun_plate = false;
+        self.hyperspace_plate = true;
+        sound(audio, MOVEMENT_GUI_ON);
+        if !self.sensors.is_open() {
+            self.toggle_sensors(audio);
+        }
+    }
+
     fn start_move(&mut self, audio: &mut Option<Audio>) {
         if self.mobile_selection().is_empty() {
             return;
@@ -2315,6 +2390,7 @@ impl Game {
             self.plate_from_right = self.right_click_move;
             self.waypoints = None;
             self.big_gun_plate = false;
+            self.hyperspace_plate = false;
             sound(audio, MOVEMENT_GUI_ON);
         } else {
             self.mode = Mode::Select;
@@ -4375,10 +4451,15 @@ impl Game {
         }
         let font = self.plate_font.clone();
         let readout_at = (!self.right_down).then_some(self.mouse);
+        // A hyperspace jump's plate is drawn in the hyperspace colour.
+        let mut colors = self.plate_colors;
+        if self.hyperspace_plate {
+            colors.plane = colors.hyperspace;
+        }
         let chime = plate.draw(
             &mut self.canvas,
             &view,
-            &self.plate_colors,
+            &colors,
             ships.as_deref(),
             font.as_deref(),
             readout_at,

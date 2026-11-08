@@ -28,6 +28,8 @@ pub mod order {
     pub const SPECIAL: u16 = 7;
     pub const HALT: u16 = 8;
     pub const MILITARY_PARADE: u16 = 9;
+    /// `COMMAND_MP_HYPERSPACEING`: see [`crate::mp_hyperspace`].
+    pub const MP_HYPERSPACE: u16 = 10;
     pub const LINK: u16 = 0xb;
     pub const UNLINK: u16 = 0xc;
     /// The Mimic disguise order (`FUN_00449520`), carried out once by `clProcess`.
@@ -101,6 +103,9 @@ pub struct CommandToDo {
     /// `buildingship` of a `COMMAND_BUILDING_SHIP` (a computer player's ship on order).
     #[serde(default, deserialize_with = "crate::save::added_in_10")]
     pub building: Option<BuildingShip>,
+    /// A multiplayer hyperspace jump's state and clock (+0x314, +0x310).
+    #[serde(default, deserialize_with = "crate::save::added_in_14")]
+    pub mp_hyperspace: Option<crate::mp_hyperspace::JumpOrder>,
 }
 
 /// A ship on order (`clBuildShip`): made at the creator once the update counter passes
@@ -224,6 +229,7 @@ fn new_command(selection: Vec<ShipId>) -> CommandToDo {
         turn_around_times: 0,
         holding_pattern_vec: Vector::ZERO,
         building: None,
+        mp_hyperspace: None,
     }
 }
 
@@ -1381,6 +1387,17 @@ pub fn cl_process(u: &mut Universe) {
         }
         for &id in &cmd.selection {
             u.ships.ship_mut(id).autostabilize_ship = false;
+        }
+        // `processMpHyperspaceingToDo`, formation or not: the command falls idle on arrival.
+        if cmd.order == order::MP_HYPERSPACE {
+            if crate::mp_hyperspace::process(u, cid) {
+                free_last_order(u, cid);
+                if let Some(c) = u.commands.get_mut(cid) {
+                    c.order = order::NULL;
+                    c.mp_hyperspace = None;
+                }
+            }
+            continue;
         }
         if cmd.attributes & attr::FORMATION != 0 {
             if !formation::is_supported(&cmd) {

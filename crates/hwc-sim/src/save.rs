@@ -45,7 +45,7 @@ pub const MAGIC: [u8; 8] = *b"HWCSAVE\0";
 /// removed, reordered or retyped). A field added at version `n` is read with `added_in_<n>`
 /// ([`added_in_2`]), so files of older versions still load with the field at its default;
 /// files of a newer version, or older ones whose shape is not known, are refused.
-pub const FORMAT_VERSION: u32 = 13;
+pub const FORMAT_VERSION: u32 = 14;
 
 /// The oldest version still read.
 pub const OLDEST_VERSION: u32 = 1;
@@ -237,6 +237,12 @@ pub fn added_in_12<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Defau
 /// paid).
 pub fn added_in_13<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
     added_in(13, d)
+}
+
+/// [`added_in`] for shape 14 (multiplayer hyperspace: the jump costs, the ships on their way
+/// and the jump commands' state).
+pub fn added_in_14<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
+    added_in(14, d)
 }
 
 fn current<T>(f: impl FnOnce(&Relink) -> T) -> T {

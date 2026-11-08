@@ -192,11 +192,11 @@ impl Default for HyperState {
 }
 
 impl HyperState {
-    fn rec(&mut self, id: ShipId) -> &mut ShipHs {
+    pub(crate) fn rec(&mut self, id: ShipId) -> &mut ShipHs {
         self.ships.entry(id).or_default()
     }
 
-    fn get(&self, id: ShipId) -> ShipHs {
+    pub(crate) fn get(&self, id: ShipId) -> ShipHs {
         self.ships.get(&id).copied().unwrap_or_default()
     }
 }
@@ -619,13 +619,16 @@ fn orient_hyperspacing_ships(u: &mut Universe, game: &mut Game) -> bool {
 }
 
 /// The ships that take part in the jump: fleet ships that can hyperspace and are in range.
+fn jumping_hs(u: &Universe, hy: &HyperState, mission: u32, id: ShipId) -> bool {
+    is_fleet_ship(u, mission, id) && can_hyperspace(u, u.ships.ship(id).ship_type) && hy.get(id).in_range
+}
+
 fn jumping(u: &Universe, game: &Game, id: ShipId) -> bool {
-    is_fleet_ship(u, game.config.mission, id) && can_hyperspace(u, u.ships.ship(id).ship_type) && game.hyper.get(id).in_range
+    jumping_hs(u, &game.hyper, game.config.mission, id)
 }
 
 /// `CalculateHyperspaceTimeForShip` (0x512a70).
-fn calculate_hyperspace_time(u: &mut Universe, game: &mut Game, id: ShipId, ms: Option<ShipId>) {
-    let tw = game.sp_tweaks.clone();
+fn calculate_hyperspace_time_hs(u: &mut Universe, hy: &mut HyperState, tw: &crate::mission::SpTweaks, id: ShipId, ms: Option<ShipId>) {
     let now = u.total_time_elapsed;
     let s = u.ships.ship(id).clone();
     let other = ms.filter(|&m| m != id).and_then(|m| u.ships.get(m));
@@ -647,7 +650,7 @@ fn calculate_hyperspace_time(u: &mut Universe, game: &mut Game, id: ShipId, ms: 
         let r = u.randy.random(RAN_GAME);
         st(ld(tw.random_waittime) * 2.328_306_4e-10 * fild_u32(r) + ld(tw.base_waittime))
     };
-    let r = game.hyper.rec(id);
+    let r = hy.rec(id);
     r.offset = offset;
     r.state = leave_state::WAITING;
     r.hs_state = hs_effect::INACTIVE;
@@ -658,11 +661,15 @@ fn calculate_hyperspace_time(u: &mut Universe, game: &mut Game, id: ShipId, ms: 
     crate::command::ship_has_just_disappeared(u, id);
 }
 
+fn calculate_hyperspace_time(u: &mut Universe, game: &mut Game, id: ShipId, ms: Option<ShipId>) {
+    calculate_hyperspace_time_hs(u, &mut game.hyper, &game.sp_tweaks, id, ms)
+}
+
 /// `AddShipToHyperspace` (0x512be0): into the hyperspace list; in single player the ship, its
 /// modules and the ships inside it are healed.
-fn add_ship_to_hyperspace(u: &mut Universe, game: &mut Game, id: ShipId) {
-    if !game.hyper.in_hyperspace.contains(&id) {
-        game.hyper.in_hyperspace.push(id);
+fn add_ship_to_hyperspace_hs(u: &mut Universe, hy: &mut HyperState, id: ShipId) {
+    if !hy.in_hyperspace.contains(&id) {
+        hy.in_hyperspace.push(id);
     }
     let statics = u.statics.clone();
     let heal = |u: &mut Universe, s: ShipId| {
@@ -673,15 +680,22 @@ fn add_ship_to_hyperspace(u: &mut Universe, game: &mut Game, id: ShipId) {
         }
     };
     u.ships.ship_mut(id).flags |= sof::HYPERSPACE;
-    heal(u, id);
-    let modules: Vec<ShipId> = u.ships.iter().filter(|m| m.base.clamp.as_ref().and_then(|c| c.host) == Some(id)).map(|m| m.id).collect();
-    for m in modules {
-        heal(u, m);
+    // The ship and its modules are healed in single player only; the ships inside always.
+    if u.single_player {
+        heal(u, id);
+        let modules: Vec<ShipId> = u.ships.iter().filter(|m| m.base.clamp.as_ref().and_then(|c| c.host) == Some(id)).map(|m| m.id).collect();
+        for m in modules {
+            heal(u, m);
+        }
     }
     let inside: Vec<ShipId> = u.ships.ship(id).base.inside.as_ref().map(|i| i.ships.clone()).unwrap_or_default();
     for s in inside {
         heal(u, s);
     }
+}
+
+fn add_ship_to_hyperspace(u: &mut Universe, game: &mut Game, id: ShipId) {
+    add_ship_to_hyperspace_hs(u, &mut game.hyper, id)
 }
 
 /// `GroupShipIntoMilitaryParade` around the player's mothership (the ship's own modules,
@@ -721,17 +735,16 @@ fn jump_now(u: &mut Universe, game: &mut Game, id: ShipId) {
 
 /// `UpdateHyperspacingShip` (0x512cc0), end-of-mission jump: true once the ship is in
 /// hyperspace.
-fn update_hyperspacing_ship(u: &mut Universe, game: &mut Game, id: ShipId, mid: bool) -> bool {
+fn update_hyperspacing_ship_hs(u: &mut Universe, hy: &mut HyperState, tw: &crate::mission::SpTweaks, mission: u32, id: ShipId, mid: bool) -> bool {
     let now = u.total_time_elapsed;
-    let tw = game.sp_tweaks.clone();
     let ms = u.base.players[HUMAN_PLAYER].mothership;
-    game.hyper.rec(id).midlevel_out = mid;
-    let r = game.hyper.get(id);
+    hy.rec(id).midlevel_out = mid;
+    let r = hy.get(id);
     match r.hs_state {
         hs_effect::INACTIVE => {
             if r.time <= now {
                 let display = crate::effects::hyperspace::should_display(u, id);
-                let rec = game.hyper.rec(id);
+                let rec = hy.rec(id);
                 rec.state = leave_state::ACCELERATING;
                 rec.time = st(ld(tw.accelerate_time) + ld(now));
                 // hsStart(ship, HYPERSPACE_SLICE_RATE, into, display).
@@ -744,31 +757,31 @@ fn update_hyperspacing_ship(u: &mut Universe, game: &mut Game, id: ShipId, mid: 
             false
         }
         hs_effect::SLICING_INTO | hs_effect::COLLAPSE_INTO if mid => {
-            step(u, game, id);
+            step_hs(u, hy, tw, id);
             false
         }
         hs_effect::SLICING_INTO => {
-            let others = u.ship_list.iter().any(|&o| jumping(u, game, o) && matches!(game.hyper.get(o).hs_state, hs_effect::POPUP_INTO | hs_effect::INACTIVE));
+            let others = u.ship_list.iter().any(|&o| jumping_hs(u, hy, mission, o) && matches!(hy.get(o).hs_state, hs_effect::POPUP_INTO | hs_effect::INACTIVE));
             if !others {
-                step(u, game, id);
+                step_hs(u, hy, tw, id);
             }
             false
         }
         hs_effect::COLLAPSE_INTO => {
             if Some(id) == ms {
-                let others = !game.hyper.whiteout && u.ship_list.iter().any(|&o| o != id && jumping(u, game, o) && game.hyper.get(o).hs_state != hs_effect::FINISHED);
-                game.hyper.whiteout = false;
+                let others = !hy.whiteout && u.ship_list.iter().any(|&o| o != id && jumping_hs(u, hy, mission, o) && hy.get(o).hs_state != hs_effect::FINISHED);
+                hy.whiteout = false;
                 if others {
                     return false;
                 }
-                game.hyper.whiteout = true;
-                game.hyper.whiteout_t = 1.0 - r.clipt;
+                hy.whiteout = true;
+                hy.whiteout_t = 1.0 - r.clipt;
             }
-            step(u, game, id);
+            step_hs(u, hy, tw, id);
             false
         }
         hs_effect::FINISHED => {
-            game.hyper.rec(id).state = leave_state::GONE;
+            hy.rec(id).state = leave_state::GONE;
             if u.ships.ship(id).flags & sof::HYPERSPACE != 0 {
                 return true;
             }
@@ -778,24 +791,27 @@ fn update_hyperspacing_ship(u: &mut Universe, game: &mut Game, id: ShipId, mid: 
                 crate::base::wipe_inside_ship(u, id);
                 return true;
             }
-            add_ship_to_hyperspace(u, game, id);
+            add_ship_to_hyperspace_hs(u, hy, id);
             true
         }
         _ => {
-            step(u, game, id);
+            step_hs(u, hy, tw, id);
             false
         }
     }
 }
 
+fn update_hyperspacing_ship(u: &mut Universe, game: &mut Game, id: ShipId, mid: bool) -> bool {
+    update_hyperspacing_ship_hs(u, &mut game.hyper, &game.sp_tweaks, game.config.mission, id, mid)
+}
+
 /// `hsUpdate` on a leaving ship, with the window effect following the clip plane.
-fn step(u: &mut Universe, game: &mut Game, id: ShipId) {
-    let tw = game.sp_tweaks.clone();
-    let r = game.hyper.rec(id);
+fn step_hs(u: &mut Universe, hy: &mut HyperState, tw: &crate::mission::SpTweaks, id: ShipId) {
+    let r = hy.rec(id);
     let ended = crate::mission::hs_update_fields(&mut r.hs_state, &mut r.clipt, &mut r.rate, r.hs_flags, &tw);
     let (state, hs_state, clipt) = (r.state, r.hs_state, r.clipt);
     if crate::effects::hyperspace::should_display(u, id) && hs_state != hs_effect::INACTIVE && hs_state != hs_effect::FINISHED {
-        crate::effects::hyperspace::continue_effect(u, id, hs_state, clipt, game.hyper.hyperspace_fails);
+        crate::effects::hyperspace::continue_effect(u, id, hs_state, clipt, hy.hyperspace_fails);
     }
     if ended {
         crate::effects::hyperspace::finish(u, id);
@@ -1428,35 +1444,35 @@ pub fn filter_disabled(u: &Universe, ships: &[ShipId]) -> Vec<ShipId> {
 
 /// `spHyperspaceSelectionOut` (0x513a60): each ship (and the ships clamped to it) goes to
 /// hyperspace: those marked to start in hyperspace at once, the others through the window.
-pub(crate) fn hyperspace_selection_out(u: &mut Universe, game: &mut Game, ships: &[ShipId]) {
+pub(crate) fn hyperspace_selection_out_hs(u: &mut Universe, hy: &mut HyperState, tw: &crate::mission::SpTweaks, ships: &[ShipId]) {
     let Some(&lead) = ships.first() else { return };
     for &id in ships {
         let Some(s) = u.ships.get(id) else { continue };
-        if s.flags & sof::HYPERSPACE != 0 || game.hyper.to_hyperspace.contains(&id) {
+        if s.flags & sof::HYPERSPACE != 0 || hy.to_hyperspace.contains(&id) {
             continue;
         }
         if s.attributes & START_IN_HYPERSPACE == 0 {
             detach_clamped_for_hyperspace(u, id);
-            calculate_hyperspace_time(u, game, id, Some(lead));
-            let delay = game.hyper.kas_delay;
+            calculate_hyperspace_time_hs(u, hy, tw, id, Some(lead));
+            let delay = hy.kas_delay;
             let host = u.ships.ship(id).base.clamp.as_ref().and_then(|c| c.host);
-            let r = game.hyper.rec(id);
+            let r = hy.rec(id);
             r.time = st(ld(delay) + ld(r.time));
             // A ship clamped to one that is already on its way leaves with it.
             if let Some(h) = host {
-                if game.hyper.to_hyperspace.contains(&h) {
-                    let t = game.hyper.get(h).time;
-                    game.hyper.rec(id).time = t;
+                if hy.to_hyperspace.contains(&h) {
+                    let t = hy.get(h).time;
+                    hy.rec(id).time = t;
                 }
             }
-            game.hyper.to_hyperspace.push(id);
+            hy.to_hyperspace.push(id);
         } else {
-            calculate_hyperspace_time(u, game, id, Some(lead));
-            game.hyper.rec(id).state = leave_state::GONE;
+            calculate_hyperspace_time_hs(u, hy, tw, id, Some(lead));
+            hy.rec(id).state = leave_state::GONE;
             if u.ships.ship(id).flags & sof::HYPERSPACE == 0 {
                 crate::base::remove_ship_from_outside(u, id, false);
-                add_ship_to_hyperspace(u, game, id);
-                game.hyper.rec(id).midlevel_out = false;
+                add_ship_to_hyperspace_hs(u, hy, id);
+                hy.rec(id).midlevel_out = false;
             }
             u.ships.ship_mut(id).attributes &= !START_IN_HYPERSPACE;
         }
@@ -1464,12 +1480,16 @@ pub(crate) fn hyperspace_selection_out(u: &mut Universe, game: &mut Game, ships:
             .ship_list
             .iter()
             .copied()
-            .filter(|&c| u.ships.get(c).and_then(|x| x.base.clamp.as_ref()).and_then(|k| k.host) == Some(id) && !game.hyper.to_hyperspace.contains(&c))
+            .filter(|&c| u.ships.get(c).and_then(|x| x.base.clamp.as_ref()).and_then(|k| k.host) == Some(id) && !hy.to_hyperspace.contains(&c))
             .collect();
         if !clamped.is_empty() {
-            hyperspace_selection_out(u, game, &clamped);
+            hyperspace_selection_out_hs(u, hy, tw, &clamped);
         }
     }
+}
+
+pub(crate) fn hyperspace_selection_out(u: &mut Universe, game: &mut Game, ships: &[ShipId]) {
+    hyperspace_selection_out_hs(u, &mut game.hyper, &game.sp_tweaks, ships)
 }
 
 /// `spDetachShipsClampedToForHyperspace` (0x5139a0), the part the simulation models: what is
@@ -1488,59 +1508,65 @@ fn detach_clamped_for_hyperspace(u: &mut Universe, id: ShipId) {
 
 /// `spHyperspaceSelectionIn` (0x5137e0): ships in hyperspace (and those clamped to them) are
 /// marked to come in at `dest`.
-pub(crate) fn hyperspace_selection_in(u: &mut Universe, game: &mut Game, ships: &[ShipId], dest: [f32; 4]) {
+pub(crate) fn hyperspace_selection_in_hs(u: &mut Universe, hy: &mut HyperState, ships: &[ShipId], dest: [f32; 4]) {
     for &id in ships {
-        let clamped: Vec<ShipId> = game
-            .hyper
+        let clamped: Vec<ShipId> = hy
             .in_hyperspace
             .iter()
             .copied()
-            .filter(|&c| u.ships.get(c).and_then(|x| x.base.clamp.as_ref()).and_then(|k| k.host) == Some(id) && !game.hyper.get(c).midlevel_in)
+            .filter(|&c| u.ships.get(c).and_then(|x| x.base.clamp.as_ref()).and_then(|k| k.host) == Some(id) && !hy.get(c).midlevel_in)
             .collect();
         if !clamped.is_empty() {
-            hyperspace_selection_in(u, game, &clamped, dest);
+            hyperspace_selection_in_hs(u, hy, &clamped, dest);
         }
-        let delay = game.hyper.kas_delay;
-        let r = game.hyper.rec(id);
+        let delay = hy.kas_delay;
+        let r = hy.rec(id);
         r.midlevel_in = true;
         r.dest = dest;
         r.time = st(ld(delay) + ld(r.time));
     }
 }
 
+pub(crate) fn hyperspace_selection_in(u: &mut Universe, game: &mut Game, ships: &[ShipId], dest: [f32; 4]) {
+    hyperspace_selection_in_hs(u, &mut game.hyper, ships, dest)
+}
+
 /// `UpdateMidLevelHyperspacingShips` (0x514820), at the start of every single-player update.
-pub(crate) fn update_midlevel(u: &mut Universe, game: &mut Game) {
+pub(crate) fn update_midlevel_hs(u: &mut Universe, hy: &mut HyperState, tw: &crate::mission::SpTweaks, mission: u32) {
     let mut i = 0;
-    while i < game.hyper.to_hyperspace.len() {
-        let id = game.hyper.to_hyperspace[i];
-        let done = u.ships.get(id).is_none() || update_hyperspacing_ship(u, game, id, true);
+    while i < hy.to_hyperspace.len() {
+        let id = hy.to_hyperspace[i];
+        let done = u.ships.get(id).is_none() || update_hyperspacing_ship_hs(u, hy, tw, mission, id, true);
         if done {
-            game.hyper.to_hyperspace.remove(i);
+            hy.to_hyperspace.remove(i);
         } else {
             i += 1;
         }
     }
-    for id in game.hyper.in_hyperspace.clone() {
-        if !game.hyper.get(id).midlevel_in || u.ships.get(id).is_none() {
+    for id in hy.in_hyperspace.clone() {
+        if !hy.get(id).midlevel_in || u.ships.get(id).is_none() {
             continue;
         }
-        if update_arriving_midlevel(u, game, id) {
-            let r = game.hyper.rec(id);
+        if update_arriving_midlevel_hs(u, hy, tw, id) {
+            let r = hy.rec(id);
             r.midlevel_in = false;
             r.state = leave_state::NONE;
             r.in_range = false;
-            game.hyper.in_hyperspace.retain(|&s| s != id);
+            hy.in_hyperspace.retain(|&s| s != id);
         }
     }
 }
 
+pub(crate) fn update_midlevel(u: &mut Universe, game: &mut Game) {
+    update_midlevel_hs(u, &mut game.hyper, &game.sp_tweaks, game.config.mission)
+}
+
 /// `UpdateArrivingShip` (0x513340) for a mid-level arrival: no waiting, the window opens at
 /// once and the ship is done when its deceleration time is over.
-fn update_arriving_midlevel(u: &mut Universe, game: &mut Game, id: ShipId) -> bool {
+fn update_arriving_midlevel_hs(u: &mut Universe, hy: &mut HyperState, tw: &crate::mission::SpTweaks, id: ShipId) -> bool {
     use crate::mission::ship_hs;
     let now = u.total_time_elapsed;
-    let tw = game.sp_tweaks.clone();
-    let r = game.hyper.get(id);
+    let r = hy.get(id);
     if let Some(s) = u.ships.get_mut(id) {
         s.autostabilize_ship = false;
         s.ship_idle = false;
@@ -1555,11 +1581,11 @@ fn update_arriving_midlevel(u: &mut Universe, game: &mut Game, id: ShipId) -> bo
         let s = u.ships.ship_mut(id);
         s.flags &= !sof::HYPERSPACE;
         s.flags |= sof::HIDE;
-        let rec = game.hyper.rec(id);
+        let rec = hy.rec(id);
         rec.state = ship_hs::WAITING;
         rec.time = 0.0;
     }
-    let r = game.hyper.get(id);
+    let r = hy.get(id);
     match r.state {
         ship_hs::WAITING => {
             if now <= r.time {
@@ -1570,7 +1596,7 @@ fn update_arriving_midlevel(u: &mut Universe, game: &mut Game, id: ShipId) -> bo
                 s.flags &= !sof::HIDE;
             }
             let display = crate::effects::hyperspace::should_display(u, id);
-            let rec = game.hyper.rec(id);
+            let rec = hy.rec(id);
             rec.state = ship_hs::DECELERATING;
             rec.time = st(ld(tw.decelerate_time) + ld(now));
             rec.rate = tw.slice_rate;
@@ -1584,7 +1610,7 @@ fn update_arriving_midlevel(u: &mut Universe, game: &mut Game, id: ShipId) -> bo
             if r.hs_state == hs_effect::INACTIVE {
                 return r.time < now;
             }
-            step(u, game, id);
+            step_hs(u, hy, tw, id);
             false
         }
         _ => false,

@@ -509,3 +509,52 @@ fn bounties_are_worked_out_and_paid() {
     assert_eq!(paid, expect);
     assert_eq!(u.base.stats.players[0].ru_bounty, expect);
 }
+
+/// `clMpHyperspace` / `processMpHyperspaceingToDo`: the mothership jumps, the player pays
+/// `hyperspaceCost`, the ship waits in the ether and comes out at the destination, free to
+/// take orders again.
+#[test]
+fn a_mothership_jumps_through_hyperspace() {
+    use hwc_math::Vector;
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    let options = default_game(d);
+    assert!(options.flags & mg::HYPERSPACE != 0);
+    let mut s = setup("Coldwar2", &[ShipRace::Somtaaw, ShipRace::Beast], options, 5);
+    for p in &mut s.players {
+        p.computer = false;
+    }
+    let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, s).expect("start");
+    for _ in 0..4 {
+        run.step();
+    }
+    let u = &mut run.universe;
+    let ms = u.base.players[0].mothership.expect("mothership");
+    let from = u.ships.ship(ms).posinfo.position;
+    let to = from + Vector::new(20000.0, 0.0, 0.0);
+    let cost = hwc_sim::mp_hyperspace::jump_cost(u, &[ms], from, to).expect("a mothership can jump");
+    // mincost 2400 + (20000 - 3000) * 0.4 (the f32 positions round the distance a little).
+    assert!((9199..=9200).contains(&cost), "{cost}");
+    u.base.players[0].resource_units = 20000;
+    hwc_sim::orders::apply(u, 0, &hwc_sim::orders::Order::MpHyperspace { ships: vec![ms], from, to }, None);
+    assert_eq!(u.base.players[0].resource_units, 20000 - cost);
+    assert!(u.ships.ship(ms).base.disabled, "no orders while jumping");
+    let mut went = false;
+    for _ in 0..16 * 120 {
+        run.step();
+        let s = run.universe.ships.ship(ms);
+        went |= s.flags & hwc_sim::object::sof::HYPERSPACE != 0;
+        if went && s.flags & hwc_sim::object::sof::HYPERSPACE == 0 && !s.base.disabled {
+            break;
+        }
+    }
+    let u = &run.universe;
+    let s = u.ships.ship(ms);
+    assert!(went, "it went into hyperspace");
+    assert!(!s.base.disabled && s.flags & hwc_sim::object::sof::HYPERSPACE == 0, "it came out");
+    let p = s.posinfo.position;
+    let off = ((p.x - to.x).powi(2) + (p.y - to.y).powi(2) + (p.z - to.z).powi(2)).sqrt();
+    println!("arrived {off:.0} from the destination at {:.1}s", u.total_time_elapsed);
+    assert!(off < 2000.0, "{off}");
+    assert!(u.total_time_elapsed > 20.0, "at least the ether wait");
+}

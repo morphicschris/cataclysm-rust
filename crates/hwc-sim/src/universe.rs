@@ -391,6 +391,8 @@ impl Universe {
         // Multiplayer resource injections and the lump sum.
         crate::multiplayer::update_resources(self);
         hooks.before_bullet_collisions(self);
+        // `UpdateMidLevelHyperspacingShips` of a multiplayer game with hyperspace on.
+        crate::mp_hyperspace::update(self);
         crate::collision::check_all_bullet_collisions(self);
         crate::crates::update(self);
         hooks.computer_players(self);

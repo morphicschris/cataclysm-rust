@@ -45,9 +45,19 @@ tested by `crates/hwc-sim/tests/skirmish.rs`:
 - Every map loads for every player count, Somtaaw first and Beast first; a game with a scripted
   strike force runs to a winner.
 
-Left for later stages: bounties during the game (`calculatePlayerBounties`), multiplayer hyperspace
-(`MG_Hyperspace`, `UpdateMidLevelHyperspacingShips`), fuel burn, alliances being formed and broken,
-and drawing crates (the simulation has them; the view does not yet).
+- Bounties during the game (`calculatePlayerBounties` every 128 updates, `bountyShipWasKilled`;
+  save version 13).
+- Hyperspace jumps (`MG_Hyperspace`, `hwc_sim::mp_hyperspace`): the `hyperspace` cost lines of
+  `Tweak.script` (`hyperspaceCost`, `makeSelectionHyperspaceCapable`), `clMpHyperspace` /
+  `ChangeOrderToHyperSpace` (command order 10) and `processMpHyperspaceingToDo` (stop, out through
+  the window, at least `TW_MULTIPLAYER_HYPERSPACE_WAIT_IN_ETHER_TIME` in the ether, in at the
+  destination), run on the campaign's mid-level jump code; `Order::MpHyperspace` over the network;
+  in the game the Hyperspace menu item / key opens the plate (hyperspace colour) in the sensors
+  manager. Save version 14. Not modelled: the sensors pings of the ships going and coming and the
+  arrival chatter; the cost is posted as a message, not drawn on the plate.
+
+Left for later stages: fuel burn, alliances being formed and broken, and drawing crates (the
+simulation has them; the view does not yet).
 
 ## 2. Skirmish front end
 

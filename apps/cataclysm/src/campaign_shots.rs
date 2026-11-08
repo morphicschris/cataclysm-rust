@@ -2290,6 +2290,27 @@ fn skirmish_plays() {
     }
     rig.shot(g, "41_skirmish_enemy");
 
+    // Hyperspace (on in the default game): the menu offers it for the mothership, the plate
+    // opens in the sensors manager, and the click jumps it for its cost.
+    g.selection = vec![ms0];
+    g.world.universe_mut().base.players[0].resource_units = 100_000;
+    rig.frame(g);
+    assert!(g.ui.fe.game.ig.view.commands.contains(&hwc_ui::ingame::host::Command::Hyperspace));
+    g.hyperspace_button(&mut None);
+    assert!(g.sensors.is_open(), "the sensors manager opens for the jump");
+    rig.frame(g);
+    rig.shot(g, "41b_skirmish_hyperspace_plate");
+    g.execute_plate(&mut None);
+    let u = g.world.universe();
+    let paid = 100_000 - u.base.players[0].resource_units;
+    let cmd = u.ships.ship(ms0).command.and_then(|c| u.commands.get(c)).map(|c| c.order);
+    println!("hyperspace: paid {paid}, order {cmd:?}");
+    assert!(paid >= 2400, "at least the mothership's minimum cost");
+    assert_eq!(cmd, Some(hwc_sim::command::order::MP_HYPERSPACE));
+    for _ in 0..8 {
+        rig.frame(g);
+    }
+
     // Their mothership goes ("destroy enemy command ship" is on): they are out, we win, and
     // the game ends back at the menu.
     let u = g.world.universe_mut();

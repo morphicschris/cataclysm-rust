@@ -86,6 +86,9 @@ pub enum Order {
     RepairPriority { module_type: ShipType, priority: i32 },
     /// The Beast mothership's emergency power setting.
     BeastSystems { mode: u32 },
+    /// `clWrapMpHyperspace`: the ships jump from around `from` to around `to` (a multiplayer
+    /// game with hyperspace on; the player pays the jump).
+    MpHyperspace { ships: Vec<ShipId>, from: Vector, to: Vector },
 }
 
 /// The player's live ships among `ships`, in order.
@@ -195,6 +198,10 @@ pub fn apply(u: &mut Universe, player: usize, order: &Order, disguises: Option<&
                     crate::ships::cl_special(u, &[id], &[]);
                 }
             }
+        }
+        Order::MpHyperspace { ships, from, to } => {
+            let s = own(u, player, ships);
+            crate::mp_hyperspace::cl_mp_hyperspace(u, &s, *from, *to);
         }
         Order::Kamikaze { ships } => {
             let s = own(u, player, ships);

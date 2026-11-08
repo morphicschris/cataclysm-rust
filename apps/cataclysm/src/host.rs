@@ -624,6 +624,14 @@ impl GameUiHost for SimHost<'_> {
         if hwc_sim::player_orders::any_can_upgrade(u, player(), self.selection) {
             c.push(Command::Upgrade);
         }
+        // A multiplayer game with hyperspace on: "Hyperspace" while a ship of the selection
+        // can jump (`makeSelectionHyperspaceCapable`).
+        if u.mp.active
+            && u.base.options.flags & hwc_sim::multiplayer::mg::HYPERSPACE != 0
+            && !hwc_sim::mp_hyperspace::hyperspace_capable(u, self.selection).is_empty()
+        {
+            c.push(Command::Hyperspace);
+        }
         // `pmBuildMenuItems`: the special-action menu's items.
         let items =
             hwc_sim::player_orders::special_menu(u, player(), self.selection, self.special_targets);

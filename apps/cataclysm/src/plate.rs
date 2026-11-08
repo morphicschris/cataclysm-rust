@@ -90,6 +90,8 @@ pub struct Colors {
     pub ship_line: Color,
     pub ship_line_closest: Color,
     pub readout: Color,
+    /// The disc of a multiplayer hyperspace jump (`TW_MOVE_HYPERSPACE_COLOUR`).
+    pub hyperspace: Color,
 }
 
 impl Default for Colors {
@@ -99,6 +101,7 @@ impl Default for Colors {
             ship_line: [233, 114, 41, 255],
             ship_line_closest: [255, 255, 22, 255],
             readout: [245, 58, 58, 255],
+            hyperspace: [198, 51, 191, 255],
         }
     }
 }
@@ -119,6 +122,7 @@ impl Colors {
             ship_line: rgb("TW_SHIP_LINE_COLOR", d.ship_line),
             ship_line_closest: rgb("TW_SHIP_LINE_CLOSEST_COLOR", d.ship_line_closest),
             readout: rgb("TW_DISTANCE_READOUT_COLOR", d.readout),
+            hyperspace: rgb("TW_MOVE_HYPERSPACE_COLOUR", d.hyperspace),
         }
     }
 }
