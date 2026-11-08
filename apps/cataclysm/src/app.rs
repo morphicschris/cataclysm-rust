@@ -72,6 +72,8 @@ struct Gpu {
 struct App {
     /// The player's saved games.
     saves: Rc<crate::saves::SaveDir>,
+    /// The skirmish last started (the escape menu's restart starts it again).
+    last_skirmish: Option<hwc_ui::skirmish::SkirmishRequest>,
     session: Session,
     audio: Option<Audio>,
     intro: Option<Intro>,
@@ -251,6 +253,7 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
     let mut session = session;
     session.fe.game.saves = Some(saves.clone());
     let mut app = App {
+        last_skirmish: None,
         saves,
         session,
         audio,
@@ -834,6 +837,25 @@ impl App {
         }
     }
 
+    /// `utyStartSkirmish`: the skirmish loads behind a loading screen.
+    fn start_skirmish(&mut self, req: hwc_ui::skirmish::SkirmishRequest) {
+        self.backdrop.drop_scene();
+        self.session.fe.all_screens_delete();
+        let size = self.session.placement.canvas;
+        let map = req.map.clone();
+        self.last_skirmish = Some(req.clone());
+        match Loading::skirmish(self.data.clone(), &self.session, req, size) {
+            Ok(mut l) => {
+                l.saves = Some(self.saves.clone());
+                self.loading = Some(Box::new(l))
+            }
+            Err(e) => {
+                eprintln!("cataclysm: cannot start a skirmish on {map}: {e}");
+                self.back_to_menu();
+            }
+        }
+    }
+
     /// `utyLoadMultiSinglePlayerGame` / `gpLoadGame`: a saved game loads behind its mission's
     /// loading screen (the game running, if any, ends first and the music stops).
     fn load_saved_game(&mut self, path: &std::path::Path) {
@@ -1202,9 +1224,10 @@ impl App {
             let level_save = g.level_save.clone().filter(|p| p.is_file());
             self.back_to_menu();
             if restart {
-                match level_save {
-                    Some(p) => self.load_saved_game(&p),
-                    None => self.start_loading(mission, difficulty),
+                match (level_save, mission, self.last_skirmish.clone()) {
+                    (_, 0, Some(req)) => self.start_skirmish(req),
+                    (Some(p), _, _) => self.load_saved_game(&p),
+                    _ => self.start_loading(mission, difficulty),
                 }
             }
             return Ok(true);
@@ -1618,7 +1641,7 @@ impl App {
             }
             Request::LoadGame(key) => self.load_saved_game(std::path::Path::new(&key)),
             Request::Multiplayer => eprintln!("cataclysm: multiplayer is not available yet"),
-            Request::StartSkirmish(s) => eprintln!("cataclysm: skirmish on {} is not playable yet", s.map),
+            Request::StartSkirmish(s) => self.start_skirmish(s),
             Request::OpenUrl(url) => eprintln!("cataclysm: troubleshooting page: {url}"),
         }
     }

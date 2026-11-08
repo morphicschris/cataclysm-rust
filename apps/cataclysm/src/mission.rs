@@ -123,6 +123,8 @@ pub struct Loader {
     /// The fleet coming from the mission before (`singlePlayerLoadNewLevel`); without it a
     /// mission after the first starts from the `warp.script` fleet (the original's warp).
     pub carry: Option<Carry>,
+    /// A multiplayer game: the statics load without the single-player changes.
+    pub multiplayer: bool,
 }
 
 impl Loader {
@@ -134,6 +136,7 @@ impl Loader {
             tweaks: None,
             play_nislets: true,
             carry: None,
+            multiplayer: false,
         }
     }
 
@@ -143,7 +146,7 @@ impl Loader {
             return;
         }
         let options = LoadOptions {
-            single_player: true,
+            single_player: !self.multiplayer,
             ..LoadOptions::default()
         };
         self.statics = Some(Arc::new(StaticWorld::load_from(assets, options)));
@@ -223,6 +226,47 @@ impl Loader {
         let (script, config) = self.script_and_config(assets)?;
         nis.finish(statics, tweaks, assets, script, config)
             .map_err(|e| e.to_string())
+    }
+
+    /// A skirmish (`gameStart` for a multiplayer game): the local player and the computer
+    /// players on the picked map, run as a mission without a script.
+    pub fn start_skirmish(
+        &mut self,
+        assets: &Assets,
+        req: &hwc_ui::skirmish::SkirmishRequest,
+        seed: u32,
+    ) -> Result<MissionRun, String> {
+        use hwc_sim::skirmish::{skirmish_races, GameSetup, PlayerSetup, SkirmishRun};
+        use hwc_sim::statics::ShipRace;
+        self.multiplayer = true;
+        self.load_statics(assets);
+        let statics = self.statics.clone().expect("statics");
+        let tweaks = self.tweaks.clone().expect("tweaks");
+        let local = if req.race == 1 {
+            ShipRace::Beast
+        } else {
+            ShipRace::Somtaaw
+        };
+        let n = 1 + usize::from(req.options.num_computers.max(1));
+        let players = skirmish_races(local, n)
+            .into_iter()
+            .enumerate()
+            .map(|(i, race)| PlayerSetup {
+                race,
+                computer: i > 0,
+            })
+            .collect();
+        let config = MissionConfig::new(0);
+        let setup = GameSetup {
+            map: req.map.clone(),
+            players,
+            options: req.options.clone(),
+            slots: None,
+            seed,
+            effects: config.effects,
+        };
+        let run = SkirmishRun::start(statics, tweaks, assets, setup).map_err(|e| e.to_string())?;
+        Ok(MissionRun::from_skirmish(run, config))
     }
 
     /// The level and the KAS script (`singlePlayerLoadNewLevel`).

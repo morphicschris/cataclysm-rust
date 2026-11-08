@@ -169,7 +169,7 @@ fn losing_the_mothership_loses_the_game() {
     while !run.over() && steps < 16 * 60 {
         run.step();
         steps += 1;
-        events.extend(run.universe.mp.events.iter().copied());
+        events.extend(run.universe.mp.events.drain(..));
     }
     println!("events: {events:?} after {steps} steps");
     assert!(events.contains(&MpEvent::PlayerDefeated { player: 1, how: 0 }), "{events:?}");
@@ -200,8 +200,9 @@ fn resource_injections_arrive() {
     let mut got = Vec::new();
     for _ in 0..250 {
         run.step();
-        got.extend(run.universe.mp.events.iter().filter_map(|e| match e {
-            MpEvent::ResourcesInjected { amount } => Some((run.universe.update_counter, *amount)),
+        let now = run.universe.update_counter;
+        got.extend(run.universe.mp.events.drain(..).filter_map(|e| match e {
+            MpEvent::ResourcesInjected { amount } => Some((now, amount)),
             _ => None,
         }));
     }
@@ -258,7 +259,7 @@ fn a_scripted_game_runs_to_a_winner() {
     while !run.over() && steps < 16 * 60 * 20 {
         run.step();
         steps += 1;
-        events.extend(run.universe.mp.events.iter().copied());
+        events.extend(run.universe.mp.events.drain(..));
     }
     let u = &run.universe;
     let acolytes = u.ship_list.iter().filter(|&&id| u.ships.ship(id).player == 0 && u.ships.ship(id).ship_type == ShipType::sAcolyte).count();
@@ -284,8 +285,8 @@ fn a_crate_appears_and_is_claimed() {
     let mut appeared = None;
     for _ in 0..16 * 3 {
         run.step();
-        for e in &run.universe.mp.events {
-            if let MpEvent::CrateAppeared { position } = *e {
+        for e in run.universe.mp.events.drain(..) {
+            if let MpEvent::CrateAppeared { position } = e {
                 appeared = Some(position);
             }
         }
@@ -301,8 +302,8 @@ fn a_crate_appears_and_is_claimed() {
     let mut found = None;
     for _ in 0..80 {
         run.step();
-        for e in &run.universe.mp.events {
-            if let MpEvent::CrateFound { player, reward, .. } = *e {
+        for e in run.universe.mp.events.drain(..) {
+            if let MpEvent::CrateFound { player, reward, .. } = e {
                 found = Some((player, reward));
             }
         }

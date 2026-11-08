@@ -866,6 +866,31 @@ impl MissionRun {
         Self::load(statics, tweaks, src, script, config, fleet, Some(carry))
     }
 
+    /// A multiplayer game (a skirmish) in the mission's clothes, so that the front end that
+    /// plays missions plays it: no script, no single-player state (`Universe::mp` is active,
+    /// which the update hooks check), `config.mission` 0.
+    pub fn from_skirmish(run: crate::skirmish::SkirmishRun, mut config: MissionConfig) -> Self {
+        config.mission = 0;
+        let mut game = empty_game(config);
+        game.level = run.level;
+        game.resource_units = run.universe.base.players.iter().map(|p| p.resource_units).collect();
+        for line in run.log {
+            game.log(LogKind::Flow, line);
+        }
+        let empty = |addr| hwc_kas::ir::Block { addr, stmts: Vec::new() };
+        let script = KasMission {
+            name: "Skirmish".into(),
+            name_hash: kas_hash("Skirmish"),
+            lstrings: Vec::new(),
+            fsms: Vec::new(),
+            init: empty(None),
+            watch: empty(None),
+            names: Default::default(),
+            fidelity: hwc_kas::ir::Fidelity::Text,
+        };
+        MissionRun { universe: run.universe, kas: Interpreter::new(script), game }
+    }
+
     fn load(
         statics: Arc<StaticWorld>,
         tweaks: SimTweaks,
@@ -1177,10 +1202,17 @@ impl crate::universe::UpdateHooks for Hooks<'_> {
     fn before_bullet_collisions(&mut self, u: &mut Universe) {
         self.game.frame = u.update_counter;
         self.game.time = u.total_time_elapsed;
+        if u.mp.active {
+            return;
+        }
         single_player_update(u, self.kas, self.game);
     }
 
     fn computer_players(&mut self, u: &mut Universe) {
+        if u.mp.active {
+            // (The multiplayer computer players come with the AI player.)
+            return;
+        }
         // aiplayerUpdateAll: KAS is skipped while a hyperspace transition is in progress.
         let state = self.game.sp_state;
         if state != sp_state::NONE && state != sp_state::KAS_STARTED {

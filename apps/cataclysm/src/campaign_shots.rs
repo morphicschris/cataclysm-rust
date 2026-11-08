@@ -2245,3 +2245,66 @@ fn the_players_saved_games_still_load() {
     println!("saved games: {ok} load, {bad} do not");
     assert_eq!(bad, 0);
 }
+
+/// A skirmish started as Start Skirmish starts one (Coldwar, the player Beast against a
+/// Somtaaw computer player): it loads, runs, and both fleets are where the map puts them.
+#[test]
+#[ignore]
+fn skirmish_plays() {
+    let Some(mut rig) = rig() else { return };
+    let assets = crate::data::Assets(rig.data.clone());
+    let mut options = hwc_sim::skirmish::game_types(&assets)
+        .into_iter()
+        .next()
+        .expect("Default")
+        .options();
+    options.num_computers = 1;
+    let req = hwc_ui::skirmish::SkirmishRequest {
+        map: "Coldwar2".into(),
+        options,
+        race: 1,
+        name: "Tester".into(),
+    };
+    let l = Loading::skirmish(rig.data.clone(), &rig.session, req, SIZE).expect("loading");
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    for _ in 0..16 * 4 {
+        let out = rig.frame(g);
+        assert!(out.is_empty(), "{out:?}");
+    }
+    let u = g.world.universe();
+    assert!(u.mp.active);
+    let ms0 = u.base.players[0].mothership.expect("our mothership");
+    let ms1 = u.base.players[1].mothership.expect("their mothership");
+    assert_eq!(u.ships.ship(ms0).ship_type, hwc_sim::statics::ShipType::bMothership);
+    assert_eq!(u.ships.ship(ms1).ship_type, hwc_sim::statics::ShipType::sMothership);
+    let ours = u.ship_list.iter().filter(|&&id| u.ships.ship(id).player == 0).count();
+    println!("skirmish: {ours} ships of ours, {} RUs", u.base.players[0].resource_units);
+    rig.shot(g, "40_skirmish_start");
+    let p = g.world.universe().ship(ms1).expect("ship").posinfo.position;
+    g.world.follow_focus = false;
+    g.world.camera.look_at = Vec3::new(p.x, p.y, p.z);
+    g.world.camera.distance = 9000.0;
+    for _ in 0..8 {
+        rig.frame(g);
+    }
+    rig.shot(g, "41_skirmish_enemy");
+
+    // Their mothership goes ("destroy enemy command ship" is on): they are out, we win, and
+    // the game ends back at the menu.
+    let u = g.world.universe_mut();
+    u.ships.ship_mut(ms1).health = 0.0;
+    hwc_sim::damage::add_ship_to_delete_list(u, ms1, -1);
+    let mut left = false;
+    for _ in 0..60 * 40 {
+        if rig.frame(g).contains(&Outcome::Leave) {
+            left = true;
+            break;
+        }
+    }
+    let said: Vec<String> = g.messages.iter().map(|m| m.text.clone()).collect();
+    println!("messages: {said:?}");
+    assert!(said.iter().any(|m| m == "Computer 1 has died"), "{said:?}");
+    assert!(said.iter().any(|m| m == "Tester has won"), "{said:?}");
+    assert!(left, "the game ends");
+}

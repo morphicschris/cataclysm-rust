@@ -148,6 +148,8 @@ pub struct Game {
     /// The hot-key number fonts by level of detail (`selGroupFont0..3`).
     group_fonts: [Option<Rc<hwc_formats::font::Font>>; 4],
     pub(crate) messages: Vec<GameMessage>,
+    /// The local player's name in a multiplayer game (the skirmish screen's player name).
+    pub local_name: Option<String>,
     /// Speech subtitles, simulated subtitles and location cards (`Subtitle.c`).
     pub subtitles: Option<Subtitles>,
     /// The NIS letterbox the mission's `wideScreenIn/Out` drive.
@@ -380,6 +382,7 @@ impl Game {
             carried_groups: None,
             group_fonts,
             messages: Vec::new(),
+            local_name: None,
             subtitles: None,
             letterbox: Letterbox::default(),
             #[cfg(test)]
@@ -2471,6 +2474,49 @@ impl Game {
         }
     }
 
+    /// A player's name in a multiplayer game: the local player's own, `Computer <n>` for the
+    /// others (`gameStart`'s `"%s %i"` with `strComputerName`).
+    fn player_name(&self, p: usize) -> String {
+        if p == self.world.universe().mp.local_player {
+            let n = self.local_name.clone().unwrap_or_else(|| self.ui.fe.game.options.get_str("PlayerName").to_string());
+            if !n.trim().is_empty() {
+                return n.trim().to_string();
+            }
+        }
+        let computer = self.strings.get("strComputerName").unwrap_or("Computer").trim().to_string();
+        format!("{computer} {p}")
+    }
+
+    /// The multiplayer rules' news: a player out (`univKillPlayer`'s message), the winners
+    /// (`DeclarePlayerWin`), and the end of the game (back to the main menu).
+    fn multiplayer_events(&mut self, out: &mut Vec<Outcome>) {
+        let events = std::mem::take(&mut self.world.universe_mut().mp.events);
+        let text = |g: &Self, key: &str, fallback: &str| g.strings.get(key).unwrap_or(fallback).trim().to_string();
+        for e in events {
+            match e {
+                hwc_sim::multiplayer::MpEvent::PlayerDefeated { player, .. } => {
+                    let line = if player == self.world.universe().mp.local_player {
+                        text(self, "strHaveBeenDefeated", "You have been defeated")
+                    } else {
+                        format!("{} {}", self.player_name(player), text(self, "strPlayerHasDied", "has died"))
+                    };
+                    self.post(&line);
+                }
+                hwc_sim::multiplayer::MpEvent::Won { winners } => {
+                    let names: Vec<String> = (0..8).filter(|p| winners & (1 << p) != 0).map(|p| self.player_name(p)).collect();
+                    let line = match names.len() {
+                        0 => text(self, "strAllPlayersDead", "All players have been killed"),
+                        1 => format!("{} {}", names[0], text(self, "strPlayerHasWon", "has won")),
+                        _ => format!("{} {}", names.join(", "), text(self, "strPlayersHaveWon", "have won")),
+                    };
+                    self.post(&line);
+                }
+                hwc_sim::multiplayer::MpEvent::GameOver => out.push(Outcome::Leave),
+                _ => {}
+            }
+        }
+    }
+
     fn post(&mut self, text: &str) {
         self.messages.push(GameMessage {
             text: text.to_string(),
@@ -2559,6 +2605,11 @@ impl Game {
         description: &str,
         autosave: bool,
     ) -> Result<(), String> {
+        if self.world.universe().mp.active {
+            // (Multiplayer saved games are not written yet: the save format's level comes
+            // from a mission number.)
+            return Err("saving a skirmish is not supported yet".into());
+        }
         let ui = self.ui_state();
         let run = self.world.run();
         let header = crate::saves::header(run, description, autosave, self.thumb.clone());
@@ -2826,6 +2877,7 @@ impl Game {
         crate::watchdog::checkpoint("update: presentation");
         self.update_presentation(dt, audio);
         crate::watchdog::checkpoint("update: done");
+        self.multiplayer_events(&mut out);
         if self.nis_level_done {
             out.push(Outcome::NisLevelDone);
         }

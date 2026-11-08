@@ -73,6 +73,8 @@ pub struct Loading {
     saved_ui: Option<crate::saves::UiState>,
     /// Where the game's saves go (given to the game when it is ready).
     pub saves: Option<Rc<crate::saves::SaveDir>>,
+    /// A skirmish to start instead of a mission.
+    skirmish: Option<hwc_ui::skirmish::SkirmishRequest>,
 }
 
 /// The player's team colours from the options (`PlayerBaseColor` / `PlayerStripeColor`, once
@@ -118,7 +120,22 @@ impl Loading {
             saved: None,
             saved_ui: None,
             saves: None,
+            skirmish: None,
         })
+    }
+
+    /// A skirmish (`utyStartSkirmish` → `gameStart`) behind a loading screen.
+    pub fn skirmish(
+        data: Rc<GameData>,
+        session: &Session,
+        req: hwc_ui::skirmish::SkirmishRequest,
+        size: (i32, i32),
+    ) -> Result<Loading, String> {
+        let mut l = Loading::new(data, session, 0, 2, size)?;
+        l.opening_nis = false;
+        l.loader.multiplayer = true;
+        l.skirmish = Some(req);
+        Ok(l)
     }
 
     /// Loading a saved game (`gameStart(file)`: `PreLoadGame`, the statics, `LoadGame`) behind
@@ -215,7 +232,7 @@ impl Loading {
                         Err(e) => eprintln!("cataclysm: {e}"),
                     }
                 }
-                if mission::supported(self.mission) {
+                if mission::supported(self.mission) || self.skirmish.is_some() {
                     self.screen.set_progress(0.05);
                     Step::Statics
                 } else {
@@ -236,6 +253,15 @@ impl Loading {
                 let sim = match self.after_nis.take() {
                     Some(n) => self.loader.finish(*n, &self.assets).map(Sim::Mission),
                     None if self.saved.is_some() => self.read_saved().map(Sim::Mission),
+                    None if self.skirmish.is_some() => {
+                        let req = self.skirmish.clone().expect("skirmish");
+                        let seed = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.subsec_nanos());
+                        self.loader
+                            .start_skirmish(&self.assets, &req, seed)
+                            .map(Sim::Mission)
+                    }
                     None if self.plays_nis_level() => self
                         .loader
                         .start_nis_level(&self.assets, self.centre)
@@ -282,6 +308,9 @@ impl Loading {
                     Ok(mut g) => {
                         if let Some(d) = &self.saves {
                             g.set_saves(d.clone());
+                        }
+                        if let Some(req) = &self.skirmish {
+                            g.local_name = Some(req.name.clone());
                         }
                         if let Some(ui) = self.saved_ui.take() {
                             g.restore_ui(ui);

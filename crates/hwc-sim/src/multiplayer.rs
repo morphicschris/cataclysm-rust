@@ -115,7 +115,7 @@ pub struct MpState {
     pub bounties: Vec<u8>,
     /// The crates (`MG_CratesEnabled`).
     pub crates: crate::crates::Crates,
-    /// This update's events (not saved).
+    /// What happened since the front end last took them (not saved).
     #[serde(skip)]
     pub events: Vec<MpEvent>,
 }
@@ -160,7 +160,6 @@ pub fn update_clocks(u: &mut Universe) {
     if !u.mp.active {
         return;
     }
-    u.mp.events.clear();
     if u.mp.quit_time == 0.0 {
         return;
     }

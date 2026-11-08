@@ -264,8 +264,9 @@ impl GameUiHost for SimHost<'_> {
                 .iter()
                 .filter(|s| s.player == PLAYER && s.flags & SOF_MODULE == 0)
                 .count() as i32,
-            single_player: true,
-            multiplayer: false,
+            single_player: !u.mp.active,
+            // `multiPlayerGame`: a network game (a skirmish is neither).
+            multiplayer: u.mp.active && u.mp.network,
             paused: self.paused,
             in_sensors: self.in_sensors,
             tutorial: false,
