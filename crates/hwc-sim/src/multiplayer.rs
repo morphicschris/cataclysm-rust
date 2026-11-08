@@ -285,6 +285,10 @@ pub fn kill_player(u: &mut Universe, player: usize, how: i32) {
         u.mp.deaths.resize(num_players(u), None);
     }
     u.mp.deaths[player] = Some((u.total_time_elapsed, how));
+    let now = u.total_time_elapsed;
+    if let Some(s) = u.base.stats.players.get_mut(player) {
+        s.died_at = now;
+    }
     if player == u.mp.local_player {
         crate::speech::queue(u, None, speech_event::PLAYER_DIES, player as i32);
     }
@@ -322,7 +326,7 @@ fn disable_all_players_ships(u: &mut Universe, player: usize) {
 /// (`was_mothership`: it was its player's mothership when it died): a player who lost the
 /// mothership with no backup (with "last mothership" on, or no ships left), or the last ship,
 /// is out.
-pub fn ship_deleted(u: &mut Universe, player: usize, was_mothership: bool) {
+pub fn ship_deleted(u: &mut Universe, player: usize, was_mothership: bool, killer: Option<usize>) {
     if !u.mp.active || u.single_player || player >= num_players(u) {
         return;
     }
@@ -339,6 +343,12 @@ pub fn ship_deleted(u: &mut Universe, player: usize, was_mothership: bool) {
     }
     let was_alive = alive(u, player);
     kill_player(u, player, death::STANDARD);
+    // The player whose weapons took the last ship has put this one out.
+    if let Some(k) = killer.filter(|&k| k != player && was_alive) {
+        if let Some(s) = u.base.stats.players.get_mut(k) {
+            s.players_killed += 1;
+        }
+    }
     if was_alive {
         check_player_win(u);
     }

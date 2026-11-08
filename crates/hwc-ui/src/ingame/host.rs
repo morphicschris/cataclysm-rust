@@ -462,6 +462,8 @@ pub enum GameRequest {
     BeastSystems(u32),
     /// A line of the multiplayer chat, to everyone or the allies (`gcInGameChatEntry`).
     Chat { allies: bool, text: String },
+    /// Done on the end-of-game statistics: back to the menu (`gstatClose`).
+    StatsDone,
     /// Give the selected ships a command (popup menu or key).
     Command(Command),
     /// Narrow the selection to one ship type (clicking the selected-ships list).
@@ -587,6 +589,11 @@ pub trait GameUiHost {
     fn player_names(&self) -> Vec<(String, [u8; 4])> {
         Vec::new()
     }
+    /// The end-of-game statistics, a column per player, once a multiplayer game is over
+    /// (`gstatOpen`); empty while it runs.
+    fn end_stats(&self) -> Vec<super::gamestats::StatPlayer> {
+        Vec::new()
+    }
     /// Screen position of ships for popup-menu target highlights (None when off screen).
     fn ship_screen_pos(&self, _ship: ShipId) -> Option<(i32, i32, i32)> {
         None
@@ -665,6 +672,8 @@ pub struct HostView {
     pub leech_state: u8,
     /// [`GameUiHost::placing_waypoints`].
     pub waypoints: Option<u8>,
+    /// [`GameUiHost::end_stats`].
+    pub end_stats: Vec<super::gamestats::StatPlayer>,
 }
 
 impl HostView {
@@ -711,6 +720,7 @@ impl HostView {
             mimic: host.mimic_menus(),
             leech_state: host.leech_state(),
             waypoints: host.placing_waypoints(),
+            end_stats: host.end_stats(),
         }
     }
 

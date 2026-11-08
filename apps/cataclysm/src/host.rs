@@ -61,6 +61,8 @@ pub struct SimHost<'a> {
     pub resource_units: i32,
     /// Screen position and radius of ships (popup highlights).
     pub screen_pos: &'a dyn Fn(ShipId) -> Option<(i32, i32, i32)>,
+    /// The end-of-game statistics, once a multiplayer game is over.
+    pub end_stats: &'a [hwc_ui::ingame::gamestats::StatPlayer],
 }
 
 impl SimHost<'_> {
@@ -743,6 +745,10 @@ impl GameUiHost for SimHost<'_> {
             remaining: h.rollcall_remaining,
             go_now_disabled: hwc_sim::campaign::rollcall_go_now_disabled(self.u()),
         })
+    }
+
+    fn end_stats(&self) -> Vec<hwc_ui::ingame::gamestats::StatPlayer> {
+        self.end_stats.to_vec()
     }
 
     fn messages(&self) -> Vec<GameMessage> {

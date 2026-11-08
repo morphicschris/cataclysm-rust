@@ -45,7 +45,7 @@ pub const MAGIC: [u8; 8] = *b"HWCSAVE\0";
 /// removed, reordered or retyped). A field added at version `n` is read with `added_in_<n>`
 /// ([`added_in_2`]), so files of older versions still load with the field at its default;
 /// files of a newer version, or older ones whose shape is not known, are refused.
-pub const FORMAT_VERSION: u32 = 11;
+pub const FORMAT_VERSION: u32 = 12;
 
 /// The oldest version still read.
 pub const OLDEST_VERSION: u32 = 1;
@@ -225,6 +225,12 @@ pub fn added_in_10<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Defau
 /// [`added_in`] for shape 11 (the computer players' teams, moves, variables and attack manager).
 pub fn added_in_11<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
     added_in(11, d)
+}
+
+/// [`added_in`] for shape 12 (the end-of-game statistics: ships killed and lost per class,
+/// players killed, crystals, time of death).
+pub fn added_in_12<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
+    added_in(12, d)
 }
 
 fn current<T>(f: impl FnOnce(&Relink) -> T) -> T {

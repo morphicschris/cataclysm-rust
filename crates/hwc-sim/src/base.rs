@@ -330,6 +330,21 @@ pub struct PlayerStats {
     /// `totalInjectedResources`: resource units from injections and the lump sum.
     #[serde(default, deserialize_with = "crate::save::added_in_9")]
     pub ru_injected: i32,
+    /// 0xa080b0: when the player was killed (`univKillPlayer`; 0 while alive).
+    #[serde(default, deserialize_with = "crate::save::added_in_12")]
+    pub died_at: f32,
+    /// 0xa080d8: crystals the player's depots took in (`salvDepotProcessCrystal`).
+    #[serde(default, deserialize_with = "crate::save::added_in_12")]
+    pub crystals: i32,
+    /// 0xa085d4: enemy ships the player killed, per class; 0xa08850: the player's ships lost,
+    /// per class (`gameStatsShipDied`; linked ACVs and MCVs count twice, Swarmers not at all).
+    #[serde(default, deserialize_with = "crate::save::added_in_12")]
+    pub killed_per_class: [i32; ShipClass::COUNT],
+    #[serde(default, deserialize_with = "crate::save::added_in_12")]
+    pub lost_per_class: [i32; ShipClass::COUNT],
+    /// 0xa08880: players the player put out of the game (`univKillOtherPlayersIfDead`).
+    #[serde(default, deserialize_with = "crate::save::added_in_12")]
+    pub players_killed: i32,
 }
 
 /// The game-wide statistics.
@@ -355,6 +370,31 @@ impl Default for GameStats {
 }
 
 impl GameStats {
+    /// `gameStatsShipDied` (0x53a340), the counts per class: a ship killed by a player's
+    /// weapons (`howDidIDie` 0x29a..0x29c, or 0x3ec) counts for that player, and every ship
+    /// counts as lost for its owner; a ship removed by the game (`howDidIDie` 1000) does not
+    /// count.
+    pub fn ship_died(&mut self, owner: usize, ship_type: ShipType, class: Option<ShipClass>, how: i32, who: i32) {
+        if how == 1000 {
+            return;
+        }
+        let killer = if (0x29a..=0x29c).contains(&how) || how == 0x3ec { who } else { 99 };
+        let swarmer = matches!(ship_type, ShipType::sSwarmer | ShipType::bSwarmer);
+        let twice = matches!(ship_type, ShipType::sACV | ShipType::sMCV | ShipType::bACV);
+        let n = if twice { 2 } else { 1 };
+        let Some(c) = class.map(|c| c.index()) else { return };
+        if killer != owner as i32 && (0..8).contains(&killer) && !swarmer {
+            if let Some(p) = self.players.get_mut(killer as usize) {
+                p.killed_per_class[c] += n;
+            }
+        }
+        if !swarmer {
+            if let Some(p) = self.players.get_mut(owner) {
+                p.lost_per_class[c] += n;
+            }
+        }
+    }
+
     /// `gameStatsAddShipSalvaged` (0x53b180): increments the cell at `type + player * 8` of the
     /// 8 x 145 table (the original's index; the counts of players other than 0 land in other
     /// players' or other types' cells).

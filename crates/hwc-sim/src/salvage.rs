@@ -1085,6 +1085,9 @@ fn depot_process_crystal(u: &mut Universe, depot: ShipId, i: usize) {
         0 => {
             crate::clamp::clamp_obj_to_obj(u, t, depot);
             crate::consume::start(u, t, at, CRYSTAL_CONSUME_TIME);
+            if let Some(s) = u.base.stats.players.get_mut(player) {
+                s.crystals += 1;
+            }
             u.ships.ship_mut(depot).base.depot.as_mut().expect("depot")[i].state = 1;
             if let Some(c) = crate::ships::crystal::spec_mut(u, t) {
                 c.processing = true;

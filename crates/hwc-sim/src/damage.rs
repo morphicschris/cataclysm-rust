@@ -489,10 +489,15 @@ fn delete_dead_ship(u: &mut Universe, id: ShipId, death_by: i32) {
     }
     let player = u.ships.ship(id).player;
     let was_mothership = u.base.players.get(player).is_some_and(|p| p.mothership == Some(id));
+    // The player whose weapons killed it (`+0x60c`, set by `ApplyDamageToTarget`).
+    let killer = {
+        let s = u.ships.ship(id);
+        ((0x29a..=0x29c).contains(&s.how_did_i_die) && (0..8).contains(&s.who_killed_me)).then_some(s.who_killed_me as usize)
+    };
     let fx = u.effects.is_some();
     retire_dead_ship(u, id, !fx);
     // `univKillOtherPlayersIfDead`.
-    crate::multiplayer::ship_deleted(u, player, was_mothership);
+    crate::multiplayer::ship_deleted(u, player, was_mothership, killer);
     // `aiplayerShipDied`, for the multiplayer computer players.
     if u.mp.active {
         let t = u.ships.get(id).map(|s| s.ship_type);
@@ -512,6 +517,12 @@ fn delete_dead_ship(u: &mut Universe, id: ShipId, death_by: i32) {
 /// The part of `univDeleteDeadShip` that makes everything let go of the ship: it is dead,
 /// no longer in the ship or impactable lists or the blobs, and no one refers to it.
 fn retire_dead_ship(u: &mut Universe, id: ShipId, fow_now: bool) {
+    // `univRemoveShipReferences`' `gameStatsShipDied`.
+    if let Some(s) = u.ships.get(id) {
+        let class = u.statics.ship(s.ship_type).and_then(|st| st.ship_class);
+        let (owner, t, how, who) = (s.player, s.ship_type, s.how_did_i_die, s.who_killed_me);
+        u.base.stats.ship_died(owner, t, class, how, who);
+    }
     let Some(s) = u.ships.get_mut(id) else { return };
     s.posinfo.force = Vector::ZERO;
     s.rotinfo.torque = Vector::ZERO;

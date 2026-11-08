@@ -12,6 +12,7 @@ pub mod cursor;
 pub mod draw;
 pub mod escmenu;
 pub mod gamechat;
+pub mod gamestats;
 pub mod host;
 pub mod icons;
 pub mod keylist;
@@ -120,6 +121,8 @@ pub struct IgState {
     pub overlay: overlay::State,
     /// The multiplayer chat line.
     pub chat: gamechat::State,
+    /// The end-of-game statistics.
+    pub stats: gamestats::State,
     pub ship_print: shipprint::State,
     pub popup: popup::State,
     /// The game was paused by the UI (escape menu, objectives) and must resume on close.
@@ -392,6 +395,14 @@ impl InGameUi {
                 self.fe.game.ig.manager.is_some()
             }
             InputEvent::MouseButton { left, down } => {
+                // The statistics at the end take every click.
+                if !self.fe.game.ig.view.end_stats.is_empty() {
+                    if left && down {
+                        let (x, y) = self.mouse;
+                        gamestats::click(&mut self.fe, x, y);
+                    }
+                    return true;
+                }
                 if !left && self.camera_passes_roll_call() {
                     // The FE still sees the release of a press it had.
                     if !down {
@@ -459,6 +470,16 @@ impl InGameUi {
                 false
             }
             InputEvent::KeyDown(code) => {
+                // The statistics at the end: the arrows pick a row, Return or Escape is Done.
+                if !self.fe.game.ig.view.end_stats.is_empty() {
+                    match code {
+                        0x26 => gamestats::key(&mut self.fe, false),
+                        0x28 => gamestats::key(&mut self.fe, true),
+                        0x0d | 0x1b => self.fe.game.ig.request(GameRequest::StatsDone),
+                        _ => {}
+                    }
+                    return true;
+                }
                 // The multiplayer chat line takes the keys while it is open.
                 if self.fe.game.ig.chat.mode != 0 {
                     self.fe.key_down(code);
@@ -681,6 +702,7 @@ impl InGameUi {
             self.fe.time += f64::from(dt);
         }
         overlay::tick(&mut self.fe, dt);
+        gamestats::tick(&mut self.fe, dt);
         // A screen that closed itself (a callback deleted the last screen).
         if self.fe.game.ig.manager.is_some() && self.fe.stack.len() <= 1 {
             close_manager(&mut self.fe);
@@ -746,6 +768,7 @@ impl InGameUi {
         if full_screen {
             overlay::draw_modern_panels(&mut self.fe, canvas);
         }
+        gamestats::draw(&mut self.fe, canvas);
     }
 
     /// Where the 3D ship picture of the build manager goes, and which ship type it shows

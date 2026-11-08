@@ -2295,8 +2295,21 @@ fn skirmish_plays() {
     let u = g.world.universe_mut();
     u.ships.ship_mut(ms1).health = 0.0;
     hwc_sim::damage::add_ship_to_delete_list(u, ms1, -1);
-    let mut left = false;
+    // The end shows the statistics (`gstatOpen`); Done goes back to the menu.
     for _ in 0..60 * 40 {
+        rig.frame(g);
+        if !g.end_stats.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(g.end_stats.len(), 2, "the statistics show");
+    assert!(g.end_stats[0].local && g.end_stats[0].values[7] >= 0);
+    assert!(g.end_stats[0].values[0] > 0, "the time survived");
+    rig.frame(g);
+    rig.shot(g, "42_skirmish_statistics");
+    g.ui.fe.game.ig.request(hwc_ui::ingame::host::GameRequest::StatsDone);
+    let mut left = false;
+    for _ in 0..10 {
         if rig.frame(g).contains(&Outcome::Leave) {
             left = true;
             break;

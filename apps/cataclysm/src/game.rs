@@ -153,6 +153,9 @@ pub struct Game {
     pub local_name: Option<String>,
     /// The network game this is, if any: orders go through it and it paces the updates.
     pub net: Option<crate::net_game::NetLink>,
+    /// The statistics shown at the end of a multiplayer game (`gstatOpen`); the game waits
+    /// under them until Done.
+    pub end_stats: Vec<hwc_ui::ingame::gamestats::StatPlayer>,
     /// Speech subtitles, simulated subtitles and location cards (`Subtitle.c`).
     pub subtitles: Option<Subtitles>,
     /// The NIS letterbox the mission's `wideScreenIn/Out` drive.
@@ -387,6 +390,7 @@ impl Game {
             messages: Vec::new(),
             local_name: None,
             net: None,
+            end_stats: Vec::new(),
             subtitles: None,
             letterbox: Letterbox::default(),
             #[cfg(test)]
@@ -580,6 +584,7 @@ impl Game {
             in_sensors: self.sensors.is_open(),
             resource_units: world.universe().base.players[player()].resource_units,
             screen_pos: &pos,
+            end_stats: &self.end_stats,
         };
         f(&mut self.ui, &host)
     }
@@ -1979,7 +1984,10 @@ impl Game {
             }
             GameRequest::Action { action, down } => self.action(action, down, audio),
             GameRequest::SetPaused(p) => self.paused = p,
-            GameRequest::QuitToMain => out.push(Outcome::Leave),
+            // A multiplayer game shows its statistics before the menu (`utyGameQuitToMain` →
+            // `gstatOpen`).
+            GameRequest::QuitToMain if self.world.universe().mp.active && self.end_stats.is_empty() => self.open_end_stats(),
+            GameRequest::QuitToMain | GameRequest::StatsDone => out.push(Outcome::Leave),
             GameRequest::RestartLevel => out.push(Outcome::Restart),
             GameRequest::SaveGame(name) => {
                 let r = self.save_named(&name);
@@ -2490,7 +2498,7 @@ impl Game {
 
     /// The multiplayer rules' news: a player out (`univKillPlayer`'s message), the winners
     /// (`DeclarePlayerWin`), and the end of the game (back to the main menu).
-    fn multiplayer_events(&mut self, out: &mut Vec<Outcome>) {
+    fn multiplayer_events(&mut self, _out: &mut Vec<Outcome>) {
         let events = std::mem::take(&mut self.world.universe_mut().mp.events);
         let text = |g: &Self, key: &str, fallback: &str| g.strings.get(key).unwrap_or(fallback).trim().to_string();
         for e in events {
@@ -2512,7 +2520,11 @@ impl Game {
                     };
                     self.post(&line);
                 }
-                hwc_sim::multiplayer::MpEvent::GameOver => out.push(Outcome::Leave),
+                hwc_sim::multiplayer::MpEvent::GameOver => {
+                    if self.end_stats.is_empty() {
+                        self.open_end_stats();
+                    }
+                }
                 _ => {}
             }
         }
@@ -2548,6 +2560,57 @@ impl Game {
             ship: None,
             time: self.world.universe().total_time_elapsed,
         });
+    }
+
+    /// `gstatOpen` with `gstatCollectPlayerStats` (0x4842b0): every player's statistics, and
+    /// the game stops under them.
+    fn open_end_stats(&mut self) {
+        use hwc_sim::statics::ShipClass as C;
+        let u = self.world.universe();
+        let n = u.mp.num_players.max(1).min(u.base.players.len());
+        let me = player();
+        let schemes = self.world.team_schemes();
+        let mut out = Vec::new();
+        for p in 0..n {
+            let st = u.base.stats.players.get(p).cloned().unwrap_or_default();
+            let sum = |a: &[i32], cs: &[C]| cs.iter().map(|c| a.get(c.index()).copied().unwrap_or(0)).sum::<i32>();
+            let fighters = [C::Corvette, C::Fighter, C::Micro];
+            let frigates = [C::Frigate];
+            let destroyers = [C::HeavyCruiser, C::Destroyer];
+            let others = [C::Carrier, C::Resource, C::NonCombat, C::Component];
+            let survived = if st.died_at != 0.0 { st.died_at } else { u.total_time_elapsed };
+            let techs = (0..0x29).filter(|&t| u.base.players[p].tech.contains(t)).count() as i32;
+            let (b, l, k) = (&st.built_per_class, &st.lost_per_class, &st.killed_per_class);
+            let values = [
+                survived as i32,
+                st.players_killed,
+                st.ru_collected,
+                st.crystals,
+                techs,
+                sum(b, &fighters),
+                sum(l, &fighters),
+                sum(k, &fighters),
+                sum(b, &frigates),
+                sum(l, &frigates),
+                sum(k, &frigates),
+                sum(b, &destroyers),
+                sum(l, &destroyers),
+                sum(k, &destroyers),
+                sum(b, &others),
+                sum(l, &others),
+                sum(k, &others),
+            ];
+            let c = schemes.get(p).map_or([200, 200, 200], |s| s.0);
+            out.push(hwc_ui::ingame::gamestats::StatPlayer {
+                name: self.player_name(p),
+                colour: [c[0], c[1], c[2], 255],
+                local: p == me,
+                ally: p != me && u.players.get(me).is_some_and(|pl| pl.is_ally(p)),
+                values,
+            });
+        }
+        self.end_stats = out;
+        self.paused = true;
     }
 
     fn post(&mut self, text: &str) {
