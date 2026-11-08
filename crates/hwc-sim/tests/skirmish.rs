@@ -658,7 +658,8 @@ fn computer_players_harass() {
 
 /// Target takeouts (attack types 4 and 5): computer players remember the enemy ships they see
 /// by type and send teams after the most dangerous capital ship or frigate; the fancy kind
-/// brings an escort team when the target has defenders.
+/// brings an escort team when the target has defenders, as the guard and huge mothership takeouts
+/// always do.
 #[test]
 fn computer_players_take_out_targets() {
     use hwc_sim::ai::team::MoveKind;
@@ -697,4 +698,5 @@ fn computer_players_take_out_targets() {
     }
     assert!(known > 0, "the enemy's ships are remembered");
     assert!(takeouts > 0, "a target takeout is made");
+    assert!(escorts > 0, "mothership takeouts (and fancy target takeouts) have escort teams");
 }

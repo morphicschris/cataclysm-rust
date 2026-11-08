@@ -82,9 +82,10 @@ fn ty(n: u8) -> ShipType {
     ShipType::from_index(n.into()).expect("ship type")
 }
 
-fn fancy(primary: u8, num: i32, alternatives: &[(u8, i32)], wait: bool, remove: bool) -> AiMove {
+/// A get-ships move with priority 1 (`aimCreateFancyGetShips(.., 1, ..)`).
+fn fancy(primary: u8, num: i32, alternatives: &[(u8, i32)], random: bool, wait: bool, remove: bool) -> AiMove {
     let alternatives = alternatives.iter().map(|&(n, r)| (ty(n), r)).collect();
-    AiMove::new(MoveKind::FancyGetShips { primary: ty(primary), num, alternatives, random_alternative: true, priority: 0, var: None }, SAME_FORMATION, 2, wait, remove)
+    AiMove::new(MoveKind::FancyGetShips { primary: ty(primary), num, alternatives, random_alternative: random, priority: 1, var: None }, SAME_FORMATION, 2, wait, remove)
 }
 
 fn event(handler: Handler, once: bool) -> Option<Event> {
@@ -121,10 +122,10 @@ pub fn create(u: &mut Universe, p: usize, t: usize) {
     let ms = super::recon::enemy_mothership_coords(u, p);
     let dest = range_standoff_point(u, ms, Vector::ZERO, OUT_STANDOFF);
     match u.players[p].race {
-        ShipRace::Somtaaw => add_move(u, t, fancy(1, 15, &[(4, 14), (3, 14), (2, 10)], true, false)),
+        ShipRace::Somtaaw => add_move(u, t, fancy(1, 15, &[(4, 14), (3, 14), (2, 10)], true, true, false)),
         ShipRace::Beast => {
             let x = if super::research::ship_type_acquired(u, p, ty(0x26)) { 0x26 } else { 0x25 };
-            add_move(u, t, fancy(0x23, 15, &[(0x27, 14), (0x25, 14), (0x24, 10), (x, 14)], true, false));
+            add_move(u, t, fancy(0x23, 15, &[(0x27, 14), (0x25, 14), (0x24, 10), (x, 14)], true, true, false));
         }
         _ => {}
     }
@@ -530,11 +531,11 @@ fn numbers_low(u: &mut Universe, t: usize) {
     m.tactics = 0;
     team::add_move_before_and_make_current(u, t, m);
     let get = match u.players[p].race {
-        ShipRace::Somtaaw => Some(fancy(1, 16, &[(4, 14), (2, 14)], true, true)),
+        ShipRace::Somtaaw => Some(fancy(1, 16, &[(4, 14), (2, 14)], false, true, true)),
         ShipRace::Beast => {
             let a = if super::research::ship_type_acquired(u, p, ty(0x22)) { 0x22 } else { 0x23 };
             let b = if super::research::ship_type_acquired(u, p, ty(0x26)) { 0x26 } else { 0x25 };
-            Some(fancy(0x28, 16, &[(0x23, 14), (0x25, 14), (a, 14), (b, 14)], true, true))
+            Some(fancy(0x28, 16, &[(0x23, 14), (0x25, 14), (a, 14), (b, 14)], false, true, true))
         }
         _ => None,
     };

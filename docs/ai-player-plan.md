@@ -138,8 +138,9 @@ once when no RUs are left to harvest) and `aiaArmada` with `aiuFindArmadaTarget`
 
 The orders ported: mothership takeouts fast, guard, big and huge, and the fighter, corvette and
 frigate strikes, with the exact ship lists and worth ratios of each race (the Beast's depending on
-the types it has acquired). Not yet: the escort teams of the guard and huge takeouts and
-hyperspace jumps. Capture, mines and the special defences
+the types it has acquired), with the escort teams of the guard and huge takeouts (ten fighters
+and corvettes, heavier stand-ins for the huge one, that wait for the takeout on a pair of AI
+variables, close up and guard it). Not yet: hyperspace jumps. Capture, mines and the special defences
 need HW1 races' ships (salvage corvettes, minelayers, cloak and gravity well generators), so a
 Somtaaw or Beast player never gets them.
 

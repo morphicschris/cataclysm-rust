@@ -46,8 +46,10 @@ fn ty(n: u8) -> ShipType {
     ShipType::from_index(n.into()).expect("ship type")
 }
 
-fn get_ships(u: &mut Universe, t: usize, primary: u8, alternatives: &[(u8, i32)]) {
-    super::attack::fancy_get_ships(u, t, primary, 1, alternatives, true, 0);
+/// `aimCreateFancyGetShips(team, primary, 1, list, 1, ..)`: priority 1; the list's own flag
+/// says whether an alternative is drawn at random.
+fn get_ships(u: &mut Universe, t: usize, primary: u8, alternatives: &[(u8, i32)], random: bool) {
+    super::attack::fancy_get_ships(u, t, primary, 1, alternatives, random, 1);
 }
 
 /// `aioCreateReconaissance` (0x40e3b0): kind 0 sends the scout towards a point near the enemy
@@ -58,10 +60,10 @@ pub fn create(u: &mut Universe, p: usize, t: usize, kind: u32) {
     if kind == 0 {
         let dest = random_standoff_point(u, enemy_ms, FIRST_STANDOFF, Vector::ZERO, 1);
         match race {
-            ShipRace::Somtaaw => get_ships(u, t, 1, &[(4, 14), (4, 14), (3, 14), (3, 14), (0, 20), (2, 10)]),
+            ShipRace::Somtaaw => get_ships(u, t, 1, &[(4, 14), (4, 14), (3, 14), (3, 14), (0, 20), (2, 10)], true),
             ShipRace::Beast => {
                 let x = if super::research::ship_type_acquired(u, p, ty(0x26)) { 0x26 } else { 0x25 };
-                get_ships(u, t, 0x23, &[(0x28, 14), (0x28, 14), (0x25, 14), (0x25, 14), (0x21, 20), (0x24, 10), (x, 14), (x, 14)]);
+                get_ships(u, t, 0x23, &[(0x28, 14), (0x28, 14), (0x25, 14), (0x25, 14), (0x21, 20), (0x24, 10), (x, 14), (x, 14)], true);
             }
             _ => {}
         }
@@ -69,8 +71,8 @@ pub fn create(u: &mut Universe, p: usize, t: usize, kind: u32) {
         add_move(u, t, AiMove::new(MoveKind::CountShips, RECON_MOVE_FORMATION, 2, false, false));
     } else {
         match race {
-            ShipRace::Somtaaw => get_ships(u, t, 1, &[(2, 10)]),
-            ShipRace::Beast => get_ships(u, t, 0x23, &[(0x24, 10)]),
+            ShipRace::Somtaaw => get_ships(u, t, 1, &[(2, 10)], false),
+            ShipRace::Beast => get_ships(u, t, 0x23, &[(0x24, 10)], false),
             _ => {}
         }
     }

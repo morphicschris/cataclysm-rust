@@ -460,6 +460,7 @@ fn takeout_mothership_fast(u: &mut Universe, p: usize, t: usize) {
 /// mothership the player has. (Its escort team is not ported yet.)
 fn takeout_mothership_guard(u: &mut Universe, p: usize, t: usize) {
     let Some(ms) = u.base.players[p].mothership.and_then(|m| u.ships.get(m)).map(|s| s.ship_type) else { return };
+    let (mine, theirs) = escort(u, p, t, false);
     match ms {
         ShipType::sMothership => fancy_get_ships(u, t, 6, 3, &[(10, 30), (25, 30), (8, 30), (7, 10), (4, 7), (4, 7)], true, 0),
         ShipType::sCarrier => fancy_get_ships(u, t, 7, 3, &[(1, 30), (2, 30), (3, 10), (4, 7), (5, 7)], true, 0),
@@ -477,7 +478,62 @@ fn takeout_mothership_guard(u: &mut Universe, p: usize, t: usize) {
         }
         _ => return,
     }
+    wait_for_escort(u, t, mine, theirs);
     guard_and_armada(u, p, t, 1, 4, false);
+}
+
+/// The escort team of a guard or huge mothership takeout (`aioCreateTakeoutMothershipGuard`,
+/// `...Huge`): ten fighters and corvettes (with heavier stand-ins for the huge one) that wait
+/// for the takeout, close up (formation 5) and guard it. The two teams wait for each other on a
+/// pair of AI variables; returns them (the takeout's, the escort's).
+fn escort(u: &mut Universe, p: usize, t: usize, huge: bool) -> (String, String) {
+    let manager = u.ai.teams[t].as_ref().expect("team").1.manager;
+    let e = super::team_create(u, p, manager, "");
+    if let Some(Some((_, tm))) = u.ai.teams.get_mut(e) {
+        tm.cooperating = Some(t);
+    }
+    let mine = team::var_create(u, 0);
+    let theirs = team::var_create(u, 0);
+    let x22 = if acquired(u, p, 0x22) { 0x22 } else { 0x23 };
+    let x26 = if acquired(u, p, 0x26) { 0x26 } else { 0x25 };
+    let x29 = if acquired(u, p, 0x29) { 0x29 } else { if huge { 0x2c } else { 0x27 } };
+    let x2a = if acquired(u, p, 0x2a) { 0x2a } else { 0x3b };
+    match (u.players[p].race, huge) {
+        (ShipRace::Somtaaw, false) => fancy_get_ships(u, e, 4, 10, &[(3, 10), (0, 20), (1, 15), (4, 20), (7, 25)], true, 0),
+        (ShipRace::Beast, false) => {
+            fancy_get_ships(u, e, 0x25, 10, &[(0x23, 10), (0x21, 20), (0x25, 10), (0x24, 15), (0x28, 20), (0x27, 25), (x22, 15), (x26, 20), (x29, 25)], true, 0)
+        }
+        (ShipRace::Somtaaw, true) => fancy_get_ships(u, e, 4, 10, &[(0, 20), (1, 15), (4, 20), (7, 25), (8, 25), (0x19, 25), (10, 100)], true, 0),
+        (ShipRace::Beast, true) => fancy_get_ships(
+            u,
+            e,
+            0x25,
+            10,
+            &[(0x23, 10), (0x25, 10), (0x25, 15), (0x28, 20), (0x27, 25), (0x2e, 100), (x22, 15), (x26, 20), (x29, 25), (x2a, 25)],
+            true,
+            0,
+        ),
+        _ => {}
+    }
+    add_move(u, e, AiMove::new(MoveKind::VarSet { var: theirs.clone(), value: 1 }, SAME_FORMATION, 2, false, false));
+    let mut w = AiMove::new(MoveKind::VarWait { var: mine.clone(), value: 1 }, SAME_FORMATION, 2, true, false);
+    w.team_died = Some(team::Handler::Patrol);
+    add_move(u, e, w);
+    add_move(u, e, AiMove::new(MoveKind::VarDestroy { var: mine.clone() }, SAME_FORMATION, 2, false, false));
+    add_move(u, e, AiMove::new(MoveKind::Formation { formation: 5 }, SAME_FORMATION, 2, false, false));
+    add_move(u, e, AiMove::new(MoveKind::GuardCooperatingTeam, SAME_FORMATION, 2, false, false));
+    add_move(u, e, done());
+    (mine, theirs)
+}
+
+/// The takeout's side of the escort's variables: it says it is ready, waits for the escort and
+/// drops the escort's variable.
+fn wait_for_escort(u: &mut Universe, t: usize, mine: String, theirs: String) {
+    add_move(u, t, AiMove::new(MoveKind::VarSet { var: mine, value: 1 }, SAME_FORMATION, 2, false, false));
+    let mut w = AiMove::new(MoveKind::VarWait { var: theirs.clone(), value: 1 }, SAME_FORMATION, 2, true, false);
+    w.team_died = Some(team::Handler::Patrol);
+    add_move(u, t, w);
+    add_move(u, t, AiMove::new(MoveKind::VarDestroy { var: theirs }, SAME_FORMATION, 2, false, false));
 }
 
 /// `aioCreateTakeoutMothershipBig` (0x40f590): two frigates with two more (asked for first),
@@ -504,11 +560,15 @@ fn takeout_mothership_big(u: &mut Universe, p: usize, t: usize, force: bool) {
 /// `aioCreateTakeoutMothershipHuge` (0x40fc90), the attacking team: a Dreadnought or a Beast
 /// Heavy Cruiser. (Its escort team is not ported yet.)
 fn takeout_mothership_huge(u: &mut Universe, p: usize, t: usize) {
+    let (mine, theirs) = escort(u, p, t, true);
     match u.players[p].race {
         ShipRace::Somtaaw => fancy_get_ships(u, t, 10, 1, &[], false, 0),
         ShipRace::Beast => fancy_get_ships(u, t, 0x2e, 1, &[], false, 0),
+        ShipRace::Kushan => fancy_get_ships(u, t, 0x42, 1, &[], false, 0),
+        ShipRace::Taiidan => fancy_get_ships(u, t, 0x50, 1, &[], false, 0),
         _ => {}
     }
+    wait_for_escort(u, t, mine, theirs);
     guard_and_armada(u, p, t, NO_FORMATION, NO_FORMATION, true);
 }
 
