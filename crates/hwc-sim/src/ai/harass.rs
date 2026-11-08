@@ -469,6 +469,11 @@ pub fn handle(u: &mut Universe, t: usize, h: Handler, rocker: Option<ShipId>) {
             team::wrap_formation_pub(u, &ships, formation);
         }
         Handler::KamikazeHealthLow => kamikaze(u, t),
+        Handler::Patrol => {
+            if let Some(Some((_, tm))) = u.ai.teams.get_mut(t) {
+                tm.flags |= team_flag::DESTROY;
+            }
+        }
     }
 }
 

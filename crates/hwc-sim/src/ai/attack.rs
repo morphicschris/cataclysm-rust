@@ -275,6 +275,10 @@ fn process_attack_teams(u: &mut Universe, p: usize) {
 }
 
 /// `aiuShipIsntAnEnemyMothership`'s opposite.
+pub(super) fn is_enemy_mothership_pub(u: &Universe, p: usize, id: ShipId) -> bool {
+    is_enemy_mothership(u, p, id)
+}
+
 fn is_enemy_mothership(u: &Universe, p: usize, id: ShipId) -> bool {
     let Some(s) = u.ships.get(id) else { return false };
     u.base.players.get(s.player).is_some_and(|pl| pl.mothership == Some(id)) && !u.players[s.player].is_ally(p)
@@ -361,6 +365,14 @@ fn generate_attack_type(u: &mut Universe, p: usize, t: usize, k: u32, force: boo
         6 if f & feature::FIGHTER_STRIKE != 0 => fighter_strike(u, p, t),
         7 if f & feature::CORVETTE_STRIKE != 0 => corvette_strike(u, p, t),
         8 if f & feature::FRIGATE_STRIKE != 0 => frigate_strike(u, p, t),
+        4 | 5 if f & (if k == 4 { feature::TAKEOUT_TARGET } else { feature::FANCY_TAKEOUT_TARGET }) != 0 => {
+            let Some(target) = super::takeout::find_target(u, p) else { return false };
+            if k == 4 {
+                super::takeout::takeout_target(u, p, t, target);
+            } else {
+                super::takeout::fancy_takeout_target(u, p, t, target);
+            }
+        }
         9 | 10 if f & feature::HARASS != 0 => super::harass::create(u, p, t),
         // The special defence teams are the HW1 races' (cloak and gravity well generators).
         13 => return f & feature::SPECIAL_DEFENSE != 0,

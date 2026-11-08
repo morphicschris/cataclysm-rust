@@ -12,6 +12,7 @@ pub mod attack;
 pub mod defense;
 pub mod harass;
 pub mod recon;
+pub mod takeout;
 pub mod research;
 pub mod resource;
 pub mod team;
@@ -106,6 +107,9 @@ pub struct AiTeam {
     /// +0x74 `kasTactics`.
     #[serde(default, deserialize_with = "crate::save::added_in_11")]
     pub tactics: i32,
+    /// +0x48: the team this one works with (a takeout's escort guards it).
+    #[serde(default, deserialize_with = "crate::save::added_in_17")]
+    pub cooperating: Option<usize>,
 }
 
 /// `struct AIPlayer`.
@@ -188,6 +192,9 @@ pub struct AiPlayer {
     /// The defence manager's state.
     #[serde(default, deserialize_with = "crate::save::added_in_11")]
     pub defense: defense::DefenseState,
+    /// +0x4b4.. the primary enemy's ships seen, by type (`aiuUpdateKnowledgeOfEnemyShips`).
+    #[serde(default, deserialize_with = "crate::save::added_in_17")]
+    pub known_enemy_ships: Vec<Vec<ShipId>>,
 }
 
 /// Everything of the computer players.
@@ -260,6 +267,7 @@ impl AiPlayer {
             num_support: 0,
             support_teams: Vec::new(),
             proximity_sensors: Vec::new(),
+            known_enemy_ships: Vec::new(),
             attack: attack::AttackState::default(),
             defense: defense::DefenseState::default(),
         };
@@ -420,6 +428,7 @@ fn ai_mut(u: &mut Universe, p: usize) -> &mut AiPlayer {
 fn fleet_command(u: &mut Universe, p: usize) {
     // (aifFindAllies, aiuUpdateKnowledgeOfEnemyShips: not needed by what is ported; the blob
     // arrays are made where they are used.)
+    takeout::update_knowledge(u, p);
     defense::clear_distress_signal(u, p);
     assign_new_ships(u, p);
     if ai(u, p).first_turn {
@@ -525,7 +534,7 @@ pub fn team_create(u: &mut Universe, p: usize, manager: Manager, order: &str) ->
     };
     let delay = [2u8, 1, 1, 0, 0][usize::from(level)];
     let tactics = if u.single_player { 1 } else { 2 };
-    let t = AiTeam { manager, flags: 0, ships: Vec::new(), order: order.to_string(), features, delay, level, moves: Vec::new(), current: None, tactics };
+    let t = AiTeam { manager, flags: 0, ships: Vec::new(), order: order.to_string(), features, delay, level, moves: Vec::new(), current: None, tactics, cooperating: None };
     u.ai.teams.push(Some((p, t)));
     u.ai.teams.len() - 1
 }
@@ -976,6 +985,9 @@ pub fn ship_died(u: &mut Universe, id: ShipId, owner: usize, ship_type: ShipType
         a.new_ships.retain(|&s| s != id);
         resource::ship_died(a, id, ship_type);
         attack::ship_died(a, id);
+        for l in &mut a.known_enemy_ships {
+            l.retain(|&s| s != id);
+        }
         defense::ship_died(a, id);
     }
     team::ship_died(u, id);

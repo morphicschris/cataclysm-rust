@@ -45,7 +45,7 @@ pub const MAGIC: [u8; 8] = *b"HWCSAVE\0";
 /// removed, reordered or retyped). A field added at version `n` is read with `added_in_<n>`
 /// ([`added_in_2`]), so files of older versions still load with the field at its default;
 /// files of a newer version, or older ones whose shape is not known, are refused.
-pub const FORMAT_VERSION: u32 = 16;
+pub const FORMAT_VERSION: u32 = 17;
 
 /// The oldest version still read.
 pub const OLDEST_VERSION: u32 = 1;
@@ -253,6 +253,12 @@ pub fn added_in_15<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Defau
 /// [`added_in`] for shape 16 (harass teams: the moves' events and the harass team).
 pub fn added_in_16<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
     added_in(16, d)
+}
+
+/// [`added_in`] for shape 17 (target takeouts: the primary enemy's ships known by type, the
+/// teams' cooperating team).
+pub fn added_in_17<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
+    added_in(17, d)
 }
 
 fn current<T>(f: impl FnOnce(&Relink) -> T) -> T {

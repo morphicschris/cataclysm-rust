@@ -109,6 +109,12 @@ pub enum MoveKind {
     HarassAttack { target: Option<ShipId> },
     /// `MOVE_ADVANCEDATTACK`: `aiuAttack` the targets, then wait until the ships stop.
     AdvancedAttack { targets: Vec<ShipId>, started: bool },
+    /// `MOVE_VARSET`, `MOVE_VARWAIT` (until the variable has the value), `MOVE_VARDESTROY`.
+    VarSet { var: String, value: i32 },
+    VarWait { var: String, value: i32 },
+    VarDestroy { var: String },
+    /// `MOVE_GUARDCOOPTEAM`: guard the cooperating team's ships.
+    GuardCooperatingTeam,
 }
 
 /// The event handlers a move can carry (`aieHandlerSet*`, `aih*Handler`).
@@ -127,6 +133,8 @@ pub enum Handler {
     HarassDisengageSingleShip,
     /// `aihKamikazeHealthLowHandler`.
     KamikazeHealthLow,
+    /// `aihPatrolTeamDiedHandler`: the team is destroyed.
+    Patrol,
 }
 
 /// One event of a move (`aieHandlerSet*`): its handler, whether it fires only once and has
@@ -196,6 +204,10 @@ impl AiMove {
             MoveKind::Intercept { .. } => super::recon::move_type::INTERCEPT,
             MoveKind::HarassAttack { .. } => super::harass::move_type::HARASS_ATTACK,
             MoveKind::AdvancedAttack { .. } => super::harass::move_type::ADVANCED_ATTACK,
+            MoveKind::VarSet { .. } => super::takeout::move_type::VAR_SET,
+            MoveKind::VarWait { .. } => super::takeout::move_type::VAR_WAIT,
+            MoveKind::VarDestroy { .. } => super::takeout::move_type::VAR_DESTROY,
+            MoveKind::GuardCooperatingTeam => super::takeout::move_type::GUARD_COOPERATING_TEAM,
         }
     }
 }
@@ -565,6 +577,34 @@ fn process(u: &mut Universe, t: usize) -> bool {
         MoveKind::Intercept { .. } => super::recon::process_intercept(u, t, c),
         MoveKind::HarassAttack { .. } => super::harass::process_harass_attack(u, t, c),
         MoveKind::AdvancedAttack { .. } => super::harass::process_advanced_attack(u, t, c),
+        MoveKind::VarSet { var, value } => {
+            if !team(u, t).expect("team").moves[c].processing {
+                var_set(u, &var, value);
+                set_processing(u, t, c, true);
+            }
+            true
+        }
+        MoveKind::VarWait { var, value } => {
+            set_processing(u, t, c, true);
+            if u.ai.vars.iter().any(|v| v.0 == var) && var_get(u, &var) == value {
+                return true;
+            }
+            !team(u, t).expect("team").moves[c].wait
+        }
+        MoveKind::VarDestroy { var } => {
+            if !team(u, t).expect("team").moves[c].processing {
+                var_destroy(u, &var);
+                set_processing(u, t, c, true);
+            }
+            true
+        }
+        MoveKind::GuardCooperatingTeam => {
+            let done = super::takeout::process_guard_cooperating_team(u, t);
+            if done {
+                set_processing(u, t, c, true);
+            }
+            done
+        }
     }
 }
 
@@ -957,6 +997,10 @@ fn process_move_to(u: &mut Universe, t: usize, c: usize) -> bool {
 // ---- wrappers (AIUtilities.c) ----------------------------------------------------------------
 
 /// The test of every `aiuWrap*`: not crazy or disabled, not in hyperspace, not being built.
+pub(super) fn wrap_ok_pub(u: &Universe, id: ShipId) -> bool {
+    wrap_ok(u, id)
+}
+
 fn wrap_ok(u: &Universe, id: ShipId) -> bool {
     u.ships.get(id).is_some_and(|s| s.flags & (sof::CRAZY | sof::DISABLED | sof::HYPERSPACE | sof::DEAD) == 0 && s.special_flags2 & 0x8 == 0)
 }

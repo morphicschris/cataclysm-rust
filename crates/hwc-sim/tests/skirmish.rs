@@ -655,3 +655,46 @@ fn computer_players_harass() {
     assert!(events > 0, "the harass moves' events run");
     assert!(harass_attacks > 0, "the teams get to their harass attack");
 }
+
+/// Target takeouts (attack types 4 and 5): computer players remember the enemy ships they see
+/// by type and send teams after the most dangerous capital ship or frigate; the fancy kind
+/// brings an escort team when the target has defenders.
+#[test]
+fn computer_players_take_out_targets() {
+    use hwc_sim::ai::team::MoveKind;
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    let mut options = default_game(d);
+    options.cpu_difficulty = 90;
+    options.flags &= !hwc_sim::multiplayer::mg::RESEARCH_ENABLED;
+    let mut s = setup("Coldwar2", &[ShipRace::Somtaaw, ShipRace::Beast], options, 5);
+    for p in &mut s.players {
+        p.computer = true;
+    }
+    let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, s).expect("start");
+    let mut takeouts = 0;
+    let mut escorts = 0;
+    let mut known = 0;
+    for minute in 0..20 {
+        for _ in 0..16 * 60 {
+            run.step();
+        }
+        let u = &run.universe;
+        for p in 0..2 {
+            let a = u.ai.players[p].as_ref().unwrap();
+            let k: usize = a.known_enemy_ships.iter().map(|l| l.len()).sum();
+            known = known.max(k);
+            for &t in a.attack.teams.iter().flatten() {
+                let Some((_, tm)) = u.ai.teams[t].as_ref() else { continue };
+                let single_capital = tm.moves.iter().any(|m| matches!(&m.kind, MoveKind::Attack { targets } if targets.len() == 1 && u.ships.get(targets[0]).and_then(|s| u.statics.ship(s.ship_type)).and_then(|st| st.ship_class).is_some_and(|c| !matches!(c, hwc_sim::statics::ShipClass::Mothership | hwc_sim::statics::ShipClass::Fighter | hwc_sim::statics::ShipClass::Corvette))));
+                if single_capital && tm.moves.iter().any(|m| matches!(m.kind, MoveKind::VarDec { .. })) {
+                    takeouts += 1;
+                }
+            }
+            escorts += u.ai.teams.iter().flatten().filter(|(q, t)| *q == p && t.cooperating.is_some()).count();
+        }
+        println!("min {minute}: known {known} takeout-team-checks {takeouts} escorts {escorts}");
+    }
+    assert!(known > 0, "the enemy's ships are remembered");
+    assert!(takeouts > 0, "a target takeout is made");
+}

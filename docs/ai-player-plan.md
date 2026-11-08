@@ -138,8 +138,8 @@ once when no RUs are left to harvest) and `aiaArmada` with `aiuFindArmadaTarget`
 
 The orders ported: mothership takeouts fast, guard, big and huge, and the fighter, corvette and
 frigate strikes, with the exact ship lists and worth ratios of each race (the Beast's depending on
-the types it has acquired). Not yet: the escort teams of the guard and huge takeouts, the target
-takeouts (types 4 and 5) and hyperspace jumps. Capture, mines and the special defences
+the types it has acquired). Not yet: the escort teams of the guard and huge takeouts and
+hyperspace jumps. Capture, mines and the special defences
 need HW1 races' ships (salvage corvettes, minelayers, cloak and gravity well generators), so a
 Somtaaw or Beast player never gets them.
 
@@ -169,6 +169,20 @@ single target), health low (`aihKamikazeHealthLowHandler` for kamikaze players),
 (`aihHarassTeamDiedHandler`: made again three times in four). `aiuFindNearbyEnemyShips` and the
 armada now leave out slipgates and crystals (`MakeTargetsOnlyEnemyShips`). Save version 16.
 Test: `skirmish::computer_players_harass`.
+
+Target takeouts (`hwc_sim::ai::takeout`, types 4 and 5): `aiuUpdateKnowledgeOfEnemyShips`
+remembers the primary enemy's ships seen by type; the target is the first known ship of each type
+that `aiaPriorityShipsConstraints` passes (a capital ship or fighting frigate no team is
+attacking), the most dangerous by Cataclysm's built-in rating table (0x88c200, standing in for
+`statsGetOverallKillRating`). The ships come from the new ships when the stats tables say they
+are enough (`statsBestShipsToUseToKillTarget`: the class matrix at 0x88cfd0 and multipliers at
+0x88cfa0) or are bought (`statsBestShipToBuyToKillShip`, the counter table at 0x88cd54). The fancy
+form (type 5) sends an escort team bought against the target's defenders
+(`statsBestShipToBuyToKillFleet`), the two teams waiting for each other on AI variables
+(`MOVE_VARSET`, `MOVE_VARWAIT`, `MOVE_VARDESTROY`) and the escort then guarding the takeout
+(`MOVE_GUARDCOOPTEAM`). Where `statsBestShipToBuyToKillShip` returns a null pointer (a target
+type without a counter) the original would read through it; the port falls back to the race's
+default buy. Save version 17. Test: `skirmish::computer_players_take_out_targets`.
 
 Finding: the defence manager's `aiuEnemyShipsInMothershipBlob` keeps the level's slipgates (its
 only filters are alliance and the crystal types) and `clAttack` does not filter targets, so in
