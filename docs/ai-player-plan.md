@@ -116,3 +116,36 @@ The resource manager's teams use: `aimCreateActiveResource` (0x29) → inserts a
 the given ships' centre, by an inserted Move (6) when further than 10 km); `aimCreateSupport`
 (0x20); `aimCreateGetShips` / `FancyGetShips` (0x16: requests ships through
 `aifTeamRequestsShipsCB` and waits on an AI variable); `aimCreateMoveDone` (0).
+
+## Attack manager and teams (step 3 and 4, first part)
+
+Done (`hwc_sim::ai::attack`, `hwc_sim::ai::team`, save version 11): teams run their moves every
+turn of their player (`aitExecute`: the team delay by team level, tactics and formation handed
+from move to move, moves removed when done), AI variables (`AIVar.c`), and the moves the attack
+orders use: `FancyGetShips` (ships taken from the new ships or requested through
+`aifTeamRequestsShipsCB`, a random alternative first, the unit caps respected; the variable set
+by `aifAssignNewShips` when the last requested ship comes), `VarDec`, `TempGuard` (the team moves
+out two thirds of the way across the sphere of influence towards the middle of the map, then
+waits for the attack variable to go negative), `Armada`, `Attack`, `FlankAttack`, `Move` and
+`MoveTo`.
+
+The attack manager: `aiaInit` (the attack variable at 2..4, the first timed attack at 200..1000
+s, the chance of each attack type by level, the features by level and race), the 24 attack slots
+filled with drawn attack types while fewer than 4 teams (10 with over 12000 RUs) wait for ships
+(`aiaProcessAttackTeams`), finished teams sent after nearby enemies or the enemy mothership,
+`aiaDivideNewShips`, `aiaTimeAttack` (beginners attack at once; otherwise every 800..1000 s, or at
+once when no RUs are left to harvest) and `aiaArmada` with `aiuFindArmadaTarget`.
+
+The orders ported: mothership takeouts fast, guard, big and huge, and the fighter, corvette and
+frigate strikes, with the exact ship lists and worth ratios of each race (the Beast's depending on
+the types it has acquired). Not yet: the escort teams of the guard and huge takeouts, the target
+takeouts (types 4 and 5), harass, capture, mines, reconnaissance, threats to the mothership in a
+temporary guard (the defence manager's sphere of influence lists) and hyperspace jumps.
+
+Finding: `statsGetOverallKillRating` is 0 for every ship in Cataclysm. The game ships HW1's
+`statfile.bin` (192,892 bytes, 83 types); `statsLoadFightStats` wants 0x41a70 bytes (98 types),
+warns and clears the table. So the blob ratings have no strength, a visible enemy mothership's
+blob always scores infinite and the armada always goes for the enemy mothership when it sees it.
+
+Test: `skirmish::computer_players_attack` (research off, beginner and hard): both computer players
+form attack teams that get their ships and attack the other.

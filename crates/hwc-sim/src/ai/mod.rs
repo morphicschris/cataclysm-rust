@@ -4,12 +4,14 @@
 //! (`aiplayerUpdateAll` → `aifFleetCommand`), the build requests of its managers and the
 //! building they lead to.
 //!
-//! Ported so far: the player, fleet command, the build requests and the resource manager
-//! ([`resource`]). The attack and defence managers and the teams' moves come next; until then
-//! the managers that would create teams record them without moves.
+//! Ported so far: the player, fleet command, the build requests, the resource manager
+//! ([`resource`]), the attack manager ([`attack`]) and the teams with the moves it uses
+//! ([`team`]). The defence manager and the resource manager's team moves come next.
 
+pub mod attack;
 pub mod research;
 pub mod resource;
+pub mod team;
 
 use crate::object::{sof, ShipId};
 use crate::statics::{ShipClass, ShipRace, ShipType};
@@ -83,8 +85,24 @@ pub struct AiTeam {
     /// `teamFlags`.
     pub flags: u32,
     pub ships: Vec<ShipId>,
-    /// What the team was created to do (the `aioCreate*` order), until the moves are ported.
+    /// What the team was created to do (the `aioCreate*` order), for the resource manager's
+    /// teams whose moves are not ported yet.
     pub order: String,
+    /// +0x0c `teamFeatures` (by team level: 0, 8, 0x1f), +0x10 `teamDelay`, +0x2c team level.
+    #[serde(default, deserialize_with = "crate::save::added_in_11")]
+    pub features: u32,
+    #[serde(default, deserialize_with = "crate::save::added_in_11")]
+    pub delay: u8,
+    #[serde(default, deserialize_with = "crate::save::added_in_11")]
+    pub level: u8,
+    /// +0x30 the moves, +0x3c the current one.
+    #[serde(default, deserialize_with = "crate::save::added_in_11")]
+    pub moves: Vec<team::AiMove>,
+    #[serde(default, deserialize_with = "crate::save::added_in_11")]
+    pub current: Option<usize>,
+    /// +0x74 `kasTactics`.
+    #[serde(default, deserialize_with = "crate::save::added_in_11")]
+    pub tactics: i32,
 }
 
 /// `struct AIPlayer`.
@@ -161,6 +179,9 @@ pub struct AiPlayer {
     pub support_teams: Vec<usize>,
     /// +0x1cc0: the proximity sensors.
     pub proximity_sensors: Vec<ShipId>,
+    /// The attack manager's state.
+    #[serde(default, deserialize_with = "crate::save::added_in_11")]
+    pub attack: attack::AttackState,
 }
 
 /// Everything of the computer players.
@@ -177,6 +198,11 @@ pub struct AiState {
     pub teams: Vec<Option<(usize, AiTeam)>>,
     /// `AIResourceMan.script`.
     pub resource_tweaks: resource::Tweaks,
+    /// The AI variables (`AIVar.c`) and the last generated label number.
+    #[serde(default, deserialize_with = "crate::save::added_in_11")]
+    pub vars: Vec<(String, i32)>,
+    #[serde(default, deserialize_with = "crate::save::added_in_11")]
+    pub next_label: u32,
 }
 
 impl AiPlayer {
@@ -228,6 +254,7 @@ impl AiPlayer {
             num_support: 0,
             support_teams: Vec::new(),
             proximity_sensors: Vec::new(),
+            attack: attack::AttackState::default(),
         };
         // aifInit: the creators are the mothership; advanced players save for hyperspace.
         let ms = u.base.players[player].mothership;
@@ -395,9 +422,11 @@ fn fleet_command(u: &mut Universe, p: usize) {
             skim_hyperspace_savings(u, p);
         }
         ai_mut(u, p).resource_request.take();
-        // aiaAttackManager, aidDefenseManager: with their step of the port.
+        attack::manager(u, p);
+        // (aidDefenseManager: with its step of the port.)
         resource::manager(u, p);
     }
+    team::execute(u, p);
     process_ship_build_requests(u, p);
 }
 
@@ -448,12 +477,14 @@ fn assign_new_ships(u: &mut Universe, p: usize) {
             if let Some(w) = a.waiting[m].iter().position(|w| w.ship_type == t) {
                 a.waiting[m][w].num -= 1;
                 let team = a.waiting[m][w].team;
-                if a.waiting[m][w].num == 0 {
-                    a.waiting[m].remove(w);
-                }
+                // The last of them sets the team's variable.
+                let done_var = (a.waiting[m][w].num == 0).then(|| a.waiting[m].remove(w).done_var);
                 a.being_built[q][t.index()] = a.being_built[q][t.index()].saturating_sub(1);
                 a.new_ships.remove(i);
                 team_add_ship(u, team, id);
+                if let Some(v) = done_var {
+                    team::var_set(u, &v, 1);
+                }
                 given = true;
                 break;
             }
@@ -475,7 +506,17 @@ fn assign_new_ships(u: &mut Universe, p: usize) {
 
 /// `aitCreate`: a new team of the player.
 pub fn team_create(u: &mut Universe, p: usize, manager: Manager, order: &str) -> usize {
-    let t = AiTeam { manager, flags: 0, ships: Vec::new(), order: order.to_string() };
+    // aitCreate: the team level is twice the player's; it gives the features and the delay.
+    let level = (ai(u, p).level * 2).min(4) as u8;
+    let features = match level {
+        2 => 8,
+        3 => 0x1e,
+        4 => 0x1f,
+        _ => 0,
+    };
+    let delay = [2u8, 1, 1, 0, 0][usize::from(level)];
+    let tactics = if u.single_player { 1 } else { 2 };
+    let t = AiTeam { manager, flags: 0, ships: Vec::new(), order: order.to_string(), features, delay, level, moves: Vec::new(), current: None, tactics };
     u.ai.teams.push(Some((p, t)));
     u.ai.teams.len() - 1
 }
@@ -925,7 +966,9 @@ pub fn ship_died(u: &mut Universe, id: ShipId, owner: usize, ship_type: ShipType
         }
         a.new_ships.retain(|&s| s != id);
         resource::ship_died(a, id, ship_type);
+        attack::ship_died(a, id);
     }
+    team::ship_died(u, id);
     for t in u.ai.teams.iter_mut().flatten() {
         t.1.ships.retain(|&s| s != id);
     }

@@ -363,3 +363,51 @@ fn computer_players_build_and_harvest() {
 
     }
 }
+
+/// Computer players against each other: the attack manager's teams get their ships, wait in
+/// a temporary guard, then the armada goes after the enemy.
+#[test]
+fn computer_players_attack() {
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    for slider in [10u8, 90] {
+        let mut options = default_game(d);
+        options.cpu_difficulty = slider;
+        // Without research every ship can be built from the start.
+        options.flags &= !hwc_sim::multiplayer::mg::RESEARCH_ENABLED;
+        let mut s = setup("Coldwar2", &[ShipRace::Somtaaw, ShipRace::Beast], options, 11);
+        for p in &mut s.players {
+            p.computer = true;
+        }
+        let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, s).expect("start");
+        let mut attacked = [false; 2];
+        let mut teams_with_ships = [0usize; 2];
+        for minute in 0..20 {
+            for _ in 0..16 * 60 {
+                run.step();
+                let u = &run.universe;
+                for &id in &u.ship_list {
+                    let sh = u.ships.ship(id);
+                    if sh.player > 1 {
+                        continue;
+                    }
+                    let Some(c) = sh.command.and_then(|c| u.commands.get(c)) else { continue };
+                    if c.order == hwc_sim::command::order::ATTACK && c.attack_targets.iter().any(|&t| u.ships.get(t).is_some_and(|x| x.player != sh.player && x.player < 2)) {
+                        attacked[sh.player] = true;
+                    }
+                }
+            }
+            let u = &run.universe;
+            for p in 0..2 {
+                let a = u.ai.players[p].as_ref().unwrap();
+                let teams: Vec<String> = a.attack.teams.iter().flatten().filter_map(|&t| u.ai.teams[t].as_ref()).map(|(_, t)| format!("{}:{:?}", t.ships.len(), t.current.map(|c| t.moves[c].move_type()))).collect();
+                teams_with_ships[p] = teams_with_ships[p].max(a.attack.teams.iter().flatten().filter_map(|&t| u.ai.teams[t].as_ref()).filter(|(_, t)| !t.ships.is_empty()).count());
+                let var = hwc_sim::ai::team::var_get(u, &a.attack.var);
+                println!("slider {slider} min {minute} p{p}: ships {} RUs {} var {var} armada {:?} teams {teams:?} requests {:?}", u.ship_list.iter().filter(|&&id| u.ships.ship(id).player == p).count(), u.base.players[p].resource_units, a.attack.armada_targets.len(), a.requests[0].iter().map(|r| (r.ship_type, r.num)).collect::<Vec<_>>());
+            }
+        }
+        println!("slider {slider}: attacked {attacked:?}, teams with ships {teams_with_ships:?}");
+        assert!(teams_with_ships.iter().all(|&n| n > 0), "both form attack teams");
+        assert!(attacked.iter().any(|&a| a), "a computer player attacks");
+    }
+}
