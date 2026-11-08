@@ -116,7 +116,7 @@ pub fn update_knowledge(u: &mut Universe, p: usize) {
 fn any_team_attacking(u: &Universe, p: usize, id: ShipId) -> bool {
     u.ai.teams.iter().flatten().filter(|(q, _)| *q == p).any(|(_, tm)| {
         tm.moves.iter().any(|m| match &m.kind {
-            MoveKind::Attack { targets } | MoveKind::AdvancedAttack { targets, .. } | MoveKind::FlankAttack { targets } => targets.contains(&id),
+            MoveKind::Attack { targets } | MoveKind::AdvancedAttack { targets, .. } | MoveKind::FlankAttack { targets } | MoveKind::FlankAttackHyperspace { targets } => targets.contains(&id),
             _ => false,
         })
     })

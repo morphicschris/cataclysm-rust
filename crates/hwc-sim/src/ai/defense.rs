@@ -268,7 +268,7 @@ fn team_isnt_defending_mothership(u: &Universe, t: usize, attackers: &[ShipId]) 
     let Some(c) = tm.current else { return false };
     match &tm.moves[c].kind {
         MoveKind::DefendMothership => false,
-        MoveKind::Attack { targets } | MoveKind::FlankAttack { targets } if !targets.is_empty() && targets.iter().all(|x| attackers.contains(x)) => false,
+        MoveKind::Attack { targets } | MoveKind::FlankAttack { targets } | MoveKind::FlankAttackHyperspace { targets } if !targets.is_empty() && targets.iter().all(|x| attackers.contains(x)) => false,
         _ => true,
     }
 }

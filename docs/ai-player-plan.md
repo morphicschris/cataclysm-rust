@@ -140,7 +140,12 @@ The orders ported: mothership takeouts fast, guard, big and huge, and the fighte
 frigate strikes, with the exact ship lists and worth ratios of each race (the Beast's depending on
 the types it has acquired), with the escort teams of the guard and huge takeouts (ten fighters
 and corvettes, heavier stand-ins for the huge one, that wait for the takeout on a pair of AI
-variables, close up and guard it). Not yet: hyperspace jumps. Capture, mines and the special defences
+variables, close up and guard it), and hyperspace jumps: an armada team with the hyperspace flag
+(fast, big and huge takeouts, frigate strikes) whose ships can jump, when the player has
+hyperspace savings, makes its flank attack by hyperspace (`aimProcessFlankAttack`'s jump,
+`aimProcessHyperspace`: `clWrapMpHyperspace` from the ships' centre, the cost off the savings);
+teams with feature 1 make their flank attacks by type (`aimProcessAdvancedAttack`). Test:
+`skirmish::computer_players_hyperspace`. Capture, mines and the special defences
 need HW1 races' ships (salvage corvettes, minelayers, cloak and gravity well generators), so a
 Somtaaw or Beast player never gets them.
 

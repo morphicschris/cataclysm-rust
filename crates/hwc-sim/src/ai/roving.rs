@@ -344,7 +344,9 @@ fn others_need_help(u: &Universe, p: usize, t: usize, targets: &[ShipId]) -> boo
         let Some((_, tm)) = u.ai.teams.get(o).and_then(|x| x.as_ref()) else { continue };
         let Some(c) = tm.current else { continue };
         let same = match &tm.moves[c].kind {
-            MoveKind::Attack { targets: x } | MoveKind::AdvancedAttack { targets: x, .. } | MoveKind::FlankAttack { targets: x } => x.len() == targets.len() && x.iter().all(|s| targets.contains(s)),
+            MoveKind::Attack { targets: x } | MoveKind::AdvancedAttack { targets: x, .. } | MoveKind::FlankAttack { targets: x } | MoveKind::FlankAttackHyperspace { targets: x } => {
+                x.len() == targets.len() && x.iter().all(|s| targets.contains(s))
+            }
             _ => false,
         };
         if same {

@@ -791,3 +791,65 @@ fn computer_players_patrol() {
     assert!(patrolling > 0, "the fast team patrols");
     assert!(answered > 0, "and answers a worker's distress call");
 }
+
+/// Computer players' hyperspace jumps (`aimProcessHyperspace`, the move `aimProcessFlankAttack`
+/// puts before the attack when an armada team with the hyperspace flag can jump): the team's
+/// ships that can jump do, paid out of the hyperspace savings. (The teams with the flag are the
+/// frigate and capital ship takeouts, which wait long for their ships; here a team is made.)
+#[test]
+fn computer_players_hyperspace() {
+    use hwc_sim::ai::team::{AiMove, MoveKind};
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    let mut options = default_game(d);
+    options.cpu_difficulty = 90;
+    assert!(options.flags & mg::HYPERSPACE != 0);
+    let mut s = setup("Coldwar2", &[ShipRace::Somtaaw, ShipRace::Beast], options, 13);
+    for p in &mut s.players {
+        p.computer = true;
+    }
+    let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, s).expect("start");
+    // Until nothing is being built on the mothership (which could not jump then).
+    for _ in 0..16 * 600 {
+        run.step();
+        let u = &run.universe;
+        let ms = u.base.players[1].mothership.expect("mothership");
+        if u.update_counter > 16 * 60 && !hwc_sim::mp_hyperspace::hyperspace_capable(u, &[ms]).is_empty() {
+            break;
+        }
+    }
+    let u = &mut run.universe;
+    let ms = u.base.players[1].mothership.expect("mothership");
+    assert!(!hwc_sim::mp_hyperspace::hyperspace_capable(u, &[ms]).is_empty(), "the mothership can jump");
+    // (An advanced player puts a share of its income by for hyperspace; enough of it here.)
+    let savings = u.ai.players[1].as_ref().unwrap().hyper_savings.max(20000);
+    u.ai.players[1].as_mut().unwrap().hyper_savings = savings;
+    let from = u.ships.ship(ms).posinfo.position;
+    let to = from + hwc_math::Vector::new(15000.0, 0.0, 0.0);
+    let t = hwc_sim::ai::team_create(u, 1, hwc_sim::ai::Manager::Attack, "");
+    for (_, tm) in u.ai.teams.iter_mut().flatten() {
+        tm.ships.retain(|&s| s != ms);
+    }
+    hwc_sim::ai::team_add_ship(u, t, ms);
+    hwc_sim::ai::team::add_move(u, t, AiMove::new(MoveKind::Hyperspace { destination: to }, 8, 2, true, true));
+    hwc_sim::ai::team::add_move(u, t, AiMove::new(MoveKind::Done, 8, 2, false, false));
+    let rus = u.base.players[1].resource_units.max(20000);
+    u.base.players[1].resource_units = rus;
+    let mut went = false;
+    for _ in 0..16 * 120 {
+        run.step();
+        let u = &run.universe;
+        went |= u.ships.ship(ms).flags & hwc_sim::object::sof::HYPERSPACE != 0;
+        if went && u.ships.ship(ms).flags & hwc_sim::object::sof::HYPERSPACE == 0 && !u.ships.ship(ms).base.disabled {
+            break;
+        }
+    }
+    let u = &run.universe;
+    let left = u.ai.players[1].as_ref().unwrap().hyper_savings;
+    let p = u.ships.ship(ms).posinfo.position;
+    let off = ((p.x - to.x).powi(2) + (p.y - to.y).powi(2) + (p.z - to.z).powi(2)).sqrt();
+    println!("savings {savings} -> {left}, arrived {off:.0} from the destination");
+    assert!(went, "the mothership jumped");
+    assert!(left < savings, "out of the savings");
+    assert!(off < 3000.0, "{off}");
+}

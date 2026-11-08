@@ -29,6 +29,7 @@ pub mod move_type {
     pub const FANCY_GET_SHIPS: u32 = 0x16;
     pub const VAR_DEC: u32 = 0x1c;
     pub const ARMADA: u32 = 0x21;
+    pub const HYPERSPACE: u32 = 0x2c;
 }
 
 /// Team flags (`teamFlags`).
@@ -121,6 +122,11 @@ pub enum MoveKind {
     PatrolMove { path: Vec<Vector>, start: usize },
     /// A patrol's move to one point (`MOVE_MOVE` numbered 7).
     PatrolPoint { destination: Vector },
+    /// `MOVE_FLANKATTACK` with its hyperspace flag (+0x18): the team jumps to the flank.
+    FlankAttackHyperspace { targets: Vec<ShipId> },
+    /// `MOVE_HYPERSPACE` (0x2c): the team jumps to the destination (`clWrapMpHyperspace`),
+    /// paid from the player's hyperspace savings.
+    Hyperspace { destination: Vector },
 }
 
 /// The event handlers a move can carry (`aieHandlerSet*`, `aih*Handler`).
@@ -228,6 +234,8 @@ impl AiMove {
             MoveKind::ActivePatrol { .. } => super::roving::move_type::ACTIVE_PATROL,
             MoveKind::PatrolMove { .. } => super::roving::move_type::PATROL_MOVE,
             MoveKind::PatrolPoint { .. } => super::roving::move_type::PATROL_POINT,
+            MoveKind::FlankAttackHyperspace { .. } => move_type::FLANK_ATTACK,
+            MoveKind::Hyperspace { .. } => move_type::HYPERSPACE,
         }
     }
 }
@@ -590,7 +598,9 @@ fn process(u: &mut Universe, t: usize) -> bool {
         MoveKind::TempGuard => process_temp_guard(u, t, c),
         MoveKind::Armada => process_armada(u, t, c),
         MoveKind::Attack { .. } => process_attack(u, t, c),
-        MoveKind::FlankAttack { targets } => process_flank_attack(u, t, c, targets),
+        MoveKind::FlankAttack { targets } => process_flank_attack(u, t, c, targets, false),
+        MoveKind::FlankAttackHyperspace { targets } => process_flank_attack(u, t, c, targets, true),
+        MoveKind::Hyperspace { destination } => process_hyperspace(u, t, c, destination),
         MoveKind::Move { destination } => process_move(u, t, c, destination),
         MoveKind::MoveTo { .. } => process_move_to(u, t, c),
         MoveKind::GuardShips { .. } => process_guard_ships(u, t, c),
@@ -911,9 +921,16 @@ fn process_armada(u: &mut Universe, t: usize, c: usize) -> bool {
     if targets.is_empty() {
         return false;
     }
-    // (Teams that may hyperspace jump to their targets when the savings allow; hyperspace is
-    // not part of the port's multiplayer yet, so they fly.)
-    let kind = if features & 2 != 0 { MoveKind::FlankAttack { targets } } else { MoveKind::Attack { targets } };
+    // A team that may jump (and has ships that can, and the savings are there) jumps to its
+    // flank.
+    let flags = team(u, t).expect("team").flags;
+    let ships = team(u, t).expect("team").ships.clone();
+    let jump = flags & team_flag::HYPERSPACE != 0 && !crate::mp_hyperspace::hyperspace_capable(u, &ships).is_empty() && 0 < ai(u, p).hyper_savings;
+    let kind = match (features & 2 != 0, jump) {
+        (true, true) => MoveKind::FlankAttackHyperspace { targets },
+        (true, false) => MoveKind::FlankAttack { targets },
+        (false, _) => MoveKind::Attack { targets },
+    };
     add_move_before_and_make_current(u, t, AiMove::new(kind, SAME_FORMATION, 2, true, true));
     let tm = team_mut(u, t).expect("team");
     let cur = tm.current.expect("current");
@@ -951,7 +968,7 @@ fn process_attack(u: &mut Universe, t: usize, c: usize) -> bool {
 
 /// `aimProcessFlankAttack` (0x408640): a move to a point to one side of the targets, then the
 /// attack, go before this move, which is then done.
-fn process_flank_attack(u: &mut Universe, t: usize, c: usize, targets: Vec<ShipId>) -> bool {
+fn process_flank_attack(u: &mut Universe, t: usize, c: usize, targets: Vec<ShipId>, hyperspace: bool) -> bool {
     let tm = team(u, t).expect("team");
     if tm.ships.is_empty() || tm.moves[c].processing {
         return true;
@@ -959,15 +976,49 @@ fn process_flank_attack(u: &mut Universe, t: usize, c: usize, targets: Vec<ShipI
     let team_centre = centre(u, &tm.ships);
     let target_centre = centre(u, &targets);
     let flank = flank_coordinates(u, target_centre, team_centre, FLANK_DISTANCE);
-    add_move_before_and_make_current(u, t, AiMove::new(MoveKind::Move { destination: flank }, FLANK_MOVE_FORMATION, 2, true, true));
+    let to_flank = if hyperspace { MoveKind::Hyperspace { destination: flank } } else { MoveKind::Move { destination: flank } };
+    add_move_before_and_make_current(u, t, AiMove::new(to_flank, FLANK_MOVE_FORMATION, 2, true, true));
     let tm = team(u, t).expect("team");
     let tactics = if u.single_player && tm.manager == Manager::Script { tm.tactics } else { 2 };
+    // Teams with feature 1 attack by type (`aimProcessAdvancedAttack`).
+    let attack = if tm.features & 1 != 0 { MoveKind::AdvancedAttack { targets, started: false } } else { MoveKind::Attack { targets } };
     // The attack goes between the move and this move.
     let tm = team_mut(u, t).expect("team");
     let cur = tm.current.expect("current");
-    tm.moves.insert(cur + 1, AiMove::new(MoveKind::Attack { targets }, FLANK_ATTACK_FORMATION, tactics, true, true));
+    tm.moves.insert(cur + 1, AiMove::new(attack, FLANK_ATTACK_FORMATION, tactics, true, true));
     tm.moves[cur + 2].processing = true;
     false
+}
+
+/// `aimProcessHyperspace` (0x407e80): the team's ships that can jump do, from their centre to
+/// the destination, the cost coming off the hyperspace savings; done once the first ship is
+/// selectable again.
+fn process_hyperspace(u: &mut Universe, t: usize, c: usize, destination: Vector) -> bool {
+    let tm = team(u, t).expect("team");
+    let ships = tm.ships.clone();
+    if ships.is_empty() {
+        return true;
+    }
+    if !tm.moves[c].processing {
+        let p = u.ai.teams[t].as_ref().expect("team").0;
+        // `aiuFilterSelectableShips`.
+        let selectable: Vec<ShipId> = ships
+            .iter()
+            .copied()
+            .filter(|&id| u.ships.get(id).is_some_and(|s| s.flags & (0xa0_0000 | sof::HYPERSPACE) == 0 && s.special_flags2 & 0x8 == 0))
+            .collect();
+        let sel = crate::mp_hyperspace::hyperspace_capable(u, &selectable);
+        if !sel.is_empty() {
+            let from = centre(u, &sel);
+            let d = st(crate::level::distance_squared(from, destination).sqrt());
+            let cost = crate::mp_hyperspace::hyperspace_cost(u, d, &sel) as i32;
+            super::ai_mut(u, p).hyper_savings -= cost;
+            crate::mp_hyperspace::cl_mp_hyperspace(u, &sel, from, destination);
+        }
+        set_processing(u, t, c, true);
+        return false;
+    }
+    u.ships.get(ships[0]).is_none_or(|s| s.flags & sof::SELECTABLE != 0)
 }
 
 /// `aiuGenerateFlankCoordinates` (0x41e5d0): `distance` from `a`, square to the line from `a`
@@ -1132,7 +1183,7 @@ pub fn ship_died(u: &mut Universe, id: ShipId) {
     for (_, tm) in u.ai.teams.iter_mut().flatten() {
         for m in &mut tm.moves {
             match &mut m.kind {
-                MoveKind::Attack { targets } | MoveKind::FlankAttack { targets } | MoveKind::GuardShips { ships: targets } => targets.retain(|&s| s != id),
+                MoveKind::Attack { targets } | MoveKind::FlankAttack { targets } | MoveKind::FlankAttackHyperspace { targets } | MoveKind::GuardShips { ships: targets } => targets.retain(|&s| s != id),
                 // `aimShipReconShipDied`, `aimInterceptShipDied`.
                 MoveKind::ShipRecon { targets, found } => {
                     targets.retain(|&s| s != id);
