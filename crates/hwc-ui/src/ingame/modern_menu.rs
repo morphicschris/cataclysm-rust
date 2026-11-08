@@ -202,7 +202,7 @@ pub struct Item {
 }
 
 impl Item {
-    fn new(kind: Kind, label: String, source: Source, at: Rect) -> Item {
+    pub fn new(kind: Kind, label: String, source: Source, at: Rect) -> Item {
         Item {
             kind,
             label,
@@ -1088,7 +1088,7 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
     if front_end && title.is_empty() {
         title = crate::front_menu::title_for(&s.name).to_string();
     }
-    Model {
+    let mut m = Model {
         name: s.name.clone(),
         style,
         title,
@@ -1097,7 +1097,11 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
         sections,
         items,
         scroll: 0.0,
+    };
+    if front_end {
+        crate::skirmish::tidy_modern(fe, &mut m);
     }
+    m
 }
 
 /// The columns a heading spans on the original's layout: from the end of the text before
@@ -1724,7 +1728,8 @@ fn place(m: &Model, f: &Frame, i: usize, x: f32, y: f32, w: f32, h: f32) -> Plac
             ..Default::default()
         },
         Kind::Entry { .. } => {
-            let b = f.at(x + 4.0, y + 6.0, w - 8.0, h - 12.0);
+            // A labelled field sits where the other controls do, its label beside it.
+            let b = if it.label.is_empty() { f.at(x + 4.0, y + 6.0, w - 8.0, h - 12.0) } else { f.at(control_x, y + 6.0, control_w, h - 12.0) };
             Placed {
                 row,
                 control: b,
@@ -2808,6 +2813,9 @@ fn draw_item(fe: &Fe, canvas: &mut Canvas, pen: &Pen, m: &Model, l: &Layout, i: 
             text,
             focused: typing,
         } => {
+            if !it.label.is_empty() {
+                draw_label(canvas, pen, f, it, p, 0.0);
+            }
             let blink = (fe.time * 2.0).fract() < 0.55;
             let look = FieldLook {
                 text,

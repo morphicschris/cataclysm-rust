@@ -342,6 +342,9 @@ fn game_type(fe: &mut Fe, call: &Call) {
     let Some(a) = call.atom else { return };
     if fe.first_call(call) {
         fe.radio_set(&call.name, fe.game.skirmish.type_index as u32);
+        // The computer players' arrows take the mouse from the start (the original makes
+        // them clickable when first drawn, which the modern look never does).
+        arm_cpu_arrows(fe);
         return;
     }
     if fe.last_call(call) {
@@ -564,6 +567,11 @@ fn cpu_arrow(fe: &mut Fe, _id: RegionId, event: u32, add: bool) {
     fe.ui_sound(crate::consts::sound::CLICK);
 }
 
+fn arm_cpu_arrows(fe: &mut Fe) {
+    fe.region_function_set("MG_RemoveCPUOpponent", "mgRemoveCPU", RPM_PRESS_RELEASE | RPE_ENTER | RPE_EXIT);
+    fe.region_function_set("MG_AddCPUOpponent", "mgAddCPU", RPM_PRESS_RELEASE | RPE_ENTER | RPE_EXIT);
+}
+
 /// `mgNumberOfComputers`.
 fn draw_computers(fe: &mut Fe, fer: &mut Fer, _a: AtomRef, r: Rect) {
     fer.canvas.fill_rect(r, [0x5a, 0x63, 0x7a, 255]);
@@ -648,6 +656,135 @@ fn fill_triangle(fer: &mut Fer, p: [(i32, i32); 3], c: Color) {
                 c,
             );
         }
+    }
+}
+
+/// The skirmish tabs as the modern front end shows them: short tab names; the map and the
+/// number of computer players as text and buttons rather than the original's drawings; the
+/// game type, win conditions and computer players only on the first tab (the original repeats
+/// them on every tab); the resource options grouped with their numbers labelled; the races
+/// named.
+pub fn tidy_modern(fe: &FrontEnd<Cataclysm>, m: &mut crate::ingame::modern_menu::Model) {
+    use crate::ingame::modern_menu::{Item, Kind, Source};
+    const TABS: [&str; 4] = ["Skirmish_Basic", "Skirmish_Advanced", "Skirmish_Resource", "Skirmish_Colour"];
+    if !TABS.contains(&m.name.as_str()) {
+        return;
+    }
+    let named = |it: &Item, name: &str| match it.source {
+        Source::Atom(a) => fe.atom(a).name.as_deref() == Some(name),
+        _ => false,
+    };
+    for it in m.items.iter_mut().filter(|i| i.tab.is_some()) {
+        it.label = match it.label.as_str() {
+            "BASIC OPTIONS" => "BASIC",
+            "ADVANCED OPTIONS" => "ADVANCED",
+            "RESOURCE OPTIONS" => "RESOURCES",
+            "SETUP PLAYER" => "PLAYER",
+            l => l,
+        }
+        .to_string();
+    }
+    let section = |m: &mut crate::ingame::modern_menu::Model, name: &str| -> usize {
+        match m.sections.iter().position(|s| s == name) {
+            Some(k) => k,
+            None => {
+                m.sections.push(name.to_string());
+                m.sections.len() - 1
+            }
+        }
+    };
+    let shared = ["WIN CONDITIONS", "CPU PLAYERS"];
+    if m.name != "Skirmish_Basic" && m.name != "Skirmish_Colour" {
+        // Kept on the basic tab only.
+        let drop: Vec<usize> = shared.iter().filter_map(|h| m.sections.iter().position(|s| s == h)).collect();
+        m.items.retain(|it| it.footer || it.tab.is_some() || !drop.contains(&it.section) || named(it, "MG_HarvestingEnabled") || named(it, "MG_ResourceInjections") || it.label == "STARTING RESOURCES" || matches!(it.kind, Kind::Entry { .. }));
+    }
+    let sk = &fe.game.skirmish;
+    let mut extra: Vec<Item> = Vec::new();
+    for it in m.items.iter_mut() {
+        if let Kind::Embed { rect } = it.kind {
+            if it.at.y0 > 270 && it.at.x0 > 200 && m.name == "Skirmish_Basic" {
+                // The map's name (`spScenarioNameDraw`).
+                let title = sk.scenarios.get(sk.scenario).map(|s| s.title.clone()).unwrap_or_default();
+                it.kind = Kind::Value { text: title };
+                it.label = "MAP".into();
+                let _ = rect;
+            } else if it.at.x0 < 150 && it.at.y0 > 270 && it.at.y0 < 300 {
+                // The number of computer players with its arrows.
+                it.kind = Kind::Value { text: sk.options.num_computers.to_string() };
+                it.label = "COMPUTER PLAYERS".into();
+                for (name, label, dx) in [("MG_RemoveCPUOpponent", "FEWER", 0), ("MG_AddCPUOpponent", "MORE", 1)] {
+                    if let Some(a) = fe.find_atom(name) {
+                        let mut b = Item::new(Kind::Button { primary: false, back: false }, label.into(), Source::Atom(a), crate::canvas::Rect::new(it.at.x0 + dx, it.at.y0 + 2, it.at.x1 + dx, it.at.y1 + 2));
+                        b.section = it.section;
+                        extra.push(b);
+                    }
+                }
+            }
+        }
+    }
+    // The computer players' buttons go after their count.
+    for b in extra {
+        let after = m.items.iter().position(|i| i.label == "COMPUTER PLAYERS").map_or(m.items.len(), |k| k + 1);
+        let at = m.items[after..].iter().position(|i| matches!(i.kind, Kind::Button { .. }) && i.label != "FEWER").map_or(after, |k| after + k);
+        let at = if b.label == "MORE" { m.items.iter().position(|i| i.label == "FEWER").map_or(at, |k| k + 1) } else { after };
+        m.items.insert(at, b);
+    }
+    if m.name == "Skirmish_Resource" {
+        let resources = section(m, "RESOURCES");
+        let injections = section(m, "RESOURCE INJECTIONS");
+        let lump = section(m, "LUMP SUM");
+        for it in m.items.iter_mut().filter(|i| !i.footer && i.tab.is_none()) {
+            let (s, label) = if it.label == "STARTING RESOURCES" || named(it, "MG_HarvestingEnabled") {
+                (resources, None)
+            } else if named(it, "MG_ResourceInjections") {
+                (injections, Some("RESOURCE INJECTIONS"))
+            } else if named(it, "MG_ResourceInjectionInterval") {
+                (injections, Some("EVERY (MINUTES)"))
+            } else if named(it, "MG_ResourceInjectionAmount") {
+                (injections, Some("AMOUNT (RUS)"))
+            } else if named(it, "MG_ResourceLumpSum") {
+                (lump, Some("ONE-TIME LUMP SUM"))
+            } else if named(it, "MG_ResourceLumpSumInterval") {
+                (lump, Some("AT (MINUTES)"))
+            } else if named(it, "MG_ResourceLumpSumAmount") {
+                (lump, Some("AMOUNT (RUS)"))
+            } else {
+                continue;
+            };
+            it.section = s;
+            if let Some(l) = label {
+                it.label = l.into();
+            }
+        }
+        // In their sections' order: the toggle, its minutes, its amount.
+        let rank = |it: &Item| -> u8 {
+            if matches!(it.kind, Kind::Toggle { .. }) {
+                0
+            } else if it.label.contains("MINUTES") {
+                1
+            } else {
+                2
+            }
+        };
+        let body_end = m.items.iter().position(|i| i.footer).unwrap_or(m.items.len());
+        let (body, _) = m.items.split_at_mut(body_end);
+        body.sort_by_key(|it| (it.tab.is_none(), it.section, rank(it), it.at.y0));
+    }
+    if m.name == "Skirmish_Colour" {
+        let race = section(m, "RACE");
+        for it in m.items.iter_mut() {
+            if named(it, "CP_RaceOne") || named(it, "CP_RaceTwo") {
+                it.section = race;
+                if named(it, "CP_RaceTwo") && it.label.is_empty() {
+                    it.label = "BEAST".into();
+                }
+            }
+        }
+        let body_end = m.items.iter().position(|i| i.footer).unwrap_or(m.items.len());
+        let (body, _) = m.items.split_at_mut(body_end);
+        // The race first.
+        body.sort_by_key(|it| (it.tab.is_none(), it.section != race));
     }
 }
 

@@ -177,3 +177,79 @@ fn skirmish_screens_set_up_and_start_a_game() {
     assert_eq!(q.race, 1);
     println!("start: {q:?}");
 }
+
+/// The skirmish screens in the modern look, for review (`screenshots/front_end/
+/// skirmish_*_modern.png`).
+#[test]
+fn skirmish_screens_modern_look() {
+    let Some(data) = GameData::from_env() else { return };
+    let src: Rc<dyn AssetSource> = Rc::new(data.expect("game data"));
+    let mut s = Session::new(src, Setup { scale: ScaleMode::Original, ..Default::default() }).expect("session");
+    s.resize(1280, 960);
+    let press = |s: &mut Session, name: &str| {
+        frames(s, 2);
+        let a = s.fe.find_atom(name).unwrap_or_else(|| panic!("no {name} on {:?}", s.fe.stack_names()));
+        s.fe.function_execute(name, Some(a), false);
+        frames(s, 4)
+    };
+    let shot = |s: &mut Session, name: &str| {
+        frames(s, 4);
+        if std::env::var_os("HWC_DUMP_MODEL").is_some() {
+            if let Some(m) = hwc_ui::ingame::modern_menu::model(&s.fe) {
+                println!("== {name}: {} / {:?}", m.title, m.sections);
+                for it in &m.items {
+                    let atom = match it.source { hwc_ui::ingame::modern_menu::Source::Atom(a) => s.fe.atom(a).name.clone(), _ => None };
+                    println!("  [{}] {:?} {:?} atom {:?} tab {:?} footer {} at {:?}", it.section, it.label, std::mem::discriminant(&it.kind), atom, it.tab, it.footer, it.at);
+                }
+            }
+        }
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../screenshots/front_end");
+        let _ = std::fs::create_dir_all(&dir);
+        s.render().save_png(&dir.join(format!("skirmish_{name}_modern.png"))).expect("png");
+    };
+    frames(&mut s, 10);
+    press(&mut s, "FE_Multiplayer_Game");
+    shot(&mut s, "connection");
+    press(&mut s, "MG_Skirmish");
+    shot(&mut s, "basic");
+    // The modern controls work: MORE adds a computer player, the map is named.
+    let click_item = |s: &mut Session, label: &str| {
+        frames(s, 2);
+        let m = hwc_ui::ingame::modern_menu::model(&s.fe).expect("model");
+        let (w, h) = s.fe.screen_size();
+        let l = hwc_ui::ingame::modern_menu::layout_for(&s.fe, &m, w, h);
+        let i = m.find(label).unwrap_or_else(|| panic!("no {label}"));
+        let r = l.placed[i].control;
+        let (x, y) = ((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2);
+        s.fe.mouse_move(x, y);
+        hwc_ui::ingame::modern_menu::mouse_move(&mut s.fe, x, y);
+        frames(s, 2);
+        s.mouse_button(true, true);
+        frames(s, 1);
+        s.mouse_button(true, false);
+        frames(s, 2);
+    };
+    let before = s.fe.game.skirmish.options.num_computers;
+    click_item(&mut s, "MORE");
+    assert_eq!(s.fe.game.skirmish.options.num_computers, before + 1, "MORE adds a computer player");
+    click_item(&mut s, "FEWER");
+    assert_eq!(s.fe.game.skirmish.options.num_computers, before);
+    let m = hwc_ui::ingame::modern_menu::model(&s.fe).expect("model");
+    assert!(m.find("MAP").is_some(), "the map is named");
+    assert!(m.find("BASIC").is_some(), "short tab names");
+    for (screen, name) in [("Skirmish_Advanced", "advanced"), ("Skirmish_Resource", "resource"), ("Skirmish_Colour", "player_setup"), ("Load_a_scenario", "scenarios"), ("Skirmish_Load", "load"), ("Recorded_Game", "recorded")] {
+        s.fe.current_screen_delete();
+        s.fe.screen_start(screen);
+        frames(&mut s, 4);
+        shot(&mut s, name);
+        let m = hwc_ui::ingame::modern_menu::model(&s.fe).expect("model");
+        if screen == "Skirmish_Resource" {
+            for l in ["EVERY (MINUTES)", "AT (MINUTES)"] {
+                assert!(m.find(l).is_some(), "{l} labelled");
+            }
+        }
+        if screen == "Skirmish_Colour" {
+            assert!(m.find("BEAST").is_some(), "the Beast named");
+        }
+    }
+}
