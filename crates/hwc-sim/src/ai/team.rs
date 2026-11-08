@@ -105,6 +105,10 @@ pub enum MoveKind {
     /// `MOVE_INTERCEPT`: fly to the target (+0x14), looking again every `wait` seconds
     /// (+0x18, until +0x1c) at the point flown to (+0x20) and whether it was moving (+0x2c).
     Intercept { target: Option<ShipId>, wait: f32, until: f32, point: Vector, moving: bool },
+    /// `MOVE_HARASSATTACK`: find a harass target (+0x14) and go for it.
+    HarassAttack { target: Option<ShipId> },
+    /// `MOVE_ADVANCEDATTACK`: `aiuAttack` the targets, then wait until the ships stop.
+    AdvancedAttack { targets: Vec<ShipId>, started: bool },
 }
 
 /// The event handlers a move can carry (`aieHandlerSet*`, `aih*Handler`).
@@ -112,6 +116,40 @@ pub enum MoveKind {
 pub enum Handler {
     /// `aihReconaissanceTeamDiedHandler`.
     Reconnaissance,
+    /// `aihHarassTeamDiedHandler`.
+    Harass,
+    /// `aihHarassNumbersLowHandler`.
+    HarassNumbersLow,
+    /// `aihGenericGettingRockedHandler`.
+    GenericGettingRocked,
+    /// `aihHarassFiringSingleShipHandler`, `aihHarassDisengageSingleShipHandler`.
+    HarassFiringSingleShip,
+    HarassDisengageSingleShip,
+    /// `aihKamikazeHealthLowHandler`.
+    KamikazeHealthLow,
+}
+
+/// One event of a move (`aieHandlerSet*`): its handler, whether it fires only once and has
+/// fired, and for health low and numbers low the percentage (+0xfc, +0x114), whether each ship
+/// counts (+0x100) and the ship count it started from (+0x118).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Event {
+    pub handler: Handler,
+    pub once: bool,
+    pub fired: bool,
+    pub percent: i32,
+    pub base: i32,
+    pub per_ship: bool,
+}
+
+/// The events of a move (`AITeamMove` +0xcc..+0x154), copied to the moves it inserts.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct Events {
+    pub getting_rocked: Option<Event>,
+    pub firing: Option<Event>,
+    pub disengage: Option<Event>,
+    pub health_low: Option<Event>,
+    pub numbers_low: Option<Event>,
 }
 
 /// One move (`AITeamMove`, 0x170 bytes).
@@ -128,11 +166,14 @@ pub struct AiMove {
     /// +0x13c: called when the team has no ships left (`aieHandlerSetTeamDied`).
     #[serde(default, deserialize_with = "crate::save::added_in_15")]
     pub team_died: Option<Handler>,
+    /// The other events (`aieExecute`).
+    #[serde(default, deserialize_with = "crate::save::added_in_16")]
+    pub events: Events,
 }
 
 impl AiMove {
     pub fn new(kind: MoveKind, formation: i32, tactics: i32, wait: bool, remove: bool) -> Self {
-        AiMove { kind, processing: false, wait, remove, formation, tactics, team_died: None }
+        AiMove { kind, processing: false, wait, remove, formation, tactics, team_died: None, events: Events::default() }
     }
 
     pub fn move_type(&self) -> u32 {
@@ -153,6 +194,8 @@ impl AiMove {
             MoveKind::ActiveRecon { .. } => super::recon::move_type::ACTIVE_RECON,
             MoveKind::ShipRecon { .. } => super::recon::move_type::SHIP_RECON,
             MoveKind::Intercept { .. } => super::recon::move_type::INTERCEPT,
+            MoveKind::HarassAttack { .. } => super::harass::move_type::HARASS_ATTACK,
+            MoveKind::AdvancedAttack { .. } => super::harass::move_type::ADVANCED_ATTACK,
         }
     }
 }
@@ -405,11 +448,80 @@ fn events(u: &mut Universe, t: usize) {
     if m.move_type() == move_type::DONE {
         return;
     }
-    if let (Some(h), true) = (m.team_died, tm.ships.is_empty()) {
-        match h {
-            Handler::Reconnaissance => super::recon::team_died_handler(u, t),
+    let ships = tm.ships.clone();
+    if let (Some(h), true) = (m.team_died, ships.is_empty()) {
+        super::harass::handle(u, t, h, None);
+        return;
+    }
+    let ev = m.events.clone();
+    let open = |e: &Option<Event>| e.filter(|e| !e.once || !e.fired);
+    let set_fired = |u: &mut Universe, f: fn(&mut Events) -> &mut Option<Event>| {
+        if let Some(e) = f(&mut team_mut(u, t).expect("team").moves[c].events).as_mut() {
+            e.fired = true;
+        }
+    };
+    if let Some(e) = open(&ev.getting_rocked) {
+        let rocker = ships.iter().find_map(|&id| {
+            let s = u.ships.get(id)?;
+            let r = s.getting_rocked?;
+            (u.ships.get(r)?.player != s.player).then_some(r)
+        });
+        if let Some(r) = rocker {
+            set_fired(u, |e| &mut e.getting_rocked);
+            super::harass::handle(u, t, e.handler, Some(r));
+            return;
         }
     }
+    let attacking = |u: &Universe| ships.iter().any(|&id| u.ships.get(id).is_some_and(|s| s.ship_is_attacking));
+    if let Some(e) = open(&ev.firing) {
+        if attacking(u) {
+            set_fired(u, |e| &mut e.firing);
+            super::harass::handle(u, t, e.handler, None);
+            return;
+        }
+    }
+    if let (Some(e), true) = (open(&ev.disengage), ev.firing.is_some_and(|f| f.fired)) {
+        if !attacking(u) {
+            set_fired(u, |e| &mut e.disengage);
+            super::harass::handle(u, t, e.handler, None);
+            return;
+        }
+    }
+    if let Some(e) = open(&ev.health_low) {
+        if super::harass::health_low(u, &ships, e.percent, e.per_ship) {
+            set_fired(u, |e| &mut e.health_low);
+            super::harass::handle(u, t, e.handler, None);
+            return;
+        }
+    }
+    if let Some(e) = open(&ev.numbers_low) {
+        let n = ships.len() as i32;
+        if e.base == 0 {
+            if let Some(x) = team_mut(u, t).expect("team").moves[c].events.numbers_low.as_mut() {
+                x.base = n;
+            }
+        } else if n * 100 < e.percent * e.base {
+            set_fired(u, |e| &mut e.numbers_low);
+            super::harass::handle(u, t, e.handler, None);
+        }
+    }
+}
+
+/// `aitDeleteCurrentMove` (0x417990): the current move is closed and goes; the next is current.
+pub(super) fn delete_current_move(u: &mut Universe, t: usize) {
+    let Some(tm) = team_mut(u, t) else { return };
+    let Some(c) = tm.current else { return };
+    let m = tm.moves.remove(c);
+    tm.current = (c < tm.moves.len()).then_some(c);
+    close_move(u, m);
+}
+
+pub(super) fn wrap_formation_pub(u: &mut Universe, sel: &[ShipId], formation: i32) {
+    wrap_formation(u, sel, formation);
+}
+
+pub(super) fn ships_no_longer_attacking_pub(u: &Universe, sel: &[ShipId]) -> bool {
+    ships_no_longer_attacking(u, sel)
 }
 
 /// The current move's process function; true when it is done.
@@ -451,6 +563,8 @@ fn process(u: &mut Universe, t: usize) -> bool {
         MoveKind::ActiveRecon { .. } => super::recon::process_active_recon(u, t, c),
         MoveKind::ShipRecon { .. } => super::recon::process_ship_recon(u, t, c),
         MoveKind::Intercept { .. } => super::recon::process_intercept(u, t, c),
+        MoveKind::HarassAttack { .. } => super::harass::process_harass_attack(u, t, c),
+        MoveKind::AdvancedAttack { .. } => super::harass::process_advanced_attack(u, t, c),
     }
 }
 
@@ -942,8 +1056,14 @@ pub fn ship_died(u: &mut Universe, id: ShipId) {
                     found.retain(|&s| s != id);
                 }
                 MoveKind::Intercept { target, .. } if *target == Some(id) => *target = None,
+                MoveKind::AdvancedAttack { targets, .. } => targets.retain(|&s| s != id),
                 _ => {}
             }
         }
+    }
+    // `aimHarassAttackShipDied`.
+    let found: Vec<(usize, usize)> = u.ai.teams.iter().enumerate().filter_map(|(t, x)| x.as_ref().map(|x| (t, &x.1))).flat_map(|(t, tm)| tm.moves.iter().enumerate().filter(|(_, m)| matches!(m.kind, MoveKind::HarassAttack { target: Some(s) } if s == id)).map(move |(c, _)| (t, c))).collect();
+    for (t, c) in found {
+        super::harass::harass_target_died(u, t, c, id);
     }
 }

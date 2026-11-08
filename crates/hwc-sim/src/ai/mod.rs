@@ -10,6 +10,7 @@
 
 pub mod attack;
 pub mod defense;
+pub mod harass;
 pub mod recon;
 pub mod research;
 pub mod resource;
@@ -423,6 +424,7 @@ fn fleet_command(u: &mut Universe, p: usize) {
     assign_new_ships(u, p);
     if ai(u, p).first_turn {
         recon::special_teams(u, p);
+        harass::special_team(u, p);
         ai_mut(u, p).first_turn = false;
     } else {
         if ai(u, p).resource_features & 0x0100_0000 != 0 {

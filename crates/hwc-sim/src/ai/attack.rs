@@ -96,6 +96,9 @@ pub struct AttackState {
     /// +0x1ca4: the scout sent to look at the armada's targets.
     #[serde(default, deserialize_with = "crate::save::added_in_15")]
     pub recon_target_team: Option<usize>,
+    /// +0xc00: the harass team of `aiaProcessSpecialTeams`.
+    #[serde(default, deserialize_with = "crate::save::added_in_16")]
+    pub harass_team: Option<usize>,
 }
 
 fn rnd(u: &mut Universe) -> u32 {
@@ -168,6 +171,7 @@ pub fn init(u: &mut Universe, p: usize) {
         sphere_of_influence: 0.0,
         recon_teams: Vec::new(),
         recon_target_team: None,
+        harass_team: None,
     };
 }
 
@@ -176,6 +180,9 @@ pub fn team_died(a: &mut AiPlayer, t: usize) {
     a.attack.recon_teams.retain(|&x| x != t);
     if a.attack.recon_target_team == Some(t) {
         a.attack.recon_target_team = None;
+    }
+    if a.attack.harass_team == Some(t) {
+        a.attack.harass_team = None;
     }
     for s in &mut a.attack.teams {
         if *s == Some(t) {
@@ -273,8 +280,17 @@ fn is_enemy_mothership(u: &Universe, p: usize, id: ShipId) -> bool {
     u.base.players.get(s.player).is_some_and(|pl| pl.mothership == Some(id)) && !u.players[s.player].is_ally(p)
 }
 
+/// `MakeTargetsOnlyEnemyShips` (0x50db80) for one ship: another player's, not an ally's
+/// (`allianceIsShipAlly`), not a slipgate or crystal (`specialFlags & 0x40000`, the crystal
+/// types).
 pub fn is_enemy(u: &Universe, p: usize, id: ShipId) -> bool {
-    u.ships.get(id).is_some_and(|s| s.player != p && s.player < u.players.len() && !u.players[s.player].is_ally(p) && s.flags & sof::DEAD == 0)
+    u.ships.get(id).is_some_and(|s| {
+        s.player != p
+            && s.special_flags & 0x4_0000 == 0
+            && !matches!(s.ship_type, ShipType::dCrystal0 | ShipType::dCrystal1)
+            && !crate::shockwave::is_ally(u, id, p)
+            && s.flags & sof::DEAD == 0
+    })
 }
 
 /// `aiuFindNearbyEnemyShips` (0x41dbe0): the enemy ships within `range` of the ship.
@@ -345,6 +361,7 @@ fn generate_attack_type(u: &mut Universe, p: usize, t: usize, k: u32, force: boo
         6 if f & feature::FIGHTER_STRIKE != 0 => fighter_strike(u, p, t),
         7 if f & feature::CORVETTE_STRIKE != 0 => corvette_strike(u, p, t),
         8 if f & feature::FRIGATE_STRIKE != 0 => frigate_strike(u, p, t),
+        9 | 10 if f & feature::HARASS != 0 => super::harass::create(u, p, t),
         // The special defence teams are the HW1 races' (cloak and gravity well generators).
         13 => return f & feature::SPECIAL_DEFENSE != 0,
         14 => return f & feature::SPECIAL_DEFENSE_2 != 0,

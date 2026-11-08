@@ -139,7 +139,7 @@ once when no RUs are left to harvest) and `aiaArmada` with `aiuFindArmadaTarget`
 The orders ported: mothership takeouts fast, guard, big and huge, and the fighter, corvette and
 frigate strikes, with the exact ship lists and worth ratios of each race (the Beast's depending on
 the types it has acquired). Not yet: the escort teams of the guard and huge takeouts, the target
-takeouts (types 4 and 5), harass and hyperspace jumps. Capture, mines and the special defences
+takeouts (types 4 and 5) and hyperspace jumps. Capture, mines and the special defences
 need HW1 races' ships (salvage corvettes, minelayers, cloak and gravity well generators), so a
 Somtaaw or Beast player never gets them.
 
@@ -154,6 +154,26 @@ that loses its ships starts over (`aihReconaissanceTeamDiedHandler`, the only ev
 ported so far, run by `aieExecute`). `aiaArmada` sends the nearest scout to look at targets the
 player's ships do not see (`aiaSendRecon`, `aimProcessShipRecon`, `aimProcessIntercept`). Save
 version 15. Test: `skirmish::computer_players_send_scouts`.
+
+Harassment (`hwc_sim::ai::harass`): a harass team on the first turn by the harass chance
+(`aiaProcessSpecialTeams`) and attack type 10 at the advanced level (`aioCreateHarass`): fifteen
+fighters (Acolytes and stand-ins, Beast Interceptors and stand-ins) fly to a point 25000 short of
+the enemy mothership, then `aimProcessHarassAttack` picks the nearest undefended, unarmed or
+fighter-prey capital ship (`aiuFindHarassTarget`, the strength being Cataclysm's ship-count ratio
+`statsGetRelativeFleetStrengths`), flies to 16000 short of it and attacks its defenders, or it
+(`aimProcessAdvancedAttack` with `aiuAttack` for teams with feature 1). The team events of
+`aieExecute` now run: getting rocked (`aihGenericGettingRockedHandler`: fight back with 1.5 times
+the ships), firing and disengage (`aihHarassFiring/DisengageSingleShipHandler`: formation 5 on a
+single target), health low (`aihKamikazeHealthLowHandler` for kamikaze players), numbers low
+(`aihHarassNumbersLowHandler`: below 40% the team goes home and is topped up) and team died
+(`aihHarassTeamDiedHandler`: made again three times in four). `aiuFindNearbyEnemyShips` and the
+armada now leave out slipgates and crystals (`MakeTargetsOnlyEnemyShips`). Save version 16.
+Test: `skirmish::computer_players_harass`.
+
+Finding: the defence manager's `aiuEnemyShipsInMothershipBlob` keeps the level's slipgates (its
+only filters are alliance and the crystal types) and `clAttack` does not filter targets, so in
+the port a team defending a mothership that starts next to a slipgate keeps attacking it (seen on
+Coldwar2); not yet checked against the original game.
 
 Finding: `statsGetOverallKillRating` is 0 for every ship in Cataclysm. The game ships HW1's
 `statfile.bin` (192,892 bytes, 83 types); `statsLoadFightStats` wants 0x41a70 bytes (98 types),

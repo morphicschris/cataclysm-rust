@@ -604,3 +604,54 @@ fn computer_players_send_scouts() {
     println!("farthest scouts {farthest:?}");
     assert!(farthest.iter().all(|&f| f > 5000.0), "the scouts went out: {farthest:?}");
 }
+
+/// Harassment (`aioCreateHarass`, `aimProcessHarassAttack`, the team events): hard computer
+/// players form harass teams, which get their fighters, fly out towards the enemy mothership
+/// and go after targets.
+#[test]
+fn computer_players_harass() {
+    use hwc_sim::ai::team::MoveKind;
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    let mut options = default_game(d);
+    options.cpu_difficulty = 90;
+    options.flags &= !hwc_sim::multiplayer::mg::RESEARCH_ENABLED;
+    let mut harass_teams = 0;
+    let mut harass_attacks = 0;
+    let mut events = 0;
+    for seed in [3u32, 21] {
+        let mut s = setup("Coldwar2", &[ShipRace::Somtaaw, ShipRace::Beast], options.clone(), seed);
+        for p in &mut s.players {
+            p.computer = true;
+        }
+        let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, s).expect("start");
+        for minute in 0..12 {
+            for _ in 0..16 * 60 {
+                run.step();
+                let u = &run.universe;
+                for (_, tm) in u.ai.teams.iter().flatten() {
+                    if tm.flags & hwc_sim::ai::harass::flag::HARASS == 0 {
+                        continue;
+                    }
+                    if let Some(c) = tm.current {
+                        let m = &tm.moves[c];
+                        if matches!(m.kind, MoveKind::HarassAttack { .. } | MoveKind::AdvancedAttack { .. }) {
+                            harass_attacks += 1;
+                        }
+                        if m.events.getting_rocked.is_some_and(|e| e.fired) || m.events.numbers_low.is_some_and(|e| e.fired || e.base > 0) {
+                            events += 1;
+                        }
+                    }
+                }
+            }
+            let u = &run.universe;
+            let teams: Vec<String> = u.ai.teams.iter().flatten().filter(|(_, t)| t.flags & hwc_sim::ai::harass::flag::HARASS != 0).map(|(p, t)| format!("p{p} {} ships {:?}", t.ships.len(), t.current.map(|c| t.moves[c].move_type()))).collect();
+            println!("seed {seed} min {minute}: harass teams {teams:?}");
+        }
+        harass_teams += run.universe.ai.teams.iter().flatten().filter(|(_, t)| t.flags & hwc_sim::ai::harass::flag::HARASS != 0).count();
+    }
+    println!("harass teams {harass_teams}, updates attacking {harass_attacks}, with events {events}");
+    assert!(harass_teams > 0, "hard computer players harass");
+    assert!(events > 0, "the harass moves' events run");
+    assert!(harass_attacks > 0, "the teams get to their harass attack");
+}
