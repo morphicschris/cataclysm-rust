@@ -38,3 +38,6 @@ __pycache__/
 /crates/*/1/
 *.png
 !crates/**/tests/data/**/*.png
+
+# Local install made by install.ps1
+/game/
