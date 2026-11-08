@@ -78,3 +78,41 @@ features allow; a carrier when support units run short; the support teams divide
 resourcers under attack. Feature bits (`ResourceFeatures` at +8): 1 support carriers, 2 resourcer
 teams, 4 processor teams, 8 advance-support teams, 0x10 distress, 0x200 smart resourcer count,
 0x400 processors, 0x1000 evasive resourcers.
+
+## Status
+
+Done (9b8a845, `hwc_sim::ai`): the player (`aiplayerInit` / `ChooseEnemies` / `GameStart` /
+`UpdateAll`), fleet command, the build requests and their weighing, ships on order
+(`clBuildShip`, `COMMAND_BUILDING_SHIP`), the research helpers, and the resource manager. Teams are
+created and given their ships but have no moves yet (`AiTeam::order` names the `aioCreate*` order
+they were given); resourcers in teams are sent harvesting directly until the moves exist.
+
+Open question for the original: the AI builds externally built ships (the Somtaaw mothership's
+modules) with `clWrapCreateShip`, which makes an unfinished hull (`univCreateShip` flag 1) that
+nothing finishes; the port does the same, so a Somtaaw computer player's modules stay hulls.
+
+## Notes on teams and moves
+
+`aitCreate` (0x416820, `AITeam` 0x280 bytes): type (manager), `teamFlags` +4, `teamFeatures` +0xc
+(level 1: 8; level 2: 0x1f), `teamDelay` +0x10 (0x740a18 by team level = player level * 2),
+`newships` +0x14, owner +0x18, ships +0x1c, strength +0x24 and value +0x28 (`aiuRateShip`), team level
++0x2c, moves list +0x30 (head, tail, count), current move +0x3c, `kasTactics` +0x74 (2 in
+multiplayer), `kasFormation` +0x78 (7).
+
+`aitExecute` (0x417c00): for each team, `aieExecute` (its event handlers), then a team flagged
+0x10 (to be destroyed) or whose move is type 0x2d (delete team) is destroyed; else the current move
+(the first when none) runs its process function (+0x154) after `teamDelay` passes; when it returns
+done, the next move becomes current, with its tactics (team feature 8) and formation (8 = same, 7 =
+none), the cloak / special handling for teams flagged 0x1000000 / 0x2000000, `teamDelay` reset, and
+the old move deleted when it said so (+0x166, with its close function +0x15c).
+
+Move structure (0x170 bytes): type +0x10, process +0x154, ship-died +0x158, close +0x15c,
+resource-died +0x160, processing +0x164, wait +0x165, remove +0x166, formation +0x168, tactics
++0x16c, event handlers +0xcc (0x22 words, copied into moves a move inserts before itself).
+
+The resource manager's teams use: `aimCreateActiveResource` (0x29) → inserts a ResourceVolume move
+(0x23, `aimProcessResourceVolume`) at the nearest resource blob (`aiuFindNearestResourceBlob`);
+`aimCreateControlResources` (0x22: a processor goes to `aiuFindResourceControllerDestination` or
+the given ships' centre, by an inserted Move (6) when further than 10 km); `aimCreateSupport`
+(0x20); `aimCreateGetShips` / `FancyGetShips` (0x16: requests ships through
+`aifTeamRequestsShipsCB` and waits on an AI variable); `aimCreateMoveDone` (0).
