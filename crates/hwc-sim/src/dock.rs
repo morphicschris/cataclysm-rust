@@ -1368,7 +1368,15 @@ pub fn ship_docks_at_ship(u: &mut Universe, ship: ShipId, dw: ShipId, cmd: Optio
                     crate::clamp::clamp_obj_to_obj(u, ship, b);
                 }
                 base::set_disable_reason(u.ships.ship_mut(ship), true, 4);
-                crate::construction::external_build_ship_launched(u, ship);
+                // A computer player's hull builds itself (`clWrapMaterialise`: it grows over its
+                // build time in `univShipAutoBehaviourUpdate`); the local player's goes on with
+                // its factory job.
+                let owner = u.ships.ship(ship).player;
+                if u.base.players.get(owner).is_some_and(|p| p.ai) {
+                    u.ships.ship_mut(ship).special_flags2 |= special2::MATERIALISING;
+                } else {
+                    crate::construction::external_build_ship_launched(u, ship);
+                }
                 return false;
             }
         }

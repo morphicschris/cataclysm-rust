@@ -354,11 +354,12 @@ fn computer_players_build_and_harvest() {
         let u = &run.universe;
         let workers = (count(&run, 0, ShipType::sWorker), count(&run, 1, ShipType::bWorker));
         let collected: Vec<i32> = (0..2).map(|p| u.base.stats.players.get(p).map_or(0, |s| s.ru_collected)).collect();
-        let modules: Vec<ShipType> = u.ship_list.iter().map(|&id| u.ships.ship(id)).filter(|s| s.player == 0 && matches!(s.ship_type, ShipType::sMothershipDockingBay | ShipType::sMothershipMicro | ShipType::sMothershipSpecial | ShipType::sMothershipWeapons | ShipType::sMothershipArmour | ShipType::sMothershipSupport)).map(|s| s.ship_type).collect();
+        let modules: Vec<(ShipType, bool)> = u.ship_list.iter().map(|&id| u.ships.ship(id)).filter(|s| s.player == 0 && matches!(s.ship_type, ShipType::sMothershipDockingBay | ShipType::sMothershipMicro | ShipType::sMothershipSpecial | ShipType::sMothershipWeapons | ShipType::sMothershipArmour | ShipType::sMothershipSupport)).map(|s| (s.ship_type, s.special_flags2 & hwc_sim::base::special2::UNDER_CONSTRUCTION == 0)).collect();
         let research: Vec<usize> = (0..2).map(|p| u.base.players[p].topics.len() + u.base.players[p].tech.has.iter().filter(|&&h| h == 1).count()).collect();
         println!("slider {slider}: workers {workers0:?} -> {workers:?}, collected {collected:?}, RUs {:?}, Somtaaw modules {modules:?}, research {research:?}", (0..2).map(|p| u.base.players[p].resource_units).collect::<Vec<_>>());
         assert!(workers.0 > workers0.0 && workers.1 > workers0.1, "both build resourcers");
         assert!(collected[0] > 0 && collected[1] > 0, "both harvest");
-        assert!(!modules.is_empty(), "the Somtaaw computer player adds modules");
+        assert!(modules.iter().any(|&(t, done)| t == ShipType::sMothershipDockingBay && done), "the Somtaaw computer player finishes its docking bay: {modules:?}");
+
     }
 }
