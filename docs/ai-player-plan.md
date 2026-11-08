@@ -87,9 +87,9 @@ Done (9b8a845, `hwc_sim::ai`): the player (`aiplayerInit` / `ChooseEnemies` / `G
 created and given their ships but have no moves yet (`AiTeam::order` names the `aioCreate*` order
 they were given); resourcers in teams are sent harvesting directly until the moves exist.
 
-Open question for the original: the AI builds externally built ships (the Somtaaw mothership's
-modules) with `clWrapCreateShip`, which makes an unfinished hull (`univCreateShip` flag 1) that
-nothing finishes; the port does the same, so a Somtaaw computer player's modules stay hulls.
+The AI builds externally built ships (the Somtaaw mothership's modules) with `clWrapCreateShip`:
+the hull launches into place and, its owner having an AI player, materialises over its build time
+(`ShipDocksAtShip` → `clWrapMaterialise`, 701eaea).
 
 ## Notes on teams and moves
 
