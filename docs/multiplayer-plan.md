@@ -94,8 +94,8 @@ orders back before their updates (`In_game_esc_menu_playing`; the player's own o
 out). Played back, the game is the same update for update (`campaign_shots::a_recorded_game_plays_back`,
 and in `hwc-net/tests/net.rs` a lockstep recording replayed on a third machine). Our recordings
 are not the original's `.pkts` files. In the modern look (`skirmish::tidy_modern`) the tabs are
-BASIC / ADVANCED / RESOURCES / PLAYER; the map and the number of computer players are text with
-FEWER / MORE buttons instead of the original's drawings; the win conditions and computer players
+BASIC / ADVANCED / RESOURCES / PLAYER; the map and the number of computer players are text, the
+count with - and + boxes after it, as in the build manager, instead of the original's drawings; the win conditions and computer players
 are on the first tab only; the resource options are grouped (resources, injections, lump sum) with
 their numbers labelled; the race toggles are named. Test: `skirmish_screens_modern_look`.
 

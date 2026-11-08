@@ -212,14 +212,14 @@ fn skirmish_screens_modern_look() {
     shot(&mut s, "connection");
     press(&mut s, "MG_Skirmish");
     shot(&mut s, "basic");
-    // The modern controls work: MORE adds a computer player, the map is named.
-    let click_item = |s: &mut Session, label: &str| {
+    // The modern controls work: + adds a computer player, - takes one away, the map is named.
+    let click_item = |s: &mut Session, label: &str, part: usize| {
         frames(s, 2);
         let m = hwc_ui::ingame::modern_menu::model(&s.fe).expect("model");
         let (w, h) = s.fe.screen_size();
         let l = hwc_ui::ingame::modern_menu::layout_for(&s.fe, &m, w, h);
         let i = m.find(label).unwrap_or_else(|| panic!("no {label}"));
-        let r = l.placed[i].control;
+        let r = l.placed[i].parts[part];
         let (x, y) = ((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2);
         s.fe.mouse_move(x, y);
         hwc_ui::ingame::modern_menu::mouse_move(&mut s.fe, x, y);
@@ -230,10 +230,11 @@ fn skirmish_screens_modern_look() {
         frames(s, 2);
     };
     let before = s.fe.game.skirmish.options.num_computers;
-    click_item(&mut s, "MORE");
-    assert_eq!(s.fe.game.skirmish.options.num_computers, before + 1, "MORE adds a computer player");
-    click_item(&mut s, "FEWER");
-    assert_eq!(s.fe.game.skirmish.options.num_computers, before);
+    click_item(&mut s, "COMPUTER PLAYERS", 1);
+    assert_eq!(s.fe.game.skirmish.options.num_computers, before + 1, "+ adds a computer player");
+    shot(&mut s, "basic_two_cpus");
+    click_item(&mut s, "COMPUTER PLAYERS", 0);
+    assert_eq!(s.fe.game.skirmish.options.num_computers, before, "- takes one away");
     let m = hwc_ui::ingame::modern_menu::model(&s.fe).expect("model");
     assert!(m.find("MAP").is_some(), "the map is named");
     assert!(m.find("BASIC").is_some(), "short tab names");

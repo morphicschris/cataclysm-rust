@@ -167,6 +167,13 @@ pub enum Kind {
     Value {
         text: String,
     },
+    /// A number with - and + boxes to its right (as the build manager's), each pressing an
+    /// atom of the original; `can` greys a box out.
+    Stepper {
+        text: String,
+        sources: [Source; 2],
+        can: [bool; 2],
+    },
     /// A picture the original screen draws itself (the front end's team colour preview and
     /// colour picker): its rectangle on the screen, shown scaled up from the original's
     /// drawing, with the mouse handed on to it.
@@ -1783,6 +1790,17 @@ fn place(m: &Model, f: &Frame, i: usize, x: f32, y: f32, w: f32, h: f32) -> Plac
             control: f.at(cx, y, cw, h),
             ..Default::default()
         },
+        Kind::Stepper { .. } => {
+            let b = 22.0;
+            let plus = f.at(x + w - 10.0 - b, mid - b / 2.0, b, b);
+            let minus = f.at(x + w - 10.0 - 2.0 * b - 8.0, mid - b / 2.0, b, b);
+            Placed {
+                row,
+                control: Rect::new(minus.x0, minus.y0, plus.x1, plus.y1),
+                parts: vec![minus, plus],
+                ..Default::default()
+            }
+        }
         Kind::Embed { rect } => {
             let (ew, eh) = embed_size(*rect, w);
             Placed {
@@ -1874,6 +1892,11 @@ pub fn hit(m: &Model, l: &Layout, open: Option<usize>, canvas_h: i32, x: i32, y:
                     return Hit::Part(i, k);
                 }
             }
+            Kind::Stepper { .. } => {
+                if let Some(k) = p.parts.iter().position(|r| r.contains(x, y)) {
+                    return Hit::Part(i, k);
+                }
+            }
             Kind::List {
                 rows,
                 top,
@@ -1946,6 +1969,15 @@ pub fn target(fe: &Fe, m: &Model, l: &Layout, at: Hit) -> Option<Target> {
                     let Source::Atom(a) = *sources.get(k)? else {
                         return None;
                     };
+                    Some(Target::new(p.parts[k], region_rect(fe, a)?))
+                }
+                Kind::Stepper { sources, can, .. } => {
+                    let Source::Atom(a) = *sources.get(k)? else {
+                        return None;
+                    };
+                    if !can[k] {
+                        return None;
+                    }
                     Some(Target::new(p.parts[k], region_rect(fe, a)?))
                 }
                 Kind::List { .. } => {
@@ -2837,6 +2869,62 @@ fn draw_item(fe: &Fe, canvas: &mut Canvas, pen: &Pen, m: &Model, l: &Layout, i: 
                 3.0 * f.scale,
                 f.scale,
                 lerp([255, 255, 255, 40], alpha(GOLD, 0.7), hv),
+            );
+        }
+        Kind::Stepper { text, can, .. } => {
+            draw_label(canvas, pen, f, it, p, 0.0);
+            // - +, drawn as the build manager's.
+            for (k, &rect) in p.parts.iter().enumerate() {
+                let hk = e(Key::Hit(Hit::Part(i, k)));
+                let held = live && fe.game.ig.mmenu.pressed == Some(Hit::Part(i, k));
+                let usable = can[k] && !it.disabled;
+                let hk = if usable { hk } else { 0.0 };
+                let bg = if held && usable {
+                    [255, 200, 0, 150]
+                } else {
+                    lerp([255, 255, 255, 12], [255, 200, 0, 70], hk)
+                };
+                rounded(canvas, rect, 3.0 * f.scale, bg);
+                let border = if usable {
+                    lerp([255, 255, 255, 50], GOLD, hk)
+                } else {
+                    [255, 255, 255, 25]
+                };
+                rounded_outline(canvas, rect, 3.0 * f.scale, 1.0, border);
+                let glyph = if held && usable {
+                    [20, 16, 6, 255]
+                } else if usable {
+                    lerp(TEXT, WHITE, hk)
+                } else {
+                    GREYED
+                };
+                let (cx, cy) = ((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2);
+                let arm = (rect.width() as f32 * 0.27).round() as i32;
+                let th = (f.scale * 1.6).round().max(1.0) as i32;
+                canvas.blend_rect(
+                    Rect::new(cx - arm, cy - th / 2, cx + arm + 1, cy - th / 2 + th),
+                    glyph,
+                );
+                if k == 1 {
+                    canvas.blend_rect(
+                        Rect::new(cx - th / 2, cy - arm, cx - th / 2 + th, cy + arm + 1),
+                        glyph,
+                    );
+                }
+            }
+            // The number, left of the boxes.
+            let vpx = f.text(VALUE_PX);
+            write_right(
+                canvas,
+                pen,
+                Face::Bold,
+                vpx,
+                0.0,
+                p.control.x0 - f.px(12.0),
+                mid_baseline(p.row, vpx),
+                WHITE,
+                value_glow(f),
+                text,
             );
         }
         Kind::Value { text } => {

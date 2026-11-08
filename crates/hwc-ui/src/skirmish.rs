@@ -700,7 +700,6 @@ pub fn tidy_modern(fe: &FrontEnd<Cataclysm>, m: &mut crate::ingame::modern_menu:
         m.items.retain(|it| it.footer || it.tab.is_some() || !drop.contains(&it.section) || named(it, "MG_HarvestingEnabled") || named(it, "MG_ResourceInjections") || it.label == "STARTING RESOURCES" || matches!(it.kind, Kind::Entry { .. }));
     }
     let sk = &fe.game.skirmish;
-    let mut extra: Vec<Item> = Vec::new();
     for it in m.items.iter_mut() {
         if let Kind::Embed { rect } = it.kind {
             if it.at.y0 > 270 && it.at.x0 > 200 && m.name == "Skirmish_Basic" {
@@ -710,25 +709,17 @@ pub fn tidy_modern(fe: &FrontEnd<Cataclysm>, m: &mut crate::ingame::modern_menu:
                 it.label = "MAP".into();
                 let _ = rect;
             } else if it.at.x0 < 150 && it.at.y0 > 270 && it.at.y0 < 300 {
-                // The number of computer players with its arrows.
-                it.kind = Kind::Value { text: sk.options.num_computers.to_string() };
+                // The number of computer players with its arrows, as - and + after it.
+                let atom = |name| fe.find_atom(name).map_or(Source::Nothing, Source::Atom);
+                let n = usize::from(sk.options.num_computers);
+                it.kind = Kind::Stepper {
+                    text: n.to_string(),
+                    sources: [atom("MG_RemoveCPUOpponent"), atom("MG_AddCPUOpponent")],
+                    can: [n > 1, n + 1 < sk.max_players()],
+                };
                 it.label = "COMPUTER PLAYERS".into();
-                for (name, label, dx) in [("MG_RemoveCPUOpponent", "FEWER", 0), ("MG_AddCPUOpponent", "MORE", 1)] {
-                    if let Some(a) = fe.find_atom(name) {
-                        let mut b = Item::new(Kind::Button { primary: false, back: false }, label.into(), Source::Atom(a), crate::canvas::Rect::new(it.at.x0 + dx, it.at.y0 + 2, it.at.x1 + dx, it.at.y1 + 2));
-                        b.section = it.section;
-                        extra.push(b);
-                    }
-                }
             }
         }
-    }
-    // The computer players' buttons go after their count.
-    for b in extra {
-        let after = m.items.iter().position(|i| i.label == "COMPUTER PLAYERS").map_or(m.items.len(), |k| k + 1);
-        let at = m.items[after..].iter().position(|i| matches!(i.kind, Kind::Button { .. }) && i.label != "FEWER").map_or(after, |k| after + k);
-        let at = if b.label == "MORE" { m.items.iter().position(|i| i.label == "FEWER").map_or(at, |k| k + 1) } else { after };
-        m.items.insert(at, b);
     }
     if m.name == "Skirmish_Resource" {
         let resources = section(m, "RESOURCES");
