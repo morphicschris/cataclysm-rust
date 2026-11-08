@@ -90,6 +90,12 @@ pub struct AttackState {
     /// +0x1cd0 (the defence manager's): the square of the radius of the mothership's sphere of
     /// influence, a quarter of the squared distance to the enemy mothership.
     pub sphere_of_influence: f32,
+    /// +0xc04.. (count +0xc18): the scouts' teams.
+    #[serde(default, deserialize_with = "crate::save::added_in_15")]
+    pub recon_teams: Vec<usize>,
+    /// +0x1ca4: the scout sent to look at the armada's targets.
+    #[serde(default, deserialize_with = "crate::save::added_in_15")]
+    pub recon_target_team: Option<usize>,
 }
 
 fn rnd(u: &mut Universe) -> u32 {
@@ -160,11 +166,17 @@ pub fn init(u: &mut Universe, p: usize) {
         armada_target_seen: false,
         teams: vec![None; ATTACK_SLOTS],
         sphere_of_influence: 0.0,
+        recon_teams: Vec::new(),
+        recon_target_team: None,
     };
 }
 
 /// `aiaTeamDied`: the team leaves its slot.
 pub fn team_died(a: &mut AiPlayer, t: usize) {
+    a.attack.recon_teams.retain(|&x| x != t);
+    if a.attack.recon_target_team == Some(t) {
+        a.attack.recon_target_team = None;
+    }
     for s in &mut a.attack.teams {
         if *s == Some(t) {
             *s = None;
@@ -195,7 +207,7 @@ pub fn manager(u: &mut Universe, p: usize) {
         }
     }
     let divided = !ai(u, p).new_ships.is_empty() && divide_new_ships(u, p);
-    // (feature::ADVANCED_RECON: more reconnaissance teams as enemy blobs show up.)
+    super::recon::more_scouts(u, p);
     if ai(u, p).attack_features != 0 && !divided {
         process_attack_teams(u, p);
     }
@@ -561,12 +573,21 @@ fn time_attack(u: &mut Universe, p: usize) {
 fn armada(u: &mut Universe, p: usize) {
     let n = team::num_teams_with_flag(u, p, team::team_flag::ARMADA);
     let a = &ai(u, p).attack;
-    if usize::from(a.armada_threshold) < n && a.armada_targets.is_empty() {
+    if usize::from(a.armada_threshold) >= n {
+        return;
+    }
+    if a.armada_targets.is_empty() {
         let (targets, seen) = find_armada_target(u, p);
         let a = ai_mut(u, p);
         a.attack.armada_targets = targets;
         a.attack.armada_target_seen = seen;
-        // (A reconnaissance team is sent when the player's ships do not see the targets.)
+    }
+    // A scout goes to look at targets the player's ships do not see.
+    let a = &ai(u, p).attack;
+    if !a.armada_targets.is_empty() && !a.armada_target_seen && a.recon_target_team.is_none() {
+        let targets = a.armada_targets.clone();
+        let t = super::recon::send_recon(u, p, &targets);
+        ai_mut(u, p).attack.recon_target_team = t;
     }
 }
 
@@ -595,6 +616,7 @@ fn ship_value(u: &Universe, id: ShipId) -> i32 {
 /// primary enemy's ships in it, whether the player has ships there and whether a mothership is.
 pub struct EnemyBlob {
     pub centre: hwc_math::Vector,
+    pub radius: f32,
     pub ships: Vec<ShipId>,
     pub value: i32,
     pub own: bool,
@@ -618,7 +640,7 @@ pub fn enemy_blobs(u: &Universe, p: usize) -> Vec<EnemyBlob> {
             continue;
         }
         let ships: Vec<ShipId> = b.ships.iter().copied().filter(|&id| u.ships.get(id).is_some_and(|s| s.player == p || !crate::cloak::is_cloaked(s) || crate::visibility::visible_to_player(u, id, p))).collect();
-        let mut r = EnemyBlob { centre: b.centre, ships, value: 0, own: false, mothership: false };
+        let mut r = EnemyBlob { centre: b.centre, radius: b.radius, ships, value: 0, own: false, mothership: false };
         for &id in &r.ships {
             let s = u.ships.ship(id);
             let mut v = ship_value(u, id);

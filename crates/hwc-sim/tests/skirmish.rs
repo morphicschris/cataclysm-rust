@@ -558,3 +558,49 @@ fn a_mothership_jumps_through_hyperspace() {
     assert!(off < 2000.0, "{off}");
     assert!(u.total_time_elapsed > 20.0, "at least the ether wait");
 }
+
+/// Reconnaissance (`aiaProcessSpecialTeams`, `aioCreateReconaissance`, `aimProcessActiveRecon`):
+/// a hard computer player sends out two scouts on its first turn, which get their ships and
+/// fly away from the mothership, from blob to blob.
+#[test]
+fn computer_players_send_scouts() {
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    let mut options = default_game(d);
+    options.cpu_difficulty = 90;
+    options.flags &= !hwc_sim::multiplayer::mg::RESEARCH_ENABLED;
+    let mut s = setup("Coldwar2", &[ShipRace::Somtaaw, ShipRace::Beast], options, 7);
+    for p in &mut s.players {
+        p.computer = true;
+    }
+    let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, s).expect("start");
+    let mut farthest = [0f32; 2];
+    for minute in 0..6 {
+        for _ in 0..16 * 60 {
+            run.step();
+        }
+        let u = &run.universe;
+        for p in 0..2 {
+            let a = u.ai.players[p].as_ref().unwrap();
+            let ms = u.base.players[p].mothership.and_then(|m| u.ships.get(m)).map(|s| s.posinfo.position);
+            let mut desc = Vec::new();
+            for &t in &a.attack.recon_teams {
+                let Some((_, tm)) = u.ai.teams[t].as_ref() else { continue };
+                let ships: Vec<String> = tm.ships.iter().map(|&id| {
+                    let s = u.ships.ship(id);
+                    let d = ms.map_or(0.0, |m| ((s.posinfo.position.x - m.x).powi(2) + (s.posinfo.position.y - m.y).powi(2) + (s.posinfo.position.z - m.z).powi(2)).sqrt());
+                    farthest[p] = farthest[p].max(d);
+                    format!("{:?} {d:.0}", s.ship_type)
+                }).collect();
+                desc.push(format!("{:?} {ships:?}", tm.current.map(|c| tm.moves[c].move_type())));
+            }
+            println!("min {minute} p{p}: scouts {desc:?}");
+        }
+    }
+    let u = &run.universe;
+    for p in 0..2 {
+        assert!(u.ai.players[p].as_ref().unwrap().attack.recon_teams.len() >= 2, "a basic and an advanced scout, and more as enemy blobs show up");
+    }
+    println!("farthest scouts {farthest:?}");
+    assert!(farthest.iter().all(|&f| f > 5000.0), "the scouts went out: {farthest:?}");
+}

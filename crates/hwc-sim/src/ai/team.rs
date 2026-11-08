@@ -95,6 +95,23 @@ pub enum MoveKind {
     DefendMothership,
     /// `MOVE_FORMATION`.
     Formation { formation: i32 },
+    /// `MOVE_COUNTSHIPS`: done at once (its process is an empty stub in Cataclysm).
+    CountShips,
+    /// `MOVE_ACTIVERECON`: wander the blobs, going out (towards home) or in, among the enemy
+    /// blobs or all of them (+0x14, +0x18).
+    ActiveRecon { out: bool, enemy: bool },
+    /// `MOVE_SHIPRECON`: find the targets (+0x14); those found so far (+0x18).
+    ShipRecon { targets: Vec<ShipId>, found: Vec<ShipId> },
+    /// `MOVE_INTERCEPT`: fly to the target (+0x14), looking again every `wait` seconds
+    /// (+0x18, until +0x1c) at the point flown to (+0x20) and whether it was moving (+0x2c).
+    Intercept { target: Option<ShipId>, wait: f32, until: f32, point: Vector, moving: bool },
+}
+
+/// The event handlers a move can carry (`aieHandlerSet*`, `aih*Handler`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Handler {
+    /// `aihReconaissanceTeamDiedHandler`.
+    Reconnaissance,
 }
 
 /// One move (`AITeamMove`, 0x170 bytes).
@@ -108,11 +125,14 @@ pub struct AiMove {
     /// +0x168 `formation`, +0x16c `tactics`.
     pub formation: i32,
     pub tactics: i32,
+    /// +0x13c: called when the team has no ships left (`aieHandlerSetTeamDied`).
+    #[serde(default, deserialize_with = "crate::save::added_in_15")]
+    pub team_died: Option<Handler>,
 }
 
 impl AiMove {
     pub fn new(kind: MoveKind, formation: i32, tactics: i32, wait: bool, remove: bool) -> Self {
-        AiMove { kind, processing: false, wait, remove, formation, tactics }
+        AiMove { kind, processing: false, wait, remove, formation, tactics, team_died: None }
     }
 
     pub fn move_type(&self) -> u32 {
@@ -129,6 +149,10 @@ impl AiMove {
             MoveKind::GuardShips { .. } => move_type::GUARD_SHIPS,
             MoveKind::DefendMothership => move_type::DEFEND_MOTHERSHIP,
             MoveKind::Formation { .. } => move_type::FORMATION,
+            MoveKind::CountShips => super::recon::move_type::COUNT_SHIPS,
+            MoveKind::ActiveRecon { .. } => super::recon::move_type::ACTIVE_RECON,
+            MoveKind::ShipRecon { .. } => super::recon::move_type::SHIP_RECON,
+            MoveKind::Intercept { .. } => super::recon::move_type::INTERCEPT,
         }
     }
 }
@@ -178,7 +202,7 @@ pub fn add_move(u: &mut Universe, t: usize, m: AiMove) {
 
 /// `aitAddmoveBeforeAndMakeCurrent`: `m` goes before the current move and becomes current,
 /// setting the team's tactics and formation when they change.
-fn add_move_before_and_make_current(u: &mut Universe, t: usize, mut m: AiMove) {
+pub(super) fn add_move_before_and_make_current(u: &mut Universe, t: usize, mut m: AiMove) {
     let Some(tm) = team(u, t) else { return };
     let Some(c) = tm.current else { return };
     let (cur_tactics, cur_formation) = (tm.moves[c].tactics, tm.moves[c].formation);
@@ -306,6 +330,7 @@ pub fn destroy(u: &mut Universe, t: usize) {
 pub fn execute(u: &mut Universe, p: usize) {
     let ids: Vec<usize> = u.ai.teams.iter().enumerate().filter_map(|(i, t)| t.as_ref().filter(|t| t.0 == p).map(|_| i)).collect();
     for t in ids {
+        events(u, t);
         let Some(tm) = team(u, t) else { continue };
         if tm.flags & team_flag::DESTROY != 0 {
             destroy(u, t);
@@ -371,6 +396,22 @@ pub fn execute(u: &mut Universe, p: usize) {
     }
 }
 
+/// `aieExecute` (0x403a70), the events ported: a team with no ships left calls its current
+/// move's team-died handler.
+fn events(u: &mut Universe, t: usize) {
+    let Some(tm) = team(u, t) else { return };
+    let Some(c) = tm.current else { return };
+    let m = &tm.moves[c];
+    if m.move_type() == move_type::DONE {
+        return;
+    }
+    if let (Some(h), true) = (m.team_died, tm.ships.is_empty()) {
+        match h {
+            Handler::Reconnaissance => super::recon::team_died_handler(u, t),
+        }
+    }
+}
+
 /// The current move's process function; true when it is done.
 fn process(u: &mut Universe, t: usize) -> bool {
     let tm = team(u, t).expect("team");
@@ -406,6 +447,10 @@ fn process(u: &mut Universe, t: usize) -> bool {
             set_processing(u, t, c, true);
             true
         }
+        MoveKind::CountShips => true,
+        MoveKind::ActiveRecon { .. } => super::recon::process_active_recon(u, t, c),
+        MoveKind::ShipRecon { .. } => super::recon::process_ship_recon(u, t, c),
+        MoveKind::Intercept { .. } => super::recon::process_intercept(u, t, c),
     }
 }
 
@@ -889,8 +934,15 @@ pub fn centre(u: &Universe, ships: &[ShipId]) -> Vector {
 pub fn ship_died(u: &mut Universe, id: ShipId) {
     for (_, tm) in u.ai.teams.iter_mut().flatten() {
         for m in &mut tm.moves {
-            if let MoveKind::Attack { targets } | MoveKind::FlankAttack { targets } | MoveKind::GuardShips { ships: targets } = &mut m.kind {
-                targets.retain(|&s| s != id);
+            match &mut m.kind {
+                MoveKind::Attack { targets } | MoveKind::FlankAttack { targets } | MoveKind::GuardShips { ships: targets } => targets.retain(|&s| s != id),
+                // `aimShipReconShipDied`, `aimInterceptShipDied`.
+                MoveKind::ShipRecon { targets, found } => {
+                    targets.retain(|&s| s != id);
+                    found.retain(|&s| s != id);
+                }
+                MoveKind::Intercept { target, .. } if *target == Some(id) => *target = None,
+                _ => {}
             }
         }
     }

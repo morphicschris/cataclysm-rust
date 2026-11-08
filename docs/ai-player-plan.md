@@ -139,8 +139,21 @@ once when no RUs are left to harvest) and `aiaArmada` with `aiuFindArmadaTarget`
 The orders ported: mothership takeouts fast, guard, big and huge, and the fighter, corvette and
 frigate strikes, with the exact ship lists and worth ratios of each race (the Beast's depending on
 the types it has acquired). Not yet: the escort teams of the guard and huge takeouts, the target
-takeouts (types 4 and 5), harass, capture, mines, reconnaissance, threats to the mothership in a
-temporary guard (the defence manager's sphere of influence lists) and hyperspace jumps.
+takeouts (types 4 and 5), harass and hyperspace jumps. Capture, mines and the special defences
+need HW1 races' ships (salvage corvettes, minelayers, cloak and gravity well generators), so a
+Somtaaw or Beast player never gets them.
+
+Reconnaissance (`hwc_sim::ai::recon`): `aiaProcessSpecialTeams` on the first turn makes a scout
+team at the standard level (`aioCreateReconaissance` 0: towards a point 15000 from the enemy
+mothership, then wandering the enemy blobs) and another at the advanced level (kind 2), and
+`aiaAttackManager` adds kind 2 scouts while there are more than five enemy blobs per scout (up to
+five). `aimProcessActiveRecon` flies five seconds towards the enemy mothership, then from blob to
+blob (`aiuFindStandoffOfNextNearest(Enemy)BlobIn/Out`, `aiuGenerateRandomStandoffPoint`),
+turning back and switching between enemy and all blobs by the number of enemy blobs. A scout team
+that loses its ships starts over (`aihReconaissanceTeamDiedHandler`, the only event handler
+ported so far, run by `aieExecute`). `aiaArmada` sends the nearest scout to look at targets the
+player's ships do not see (`aiaSendRecon`, `aimProcessShipRecon`, `aimProcessIntercept`). Save
+version 15. Test: `skirmish::computer_players_send_scouts`.
 
 Finding: `statsGetOverallKillRating` is 0 for every ship in Cataclysm. The game ships HW1's
 `statfile.bin` (192,892 bytes, 83 types); `statsLoadFightStats` wants 0x41a70 bytes (98 types),
