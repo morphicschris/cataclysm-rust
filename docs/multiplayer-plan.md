@@ -60,8 +60,10 @@ tested by `crates/hwc-sim/tests/skirmish.rs`:
   code tests the bit, nothing burns fuel and `OUT_OF_FUEL_FRICTION` is never read; ships' fuel
   (+0x334) is only filled in (`InitStatShipInfo`, hyperspace, `refuelRepairShips`) and read by KAS.
 
-Left for later stages: alliances being formed and broken, and drawing crates (the
-simulation has them; the view does not yet).
+- Crates are drawn: the derelict mesh `race_derelict\dcrate` at each crate (uncoloured, not
+  turning); the effect of a crate expiring is not shown yet.
+
+Left for later stages: alliances being formed and broken.
 
 ## 2. Skirmish front end
 

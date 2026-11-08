@@ -113,6 +113,10 @@ struct MissileArt {
 /// Which missile mesh: the race's index and whether it is the mine.
 type MissileKey = (usize, bool);
 
+/// The crates of a multiplayer game (`MG_CratesEnabled`) are drawn with the missile art under
+/// this key: the derelict `R_Derelict\dCrate`, uncoloured.
+const CRATE_KEY: MissileKey = (usize::MAX, false);
+
 /// The type and colour scheme a ship is drawn with: a Mimic past half its morph shows its
 /// disguise (`MimicGetApparentShipType`, with the scheme `MimicChooseColourScheme` picked).
 fn drawn_look(u: &Universe, s: &hwc_sim::object::Ship) -> (ShipType, usize) {
@@ -725,6 +729,18 @@ impl World {
         }
     }
 
+    /// Crates drawn in the last frame (the crate art is loaded and uploaded, and crates lie in
+    /// view).
+    #[cfg(test)]
+    pub fn drawn_crates(&self) -> usize {
+        let loaded = self.missile_art.get(&CRATE_KEY).and_then(Option::as_ref).is_some_and(|a| a.gpu.contains_key(&0));
+        if loaded {
+            self.universe().mp.crates.list.len()
+        } else {
+            0
+        }
+    }
+
     fn load_art(&mut self) -> Result<(), String> {
         self.load_missile_art();
         let u = self.universe();
@@ -840,6 +856,16 @@ impl World {
                 });
             self.missile_art.insert((race_index, mine), art);
         }
+        // The crate (a derelict of type `Crate` in the original).
+        let u = self.sim.universe();
+        if !u.mp.crates.list.is_empty() && !self.missile_art.contains_key(&CRATE_KEY) {
+            let art = ShipDef::load(&self.src, "race_derelict", "dcrate")
+                .and_then(|d| ShipModel::load_lods(&self.src, &d))
+                .map_err(|e| eprintln!("warning: race_derelict\\dcrate: {e}"))
+                .ok()
+                .map(|(levels, table)| MissileArt { levels, table, gpu: BTreeMap::new() });
+            self.missile_art.insert(CRATE_KEY, art);
+        }
     }
 
     /// Loads the art of ships and asteroids that appeared since the last update.
@@ -951,6 +977,12 @@ impl World {
             };
             let gpu = renderer.upload_ship_lods(&art.levels, art.table.clone(), paint);
             art.gpu.insert(scheme, gpu);
+        }
+        if let Some(Some(art)) = self.missile_art.get_mut(&CRATE_KEY) {
+            if !art.gpu.contains_key(&0) {
+                let gpu = renderer.upload_ship_lods(&art.levels, art.table.clone(), TeamPaint::None);
+                art.gpu.insert(0, gpu);
+            }
         }
         for art in self.resource_art.values_mut().flatten() {
             if art.gpu.is_none() {
@@ -1959,6 +1991,37 @@ impl World {
                 });
                 frame.poses.push(None);
                 frame.ids.push((None, true));
+            }
+            // The crates, where they lie.
+            if let Some(gpu) = self.missile_art.get(&CRATE_KEY).and_then(Option::as_ref).and_then(|art| art.gpu.get(&0)) {
+                for c in &u.mp.crates.list {
+                    let p = v3(c.position);
+                    if !self.object_in_view(p, false) {
+                        continue;
+                    }
+                    let transform = Mat4::from_translation(p);
+                    let (centre, radius) = gpu.bounds();
+                    let r = screen_radius(view, proj, transform.transform_point3(centre), radius);
+                    let d2 = (p - eye).length_squared();
+                    let nominal = self.lod.select(gpu.level_count(), 0, r, d2, gpu.lod_table());
+                    frame.items.push(Item {
+                        kind: ItemKind::Missile(CRATE_KEY, 0),
+                        transform,
+                        age: 10.0,
+                        lod: drawn_lod(self.full_detail, nominal),
+                        clip: None,
+                        tint: TintParams::default(),
+                        time: now,
+                        construction: None,
+                        infection: None,
+                        lightning: false,
+                        fade: 1.0,
+                        untextured: false,
+                        retrofit: None,
+                    });
+                    frame.poses.push(None);
+                    frame.ids.push((None, true));
+                }
             }
         }
         self.combat_effects(&mut frame.effects, glow_texture);

@@ -2290,6 +2290,20 @@ fn skirmish_plays() {
     }
     rig.shot(g, "41_skirmish_enemy");
 
+    // A crate (`MG_CratesEnabled`) lies where it was put and is drawn with its derelict mesh.
+    let u = g.world.universe_mut();
+    let crate_at = hwc_math::Vector::new(p.x + 4000.0, p.y, p.z);
+    let now = u.total_time_elapsed;
+    u.mp.crates.list.push(hwc_sim::crates::Crate { position: crate_at, created: now });
+    g.world.camera.look_at = Vec3::new(crate_at.x, crate_at.y, crate_at.z);
+    g.world.camera.distance = 1500.0;
+    for _ in 0..32 {
+        rig.frame(g);
+    }
+    rig.shot(g, "41a_skirmish_crate");
+    assert!(g.world.drawn_crates() > 0, "the crate is drawn");
+    g.world.universe_mut().mp.crates.list.clear();
+
     // Hyperspace (on in the default game): the menu offers it for the mothership, the plate
     // opens in the sensors manager, and the click jumps it for its cost.
     g.selection = vec![ms0];
