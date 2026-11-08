@@ -1618,6 +1618,7 @@ impl App {
             }
             Request::LoadGame(key) => self.load_saved_game(std::path::Path::new(&key)),
             Request::Multiplayer => eprintln!("cataclysm: multiplayer is not available yet"),
+            Request::StartSkirmish(s) => eprintln!("cataclysm: skirmish on {} is not playable yet", s.map),
             Request::OpenUrl(url) => eprintln!("cataclysm: troubleshooting page: {url}"),
         }
     }

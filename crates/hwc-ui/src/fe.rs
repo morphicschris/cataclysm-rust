@@ -740,6 +740,44 @@ impl<G> FrontEnd<G> {
         }
     }
 
+    /// `uicTextEntrySet` + `uicTextBufferResize`: a text entry's text and length limit.
+    pub fn text_entry_set(&mut self, atom: AtomRef, text: &str, max_len: usize) {
+        let Some(id) = self.atom(atom).region else {
+            return;
+        };
+        if let Some(Control::Text(t)) = self.regions.get_mut(id).map(|r| &mut r.control) {
+            t.text = text.chars().take(max_len).collect();
+            t.cursor = t.text.chars().count();
+            t.max_len = max_len;
+        }
+    }
+
+    /// The message a text entry's callback is being called with (`CM_*`; 0 on creation).
+    pub fn text_message(&self, atom: AtomRef) -> u32 {
+        match self
+            .atom(atom)
+            .region
+            .and_then(|id| self.regions.get(id))
+            .map(|r| &r.control)
+        {
+            Some(Control::Text(t)) => t.message,
+            _ => 0,
+        }
+    }
+
+    /// Removes the last character of a text entry (`uicBackspaceCharacter`).
+    pub fn text_entry_backspace(&mut self, atom: AtomRef) {
+        let Some(id) = self.atom(atom).region else {
+            return;
+        };
+        if let Some(Control::Text(t)) = self.regions.get_mut(id).map(|r| &mut r.control) {
+            if t.cursor > 0 {
+                t.cursor -= 1;
+                t.text.remove(t.cursor);
+            }
+        }
+    }
+
     /// Whether a text entry has the keyboard (`regKeysFocussed`).
     pub fn keys_focussed(&self) -> bool {
         self.keys_focussed

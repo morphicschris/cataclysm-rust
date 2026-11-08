@@ -19,7 +19,8 @@ pub struct GameOptions {
     pub injection_amount: i32,
     pub lump_sum_time: u32,
     pub lump_sum_amount: i32,
-    /// `aiplayerDifficultyLevel` and `aiplayerBigotry` (the CPU sliders).
+    /// `aiplayerDifficultyLevel` and `aiplayerBigotry`: the CPU sliders, 0..100 (difficulty
+    /// below 34 is easy, above 66 hard).
     pub cpu_difficulty: u8,
     pub cpu_bigotry: u8,
 }
@@ -37,8 +38,8 @@ impl Default for GameOptions {
             injection_amount: 1500,
             lump_sum_time: 19200,
             lump_sum_amount: 2000,
-            cpu_difficulty: 1,
-            cpu_bigotry: 1,
+            cpu_difficulty: 50,
+            cpu_bigotry: 50,
         }
     }
 }

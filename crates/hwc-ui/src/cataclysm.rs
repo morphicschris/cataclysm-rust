@@ -44,6 +44,8 @@ pub enum Request {
     DisplayMode(Setting),
     /// Options were accepted: apply audio/video settings, save the config.
     ApplyOptions,
+    /// Start a skirmish against the computer (`utyStartSkirmish`).
+    StartSkirmish(crate::skirmish::SkirmishRequest),
 }
 
 /// Seconds the "keep this display mode?" box waits before restoring the old mode
@@ -98,6 +100,8 @@ pub struct Cataclysm {
     pub countdown_text: [String; 3],
     /// In-game screens' state (managers, overlay, keys); unused by the front end.
     pub ig: crate::ingame::IgState,
+    /// The skirmish screens' state.
+    pub skirmish: crate::skirmish::SkirmishUi,
 }
 
 impl Cataclysm {
@@ -131,6 +135,7 @@ impl Cataclysm {
                 "Original settings will restore in %ds.".into(),
             ],
             ig: Default::default(),
+            skirmish: Default::default(),
         }
     }
 
@@ -359,6 +364,7 @@ pub fn register(fe: &mut Fe) {
         fe.screen_start("Load_game");
     });
     crate::colpick::register(fe);
+    crate::skirmish::register(fe);
 
     // Options: navigation.
     fe.callback_add("OP_Options_Accept", options_accept);
