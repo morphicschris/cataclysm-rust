@@ -309,9 +309,11 @@ pub fn process_link_to_do(u: &mut Universe, cid: CommandId) -> bool {
                 sh.posinfo.position = pt.posinfo.position;
                 sh.rotinfo.coordsys = Matrix::from_cols(neg(pup), neg(pright), ph);
                 sh.posinfo.velocity = pt.posinfo.velocity;
-                // The link animations are not modelled; the merge happens when the time the
-                // original allows them runs out.
-                if !(now >= sh.base.link.timer) {
+                // The merge waits for both link animations to end (`madAnimation +0x14`, they
+                // hold their last frames) or for the time the original allows them.
+                let played = crate::mad::paused(u, ship) && crate::mad::paused(u, p);
+                let sh = u.ships.ship(ship);
+                if !played && !(now >= sh.base.link.timer) {
                     done = false;
                     continue;
                 }

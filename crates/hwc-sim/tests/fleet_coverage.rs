@@ -369,3 +369,39 @@ fn an_acv_turns_then_splits_into_two_acolytes() {
     }
     assert!((dist(&run) - apart).abs() < apart, "they stayed side by side until then");
 }
+
+/// Two Acolytes link: the merge waits for both link animations to end, or for the 2 s the
+/// original allows them, whichever comes first (`processLinkToDo`).
+#[test]
+fn acolytes_merge_when_their_link_animations_end() {
+    let Some(d) = data() else { return };
+    let spawns = vec![
+        Spawn { ship_type: ShipType::sAcolyte, player: 0, position: Vector::new(0.0, 0.0, 0.0) },
+        Spawn { ship_type: ShipType::sAcolyte, player: 0, position: Vector::new(300.0, 0.0, 0.0) },
+    ];
+    let mut run = one_run(d, ShipRace::Somtaaw, spawns, Vec::new());
+    let (a, b) = (run.ids[0], run.ids[1]);
+    run.step();
+    assert!(hwc_sim::link::cl_link(&mut run.universe, a, b), "link order");
+    let (mut merge_from, mut steps) = (None, 0);
+    while run.universe.ships.get(a).is_some() && run.universe.ships.get(b).is_some() {
+        run.step();
+        steps += 1;
+        assert!(steps < 16 * 120, "the Acolytes never merged");
+        let st = |id| run.universe.ships.get(id).map(|s| s.base.link.state);
+        if merge_from.is_none() && (st(a) == Some(4) || st(b) == Some(4)) {
+            merge_from = Some(steps);
+        }
+    }
+    let from = merge_from.expect("the merge state");
+    let took = (steps - from) as f32 / 16.0;
+    let anim = d.statics.ship(ShipType::sAcolyte).and_then(|s| s.mad.as_ref()).map(|m| m.length_of(2));
+    println!("merge took {took} s, link animation {anim:?} s");
+    assert!(took <= 2.0 + 1.0 / 16.0 + 1e-3, "no longer than the time allowed: {took}");
+    if let Some(Some(len)) = anim {
+        if len < 2.0 {
+            assert!(took < 2.0, "the animations ending first merge them: {took} vs {len}");
+        }
+    }
+    assert!(run.universe.ships.iter().any(|s| s.ship_type == ShipType::sACV), "an ACV");
+}

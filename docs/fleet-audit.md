@@ -53,14 +53,39 @@ a non-ship target of a ship class). The Beast carrier and the processors doing n
 - A Beast player on screen: `campaign_shots::beast_player_look` (`--ignored`) shows the fleet and its
   build, research and systems managers, all with the Beast's own lists and buttons.
 
+## Done in the third pass (checked line by line against the original)
+
+- A link merges when both link animations have ended (`madAnimation +0x14`), or after the 2 s
+  `processLinkToDo` allows them: the Acolytes' 1.6 s animation now sets the pace. Test
+  `fleet_coverage::acolytes_merge_when_their_link_animations_end`.
+- The Naggarok's EMP look is not bolts: `rndShipMovingUnderNaggarokEMP` sets a render state that
+  `meshCurrentMaterialDefault` turns into a material ambient of (v, v, 1), v bouncing between
+  0.45 and 1, stepped once per drawn frame and by 0.1 more per material (bands across the hull).
+  Ported as `ShipRenderState::emp_ambient` and the ship shader; the base steps per update rather
+  than per frame, so the pulse keeps its pace at any frame rate. Shots
+  `campaign_shots::fleet_looks` (33, 33b).
+- The ramming frigate plays `0x81c` when it latches on (`RammingFrigateCheckBump`), besides the
+  animation's own sound, and its first trail's ribbon is 1.3 times longer (4 with the ram upgrade)
+  while it charges or pushes (`RammingFrigateSetState`, `ramming::trail_scale`). The hive's
+  speech and chatter were already in.
+- Another player's cloaked ship the local player cannot see (`univShipVisibleToPlayer`) is not
+  drawn in the main view, nor are its trails (`rndRenderObject`, HW1's trail test). The player's
+  own cloaked ship drawing untextured, and the fade, match.
+- The Somtaaw carrier's doors (`CarrierHouseKeep`, `CarrierDockDoorCheck`, `CarrierInit`) were
+  checked and are 1:1.
+- The Beast player's build and research managers on a real skirmish level:
+  `campaign_shots::skirmish_plays` (40a, 40b).
+
+Found while checking, not ported: the per-ship part of `soundEventUpdate` (0x517e30: engine hums,
+ambient, damage and the special loops in `SOUNDEVENT +0x10`, which `RammingFrigateSetState` stops
+when it starts pushing) has no port, so no ship has engine sounds.
+
 ## Still open
 
 Nothing on the list from the original audit. Two things are knowingly left:
 
 - `MadSpecialCaseAnims` (gravity well generators and proximity sensors): those are Kushan and Taiidan
   ships, not in either fleet, and keep their own opening logic.
-- Beast research and the build list were checked with the Mission 1 level turned Beast. A real
-  skirmish level comes with the multiplayer work.
 
 Not gaps: `*_Save/_Load/_Fix/_PreFix` (the port saves differently), `MCV*` wrappers, and helper
 functions the Rust inlines. The AI player for skirmish is multiplayer work and is left for then.

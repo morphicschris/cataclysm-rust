@@ -146,6 +146,14 @@ fn cloak_fade(s: &hwc_sim::object::Ship) -> f32 {
     hwc_sim::cloak::fade_level(s).map_or(1.0, |level| 1.0 - level)
 }
 
+/// `rndRenderObject` draws nothing of another player's cloaked ship the local player cannot see
+/// (`cloakIsCloaked`, not `curPlayerPtr`'s, `!univShipVisibleToPlayer`), and its trails are left
+/// out on the same test (HW1's `rndMainViewRenderFunction`).
+fn cloak_hidden(u: &Universe, s: &hwc_sim::object::Ship) -> bool {
+    let me = crate::host::player();
+    hwc_sim::cloak::is_cloaked(s) && s.player != me && !hwc_sim::visibility::visible_to_player(u, s.id, me)
+}
+
 /// `rndRenderObject` sets `0x8f18b2` for the player's own fully cloaked ship: the materials drop
 /// their textures.
 fn cloak_untextured(s: &hwc_sim::object::Ship) -> bool {
@@ -235,6 +243,8 @@ struct Item {
     infection: Option<(ShipType, usize, f32)>,
     /// Electric bolts crawl over the hull.
     lightning: bool,
+    /// The Naggarok's EMP pulse ([`ShipRenderState::emp_ambient`]).
+    emp_ambient: Option<(f32, bool)>,
     /// Opacity (a cloak fading).
     fade: f32,
     /// Drawn without textures.
@@ -1267,6 +1277,10 @@ impl World {
                     fx.anim.update(clip, TICK);
                 }
             }
+            // A ramming frigate charging or pushing stretches its first trail.
+            if let Some(t) = fx.trails.trails.iter_mut().find(|t| t.slot == 0) {
+                t.ribbon_scale = hwc_sim::ships::ramming::trail_scale(u, id);
+            }
             let (_, transform) = Self::transform_of(s);
             // The nozzles go through the objects of the level drawn (`trailUpdate` reads the
             // ship's current level), posed or at rest.
@@ -1728,6 +1742,9 @@ impl World {
             if !self.ship_in_view(s, transform.w_axis.truncate()) {
                 continue;
             }
+            if cloak_hidden(u, s) {
+                continue;
+            }
             let color_scheme = drawn_look(u, s).1;
             let Some(art) = self.art.get(&t) else {
                 continue;
@@ -1814,7 +1831,7 @@ impl World {
                 moving: s.posinfo.is_moving != 0 || v3(s.posinfo.velocity).length_squared() > 1.0,
                 docked: s.base.dock_state == hwc_sim::dock::state::INSIDE,
                 hyperspacing: hs.is_some(),
-                cloaked: false,
+                cloaked: cloak_hidden(u, s),
                 suppressed: s.base.clamp.is_some() || s.flags & hwc_sim::base::SOF_MODULE != 0,
                 idle_dodge: s.is_dodging && s.ship_idle,
             };
@@ -1862,7 +1879,10 @@ impl World {
                 time: now,
                 construction,
                 infection: infection_look(u, s).map(|(t, p)| (t, s.color_scheme, p)),
-                lightning: lightning_on(u, s) || self.naggarok_emp(s),
+                lightning: lightning_on(u, s),
+                emp_ambient: self
+                    .naggarok_emp(s)
+                    .then(|| hwc_render::render_state::naggarok_base(u.update_counter)),
                 fade: cloak_fade(s),
                 untextured: cloak_untextured(s),
                 retrofit: hwc_sim::salvage::retrofit_look(u, id),
@@ -1874,7 +1894,6 @@ impl World {
                 .and_then(|t| t.levels.get(nominal))
                 .is_none_or(|l| l.kind == LodKind::Mesh);
             frame.ids.push((Some(id), mesh));
-            // TODO(render states): the Naggarok's EMP lightning once the simulation exposes it.
         }
         // Dead hulls the Remastered death sequences keep in view.
         if let Some(h) = &self.hwr {
@@ -1899,6 +1918,7 @@ impl World {
                     construction: None,
                     infection: None,
                     lightning: false,
+                    emp_ambient: None,
                     fade: 1.0,
                     untextured: false,
                     retrofit: None,
@@ -1934,6 +1954,7 @@ impl World {
                 construction: None,
                 infection: None,
                 lightning: false,
+                emp_ambient: None,
                 fade: 1.0,
                 untextured: false,
                 retrofit: None,
@@ -1985,6 +2006,7 @@ impl World {
                     construction: None,
                     infection: None,
                     lightning: false,
+                    emp_ambient: None,
                     fade: 1.0,
                     untextured: false,
                     retrofit: None,
@@ -2015,6 +2037,7 @@ impl World {
                         construction: None,
                         infection: None,
                         lightning: false,
+                        emp_ambient: None,
                         fade: 1.0,
                         untextured: false,
                         retrofit: None,
@@ -2200,15 +2223,17 @@ impl World {
         }
     }
 
-    /// `rndShipMovingUnderNaggarokEMP` (0x570480): the Naggarok under way crawls with bolts once
-    /// the script's `G_NaggarokEMP` counts more than the EMPs that have hit it.
+    /// `rndSetupObjectRenderStates`' Naggarok state (`rndShipMovingUnderNaggarokEMP` 0x570480):
+    /// the Naggarok (type 0x6d) under way once the script's `G_NaggarokEMP` counts more than the
+    /// EMPs that have hit it (unsigned). `meshCurrentMaterialDefault` then pulses its materials'
+    /// ambient ([`ShipRenderState::emp_ambient`]); it draws no bolts.
     fn naggarok_emp(&self, s: &hwc_sim::object::Ship) -> bool {
         s.ship_type == ShipType::dBeastMothership
             && s.posinfo.velocity.mag_sq() > 0.01
             && self
                 .mission_run()
                 .and_then(|r| r.var(None, "G_NaggarokEMP"))
-                .is_some_and(|v| (s.disable.emp_count as i64) < i64::from(v))
+                .is_some_and(|v| (s.disable.emp_count as u32) < v as u32)
     }
 
     /// The ship instances and their render states for a prepared frame.
@@ -2265,6 +2290,7 @@ impl World {
                 construction: item.construction,
                 infection,
                 emp_lightning: item.lightning,
+                emp_ambient: item.emp_ambient,
                 fade: item.fade,
                 untextured: item.untextured,
                 phase,

@@ -195,8 +195,13 @@ pub struct ShipRenderState<'a> {
     pub infection: Option<(&'a GpuShip, f32)>,
     /// Phase blend stage and value, with the ship it becomes and its collision box.
     pub phase: Option<PhaseState<'a>>,
-    /// Naggarok EMP: lightning crawls over the hull edges.
+    /// Electric bolts crawl over the hull edges (the ship's flicker window, `rndRenderObject`).
     pub emp_lightning: bool,
+    /// The Naggarok under way after the script's EMP (`meshCurrentMaterialDefault` with
+    /// `rndShipMovingUnderNaggarokEMP`): every material's ambient becomes (v, v, 1), v pulsing
+    /// between 0.45 and 1. The ship's base level and whether it is rising; each material in turn
+    /// steps it by 0.1 more ([`naggarok_ambient`]).
+    pub emp_ambient: Option<(f32, bool)>,
     /// Seconds, for time-varying effects (lightning).
     pub time: f32,
     /// Forces the sorted transparent pass.
@@ -225,11 +230,50 @@ impl Default for ShipRenderState<'_> {
             infection: None,
             phase: None,
             emp_lightning: false,
+            emp_ambient: None,
             time: 0.0,
             transparent: false,
             construction: None,
         }
     }
+}
+
+/// `meshCurrentMaterialDefault`'s Naggarok level after `steps` steps of `step` from `level`,
+/// bouncing between 0.45 and 1 (the bounds clamp and turn it).
+pub fn naggarok_step(mut level: f32, mut rising: bool, step: f32, steps: u32) -> (f32, bool) {
+    for _ in 0..steps {
+        if rising {
+            level += step;
+            if 1.0 < level {
+                rising = false;
+                level = 1.0;
+            }
+        } else {
+            level -= step;
+            if level < 0.45 {
+                rising = true;
+                level = 0.45;
+            }
+        }
+    }
+    (level, rising)
+}
+
+/// The ambient level of a ship's `index`th material under the Naggarok's EMP: the ship's base
+/// level stepped by 0.1 once per material drawn, the first included.
+pub fn naggarok_ambient(base: (f32, bool), index: u32) -> f32 {
+    naggarok_step(base.0, base.1, 0.1, index + 1).0
+}
+
+/// The base level for the ship under the EMP: the original steps it by the update period
+/// (`universe.phystimeelapsed`, 1/16 s) each frame it draws the ship; here each update, so the
+/// pulse keeps the same pace at any frame rate. `updates` counts the updates so far.
+pub fn naggarok_base(updates: u32) -> (f32, bool) {
+    // Down from 1 to 0.45 and back: 0.55 each way, in steps of 1/16.
+    const STEP: f32 = 0.0625;
+    let span = 0.55;
+    let pos = (updates as f32 * STEP) % (2.0 * span);
+    if pos < span { (1.0 - pos, false) } else { (0.45 + (pos - span), true) }
 }
 
 impl ShipRenderState<'_> {
@@ -341,5 +385,24 @@ mod tests {
             ..Default::default()
         };
         assert!(s.is_transparent());
+    }
+
+    #[test]
+    fn the_naggarok_pulse_bounces_between_its_bounds() {
+        // From 1 down: one update of 1/16 a step, then up again from 0.45.
+        assert_eq!(naggarok_base(0), (1.0, false));
+        let (v, rising) = naggarok_base(8);
+        assert!(!rising && (v - 0.5).abs() < 1e-5, "{v}");
+        let (v, rising) = naggarok_base(9);
+        assert!(rising && (0.45..0.5).contains(&v), "{v}");
+        for n in 0..200 {
+            let (v, _) = naggarok_base(n);
+            assert!((0.45..=1.0).contains(&v), "{n}: {v}");
+        }
+        // Each material steps it by 0.1 more, turning at the bounds.
+        assert!((naggarok_ambient((1.0, false), 0) - 0.9).abs() < 1e-6);
+        assert!((naggarok_ambient((0.5, false), 0) - 0.45).abs() < 1e-6);
+        assert!((naggarok_ambient((0.5, false), 1) - 0.55).abs() < 1e-6);
+        assert!((naggarok_ambient((0.95, true), 0) - 1.0).abs() < 1e-6);
     }
 }

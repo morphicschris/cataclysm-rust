@@ -593,6 +593,10 @@ pub struct ShipTrail {
     /// Radians, or -1 for none.
     pub angle: f32,
     pub ribbon_adjust: f32,
+    /// A factor on [`Self::ribbon_adjust`] from the simulation (a ramming frigate's charge
+    /// multiplies the stored value, a default -1 included, which then no longer reads as the
+    /// default).
+    pub ribbon_scale: f32,
     pub scale_cap: f32,
     pub state: GlowState,
     pub counter: u8,
@@ -622,6 +626,7 @@ impl ShipTrail {
                 p.angle.to_radians()
             },
             ribbon_adjust: p.ribbon_adjust,
+            ribbon_scale: 1.0,
             scale_cap: p.scale_cap,
             state: GlowState::Contracted,
             counter: 0,
@@ -688,10 +693,11 @@ impl ShipTrail {
     }
 
     fn ribbon(&self) -> f32 {
-        if self.ribbon_adjust == -1.0 {
+        let r = self.ribbon_adjust * self.ribbon_scale;
+        if r == -1.0 {
             1.0
         } else {
-            self.ribbon_adjust
+            r
         }
     }
 

@@ -1994,7 +1994,8 @@ fn fleet_looks() {
     assert!(said.iter().any(|m| m.contains("No Salvagable Ships Found")), "{said:?}");
     assert_eq!(g.messages.last().and_then(|m| m.ship), Some(crate::host::ui_id(worker)), "the message focuses on the worker");
     rig.shot(g, "34_fleet_nothing_to_salvage");
-    // The Naggarok under way after the script's G_NaggarokEMP: bolts crawl over it.
+    // The Naggarok under way after the script's G_NaggarokEMP: its hull's ambient pulses
+    // blue-white (meshCurrentMaterialDefault), a band per material.
     let u = g.world.universe_mut();
     let nag = hwc_sim::base::create_ship(u, T::dBeastMothership, 1, at(-30_000.0, 0.0), Default::default()).expect("naggarok");
     let to = at(-30_000.0, 40_000.0);
@@ -2010,6 +2011,11 @@ fn fleet_looks() {
     // (It only moves under its mission's script: the shot gives it a speed.)
     g.world.universe_mut().ships.ship_mut(nag).posinfo.velocity = hwc_math::Vector::new(0.0, 0.0, 200.0);
     rig.shot(g, "33_fleet_naggarok_emp");
+    for _ in 0..6 {
+        rig.frame(g);
+        g.world.universe_mut().ships.ship_mut(nag).posinfo.velocity = hwc_math::Vector::new(0.0, 0.0, 200.0);
+    }
+    rig.shot(g, "33b_fleet_naggarok_emp_later");
 
 }
 
@@ -2281,6 +2287,26 @@ fn skirmish_plays() {
     let ours = u.ship_list.iter().filter(|&&id| u.ships.ship(id).player == 0).count();
     println!("skirmish: {ours} ships of ours, {} RUs", u.base.players[0].resource_units);
     rig.shot(g, "40_skirmish_start");
+    // The Beast player's build and research managers on a real skirmish level (not the
+    // Mission 1 level turned Beast of `beast_player_look`).
+    g.selection = vec![ms0];
+    rig.key(g, b'B' as u16);
+    for _ in 0..4 {
+        rig.frame(g);
+    }
+    let offered = hwc_sim::level::construction_list(g.world.universe(), ms0);
+    println!("the Beast mothership offers {} ships", offered.len());
+    assert!(!offered.is_empty(), "the Beast mothership offers ships");
+    rig.shot(g, "40a_skirmish_beast_build");
+    rig.key(g, 27);
+    rig.frame(g);
+    rig.key(g, b'R' as u16);
+    for _ in 0..4 {
+        rig.frame(g);
+    }
+    rig.shot(g, "40b_skirmish_beast_research");
+    rig.key(g, 27);
+    rig.frame(g);
     let p = g.world.universe().ship(ms1).expect("ship").posinfo.position;
     g.world.follow_focus = false;
     g.world.camera.look_at = Vec3::new(p.x, p.y, p.z);

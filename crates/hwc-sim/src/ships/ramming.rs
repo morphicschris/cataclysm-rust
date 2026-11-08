@@ -15,9 +15,10 @@
 //! (`EGT_RAMMING_FRIGATE_IMPACT_EFFECT`), the vents of its collapsing bow
 //! (`EGT_RAM_VENT`) and the cutting beam while it pushes (`EGT_BULLET_CUTTING_BEAM`).
 //!
-//! Not reproduced: the chatter and trail scaling of the original
-//! (presentation only; the state changes are reported as [`Effect::State`] events), and the
-//! ray tests against the target's polygon mesh (`meshShipSegmentCollide`: the snap point and the
+//! The chatter of the original is made here, and its sound when the rammer latches on; the view
+//! lengthens the first engine trail while it charges or pushes ([`trail_scale`]).
+//!
+//! Not reproduced: the ray tests against the target's polygon mesh (`meshShipSegmentCollide`: the snap point and the
 //! cutting beam's length), which use the target's collision box here (they test the
 //! full-detail mesh; the simulation keeps only the LOD 3 hull of the hit tests,
 //! [`crate::statics::hull`]).
@@ -442,6 +443,18 @@ pub fn is_rammer(u: &Universe, id: ShipId) -> bool {
 /// `RammingFrigateIsPushing` (0x5bb4f0).
 pub fn is_pushing(u: &Universe, id: ShipId) -> bool {
     spec(u, id).is_some_and(|r| r.state == state::PUSHING)
+}
+
+/// `RammingFrigateSetState`'s trail: the ribbon of the rammer's first trail (`ship +0x42c`,
+/// `shiptrail.ribbonadjust`) is multiplied by 1.3 (0x8bbb54; 4 with the ram upgrade, 0x8bbb58)
+/// on entering the charging, pushing or unused 4 states and divided back on leaving them. The
+/// view applies it as a factor while the state lasts; 1 otherwise.
+pub fn trail_scale(u: &Universe, id: ShipId) -> f32 {
+    let Some(r) = spec(u, id) else { return 1.0 };
+    if !matches!(r.state, state::CHARGING | 4 | state::PUSHING) {
+        return 1.0;
+    }
+    if has_ram_upgrade(u, id) { f32::from_bits(0x4080_0000) } else { f32::from_bits(0x3fa6_6666) }
 }
 
 /// `RammingFrigateIsRamming` (0x5bc920): a rammer with a run in progress.
@@ -984,6 +997,8 @@ fn check_bump(u: &mut Universe, r: ShipId, bumped: ShipId) {
                 s.push_heading = rh;
             }
             restart_effect(u, r);
+            // `soundEventPlay(rammer, 0x81c, 0)`, beside the animation's own sound.
+            crate::mad::ship_sound(u, r, 0x81c);
             use crate::battle_chatter::{attempt, bce, can_chatter_at_this_time};
             if can_chatter_at_this_time(u, bce::RAM_COMPLETE, Some(r)) {
                 attempt(u, bce::RAM_COMPLETE, r, -1);

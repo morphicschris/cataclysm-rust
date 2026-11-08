@@ -58,6 +58,8 @@ struct ObjectUniform {
     tint: [f32; 4],
     engine_glow: [f32; 4],
     team: [f32; 4],
+    /// The Naggarok's EMP pulse: on, base level, rising.
+    emp: [f32; 4],
 }
 
 #[repr(C)]
@@ -659,6 +661,8 @@ struct InstanceParams {
     exponent: f32,
     /// The still-to-be-built part of a hull under construction (blue ambient).
     ghost: bool,
+    /// [`ShipRenderState::emp_ambient`].
+    emp: Option<(f32, bool)>,
 }
 
 impl Default for InstanceParams {
@@ -673,6 +677,7 @@ impl Default for InstanceParams {
             team: [1.0; 4],
             exponent: 1.0,
             ghost: false,
+            emp: None,
         }
     }
 }
@@ -692,6 +697,7 @@ fn object_uniform(model: Mat4, p: &InstanceParams) -> ObjectUniform {
         tint: [p.tint[0], p.tint[1], f32::from(u8::from(p.ghost)), f32::from(u8::from(p.untextured))],
         engine_glow: p.engine_glow,
         team: p.team,
+        emp: p.emp.map_or([0.0; 4], |(level, rising)| [1.0, level, f32::from(u8::from(rising)), 0.0]),
     }
 }
 
@@ -1250,7 +1256,9 @@ impl Renderer {
                     flags: [
                         f32::from(u8::from(info.self_illuminated())),
                         f32::from(u8::from(info.textured)),
-                        0.0,
+                        // Its place in the level's draw order (the Naggarok's EMP pulse steps
+                        // once per material).
+                        materials.len() as f32,
                         0.0,
                     ],
                 };
@@ -1559,6 +1567,7 @@ impl Renderer {
                 ],
                 exponent: 1.0,
                 ghost: false,
+                emp: state.emp_ambient,
             };
             let transparent = state.is_transparent();
             let mut draw_main = true;

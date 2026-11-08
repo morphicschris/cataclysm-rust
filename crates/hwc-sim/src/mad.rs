@@ -120,6 +120,11 @@ impl MadStatic {
     }
 
     /// The file animation a number given to `madAnimationStart` plays.
+    /// Seconds animation `index` (numbered as `madAnimationStart` takes it) runs.
+    pub fn length_of(&self, index: i32) -> Option<f32> {
+        self.file_animation(index).map(|w| w.end - w.start)
+    }
+
     fn file_animation(&self, index: i32) -> Option<Window> {
         let f = match &self.remap {
             Some(r) => *r.get(usize::try_from(index).ok()?)?,

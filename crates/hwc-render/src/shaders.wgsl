@@ -37,12 +37,14 @@ struct Object {
     engine_glow: vec4<f32>,
     // rgb: normalised team colour (glow meshes: colour, a: alpha)
     team: vec4<f32>,
+    // The Naggarok under its EMP: x on, y base level, z rising.
+    emp: vec4<f32>,
 };
 
 struct Material {
     ambient: vec4<f32>,
     diffuse: vec4<f32>,
-    // x: self-illuminated, y: textured
+    // x: self-illuminated, y: textured, z: index in the level's draw order
     flags: vec4<f32>,
 };
 
@@ -103,9 +105,36 @@ fn tint_offset(color: u32, flags: u32) -> vec3<f32> {
     return vec3<f32>(0.0);
 }
 
+// The material's ambient: the Naggarok under its EMP pulses (meshCurrentMaterialDefault: the
+// ship's level stepped by 0.1 for each material drawn, bouncing between 0.45 and 1, as
+// (v, v, 1)); the unbuilt part of a hull under construction takes a blue ambient (tint.z set).
+fn material_ambient() -> vec3<f32> {
+    if (object.emp.x > 0.5) {
+        var v = object.emp.y;
+        var rising = object.emp.z > 0.5;
+        let steps = u32(material.flags.z) + 1u;
+        for (var i = 0u; i < steps; i++) {
+            if (rising) {
+                v += 0.1;
+                if (1.0 < v) {
+                    rising = false;
+                    v = 1.0;
+                }
+            } else {
+                v -= 0.1;
+                if (v < 0.45) {
+                    rising = true;
+                    v = 0.45;
+                }
+            }
+        }
+        return vec3<f32>(v, v, 1.0);
+    }
+    return select(material.ambient.rgb, vec3<f32>(0.0, 0.0, 0.75), object.tint.z > 0.5);
+}
+
 fn lit(n: vec3<f32>) -> vec3<f32> {
-    // The unbuilt part of a hull under construction takes a blue ambient (tint.z set).
-    let ambient = select(material.ambient.rgb, vec3<f32>(0.0, 0.0, 0.75), object.tint.z > 0.5);
+    let ambient = material_ambient();
     var c = ambient * frame.global_ambient.rgb;
     let count = i32(frame.params.x);
     for (var i = 0; i < count; i++) {
@@ -181,7 +210,7 @@ fn shadow_at(world: vec3<f32>, n: vec3<f32>) -> f32 {
 // occlusion taken off the ambient (and half off the diffuse), and the main light's diffuse
 // shadowed. Unclamped when tone mapping.
 fn lit_modern(n: vec3<f32>, shadow: f32, occlusion: f32) -> vec3<f32> {
-    let ambient = select(material.ambient.rgb, vec3<f32>(0.0, 0.0, 0.75), object.tint.z > 0.5);
+    let ambient = material_ambient();
     var light = frame.global_ambient.rgb;
     let count = i32(frame.params.x);
     for (var i = 0; i < count; i++) {
