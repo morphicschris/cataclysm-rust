@@ -56,8 +56,12 @@ pub const LEFT_OUT: [&str; 7] = [
 /// The labels of what [`LEFT_OUT`] leaves out.
 pub const LEFT_OUT_TEXTS: [&str; 6] = ["GAMES IN", "ROOM", "ROOMS", "CONTEST SERVER", "SIERRA.COM", "QUIT"];
 
+/// What the internet screens keep of [`LEFT_OUT`]: the lobby server's rooms.
+pub const ROOM_PARTS: [&str; 4] = ["MG_CurrentChannel", "MG_ChatHistoryWindow", "MG_UserNameWindow", "MG_ChatTextEntry"];
+pub const ROOM_TEXTS: [&str; 3] = ["ROOM", "ROOMS", "QUIT"];
+
 /// The multiplayer screens [`LEFT_OUT`] applies to.
-pub const LOBBY_SCREENS: [&str; 6] = ["Channel_Chat", "Available_Games", "Player_Wait", "Captain_Wait", "LAN_Login", "Connecting"];
+pub const LOBBY_SCREENS: [&str; 9] = ["Channel_Chat", "Available_Games", "Player_Wait", "Captain_Wait", "LAN_Login", "Connecting", "Internet_Login", "Available_Channels", "Create_Channel"];
 
 /// 0: the options file decides; 1 modern; 2 original (`--front-end`).
 static OVERRIDE: AtomicU8 = AtomicU8::new(0);
@@ -102,6 +106,7 @@ pub fn title_for(screen: &str) -> &'static str {
         "LAN_Login" => "LAN GAME",
         "Available_Games" => "LAN GAMES",
         "Connecting" => "CONNECTING",
+        "Channel_Chat" => "INTERNET LOBBY",
         _ => "",
     }
 }

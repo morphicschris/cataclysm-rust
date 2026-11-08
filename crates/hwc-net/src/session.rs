@@ -97,11 +97,25 @@ impl Session {
 
     /// Joins the game at `addr`.
     pub fn join(addr: impl ToSocketAddrs, name: &str, timeout: Duration) -> io::Result<Self> {
-        let mut conn = Conn::connect(addr, timeout)?;
+        let conn = Conn::connect(addr, timeout)?;
+        Ok(Self::join_over(conn, name))
+    }
+
+    /// Joins the game at the other end of `conn` (a direct connection, or a pipe through the
+    /// lobby server's relay).
+    pub fn join_over(mut conn: Conn, name: &str) -> Self {
         let build = crate::build_id();
         conn.send(&Msg::Hello { protocol: crate::PROTOCOL, build: build.clone(), name: name.to_string() });
         conn.flush();
-        Ok(Session { name: name.to_string(), client: None, role: Role::Client { conn }, lobby: None, game: None, events: Vec::new(), build })
+        Session { name: name.to_string(), client: None, role: Role::Client { conn }, lobby: None, game: None, events: Vec::new(), build }
+    }
+
+    /// The host takes a client that came another way (through the lobby server's relay).
+    pub fn adopt(&mut self, conn: Conn) {
+        if let Role::Host { peers, next_client, .. } = &mut self.role {
+            peers.push(Peer { client: *next_client, conn, hello: false });
+            *next_client += 1;
+        }
     }
 
     /// A different build id (the app's, to make sure every machine runs the same program).

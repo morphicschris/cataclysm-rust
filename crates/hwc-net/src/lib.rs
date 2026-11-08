@@ -12,9 +12,11 @@
 //!   original's routing server was).
 //! * [`lobby`]: the game being set up before it starts: slots, races, options, chat.
 //! * [`discovery`]: finding games on the local network by UDP broadcast.
+//! * [`internet`]: the lobby server for internet games (rooms, chat, game lists) and its relay.
 //! * [`session`]: all of it together, for the game: the lobby, then the running game.
 
 pub mod discovery;
+pub mod internet;
 pub mod lobby;
 pub mod lockstep;
 pub mod session;

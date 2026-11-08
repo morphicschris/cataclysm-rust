@@ -63,8 +63,8 @@ impl Conn {
         }
     }
 
-    /// The messages that have come; the connection closes on an error or a bad message.
-    pub fn poll(&mut self) -> Vec<Msg> {
+    /// Reads what the socket has.
+    fn read_in(&mut self) {
         let mut buf = [0u8; 16384];
         while !self.closed {
             match self.stream.read(&mut buf) {
@@ -75,8 +75,18 @@ impl Conn {
                 Err(_) => self.closed = true,
             }
         }
+    }
+
+    /// The messages that have come; the connection closes on an error or a bad message.
+    pub fn poll(&mut self) -> Vec<Msg> {
+        self.poll_as()
+    }
+
+    /// The messages that have come, as `T` (the lobby server's protocol).
+    pub fn poll_as<T: serde::de::DeserializeOwned>(&mut self) -> Vec<T> {
+        self.read_in();
         let mut out = Vec::new();
-        while let Some(m) = self.decoder.next() {
+        while let Some(m) = self.decoder.next_as::<T>() {
             match m {
                 Ok(m) => out.push(m),
                 Err(_) => {
@@ -86,6 +96,40 @@ impl Conn {
             }
         }
         out
+    }
+
+    /// At most one message as `T`, leaving what follows it in the buffer (the last message
+    /// before a connection changes protocol).
+    pub fn poll_one_as<T: serde::de::DeserializeOwned>(&mut self) -> Option<T> {
+        self.read_in();
+        match self.decoder.next_as::<T>()? {
+            Ok(m) => Some(m),
+            Err(_) => {
+                self.closed = true;
+                None
+            }
+        }
+    }
+
+    /// Queues any message.
+    pub fn send_any<T: serde::Serialize>(&mut self, msg: &T) {
+        self.out.extend_from_slice(&wire::encode_any(msg));
+    }
+
+    /// Queues raw bytes.
+    pub fn send_raw(&mut self, bytes: &[u8]) {
+        self.out.extend_from_slice(bytes);
+    }
+
+    /// The bytes that have come, not taken as messages (a pipe's).
+    pub fn poll_raw(&mut self) -> Vec<u8> {
+        self.read_in();
+        self.decoder.take_rest()
+    }
+
+    /// Bytes queued and not yet sent.
+    pub fn pending(&self) -> usize {
+        self.out.len()
     }
 
     /// Sends what is queued, waiting up to `timeout` (for a last message before closing).

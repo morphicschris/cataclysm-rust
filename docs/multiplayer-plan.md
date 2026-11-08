@@ -112,6 +112,19 @@ screenshots `screenshots/front_end/lan_*`) and `lan::tests::two_front_ends_host_
 Direct connection by address first, then a lightweight lobby (game list and relay for players behind
 NAT) in place of WON's servers. Chat in game and in the lobby.
 
+Status: the lobby server `hwc-lobby` (`hwc_net::internet::LobbyServer`) replaces WON: log in
+with a free name (no accounts), rooms with their chat and players (Lobby, and rooms players
+make), the games hosted in each room, and a relay. A host that is not behind a firewall (or
+lets the server find out) is checked by the server connecting back to its game port and joined
+directly; otherwise joining players reach it through a pipe the server opens between them. The
+original's internet screens are wired to it (Internet Login with the firewall choice, Channel
+Chat, Available Rooms, Create Room, the room's games, the waiting rooms with the room's chat);
+the server's address is `hwcLobbyServer` in the options or `HWC_LOBBY`, else this machine.
+Tests: `hwc-net/tests/net.rs::an_internet_game_through_the_lobby_and_its_relay` (200 turns in
+lockstep through the relay), `lan::tests::two_front_ends_meet_in_the_lobby_and_play_through_the_relay`,
+`hwc-ui/tests/lan_screens.rs` (internet screens, both looks). Not yet: a public server, accounts,
+passworded games, the recorded games.
+
 ## Not planned
 
 Talking to the original game over the network: its protocol runs through WON, which is gone, and

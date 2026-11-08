@@ -373,3 +373,119 @@ fn find_local_player_divergence() {
     }
     println!("no divergence");
 }
+
+/// The lobby server on this machine: two players log in, chat in the main room, one hosts a
+/// game that the server cannot reach (so the other joins through the relay), and they play
+/// in lockstep through the server.
+#[test]
+fn an_internet_game_through_the_lobby_and_its_relay() {
+    use hwc_net::internet::{LobbyClient, LobbyEvent, LobbyMsg, LobbyServer};
+    let Some(d) = data() else { return };
+    let build = hwc_net::build_id();
+    let mut server = LobbyServer::bind("127.0.0.1:0", &build).expect("server");
+    let at = server.local_addr().unwrap();
+    // The server runs on its own, as it would on another machine.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop2 = stop.clone();
+    let server_thread = std::thread::spawn(move || {
+        while !stop2.load(std::sync::atomic::Ordering::Relaxed) {
+            server.poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    let mut alice = LobbyClient::connect(at, "Alice", "", &build, Duration::from_secs(2)).expect("alice");
+    let mut bob = LobbyClient::connect(at, "Bob", "", &build, Duration::from_secs(2)).expect("bob");
+    let run_until = |a: &mut LobbyClient, b: &mut LobbyClient, done: &dyn Fn(&LobbyClient, &LobbyClient) -> bool| {
+        let end = Instant::now() + Duration::from_secs(10);
+        while !done(a, b) && Instant::now() < end {
+            a.poll();
+            b.poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(done(a, b), "timed out");
+    };
+    run_until(&mut alice, &mut bob, &|a, b| a.logged_in && b.logged_in && a.users.len() == 2);
+    // A name in use is refused.
+    let mut again = LobbyClient::connect(at, "Alice", "", &build, Duration::from_secs(2)).expect("again");
+    let end = Instant::now() + Duration::from_secs(5);
+    while again.events.is_empty() && Instant::now() < end {
+        again.poll();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(matches!(again.events.first(), Some(LobbyEvent::Refused(_))), "{:?}", again.events);
+    alice.send(LobbyMsg::Chat { text: "anyone for a game?".into() });
+    run_until(&mut alice, &mut bob, &|_, b| b.events.iter().any(|e| matches!(e, LobbyEvent::Chat { from, .. } if from == "Alice")));
+    // Alice hosts; the server is not asked to reach her, so the game goes through the relay.
+    let mut host = Session::host("Alice", "Relay test", &map_for(d, 2), 2, options(d), "127.0.0.1:0", None).expect("host");
+    let info = host.info().expect("info");
+    alice.send(LobbyMsg::HostGame { info, try_direct: false });
+    run_until(&mut alice, &mut bob, &|_, b| !b.games.is_empty());
+    let listed = bob.games[0].clone();
+    assert_eq!(listed.direct, None);
+    // Bob's connection goes through the server; the server asks Alice for her end.
+    let bob_conn = std::thread::scope(|s| {
+        let h = s.spawn(|| bob.connect_game(&listed, Duration::from_secs(5)));
+        let end = Instant::now() + Duration::from_secs(5);
+        while !h.is_finished() && Instant::now() < end {
+            alice.poll();
+            for pipe in std::mem::take(&mut alice.incoming) {
+                let c = alice.accept_pipe(pipe, Duration::from_secs(5)).expect("pipe");
+                host.adopt(c);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        h.join().unwrap()
+    })
+    .expect("bob reaches the game through the relay");
+    let mut client = Session::join_over(bob_conn, "Bob");
+    let pump = |host: &mut Session, client: &mut Session| {
+        host.poll();
+        client.poll();
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    let end = Instant::now() + Duration::from_secs(5);
+    while host.lobby.as_ref().is_none_or(|l| l.humans() < 2) && Instant::now() < end {
+        pump(&mut host, &mut client);
+    }
+    client.request(LobbyRequest::Ready(true));
+    let end = Instant::now() + Duration::from_secs(5);
+    while !host.lobby.as_ref().unwrap().can_start() && Instant::now() < end {
+        pump(&mut host, &mut client);
+    }
+    let mut host_setup = host.start(9, DEFAULT_DELAY).expect("the game starts");
+    let mut client_setup = None;
+    let end = Instant::now() + Duration::from_secs(5);
+    while client_setup.is_none() && Instant::now() < end {
+        pump(&mut host, &mut client);
+        for e in client.events.drain(..) {
+            if let SessionEvent::Started { setup, .. } = e {
+                client_setup = Some(setup);
+            }
+        }
+    }
+    let mut client_setup = client_setup.expect("the client starts");
+    host_setup.effects = false;
+    client_setup.effects = false;
+    let mut runs = [start(d, host_setup), start(d, client_setup)];
+    let mut rngs = [Lcg(8), Lcg(9)];
+    let turns = 200;
+    let end = Instant::now() + Duration::from_secs(60);
+    while (host.game.as_ref().unwrap().lockstep.turn < turns || client.game.as_ref().unwrap().lockstep.turn < turns) && Instant::now() < end {
+        for (m, s) in [&mut host, &mut client].into_iter().enumerate() {
+            if s.game.as_ref().unwrap().lockstep.turn < turns {
+                if s.game.as_ref().unwrap().lockstep.ready() && rngs[m].next() % 5 == 0 {
+                    if let Some(o) = some_order(&runs[m], m, &mut rngs[m]) {
+                        s.give(o);
+                    }
+                }
+                s.run_turns(&mut runs[m].universe, None, 1, |u| u.update());
+            }
+            s.poll();
+        }
+    }
+    assert!(host.game.as_ref().unwrap().lockstep.turn >= turns && client.game.as_ref().unwrap().lockstep.turn >= turns, "both played through the relay");
+    assert_eq!(sync_checksum(&runs[0].universe), sync_checksum(&runs[1].universe), "the same game");
+    assert!(!host.events.iter().chain(client.events.iter()).any(|e| matches!(e, SessionEvent::Desync { .. })));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    server_thread.join().unwrap();
+}

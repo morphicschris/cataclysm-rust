@@ -125,3 +125,51 @@ fn lan_screens_original_look() {
 fn lan_screens_modern_look() {
     run(true);
 }
+
+fn run_internet(modern: bool) {
+    let Some(mut s) = session(modern) else { return };
+    frames(&mut s, 10);
+    press(&mut s, "FE_Multiplayer_Game");
+    press(&mut s, "MG_InternetWON");
+    assert_eq!(screen(&s).as_deref(), Some("Internet_Login"));
+    s.fe.game.skirmish.name = "Tester".into();
+    shot(&mut s, "internet_login", modern);
+    let r = press(&mut s, "MG_LaunchWON");
+    assert!(matches!(lan(&r).as_slice(), [LanRequest::Login { name, .. }] if name == "Tester"));
+    assert_eq!(screen(&s).as_deref(), Some("Connecting"));
+    // Logged in: the room.
+    s.fe.game.lan.room = "Lobby".into();
+    s.fe.game.lan.room_users = vec!["Tester".into(), "Alice".into()];
+    s.fe.game.lan.room_chat = vec!["Alice: anyone for a game?".into()];
+    hwc_ui::lan::logged_in(&mut s.fe);
+    s.fe.game.lan.dirty = true;
+    hwc_ui::lan::refresh(&mut s.fe);
+    assert_eq!(screen(&s).as_deref(), Some("Channel_Chat"));
+    let users = s.fe.find_atom("MG_UserNameWindow").expect("users");
+    assert_eq!(s.fe.list(users).map(|l| l.items.len()), Some(2));
+    shot(&mut s, "room", modern);
+    let r = press(&mut s, "MG_ViewChannels");
+    assert_eq!(lan(&r), vec![LanRequest::ListRooms]);
+    s.fe.game.lan.rooms = vec!["Lobby  -  Where everyone starts  (2)".into(), "Veterans  -  hard CPUs  (0)".into()];
+    s.fe.game.lan.dirty = true;
+    hwc_ui::lan::refresh(&mut s.fe);
+    shot(&mut s, "rooms", modern);
+    let rooms = s.fe.find_atom("MG_ListOfChannels").expect("rooms");
+    s.fe.list_mut(rooms).unwrap().select(1);
+    let r = press(&mut s, "MG_JoinChannel");
+    assert_eq!(lan(&r), vec![LanRequest::JoinRoom(1)]);
+    assert_eq!(screen(&s).as_deref(), Some("Channel_Chat"));
+    let r = press(&mut s, "MG_BackToLogin");
+    assert_eq!(lan(&r), vec![LanRequest::Leave, LanRequest::Logout]);
+    assert_eq!(screen(&s).as_deref(), Some("Internet_Login"));
+}
+
+#[test]
+fn internet_screens_original_look() {
+    run_internet(false);
+}
+
+#[test]
+fn internet_screens_modern_look() {
+    run_internet(true);
+}

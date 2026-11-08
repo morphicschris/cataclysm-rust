@@ -37,6 +37,11 @@ pub enum Msg {
 
 /// The message with its length in front.
 pub fn encode(msg: &Msg) -> Vec<u8> {
+    encode_any(msg)
+}
+
+/// Any serialisable message (the lobby server's too) with its length in front.
+pub fn encode_any<T: Serialize>(msg: &T) -> Vec<u8> {
     let body = bincode::serialize(msg).expect("messages serialise");
     let mut out = Vec::with_capacity(body.len() + 4);
     out.extend_from_slice(&(body.len() as u32).to_le_bytes());
@@ -73,6 +78,20 @@ impl Decoder {
 
     /// The next whole message, if one has come.
     pub fn next(&mut self) -> Option<Result<Msg, WireError>> {
+        self.next_as()
+    }
+
+    /// The next whole message as `T`.
+    pub fn next_as<T: serde::de::DeserializeOwned>(&mut self) -> Option<Result<T, WireError>> {
+        let frame = match self.next_frame()? {
+            Ok(f) => f,
+            Err(e) => return Some(Err(e)),
+        };
+        Some(bincode::deserialize(&frame).map_err(|e| WireError::Malformed(e.to_string())))
+    }
+
+    /// The next whole frame's body, undecoded.
+    pub fn next_frame(&mut self) -> Option<Result<Vec<u8>, WireError>> {
         if self.buf.len() < 4 {
             return None;
         }
@@ -83,8 +102,13 @@ impl Decoder {
         if self.buf.len() < 4 + n {
             return None;
         }
-        let r = bincode::deserialize(&self.buf[4..4 + n]).map_err(|e| WireError::Malformed(e.to_string()));
+        let body = self.buf[4..4 + n].to_vec();
         self.buf.drain(..4 + n);
-        Some(r)
+        Some(Ok(body))
+    }
+
+    /// The bytes not yet taken as frames (handed on when a connection becomes a pipe).
+    pub fn take_rest(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buf)
     }
 }

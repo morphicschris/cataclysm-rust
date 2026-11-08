@@ -477,17 +477,19 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
     let mut pictures: Vec<(AtomRef, Rect, Rect)> = Vec::new();
     let front_end = fe.game.ig.mmenu.front_end;
     let lobby = front_end && crate::front_menu::LOBBY_SCREENS.contains(&s.name.as_str());
+    // The rooms are the lobby server's: the internet screens keep them.
+    let rooms = lobby && fe.game.lan.internet;
     for (i, atom) in s.atoms.iter().enumerate().skip(1) {
         let a = AtomRef { screen, atom: i };
         let r = atom.layout_rect();
         if atom.has(FAF_HIDDEN) || !on_layout(r) {
             continue;
         }
-        if lobby && atom.name.as_deref().is_some_and(|n| crate::front_menu::LEFT_OUT.contains(&n) || n == "MG_ViewChannels" || n == "MG_BackToLogin") {
+        if lobby && atom.name.as_deref().is_some_and(|n| (crate::front_menu::LEFT_OUT.contains(&n) && !(rooms && crate::front_menu::ROOM_PARTS.contains(&n))) || (!rooms && (n == "MG_ViewChannels" || n == "MG_BackToLogin"))) {
             continue;
         }
         if atom.kind == FA_STATIC_TEXT {
-            if let Some(text) = atom_text(fe, atom).filter(|t| !(lobby && crate::front_menu::LEFT_OUT_TEXTS.contains(&t.as_str()))) {
+            if let Some(text) = atom_text(fe, atom).filter(|t| !(lobby && crate::front_menu::LEFT_OUT_TEXTS.contains(&t.as_str()) && !(rooms && crate::front_menu::ROOM_TEXTS.contains(&t.as_str())))) {
                 texts.push(Txt {
                     r,
                     text,

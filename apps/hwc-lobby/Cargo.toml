@@ -1,0 +1,10 @@
+[package]
+name = "hwc-lobby"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The lobby server for internet games of the Homeworld: Cataclysm recreation: log in, rooms with chat, the games hosted in them, and a relay for players behind firewalls"
+
+[dependencies]
+hwc-net = { path = "../../crates/hwc-net" }
