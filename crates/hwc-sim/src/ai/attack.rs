@@ -186,21 +186,8 @@ pub fn find_enemy_mothership(u: &Universe, p: usize) -> Option<ShipId> {
     u.base.players.get(enemy)?.mothership.filter(|&m| u.ships.get(m).is_some())
 }
 
-/// The part of `aidCheckSphereOfInfluence` the attack manager needs: the radius of the
-/// mothership's sphere of influence, every sixteen seconds.
-fn update_sphere_of_influence(u: &mut Universe, p: usize) {
-    let Some(ms) = u.base.players[p].mothership.and_then(|m| u.ships.get(m)).map(|s| s.posinfo.position) else { return };
-    if ai(u, p).attack.sphere_of_influence != 0.0 && (u.total_time_elapsed as i64) & 15 != 0 {
-        return;
-    }
-    let Some(enemy) = find_enemy_mothership(u, p).and_then(|m| u.ships.get(m)).map(|s| s.posinfo.position) else { return };
-    let d = crate::level::distance_squared(enemy, ms);
-    ai_mut(u, p).attack.sphere_of_influence = st(d * 0.25);
-}
-
 /// `aiaAttackManager` (0x401840).
 pub fn manager(u: &mut Universe, p: usize) {
-    update_sphere_of_influence(u, p);
     for t in ai(u, p).attack.teams.clone().into_iter().flatten() {
         let empty = u.ai.teams.get(t).and_then(|x| x.as_ref()).is_none_or(|x| x.1.ships.is_empty());
         if team::team_is_done(u, t) && empty {
@@ -274,12 +261,12 @@ fn is_enemy_mothership(u: &Universe, p: usize, id: ShipId) -> bool {
     u.base.players.get(s.player).is_some_and(|pl| pl.mothership == Some(id)) && !u.players[s.player].is_ally(p)
 }
 
-fn is_enemy(u: &Universe, p: usize, id: ShipId) -> bool {
+pub fn is_enemy(u: &Universe, p: usize, id: ShipId) -> bool {
     u.ships.get(id).is_some_and(|s| s.player != p && s.player < u.players.len() && !u.players[s.player].is_ally(p) && s.flags & sof::DEAD == 0)
 }
 
 /// `aiuFindNearbyEnemyShips` (0x41dbe0): the enemy ships within `range` of the ship.
-fn find_nearby_enemy_ships(u: &Universe, p: usize, id: ShipId, range: f32) -> Vec<ShipId> {
+pub fn find_nearby_enemy_ships(u: &Universe, p: usize, id: ShipId, range: f32) -> Vec<ShipId> {
     let Some(pos) = u.ships.get(id).map(|s| s.posinfo.position) else { return Vec::new() };
     let r2 = ld(range) * ld(range);
     u.ship_list
@@ -361,7 +348,7 @@ fn done() -> AiMove {
 }
 
 /// `aimCreateFancyGetShips` with the alternatives given as (type number, worth in tenths).
-fn fancy_get_ships(u: &mut Universe, t: usize, primary: u8, num: i32, alternatives: &[(u8, i32)], random: bool, priority: u32) {
+pub(super) fn fancy_get_ships(u: &mut Universe, t: usize, primary: u8, num: i32, alternatives: &[(u8, i32)], random: bool, priority: u32) {
     let ty = |n: u8| ShipType::from_index(n.into()).expect("ship type");
     let alternatives = alternatives.iter().map(|&(n, r)| (ty(n), r)).collect();
     add_move(
@@ -603,14 +590,20 @@ fn ship_value(u: &Universe, id: ShipId) -> i32 {
 /// (a third either way at random when the player has no ship there), unless the enemy's
 /// mothership is in sight, which is always preferred (its strength being 0). Returns the
 /// targets and whether the player's ships are among them.
-fn find_armada_target(u: &mut Universe, p: usize) -> (Vec<ShipId>, bool) {
+/// A blob with visible enemy ships, rated for the player (`aiuCreateBlobArrays`,
+/// `aiuRateBlobs`): its ships (less cloaked enemies the player cannot see), the value of the
+/// primary enemy's ships in it, whether the player has ships there and whether a mothership is.
+pub struct EnemyBlob {
+    pub centre: hwc_math::Vector,
+    pub ships: Vec<ShipId>,
+    pub value: i32,
+    pub own: bool,
+    pub mothership: bool,
+}
+
+/// The enemy blobs (`aiuFillInArrays`, `aiuFillInAIBlobArrays`, `aiuRateBlobs`).
+pub fn enemy_blobs(u: &Universe, p: usize) -> Vec<EnemyBlob> {
     let enemy = ai(u, p).primary_enemy;
-    struct Rated {
-        ships: Vec<ShipId>,
-        value: i32,
-        own: bool,
-        mothership: bool,
-    }
     let mut blobs = Vec::new();
     for b in &u.blobs.blobs {
         let visible_enemy = b.ships.iter().any(|&id| {
@@ -625,7 +618,7 @@ fn find_armada_target(u: &mut Universe, p: usize) -> (Vec<ShipId>, bool) {
             continue;
         }
         let ships: Vec<ShipId> = b.ships.iter().copied().filter(|&id| u.ships.get(id).is_some_and(|s| s.player == p || !crate::cloak::is_cloaked(s) || crate::visibility::visible_to_player(u, id, p))).collect();
-        let mut r = Rated { ships, value: 0, own: false, mothership: false };
+        let mut r = EnemyBlob { centre: b.centre, ships, value: 0, own: false, mothership: false };
         for &id in &r.ships {
             let s = u.ships.ship(id);
             let mut v = ship_value(u, id);
@@ -641,6 +634,11 @@ fn find_armada_target(u: &mut Universe, p: usize) -> (Vec<ShipId>, bool) {
         }
         blobs.push(r);
     }
+    blobs
+}
+
+fn find_armada_target(u: &mut Universe, p: usize) -> (Vec<ShipId>, bool) {
+    let blobs = enemy_blobs(u, p);
     let mut best: Option<usize> = None;
     let mut best_score = 0.0f32;
     let mut mothership_blob: Option<usize> = None;
@@ -671,6 +669,7 @@ fn find_armada_target(u: &mut Universe, p: usize) -> (Vec<ShipId>, bool) {
         let targets = b.ships.iter().copied().filter(|&id| is_enemy(u, p, id)).collect();
         return (targets, b.own);
     }
+    let enemy = ai(u, p).primary_enemy;
     let enemy_ms = u.base.players.get(enemy).and_then(|pl| pl.mothership).filter(|&m| u.ships.get(m).is_some_and(|s| s.flags & sof::DEAD == 0));
     if let (Some(ms), Some(i)) = (enemy_ms, mothership_blob) {
         return (vec![ms], blobs[i].own);

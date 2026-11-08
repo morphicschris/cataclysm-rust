@@ -149,3 +149,23 @@ blob always scores infinite and the armada always goes for the enemy mothership 
 
 Test: `skirmish::computer_players_attack` (research off, beginner and hard): both computer players
 form attack teams that get their ships and attack the other.
+
+## Defence manager (step 5, first part)
+
+Done (`hwc_sim::ai::defense`): `aidInit` (features by level: none, 0x131, 0x377),
+`aidClearDistressSignal` every turn, `aidDefenseManager` (finished defence teams give their ships
+back), `aidCheckSphereOfInfluence` (the sphere's radius, and at the advanced level the enemy ships
+leading into it become distress calls and threats, which a temporary guard attacks when they are
+capital ships), `aidSetupResourceDefenseTeams` with `aioCreateGuardShips` (an escort of six,
+twelve for a capital ship, of Acolytes or Interceptors or their stand-ins, in a sphere, guarding
+each resourcer and processor) and `aidMothershipDefense` (the enemies in the mothership's blob or
+near whoever is hitting it; dangerous new ships form the mothership's defence team, idle teams
+with dangerous ships defend; with too few defenders the guards, then every team in range, join).
+The moves `GuardShips`, `DefendMothership` and `Formation`, and `aimInsertMove`.
+
+Not yet: the advanced player's roving defence (`aioCreateFast/SlowRovingDefense`, patrol moves),
+recalling guard teams to the sphere, resourcers' distress calls, the HW1 races' cloak defence.
+
+Test: `skirmish::a_computer_player_defends_its_mothership` (escorts for the resourcers, and
+frigates sent at the mothership are attacked). `a_scripted_game_runs_to_a_winner` now has two
+human players, since a computer player defends its mothership.

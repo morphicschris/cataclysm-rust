@@ -234,7 +234,12 @@ fn a_scripted_game_runs_to_a_winner() {
     let src = GameDataSource(&d.gd);
     let mut options = default_game(d);
     options.flags &= !mg::RESEARCH_ENABLED;
-    let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, setup("Coldwar2", &[ShipRace::Somtaaw, ShipRace::Beast], options, 5)).expect("start");
+    // Both players human: a computer player would defend its mothership.
+    let mut s = setup("Coldwar2", &[ShipRace::Somtaaw, ShipRace::Beast], options, 5);
+    for p in &mut s.players {
+        p.computer = false;
+    }
+    let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, s).expect("start");
     let u = &mut run.universe;
     let ms0 = u.base.players[0].mothership.expect("mothership 0");
     let ms1 = u.base.players[1].mothership.expect("mothership 1");
@@ -410,4 +415,57 @@ fn computer_players_attack() {
         assert!(teams_with_ships.iter().all(|&n| n > 0), "both form attack teams");
         assert!(attacked.iter().any(|&a| a), "a computer player attacks");
     }
+}
+
+/// The computer player's defence: escorts for its resourcers, and when enemy frigates attack
+/// its mothership its ships go after them.
+#[test]
+fn a_computer_player_defends_its_mothership() {
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    let mut options = default_game(d);
+    options.flags &= !mg::RESEARCH_ENABLED;
+    options.cpu_difficulty = 50;
+    let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, setup("Coldwar2", &[ShipRace::Somtaaw, ShipRace::Beast], options, 7)).expect("start");
+    // The computer player builds up for four minutes.
+    for _ in 0..16 * 60 * 4 {
+        run.step();
+    }
+    let escorts = {
+        let u = &run.universe;
+        let a = u.ai.players[1].as_ref().unwrap();
+        a.defense.teams.iter().filter(|&&t| u.ai.teams[t].as_ref().is_some_and(|(_, tm)| tm.moves.iter().any(|m| matches!(m.kind, hwc_sim::ai::team::MoveKind::GuardShips { .. })))).count()
+    };
+    let u = &mut run.universe;
+    let ms1 = u.base.players[1].mothership.expect("mothership 1");
+    let at = u.ships.ship(ms1).posinfo.position;
+    let mut force = Vec::new();
+    for i in 0..4 {
+        let p = hwc_math::Vector::new(at.x + 2500.0 + 600.0 * i as f32, at.y, at.z + 2500.0);
+        let id = u.add_ship(ShipType::sMultiBeamFrigate, 0, p, None).expect("ship");
+        force.push(id);
+    }
+    for _ in 0..8 {
+        run.step();
+    }
+    hwc_sim::command::cl_attack(&mut run.universe, &force, &[ms1]);
+    let mut defended = false;
+    let mut attackers_seen = false;
+    for _ in 0..16 * 60 * 2 {
+        run.step();
+        let u = &run.universe;
+        attackers_seen |= !u.ai.players[1].as_ref().unwrap().defense.mothership_attackers.is_empty();
+        defended |= u.ship_list.iter().any(|&id| {
+            let s = u.ships.ship(id);
+            s.player == 1 && s.command.and_then(|c| u.commands.get(c)).is_some_and(|c| c.order == hwc_sim::command::order::ATTACK && c.attack_targets.iter().any(|t| force.contains(t)))
+        });
+        if defended {
+            break;
+        }
+    }
+    let u = &run.universe;
+    let a = u.ai.players[1].as_ref().unwrap();
+    println!("escorts {escorts}, attackers seen {attackers_seen}, defended {defended}, defence teams {:?}, mothership team {:?}", a.defense.teams, a.defense.mothership_team);
+    assert!(attackers_seen, "the computer player sees its mothership attacked");
+    assert!(defended, "its ships attack the attackers");
 }

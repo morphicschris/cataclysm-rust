@@ -5,10 +5,11 @@
 //! building they lead to.
 //!
 //! Ported so far: the player, fleet command, the build requests, the resource manager
-//! ([`resource`]), the attack manager ([`attack`]) and the teams with the moves it uses
-//! ([`team`]). The defence manager and the resource manager's team moves come next.
+//! ([`resource`]), the attack manager ([`attack`]), the defence manager ([`defense`]) and the
+//! teams with the moves they use ([`team`]). The resource manager's team moves come next.
 
 pub mod attack;
+pub mod defense;
 pub mod research;
 pub mod resource;
 pub mod team;
@@ -182,6 +183,9 @@ pub struct AiPlayer {
     /// The attack manager's state.
     #[serde(default, deserialize_with = "crate::save::added_in_11")]
     pub attack: attack::AttackState,
+    /// The defence manager's state.
+    #[serde(default, deserialize_with = "crate::save::added_in_11")]
+    pub defense: defense::DefenseState,
 }
 
 /// Everything of the computer players.
@@ -255,6 +259,7 @@ impl AiPlayer {
             support_teams: Vec::new(),
             proximity_sensors: Vec::new(),
             attack: attack::AttackState::default(),
+            defense: defense::DefenseState::default(),
         };
         // aifInit: the creators are the mothership; advanced players save for hyperspace.
         let ms = u.base.players[player].mothership;
@@ -411,8 +416,9 @@ fn ai_mut(u: &mut Universe, p: usize) -> &mut AiPlayer {
 
 /// `aifFleetCommand` (0x405ba0).
 fn fleet_command(u: &mut Universe, p: usize) {
-    // (aifFindAllies, aiuCreateBlobArrays, aiuUpdateKnowledgeOfEnemyShips, aidClearDistressSignal:
-    // with the attack and defence managers.)
+    // (aifFindAllies, aiuUpdateKnowledgeOfEnemyShips: not needed by what is ported; the blob
+    // arrays are made where they are used.)
+    defense::clear_distress_signal(u, p);
     assign_new_ships(u, p);
     if ai(u, p).first_turn {
         // aiaProcessSpecialTeams (attack manager).
@@ -423,7 +429,7 @@ fn fleet_command(u: &mut Universe, p: usize) {
         }
         ai_mut(u, p).resource_request.take();
         attack::manager(u, p);
-        // (aidDefenseManager: with its step of the port.)
+        defense::manager(u, p);
         resource::manager(u, p);
     }
     team::execute(u, p);
@@ -967,6 +973,7 @@ pub fn ship_died(u: &mut Universe, id: ShipId, owner: usize, ship_type: ShipType
         a.new_ships.retain(|&s| s != id);
         resource::ship_died(a, id, ship_type);
         attack::ship_died(a, id);
+        defense::ship_died(a, id);
     }
     team::ship_died(u, id);
     for t in u.ai.teams.iter_mut().flatten() {

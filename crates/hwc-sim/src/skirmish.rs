@@ -294,6 +294,7 @@ impl SkirmishRun {
             if p.computer {
                 u.ai.players[i] = Some(crate::ai::AiPlayer::new(&u, i, level));
                 crate::ai::attack::init(&mut u, i);
+                crate::ai::defense::init(&mut u, i);
             }
         }
         for (i, p) in setup.players.iter().enumerate() {

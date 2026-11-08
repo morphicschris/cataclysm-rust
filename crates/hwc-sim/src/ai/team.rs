@@ -17,6 +17,9 @@ use crate::universe::Universe;
 /// The move numbers (`AIMoveTypes`) the code looks at.
 pub mod move_type {
     pub const DONE: u32 = 0;
+    pub const GUARD_SHIPS: u32 = 1;
+    pub const DEFEND_MOTHERSHIP: u32 = 2;
+    pub const FORMATION: u32 = 5;
     pub const TEMP_GUARD: u32 = 3;
     pub const GET_SHIPS: u32 = 4;
     pub const MOVE: u32 = 6;
@@ -58,6 +61,8 @@ const FLANK_ATTACK_FORMATION: i32 = 1;
 const TEMP_GUARD_SHARE: f32 = f32::from_bits(0x3f2a_a64c);
 const TEMP_GUARD_FORMATION: i32 = 1;
 const TEMP_GUARD_TACTICS: i32 = 2;
+/// Formation of a temporary guard's attack on threats (0x740b40).
+const TEMP_GUARD_ATTACK_FORMATION: i32 = 1;
 
 /// What a move does, with its parameters.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -84,6 +89,12 @@ pub enum MoveKind {
     /// `MOVE_MOVETO`: move towards `destination` until `limit` from where the team started
     /// (`by_distance`) or for `limit` seconds.
     MoveTo { destination: Vector, limit: f32, by_distance: bool, start_time: f32, start: Vector },
+    /// `MOVE_GUARDSHIPS`: protect the ships while any is left.
+    GuardShips { ships: Vec<ShipId> },
+    /// `MOVE_DEFMOSHIP`: attack the ships attacking the mothership while there are some.
+    DefendMothership,
+    /// `MOVE_FORMATION`.
+    Formation { formation: i32 },
 }
 
 /// One move (`AITeamMove`, 0x170 bytes).
@@ -115,6 +126,9 @@ impl AiMove {
             MoveKind::FlankAttack { .. } => move_type::FLANK_ATTACK,
             MoveKind::Move { .. } => move_type::MOVE,
             MoveKind::MoveTo { .. } => move_type::MOVE_TO,
+            MoveKind::GuardShips { .. } => move_type::GUARD_SHIPS,
+            MoveKind::DefendMothership => move_type::DEFEND_MOTHERSHIP,
+            MoveKind::Formation { .. } => move_type::FORMATION,
         }
     }
 }
@@ -180,6 +194,31 @@ fn add_move_before_and_make_current(u: &mut Universe, t: usize, mut m: AiMove) {
     let tm = team_mut(u, t).expect("team");
     tm.moves.insert(c, m);
     tm.current = Some(c);
+}
+
+/// `aimInsertMove` (0x40e630): the move goes before the current one and becomes current (the
+/// current one, unless it is getting ships, starts over afterwards); with no current move it
+/// goes first.
+pub fn insert_move(u: &mut Universe, t: usize, m: AiMove) {
+    let Some(tm) = team_mut(u, t) else { return };
+    match tm.current {
+        None => {
+            tm.moves.insert(0, m);
+            tm.current = Some(0);
+        }
+        Some(c) => {
+            if !matches!(tm.moves[c].move_type(), move_type::GET_SHIPS | move_type::FANCY_GET_SHIPS) {
+                tm.moves[c].processing = false;
+            }
+            add_move_before_and_make_current(u, t, m);
+        }
+    }
+}
+
+/// An attack on `targets` inserted before the current move and made current (as the guard,
+/// armada and defence moves do).
+pub fn insert_attack_before(u: &mut Universe, t: usize, targets: Vec<ShipId>, formation: i32) {
+    add_move_before_and_make_current(u, t, AiMove::new(MoveKind::Attack { targets }, formation, 2, true, true));
 }
 
 /// `aitDeleteAllTeamMoves`.
@@ -258,6 +297,7 @@ pub fn destroy(u: &mut Universe, t: usize) {
             w.retain(|w| w.team != t);
         }
         super::attack::team_died(a, t);
+        super::defense::team_died(a, t);
     }
 }
 
@@ -352,6 +392,20 @@ fn process(u: &mut Universe, t: usize) -> bool {
         MoveKind::FlankAttack { targets } => process_flank_attack(u, t, c, targets),
         MoveKind::Move { destination } => process_move(u, t, c, destination),
         MoveKind::MoveTo { .. } => process_move_to(u, t, c),
+        MoveKind::GuardShips { .. } => process_guard_ships(u, t, c),
+        MoveKind::DefendMothership => {
+            let p = u.ai.teams[t].as_ref().expect("team").0;
+            super::defense::process_defend_mothership(u, p, t)
+        }
+        MoveKind::Formation { formation } => {
+            let ships = team(u, t).expect("team").ships.clone();
+            if ships.is_empty() || wrap_filter(u, &ships).is_empty() {
+                return false;
+            }
+            wrap_formation(u, &ships, formation);
+            set_processing(u, t, c, true);
+            true
+        }
     }
 }
 
@@ -525,6 +579,31 @@ pub fn team_requests_ships(u: &mut Universe, p: usize, t: usize, ty: ShipType, n
     }
 }
 
+/// `aimProcessGuardShips` (0x40ad30): the team protects the ships, and is done when they are
+/// all gone.
+fn process_guard_ships(u: &mut Universe, t: usize, c: usize) -> bool {
+    let tm = team(u, t).expect("team");
+    let team_ships = tm.ships.clone();
+    if team_ships.is_empty() {
+        return false;
+    }
+    let MoveKind::GuardShips { ships } = tm.moves[c].kind.clone() else { return true };
+    let processing = tm.moves[c].processing;
+    let ships: Vec<ShipId> = ships.into_iter().filter(|&id| u.ships.get(id).is_some_and(|s| s.flags & sof::DEAD == 0)).collect();
+    if !processing {
+        if !ships.is_empty() {
+            let ok = wrap_filter(u, &team_ships);
+            if ok.is_empty() {
+                return false;
+            }
+            command::cl_protect(u, &ok, &ships);
+        }
+        set_processing(u, t, c, true);
+        return false;
+    }
+    ships.is_empty()
+}
+
 /// `aimProcessTempGuard` (0x409d00): while the attack variable is not negative the team waits;
 /// the first time it moves out towards the middle of the map, two thirds of the way across
 /// the mothership's sphere of influence. When the variable goes negative the move is done.
@@ -561,8 +640,16 @@ fn process_temp_guard(u: &mut Universe, t: usize, c: usize) -> bool {
         set_processing(u, t, c, true);
         return false;
     }
-    // (Threats to the mothership, from the defence manager's sphere of influence, are attacked
-    // here; that list stays empty until the defence manager is ported.)
+    // Capital ships threatening the mothership (the defence manager's sphere of influence) are
+    // attacked; the guard starts over afterwards.
+    let threats: Vec<ShipId> = ai(u, p).defense.threats.iter().copied().filter(|&id| u.ships.get(id).and_then(|s| u.statics.ship(s.ship_type)).is_some_and(|st| st.is_capital_ship)).collect();
+    if !threats.is_empty() {
+        insert_attack_before(u, t, threats, TEMP_GUARD_ATTACK_FORMATION);
+        let tm = team_mut(u, t).expect("team");
+        let cur = tm.current.expect("current");
+        tm.moves[cur + 1].processing = false;
+    }
+    // (The ships to rescue are the HW1 races'.)
     false
 }
 
@@ -802,7 +889,7 @@ pub fn centre(u: &Universe, ships: &[ShipId]) -> Vector {
 pub fn ship_died(u: &mut Universe, id: ShipId) {
     for (_, tm) in u.ai.teams.iter_mut().flatten() {
         for m in &mut tm.moves {
-            if let MoveKind::Attack { targets } | MoveKind::FlankAttack { targets } = &mut m.kind {
+            if let MoveKind::Attack { targets } | MoveKind::FlankAttack { targets } | MoveKind::GuardShips { ships: targets } = &mut m.kind {
                 targets.retain(|&s| s != id);
             }
         }
