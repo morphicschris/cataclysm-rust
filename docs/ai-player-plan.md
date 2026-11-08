@@ -227,8 +227,11 @@ team home to be topped up; a wiped-out team is made again. Save version 18. Test
 requests for types an attack team also waits for are taken by the attack team first, so on its
 own a team waits long for its ships).
 
-Not yet: recalling guard teams to the sphere, resourcers' distress calls (the rescue list is
-never filled yet), the HW1 races' cloak defence.
+Resourcers under fire call for help (`airResourceManager`'s `aidSendDistressSignal`, resource
+feature 0x10): they join the distress calls and the ships to rescue, which the roving teams
+answer the same turn.
+
+Not yet: recalling guard teams to the sphere, the HW1 races' cloak defence.
 
 Test: `skirmish::a_computer_player_defends_its_mothership` (escorts for the resourcers, and
 frigates sent at the mothership are attacked). `a_scripted_game_runs_to_a_winner` now has two

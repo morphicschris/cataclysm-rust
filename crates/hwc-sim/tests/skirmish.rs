@@ -703,7 +703,7 @@ fn computer_players_take_out_targets() {
 
 /// The roving defence of a hard computer player (`aioCreateFast/SlowRovingDefense`): fast and
 /// slow defence teams by the number of resourcers, the fast ones patrolling between the
-/// resourcers nearest the enemy.
+/// resourcers nearest the enemy and coming to the rescue of a worker under fire.
 #[test]
 fn computer_players_patrol() {
     use hwc_sim::ai::team::MoveKind;
@@ -755,6 +755,16 @@ fn computer_players_patrol() {
             run.universe.base.players[p].resource_units = run.universe.base.players[p].resource_units.max(20000);
         }
         for _ in 0..16 * 60 {
+            // A worker under fire calls for help (`aidSendDistressSignal`) and the fast team
+            // comes to the rescue.
+            if handed && minute == 4 {
+                let u = &mut run.universe;
+                let enemy = u.base.players[1].mothership;
+                let worker = u.ship_list.iter().copied().find(|&id| u.ships.ship(id).player == 0 && u.ships.ship(id).ship_type == hwc_sim::statics::ShipType::sWorker);
+                if let (Some(w), Some(e)) = (worker, enemy) {
+                    u.ships.ship_mut(w).getting_rocked = Some(e);
+                }
+            }
             run.step();
             let u = &run.universe;
             for (_, tm) in u.ai.teams.iter().flatten() {
@@ -779,4 +789,5 @@ fn computer_players_patrol() {
     assert!(fast > 0 && slow > 0, "fast and slow roving teams");
     assert!(handed, "a fast team was handed fighters");
     assert!(patrolling > 0, "the fast team patrols");
+    assert!(answered > 0, "and answers a worker's distress call");
 }

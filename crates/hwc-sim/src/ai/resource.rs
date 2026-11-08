@@ -388,6 +388,19 @@ pub fn manager(u: &mut Universe, p: usize) {
             }
         }
     }
-    // (airDivideSupportTasks and the resourcers' distress: with the teams and the defence
-    // manager.)
+    // (airDivideSupportTasks: with the support teams.)
+    // `aidSendDistressSignal`: the resourcers being hit call for help (the distress calls and the
+    // ships to rescue the roving defence answers).
+    if ai(u, p).resource_features & feature::DISTRESS != 0 {
+        let hit: Vec<ShipId> = ai(u, p).resource_collectors.iter().copied().filter(|&id| u.ships.get(id).is_some_and(|s| s.getting_rocked.is_some())).collect();
+        let d = &mut ai_mut(u, p).defense;
+        for id in hit {
+            if !d.distress.contains(&id) {
+                d.distress.push(id);
+            }
+            if !d.rescue.contains(&id) {
+                d.rescue.push(id);
+            }
+        }
+    }
 }
