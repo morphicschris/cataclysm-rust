@@ -877,8 +877,13 @@ impl MissionRun {
         for line in run.log {
             game.log(LogKind::Flow, line);
         }
+        MissionRun { universe: run.universe, kas: Interpreter::new(Self::skirmish_script()), game }
+    }
+
+    /// The empty script a skirmish runs (a multiplayer game has no mission script).
+    pub fn skirmish_script() -> KasMission {
         let empty = |addr| hwc_kas::ir::Block { addr, stmts: Vec::new() };
-        let script = KasMission {
+        KasMission {
             name: "Skirmish".into(),
             name_hash: kas_hash("Skirmish"),
             lstrings: Vec::new(),
@@ -887,8 +892,7 @@ impl MissionRun {
             watch: empty(None),
             names: Default::default(),
             fidelity: hwc_kas::ir::Fidelity::Text,
-        };
-        MissionRun { universe: run.universe, kas: Interpreter::new(script), game }
+        }
     }
 
     fn load(

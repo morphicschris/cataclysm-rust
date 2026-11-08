@@ -2777,10 +2777,9 @@ impl Game {
         description: &str,
         autosave: bool,
     ) -> Result<(), String> {
-        if self.world.universe().mp.active {
-            // (Multiplayer saved games are not written yet: the save format's level comes
-            // from a mission number.)
-            return Err("saving a skirmish is not supported yet".into());
+        // A network game is not saved (its escape menu has no save).
+        if self.net.is_some() {
+            return Err("A network game cannot be saved.".into());
         }
         let ui = self.ui_state();
         let run = self.world.run();
@@ -2790,7 +2789,9 @@ impl Game {
 
     /// The folder this game's saves go in.
     fn save_folder(&self) -> hwc_ui::saves::SaveFolder {
-        if self.world.mission() == 0 {
+        if self.world.universe().mp.active {
+            hwc_ui::saves::SaveFolder::Multiplayer
+        } else if self.world.mission() == 0 {
             hwc_ui::saves::SaveFolder::Training
         } else {
             hwc_ui::saves::SaveFolder::SinglePlayer

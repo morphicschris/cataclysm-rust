@@ -13,6 +13,8 @@ use crate::region::AtomRef;
 pub enum SaveFolder {
     SinglePlayer,
     Training,
+    /// Skirmish games (`SavedGames\MultiPlayer`).
+    Multiplayer,
 }
 
 /// A small RGB picture of a saved game.

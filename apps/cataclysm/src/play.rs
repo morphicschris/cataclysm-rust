@@ -75,6 +75,9 @@ pub struct Loading {
     pub saves: Option<Rc<crate::saves::SaveDir>>,
     /// A skirmish to start instead of a mission.
     skirmish: Option<hwc_ui::skirmish::SkirmishRequest>,
+    /// The mission number of the saved game being loaded ([`crate::saves::SKIRMISH_MISSION`]
+    /// for a skirmish).
+    saved_mission: u32,
     /// A network game to start instead: its setup, and the session that plays it.
     network: Option<crate::lan::NetStart>,
 }
@@ -123,6 +126,7 @@ impl Loading {
             saved_ui: None,
             saves: None,
             skirmish: None,
+            saved_mission: 0,
             network: None,
         })
     }
@@ -160,8 +164,14 @@ impl Loading {
         size: (i32, i32),
     ) -> Result<Loading, String> {
         let h = hwc_sim::save::read_header(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut l = Loading::new(data, session, h.mission, h.skill, size)?;
+        let skirmish = h.mission == crate::saves::SKIRMISH_MISSION;
+        // A skirmish loads behind the loading screen a skirmish starts with, the statics for
+        // multiplayer.
+        let mission = if skirmish { 0 } else { h.mission };
+        let mut l = Loading::new(data, session, mission, if skirmish { 2 } else { h.skill }, size)?;
         l.saved = Some(path.to_path_buf());
+        l.saved_mission = h.mission;
+        l.loader.multiplayer = skirmish;
         l.opening_nis = false;
         Ok(l)
     }
@@ -244,7 +254,7 @@ impl Loading {
                         Err(e) => eprintln!("cataclysm: {e}"),
                     }
                 }
-                if mission::supported(self.mission) || self.skirmish.is_some() || self.network.is_some() {
+                if mission::supported(self.mission) || self.skirmish.is_some() || self.network.is_some() || self.saved_mission == crate::saves::SKIRMISH_MISSION {
                     self.screen.set_progress(0.05);
                     Step::Statics
                 } else {
@@ -383,13 +393,16 @@ impl Loading {
     fn read_saved(&mut self) -> Result<hwc_sim::mission::MissionRun, String> {
         let path = self.saved.clone().expect("saved game");
         let statics = self.loader.statics.clone().expect("statics");
-        let relink = crate::saves::relink(&self.assets, statics, self.mission)?;
+        let relink = crate::saves::relink(&self.assets, statics, self.saved_mission)?;
         let (_, mut payload) =
             crate::saves::read(&path, &relink).map_err(|e| format!("{}: {e}", path.display()))?;
-        // A level without a mission file (the tutorial) keeps the statics as loaded.
-        let _ = payload
-            .run
-            .restore_ship_availability(&hwc_sim::mission::GameDataSource(self.assets.data()));
+        // A level without a mission file (the tutorial, a skirmish) keeps the statics as
+        // loaded.
+        if self.saved_mission != crate::saves::SKIRMISH_MISSION {
+            let _ = payload
+                .run
+                .restore_ship_availability(&hwc_sim::mission::GameDataSource(self.assets.data()));
+        }
         self.saved_ui = Some(payload.ui);
         Ok(payload.run)
     }

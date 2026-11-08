@@ -90,8 +90,12 @@ pub fn relink(assets: &Assets, statics: Arc<StaticWorld>, mission: u32) -> Resul
     if !fx.is_empty() {
         r.effects = Some(fx);
     }
-    let script = load_kas_mission(assets.data(), &mission_script_name(mission))
-        .map_err(|e| e.to_string())?;
+    let script = if mission == SKIRMISH_MISSION {
+        // A skirmish runs no mission script (`MissionRun::from_skirmish`).
+        hwc_sim::mission::MissionRun::skirmish_script()
+    } else {
+        load_kas_mission(assets.data(), &mission_script_name(mission)).map_err(|e| e.to_string())?
+    };
     r.mission = Some(Arc::new(script));
     Ok(r)
 }
@@ -108,7 +112,7 @@ pub fn header(
     autosave: bool,
     thumbnail: Option<save::Thumbnail>,
 ) -> SaveHeader {
-    let mission = run.game.config.mission;
+    let mission = if run.universe.mp.active { SKIRMISH_MISSION } else { run.game.config.mission };
     SaveHeader {
         description: description.to_string(),
         mission,
@@ -124,9 +128,14 @@ pub fn header(
     }
 }
 
+/// The mission number a skirmish's saved game carries (its level is the map's, saved with it).
+pub const SKIRMISH_MISSION: u32 = u32::MAX;
+
 /// How the lists name a mission.
 pub fn mission_name(mission: u32) -> String {
-    if mission == 0 {
+    if mission == SKIRMISH_MISSION {
+        "Skirmish".into()
+    } else if mission == 0 {
         "Training".into()
     } else {
         format!("Mission {mission:02}")
@@ -245,6 +254,7 @@ impl SaveDir {
         self.root.join(match f {
             SaveFolder::SinglePlayer => "SinglePlayer",
             SaveFolder::Training => "Training",
+            SaveFolder::Multiplayer => "MultiPlayer",
         })
     }
 

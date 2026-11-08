@@ -89,7 +89,7 @@ impl Rig {
                 Progress::Abandon(e) => panic!("mission {} did not start: {e}", loading.mission),
             }
         }
-        panic!("loading never finished");
+        panic!("loading never finished: {:?}", loading.failure());
     }
 
     /// The NIS level's NIS has stopped: the mission loads from it on its own loading screen.
@@ -2355,4 +2355,52 @@ fn skirmish_plays() {
     assert!(said.iter().any(|m| m == "Computer 1 has died"), "{said:?}");
     assert!(said.iter().any(|m| m == "Tester has won"), "{said:?}");
     assert!(left, "the game ends");
+}
+
+/// A skirmish is saved (in the MultiPlayer folder, its mission number marking it a
+/// skirmish) and loads back as the same game: the same ships, frame and players.
+#[test]
+#[ignore]
+fn skirmish_saves_and_loads() {
+    let Some(mut rig) = rig() else { return };
+    let assets = crate::data::Assets(rig.data.clone());
+    let mut options = hwc_sim::skirmish::game_types(&assets).into_iter().next().expect("Default").options();
+    options.num_computers = 1;
+    let req = hwc_ui::skirmish::SkirmishRequest { map: "Coldwar2".into(), options, race: 1, name: "Tester".into() };
+    let l = Loading::skirmish(rig.data.clone(), &rig.session, req, SIZE).expect("loading");
+    let mut game = rig.load(l);
+    let g = &mut *game;
+    for _ in 0..16 * 4 {
+        rig.frame(g);
+    }
+    let dir = std::env::temp_dir().join(format!("hwc-skirmish-save-{}", std::process::id()));
+    let saves = Rc::new(crate::saves::SaveDir::new(&dir));
+    g.set_saves(saves.clone());
+    assert!(g.can_save().is_ok());
+    let path = g.save_named("Skirmish Test").expect("saved");
+    assert!(path.starts_with(dir.join("MultiPlayer")), "{}", path.display());
+    let h = hwc_sim::save::read_header(&path).expect("header");
+    assert_eq!(h.mission, crate::saves::SKIRMISH_MISSION);
+    // The skirmish load screen's list (`Skirmish_Load`) shows it.
+    let listed = hwc_ui::saves::SaveStore::list(&*saves, hwc_ui::saves::SaveFolder::Multiplayer);
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].detail.starts_with("SKIRMISH"), "{}", listed[0].detail);
+    let (ships, frame, players) = {
+        let u = g.world.universe();
+        (u.ship_list.len(), u.update_counter, u.mp.num_players)
+    };
+    drop(game);
+    let l = Loading::from_save(rig.data.clone(), &rig.session, &path, SIZE).expect("loading the save");
+    let mut game = rig.load(l);
+    let u = game.world.universe();
+    println!("saved {ships} ships at frame {frame}; loaded {} at {}", u.ship_list.len(), u.update_counter);
+    assert!(u.mp.active, "a multiplayer game");
+    assert_eq!(u.mp.num_players, players);
+    assert_eq!(u.ship_list.len(), ships);
+    assert_eq!(u.update_counter, frame);
+    for _ in 0..16 {
+        rig.frame(&mut game);
+    }
+    assert!(game.world.universe().update_counter > frame, "and it runs on");
+    let _ = std::fs::remove_dir_all(&dir);
 }

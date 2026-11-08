@@ -89,6 +89,8 @@ pub struct Cataclysm {
     /// The single-player and training save lists as last filled from [`Self::saves`].
     pub saved_games: Vec<SaveEntry>,
     pub training_games: Vec<SaveEntry>,
+    /// The skirmish games (the skirmish load screen's list, and in a skirmish).
+    pub multiplayer_games: Vec<SaveEntry>,
     /// Where the saved games are (set by the game; the lists are empty without it).
     pub saves: Option<Rc<dyn SaveStore>>,
     pub colors: ColorPicker,
@@ -127,6 +129,7 @@ impl Cataclysm {
             key_bindings: Vec::new(),
             saved_games: Vec::new(),
             training_games: Vec::new(),
+            multiplayer_games: Vec::new(),
             saves: None,
             colors,
             credits: None,
@@ -716,7 +719,15 @@ fn start_game(fe: &mut Fe, name: &str) {
 /// single-player games otherwise (`gpGameWindowInit`).
 pub fn list_folder(fe: &Fe, training: bool) -> SaveFolder {
     if training || fe.game.ig.view.player.tutorial {
-        SaveFolder::Training
+        return SaveFolder::Training;
+    }
+    // The skirmish load screen, and the save and load screens of a skirmish (a game neither
+    // single player nor networked).
+    let stack = fe.stack_names();
+    let p = &fe.game.ig.view.player;
+    let in_game_list = stack.iter().any(|&n| n == "In_game_load" || n == "In_game_save");
+    if stack.contains(&"Skirmish_Load") || (in_game_list && !p.single_player && !p.multiplayer) {
+        SaveFolder::Multiplayer
     } else {
         SaveFolder::SinglePlayer
     }
@@ -733,6 +744,7 @@ pub fn refresh_saves(fe: &mut Fe, folder: SaveFolder) -> Vec<SaveEntry> {
     match folder {
         SaveFolder::Training => fe.game.training_games = games.clone(),
         SaveFolder::SinglePlayer => fe.game.saved_games = games.clone(),
+        SaveFolder::Multiplayer => fe.game.multiplayer_games = games.clone(),
     }
     games
 }
@@ -742,6 +754,7 @@ pub fn save_entries(fe: &Fe, folder: SaveFolder) -> &[SaveEntry] {
     match folder {
         SaveFolder::Training => &fe.game.training_games,
         SaveFolder::SinglePlayer => &fe.game.saved_games,
+        SaveFolder::Multiplayer => &fe.game.multiplayer_games,
     }
 }
 
