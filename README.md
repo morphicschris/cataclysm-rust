@@ -14,6 +14,23 @@ original interface and an optional modern one.
 game data, code or third-party libraries are included: the installer reads them from your own
 Homeworld: Cataclysm (or Homeworld: Emergence) install when you set the game up.
 
+## Screenshots
+
+Rendered by the game at 1280x720 with 4x MSAA and 2x supersampling, in its default modern look
+(`cargo test --release -p cataclysm readme_shots -- --ignored`). The images are kept on the
+repository's `screenshots` branch, not in the code's history.
+
+| | |
+|---|---|
+| ![Main menu](https://github.com/morphicschris/cataclysm-rust/raw/screenshots/readme/01_main_menu.png) | ![Mission 1 under way](https://github.com/morphicschris/cataclysm-rust/raw/screenshots/readme/06_ingame_m1.png) |
+| The modern main menu over a live scene | Mission 1: the Kuun-Lan with the modern HUD and ship icons |
+| ![Battle](https://github.com/morphicschris/cataclysm-rust/raw/screenshots/readme/07_battle.png) | ![Battle, later](https://github.com/morphicschris/cataclysm-rust/raw/screenshots/readme/08_battle_later.png) |
+| Acolytes and multi-beam frigates against Turanic raiders | The same battle a few seconds on |
+| ![Mission 1 opening](https://github.com/morphicschris/cataclysm-rust/raw/screenshots/readme/02_cutscene_m1_opening.png) | ![The Kuun-Lan](https://github.com/morphicschris/cataclysm-rust/raw/screenshots/readme/03_cutscene_m1_kuun_lan.png) |
+| Mission 1's opening cutscene | The Kuun-Lan in the same cutscene |
+| ![Into the nebula](https://github.com/morphicschris/cataclysm-rust/raw/screenshots/readme/05_cutscene_m6_nebula.png) | |
+| Mission 6's cutscene in the nebula | |
+
 ## Quick install (Windows)
 
 1. Install [Rust](https://rustup.rs) (the installer offers to do this for you through winget).
@@ -113,6 +130,68 @@ games are in `<data>\saves` (or `%HWC_SAVE_DIR%`).
 Where the game differs from the original by default (borderless window, modern HUD and menus,
 full-detail ships, modern graphics, right-click to move), the original behaviour is one option
 away, and each difference is listed in `cataclysm.exe --help` as "a user-requested change".
+
+### Quality-of-life changes and enhancements
+
+On top of the 1:1 recreation, the game has a set of modern conveniences. Each one can be
+switched off to get the original behaviour back, in game under **Options > Enhancements**, on
+the command line, or in `hwc-options.cfg` (the setting's name is given in brackets).
+
+**Controls and camera**
+
+* **Ship icons** in the style of the later Homeworld games, over every ship or only distant
+  ones. **Tab** cycles them; Shift+Tab is the original's ship info (`hwcShipIcons`,
+  `hwcTabShipIcons`).
+* **Move wheel on right-click:** with ships selected, a right click on empty space opens the
+  move plate; Shift+right-click opens the original's menu (`hwcRightClickMove`).
+* **Order lines** from the selected ships to their targets and destinations, coloured by order
+  (`hwcOrderLines`), and outlined health bars (`hwcHealthBrackets`).
+* **Double-click a ship** to select every ship of that type on screen (`hwcDoubleClickSelectType`).
+* Smooth mouse-wheel zoom (`hwcSmoothZoom`); Alt+click focus keeps the current zoom
+  (`hwcAltFocusKeepsZoom`); the camera can't zoom inside a hull (`hwcZoomClear`).
+* The sensors manager follows the main view's focus, and F centres it on the selection
+  (`hwcSensorsFollow`, `hwcSensorsFocusStays`).
+* Quick save and quick load on Shift+F5 / Shift+F9 (`hwcQuickSave`, off by default).
+* Optional formation focus fire: wingmen always fire at the leader's target
+  (`hwcFormationFocusFire`, off by default).
+
+**Interface**
+
+* **Modern HUD:** resources and selected ships top right, objectives and build queue top left,
+  system log bottom left, each panel collapsible. `--hud original` or `hwcModernHud = 0`
+  restores the original HUD (and with it the original managers).
+* **Modern managers and menus:** the build, research and launch managers and the in-game
+  menus redrawn in the same style (`hwcModernBuildManager`, `hwcModernResearchManager`,
+  `hwcModernMenus`).
+* **Modern main menu** over a live in-engine scene of the Kuun-Lan with its workers
+  harvesting (`hwcModernFrontEnd`, `--front-end original`).
+* Borderless full-screen window by default, any resolution up to 5120x1440, Alt+Enter to
+  switch modes (`hwcDisplayMode`).
+* Cutscene letterbox bars no thinner than on a 4:3 screen (`hwcOriginalLetterbox`).
+* Optional spoken battle reports in campaign games (`hwcBattleReports`, off by default).
+
+**Graphics**
+
+* Ships drawn at full detail at any distance (`hwcFullDetailShips`).
+* Modern ship lighting: per-pixel light and highlights, smoothed facets, sky light, ambient
+  occlusion, shadows, tone mapping, bloom and heat haze (`hwcShipLook`, `hwcSkyLight`,
+  `hwcAmbientOcclusion`, `hwcShadows`, `hwcToneMap`, `hwcBloom`, `hwcHeatHaze`).
+* Smooth engine trails, and engine glows that keep their size relative to the hull
+  (`hwcSmoothTrails`, `hwcGlowsInProportion`).
+* Redesigned Sentinel force fields: a shimmering hex bubble that ripples where it is hit
+  (`hwcModernFields`).
+* Anti-aliasing: MSAA up to 8x, supersampling up to 2x and FXAA (`hwcMsaa`, `hwcRenderScale`,
+  `hwcFxaa`; off by default).
+* Optional, from your own Homeworld Remastered install: Homeworld 2 style ship explosions and
+  engine trails (`hwcRemasteredFx`), and Remastered battle chatter for the lines Cataclysm has
+  none of (`hwcRemasteredChatter`). Both are off by default.
+
+**Multiplayer and saves**
+
+* LAN and internet play without the original's WON servers, through a lobby server anyone
+  can run (`hwc-lobby`).
+* Skirmish games can be saved, and any skirmish or network game can be recorded and played
+  back.
 
 ### Multiplayer
 

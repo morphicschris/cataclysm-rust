@@ -51,6 +51,8 @@ mod profile;
 #[cfg(test)]
 mod quality_shots;
 #[cfg(test)]
+mod readme_shots;
+#[cfg(test)]
 mod resui_shots;
 #[cfg(test)]
 mod save_checks;
