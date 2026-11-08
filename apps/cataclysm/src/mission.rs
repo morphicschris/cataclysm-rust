@@ -264,6 +264,8 @@ impl Loader {
             slots: None,
             seed,
             effects: config.effects,
+            local_player: 0,
+            network: false,
         };
         let run = SkirmishRun::start(statics, tweaks, assets, setup).map_err(|e| e.to_string())?;
         Ok(MissionRun::from_skirmish(run, config))

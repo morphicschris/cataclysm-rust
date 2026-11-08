@@ -79,6 +79,19 @@ checksums each packet carries checked so a desync is found at once and reported.
 on the local network, a game browser by broadcast, joining before the game starts, and a player
 dropping out. Recording a game works as the original's `.pkts` recordings do.
 
+Status (first part): `hwc_sim::orders` (every order the interface gives as data, `apply` the
+one place it changes the universe, and `sync_checksum`) and the `hwc-net` crate: lockstep turns
+of two updates with a delay of three turns and per-packet checksums (`lockstep`), framed
+messages (`wire`), a host and clients over TCP with the host relaying (`tcp`, `session`), the
+lobby with slots, races and computer players (`lobby`), the LAN game browser by UDP broadcast
+(`discovery`) and players dropping out (`multiplayer::player_dropped` at the turn after their last
+packet). Tests `hwc-net/tests/net.rs`: two machines with different local players stay identical
+for 1500 turns of random orders and lag, a desync is reported on the turn it happens, the browser
+finds a host, and a host and a client play over TCP until the client leaves. The checksum leaves
+out the battle chatter's and the effects' random streams, which only the machine showing them
+draws from. Next: the game giving its orders through `orders` (and the local player not fixed at
+0), the LAN screens, recording games.
+
 ## 5. Internet
 
 Direct connection by address first, then a lightweight lobby (game list and relay for players behind

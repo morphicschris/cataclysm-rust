@@ -2,7 +2,7 @@
 //! screens offer, over `tpGameCreated`) and `multiPlayerMissions.script` (the map list).
 
 /// The options a multiplayer game starts with (`tpGameCreated`, 0x87bf9c..0x87bfb4).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GameOptions {
     /// `flag`, see `hwc_sim::multiplayer::mg`.
     pub flags: u32,

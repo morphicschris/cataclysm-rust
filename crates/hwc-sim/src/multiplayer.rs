@@ -263,6 +263,16 @@ pub fn try_to_find_motherships(u: &mut Universe) {
     }
 }
 
+/// A player left a network game (the `PLAYERDROPPED` sync command): the player is out, as
+/// `univKillPlayer(PLAYERKILLED_DROPPEDOUT)`, and the game may be decided.
+pub fn player_dropped(u: &mut Universe, player: usize) {
+    let was_alive = alive(u, player);
+    kill_player(u, player, death::DROPPED_OUT);
+    if was_alive {
+        check_player_win(u);
+    }
+}
+
 /// `univKillPlayer`: the player is out. Its ships careen and blow up within
 /// `PLAYERLOSE_SHIPDEATHTIMEMIN..MAX` seconds (`DisableAllPlayersShips`).
 pub fn kill_player(u: &mut Universe, player: usize, how: i32) {

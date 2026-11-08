@@ -106,7 +106,7 @@ impl MpTweaks {
 }
 
 /// One player of a game.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlayerSetup {
     /// Somtaaw or Beast.
     pub race: ShipRace,
@@ -122,7 +122,7 @@ pub fn skirmish_races(local: ShipRace, num_players: usize) -> Vec<ShipRace> {
 }
 
 /// A game to start.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GameSetup {
     /// The map's name in the map list (`Coldwar2`).
     pub map: String,
@@ -136,6 +136,12 @@ pub struct GameSetup {
     pub seed: u32,
     /// Attach the effect data (explosions and the like), for a game that is drawn.
     pub effects: bool,
+    /// The player at this machine (0 in a skirmish).
+    #[serde(default)]
+    pub local_player: usize,
+    /// A network game (`multiPlayerGame`): every machine plays the same setup.
+    #[serde(default)]
+    pub network: bool,
 }
 
 /// Why a game could not start.
@@ -230,12 +236,13 @@ impl SkirmishRun {
         }
         // The level's own objects' player is never in the game.
         u.base.players[n].state = 1;
-        u.chatter.local_player = 0;
+        let local = setup.local_player.min(n.saturating_sub(1));
+        u.chatter.local_player = local;
         u.mp = crate::multiplayer::MpState {
             active: true,
-            network: false,
+            network: setup.network,
             num_players: n,
-            local_player: 0,
+            local_player: local,
             injection_amount: o.injection_amount,
             lump_sum_amount: o.lump_sum_amount,
             ship_death_time_min: mpt.ship_death_time_min,
@@ -264,7 +271,7 @@ impl SkirmishRun {
         // levelInit's tail.
         crate::multiplayer::try_to_find_motherships(&mut u);
         level::preset_ships_to_position(&mut u);
-        crate::fow::create_for_local_player(&mut u, 0);
+        crate::fow::create_for_local_player(&mut u, local);
 
         // gameStart: the starting RUs. Computer players get five times as much (2000 RUs
         // without a size) when harvesting is on.

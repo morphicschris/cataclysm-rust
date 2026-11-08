@@ -828,6 +828,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hwc-net"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "hwc-formats",
+ "hwc-math",
+ "hwc-sim",
+ "serde",
+]
+
+[[package]]
 name = "hwc-nis"
 version = "0.1.0"
 dependencies = [

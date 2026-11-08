@@ -48,6 +48,8 @@ fn setup(map: &str, races: &[ShipRace], options: GameOptions, seed: u32) -> Game
         slots: None,
         seed,
         effects: false,
+        local_player: 0,
+        network: false,
     }
 }
 

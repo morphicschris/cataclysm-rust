@@ -64,6 +64,7 @@ pub mod nebula;
 pub mod nis_level;
 pub mod nis_support;
 pub mod object;
+pub mod orders;
 pub mod parade;
 pub mod player_orders;
 pub mod physics;

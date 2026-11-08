@@ -1110,7 +1110,7 @@ pub fn mr_mimic_undisguise(u: &mut Universe, selection: &[ShipId]) {
 }
 
 /// What a Mimic order clicked on takes the shape of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MimicTarget {
     Ship(ShipId),
     Asteroid,
