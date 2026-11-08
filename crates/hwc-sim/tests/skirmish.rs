@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 use hwc_formats::gamedata::GameData;
 use hwc_sim::mission::GameDataSource;
 use hwc_sim::multiplayer::{mg, MpEvent};
-use hwc_sim::skirmish::{game_types, map_list, skirmish_races, GameSetup, GameType, PlayerSetup, SkirmishRun};
+use hwc_sim::skirmish::{game_type_index, game_types, map_list, skirmish_races, GameOptions, GameSetup, PlayerSetup, SkirmishRun};
 use hwc_sim::statics::{LoadOptions, ShipRace, ShipType, StaticWorld};
 use hwc_sim::SimTweaks;
 
@@ -35,12 +35,12 @@ fn data() -> Option<&'static Data> {
     .as_ref()
 }
 
-fn default_game(d: &Data) -> GameType {
+fn default_game(d: &Data) -> GameOptions {
     let src = GameDataSource(&d.gd);
-    game_types(&src).into_iter().find(|g| g.name == "Default").expect("the Default game type")
+    game_types(&src).into_iter().find(|g| g.name == "Default").expect("the Default game type").options()
 }
 
-fn setup(map: &str, races: &[ShipRace], options: GameType, seed: u32) -> GameSetup {
+fn setup(map: &str, races: &[ShipRace], options: GameOptions, seed: u32) -> GameSetup {
     GameSetup {
         map: map.to_string(),
         players: races.iter().enumerate().map(|(i, &race)| PlayerSetup { race, computer: i > 0 }).collect(),
@@ -58,11 +58,22 @@ fn the_game_types_and_maps_are_read() {
     let types = game_types(&src);
     let names: Vec<&str> = types.iter().map(|g| g.name.as_str()).collect();
     assert_eq!(names, ["Default", "I hate harvesting", "Bounty Hunter", "Carpe Diem"]);
-    let def = &types[0];
+    let def = types[0].options();
     assert_eq!(def.flags, mg::LAST_MOTHERSHIP | mg::HARVESTING_ENABLED | mg::RESEARCH_ENABLED | mg::UNIT_CAPS_ENABLED | mg::ALLOW_ALLIES | mg::HYPERSPACE);
     assert_eq!((def.starting_resources, def.injection_interval, def.injection_amount), (1, 14400, 2000));
-    let carpe = &types[3];
+    let carpe = types[3].options();
     assert_eq!(carpe.flags & (mg::CAPTURE_CAPITAL_SHIP | mg::RESEARCH_ENABLED | mg::RESOURCE_INJECTIONS), mg::CAPTURE_CAPITAL_SHIP | mg::RESOURCE_INJECTIONS);
+    // Picking a type selects its button; a change away from every type selects "custom".
+    for (i, g) in types.iter().enumerate() {
+        assert_eq!(game_type_index(&types, &g.options()), i, "{}", g.name);
+    }
+    // "Bounty Hunter" leaves the injection settings as they were.
+    let mut o = types[1].options();
+    types[2].apply(&mut o);
+    assert_eq!((o.injection_interval, o.bounty_size), (14400, 2));
+    let mut custom = def.clone();
+    custom.flags ^= mg::CRATES_ENABLED;
+    assert_eq!(game_type_index(&types, &custom), types.len());
 
     let maps = map_list(&src);
     let names: Vec<(&str, usize)> = maps.iter().map(|m| (m.name.as_str(), m.max_players)).collect();
@@ -204,7 +215,7 @@ fn resource_injections_arrive() {
 fn carpe_diem_gives_a_hive_frigate() {
     let Some(d) = data() else { return };
     let src = GameDataSource(&d.gd);
-    let carpe = game_types(&src).into_iter().find(|g| g.name == "Carpe Diem").expect("Carpe Diem");
+    let carpe = game_types(&src).into_iter().find(|g| g.name == "Carpe Diem").expect("Carpe Diem").options();
     let run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, setup("TheGates3", &[ShipRace::Somtaaw, ShipRace::Beast, ShipRace::Somtaaw], carpe, 3)).expect("start");
     let u = &run.universe;
     for (p, t) in [(0, ShipType::sHiveFrigate), (1, ShipType::bHiveFrigate), (2, ShipType::sHiveFrigate)] {
