@@ -56,7 +56,11 @@ tested by `crates/hwc-sim/tests/skirmish.rs`:
   manager. Save version 14. Not modelled: the sensors pings of the ships going and coming and the
   arrival chatter; the cost is posted as a message, not drawn on the plate.
 
-Left for later stages: fuel burn, alliances being formed and broken, and drawing crates (the
+- Fuel burn: nothing to port. Cataclysm keeps the option (`mgFuelBurnEnabled` sets bit 0x400) but no
+  code tests the bit, nothing burns fuel and `OUT_OF_FUEL_FRICTION` is never read; ships' fuel
+  (+0x334) is only filled in (`InitStatShipInfo`, hyperspace, `refuelRepairShips`) and read by KAS.
+
+Left for later stages: alliances being formed and broken, and drawing crates (the
 simulation has them; the view does not yet).
 
 ## 2. Skirmish front end
