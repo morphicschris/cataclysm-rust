@@ -476,14 +476,18 @@ pub fn screen_model(fe: &Fe, screen: usize) -> Model {
     // The front end's user regions that draw pictures: (atom, layout rect, screen rect).
     let mut pictures: Vec<(AtomRef, Rect, Rect)> = Vec::new();
     let front_end = fe.game.ig.mmenu.front_end;
+    let lobby = front_end && crate::front_menu::LOBBY_SCREENS.contains(&s.name.as_str());
     for (i, atom) in s.atoms.iter().enumerate().skip(1) {
         let a = AtomRef { screen, atom: i };
         let r = atom.layout_rect();
         if atom.has(FAF_HIDDEN) || !on_layout(r) {
             continue;
         }
+        if lobby && atom.name.as_deref().is_some_and(|n| crate::front_menu::LEFT_OUT.contains(&n) || n == "MG_ViewChannels" || n == "MG_BackToLogin") {
+            continue;
+        }
         if atom.kind == FA_STATIC_TEXT {
-            if let Some(text) = atom_text(fe, atom) {
+            if let Some(text) = atom_text(fe, atom).filter(|t| !(lobby && crate::front_menu::LEFT_OUT_TEXTS.contains(&t.as_str()))) {
                 texts.push(Txt {
                     r,
                     text,

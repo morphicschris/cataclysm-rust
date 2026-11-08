@@ -31,7 +31,8 @@ use hwc_ui::ingame::cursor::{self, avail, Availability, Pointer, PointerAction};
 
 use crate::audio::Audio;
 use crate::bandbox;
-use crate::host::{selectable, sim_id, SimHost, PLAYER};
+use crate::host::{player, selectable, sim_id, SimHost};
+use hwc_sim::orders::Order;
 use crate::hotkeys::{CarriedGroups, HotKeyGroups};
 use crate::intel_trace::IntelTraceKind;
 use crate::mission::{Cue, CueReader};
@@ -150,6 +151,8 @@ pub struct Game {
     pub(crate) messages: Vec<GameMessage>,
     /// The local player's name in a multiplayer game (the skirmish screen's player name).
     pub local_name: Option<String>,
+    /// The network game this is, if any: orders go through it and it paces the updates.
+    pub net: Option<crate::net_game::NetLink>,
     /// Speech subtitles, simulated subtitles and location cards (`Subtitle.c`).
     pub subtitles: Option<Subtitles>,
     /// The NIS letterbox the mission's `wideScreenIn/Out` drive.
@@ -383,6 +386,7 @@ impl Game {
             group_fonts,
             messages: Vec::new(),
             local_name: None,
+            net: None,
             subtitles: None,
             letterbox: Letterbox::default(),
             #[cfg(test)]
@@ -574,7 +578,7 @@ impl Game {
                 || !self.selection.is_empty(),
             placing_waypoints: self.placing_waypoints().then_some(self.waypoint_mode as u8),
             in_sensors: self.sensors.is_open(),
-            resource_units: world.universe().base.players[PLAYER].resource_units,
+            resource_units: world.universe().base.players[player()].resource_units,
             screen_pos: &pos,
         };
         f(&mut self.ui, &host)
@@ -769,7 +773,7 @@ impl Game {
             u.messages.push(hwc_sim::speech::Message { key: "strCantFireBigGun", colour: RED, ship: None });
             return;
         }
-        let Some(ms) = u.ships.iter().find(|s| s.player == PLAYER && s.ship_type == ShipType::sMothership).map(|s| s.id) else {
+        let Some(ms) = u.ships.iter().find(|s| s.player == player() && s.ship_type == ShipType::sMothership).map(|s| s.id) else {
             return;
         };
         if !mothership::has_big_gun_module(u, ms) {
@@ -804,8 +808,7 @@ impl Game {
             }
             let ms: Vec<ShipId> = self.selection.clone();
             if dest.is_finite() {
-                let u = self.world.universe_mut();
-                hwc_sim::ships::mothership::cl_big_gun(u, &ms, hwc_math::Vector::new(dest.x, dest.y, dest.z));
+                self.give(Order::BigGun { ships: ms, point: hwc_math::Vector::new(dest.x, dest.y, dest.z) });
             }
             sound(audio, MOVEMENT_GUI_OFF);
             self.mode = Mode::Select;
@@ -819,9 +822,8 @@ impl Game {
                 let c = plate.centre;
                 let from = hwc_math::Vector::new(c.x, c.y, c.z);
                 let d = hwc_math::Vector::new(dest.x, dest.y, dest.z);
-                let u = self.world.universe_mut();
-                command::cl_move(u, &sel, command::waypoint_mode::ONCE, from, &[d]);
-                hwc_sim::speech::by_first(u, &sel, hwc_sim::speech::event::MOVE);
+                self.give(Order::Move { ships: sel.clone(), mode: command::waypoint_mode::ONCE, from, waypoints: vec![d] });
+                hwc_sim::speech::by_first(self.world.universe_mut(), &sel, hwc_sim::speech::event::MOVE);
             }
             sound(audio, MOVEMENT_GUI_OFF);
             self.mode = Mode::Select;
@@ -841,7 +843,7 @@ impl Game {
                 continue;
             }
             let Some(s) = u.ship(other) else { continue };
-            if s.player != PLAYER || s.ship_type != kind {
+            if s.player != player() || s.ship_type != kind {
                 continue;
             }
             let on_screen = Self::screen_pos(&self.world, size, other).is_some_and(|(x, y, _)| {
@@ -865,7 +867,7 @@ impl Game {
         }
         let u = self.world.universe();
         let Some(s) = u.ship(id) else { return };
-        let own = s.player == PLAYER;
+        let own = s.player == player();
         if self.ui.action_held(keys::BANDBOX_FOCUS) {
             self.focus_on(vec![id], true, audio);
             return;
@@ -1013,17 +1015,15 @@ impl Game {
         if self.classify(h) == PointerAction::Mimic {
             // `mrMimicDisguiseAsTarget`.
             if let Some(m) = self.mimic_target(h) {
-                let mut sel = self.selection.clone();
-                let u = self.world.universe_mut();
-                hwc_sim::player_orders::with_upgrade(u, &mut sel, 0x20);
-                hwc_sim::player_orders::mr_mimic_disguise_as_target(u, &sel, m);
+                let sel = self.selection.clone();
+                self.give(Order::MimicAsTarget { ships: sel, target: m });
                 return true;
             }
         }
         match (self.classify(h), h) {
             (PointerAction::Harvest, Hover::Resource(r)) => {
                 let sel = self.selection.clone();
-                harvest(self.world.universe_mut(), &sel, Some(r));
+                self.harvest(&sel, Some(r));
                 true
             }
             (PointerAction::Attack, Hover::Ship(t)) => {
@@ -1036,27 +1036,18 @@ impl Game {
             ) => {
                 let sel = self.selection.clone();
                 let mission_15 = self.on_mission_15();
-                hwc_sim::player_orders::mr_dock_at_slipgate(self.world.universe_mut(), &sel, t, mission_15);
+                self.give(Order::DockAtSlipgate { ships: sel, gate: t, mission_15 });
                 true
             }
             (PointerAction::Dock, Hover::Ship(t)) => {
                 let sel = self.selection.clone();
-                wrap_dock(
-                    self.world.universe_mut(),
-                    &sel,
-                    dock::purpose::DOCK,
-                    Some(t),
-                );
+                self.dock(&sel, dock::purpose::DOCK, Some(t));
                 true
             }
             // Sentinels shield the ally (`mrProtectShips`).
             (PointerAction::ForceField, Hover::Ship(t)) => {
                 let sel = self.selection.clone();
-                hwc_sim::player_orders::mr_protect_ships(
-                    self.world.universe_mut(),
-                    &sel,
-                    Some(&[t]),
-                );
+                self.give(Order::ProtectShips { ships: sel, targets: Some(vec![t]) });
                 true
             }
             // The special orders on the object (`mrSpecialTargetOrder(target, order)`).
@@ -1074,13 +1065,7 @@ impl Game {
                     _ => return false,
                 };
                 let sel = self.selection.clone();
-                hwc_sim::player_orders::special_target_order(
-                    self.world.universe_mut(),
-                    PLAYER,
-                    &sel,
-                    Some(&[t]),
-                    order,
-                );
+                self.give(Order::SpecialTarget { ships: sel, targets: Some(vec![t]), order });
                 true
             }
             _ => false,
@@ -1110,7 +1095,7 @@ impl Game {
         let u = self.world.universe();
         if self.right_click_move {
             if let (Some(t), Some(kind)) = (self.menu_target, item.target_kind()) {
-                if hwc_sim::player_orders::is_special_target(u, PLAYER, t, kind) {
+                if hwc_sim::player_orders::is_special_target(u, player(), t, kind) {
                     return vec![t];
                 }
             }
@@ -1140,7 +1125,7 @@ impl Game {
         if let (Some(item), true) = (item, self.special_targets.is_empty()) {
             let u = self.world.universe();
             self.menu_context =
-                hwc_sim::player_orders::context_target(u, PLAYER, &self.selection, item)
+                hwc_sim::player_orders::context_target(u, player(), &self.selection, item)
                     .map(|t| (item, t));
         }
         let shown = item.map_or_else(Vec::new, |i| self.menu_targets(i));
@@ -1150,7 +1135,7 @@ impl Game {
             .into_iter()
             .filter_map(|id| {
                 let (x, y, r) = Game::screen_pos(&self.world, size, id)?;
-                Some((x, y, r, hwc_sim::shockwave::is_ally(u, id, PLAYER)))
+                Some((x, y, r, hwc_sim::shockwave::is_ally(u, id, player())))
             })
             .collect();
         self.ui.fe.game.ig.popup.target_boxes = boxes;
@@ -1182,9 +1167,9 @@ impl Game {
             let ti = s.ship_type.index();
             // A Mimic disguised as one of the player's ships counts as an ally
             // (`selGetCommandAvailability`).
-            if s.player == PLAYER
-                || u.players.get(PLAYER).is_some_and(|p| p.is_ally(s.player))
-                || hwc_sim::ships::mimic::is_disguised_as_player(u, id, PLAYER)
+            if s.player == player()
+                || u.players.get(player()).is_some_and(|p| p.is_ally(s.player))
+                || hwc_sim::ships::mimic::is_disguised_as_player(u, id, player())
             {
                 t[avail::ALLY] = true;
             } else {
@@ -1284,7 +1269,7 @@ impl Game {
                 let t = self.availability(&[id]);
                 let u = self.world.universe();
                 if let Some(s) = u.ship(id) {
-                    facts.own_ship = s.player == PLAYER;
+                    facts.own_ship = s.player == player();
                     facts.all_can_dock = facts.own_ship
                         && !self.selection.is_empty()
                         && self.selection.iter().all(|&a| {
@@ -1363,7 +1348,7 @@ impl Game {
         if id.mine().is_some() {
             self.mine_facts(id)
         } else {
-            bandbox::Facts::of(self.world.universe(), id, PLAYER)
+            bandbox::Facts::of(self.world.universe(), id, player())
         }
     }
 
@@ -1507,7 +1492,7 @@ impl Game {
         let mut inside: Vec<(ShipId, bandbox::Facts)> = self
             .ships_in_box(a, b)
             .into_iter()
-            .filter_map(|id| Some((id, bandbox::Facts::of(u, id, PLAYER)?)))
+            .filter_map(|id| Some((id, bandbox::Facts::of(u, id, player())?)))
             .collect();
         if matches!(mode, bandbox::Mode::Attack | bandbox::Mode::ForceAttack) {
             inside.extend(
@@ -1558,7 +1543,7 @@ impl Game {
             &inside,
             &sel,
             |id| bandbox::stand_in(u, id),
-            |id| bandbox::Facts::of(u, id, PLAYER),
+            |id| bandbox::Facts::of(u, id, player()),
         )
     }
 
@@ -1586,7 +1571,7 @@ impl Game {
                     bandbox::attack_targets(&facts, &attackers, mode == Mode::ForceAttack);
                 if !targets.is_empty() {
                     self.speak_attack(&attackers, &targets);
-                    command::cl_attack(self.world.universe_mut(), &attackers, &targets);
+                    self.give(Order::Attack { ships: attackers, targets });
                 }
             }
             Mode::Guard => {
@@ -1597,9 +1582,8 @@ impl Game {
                 self.selection = guards.clone();
                 if !guards.is_empty() {
                     // The mothership's voice acknowledges the guard order.
-                    let u = self.world.universe_mut();
-                    hwc_sim::speech::queue(u, None, hwc_sim::speech::event::GUARD, 0);
-                    command::cl_protect(u, &guards, &selecting);
+                    hwc_sim::speech::queue(self.world.universe_mut(), None, hwc_sim::speech::event::GUARD, 0);
+                    self.give(Order::Protect { ships: guards, targets: selecting });
                 }
             }
             Mode::Focus => {
@@ -1732,7 +1716,7 @@ impl Game {
         let sel = command::attack_capable(self.world.universe(), &self.selection);
         if !sel.is_empty() {
             self.speak_attack(&sel, targets);
-            command::cl_attack(self.world.universe_mut(), &sel, targets);
+            self.give(Order::Attack { ships: sel, targets: targets.to_vec() });
         }
     }
 
@@ -1749,7 +1733,7 @@ impl Game {
                     continue;
                 }
                 match u.ship(t) {
-                    Some(s) if s.player == PLAYER => own += 1,
+                    Some(s) if s.player == player() => own += 1,
                     Some(_) => enemy += 1,
                     None => resources += 1,
                 }
@@ -1773,7 +1757,7 @@ impl Game {
     /// first ship, or, with the player's mothership in it, the mothership's voice.
     fn speak_selected(&mut self) {
         let u = self.world.universe_mut();
-        let ms = u.base.players[PLAYER].mothership.filter(|&m| {
+        let ms = u.base.players[player()].mothership.filter(|&m| {
             self.selection.contains(&m)
                 && u.ship(m)
                     .and_then(|s| u.statics.ship(s.ship_type))
@@ -1793,7 +1777,7 @@ impl Game {
     /// Plays the speech the orders and ships asked for since the last frame.
     fn ship_speech(&mut self, audio: &mut Option<Audio>) {
         if let Some(a) = audio.as_mut() {
-            let beast = self.world.universe().players.get(PLAYER).is_some_and(|p| p.race == hwc_sim::statics::ShipRace::Beast);
+            let beast = self.world.universe().players.get(player()).is_some_and(|p| p.race == hwc_sim::statics::ShipRace::Beast);
             a.set_player_race(beast);
         }
         // The simulation's status messages (`moMessageAdd`), such as the Leech's
@@ -1811,7 +1795,7 @@ impl Game {
         let speech = std::mem::take(&mut self.world.universe_mut().speech);
         if let Some(a) = audio.as_mut() {
             for s in speech {
-                a.ship_speech(self.world.universe(), PLAYER, s);
+                a.ship_speech(self.world.universe(), player(), s);
             }
         }
         // For the next updates: the speech queue's refusals and the hot-key groups.
@@ -1826,6 +1810,67 @@ impl Game {
         });
     }
 
+
+    // ---------------------------------------------------------------------------------------
+    // Orders
+    // ---------------------------------------------------------------------------------------
+
+    /// Gives an order of the local player: at once in a game on this machine, in the next
+    /// packet in a network game (applied on every machine at the same update). True when it
+    /// was applied now.
+    pub(crate) fn give(&mut self, order: Order) -> bool {
+        if let Some(n) = self.net.as_mut() {
+            n.session.give(order);
+            return false;
+        }
+        let tables = self.world.mission_run().map(|r| r.game.disguise_tables.clone());
+        hwc_sim::orders::apply(self.world.universe_mut(), player(), &order, tables.as_ref());
+        true
+    }
+
+    /// The harvest order (`clWrapCollectResource`), the first harvester answering (each that
+    /// finds nothing says so when no resource was named).
+    fn harvest(&mut self, sel: &[ShipId], resource: Option<hwc_sim::resource::ResourceId>) {
+        use hwc_sim::speech::{self, event};
+        let u = self.world.universe_mut();
+        let harvesters = hwc_sim::orders::harvesters(u, sel);
+        let Some(&first) = harvesters.first() else {
+            return;
+        };
+        match resource {
+            Some(_) => speech::by_ship(u, first, event::HARVEST),
+            None => {
+                for &id in &harvesters {
+                    let found = hwc_sim::resource::find_nearest_resource(u, id, 0.0, hwc_math::Vector::new(0.0, 0.0, 0.0));
+                    match found {
+                        Some(_) if id == first => speech::by_ship(u, id, event::HARVEST),
+                        Some(_) => {}
+                        None => speech::by_ship(u, id, event::HARVEST_NOTHING),
+                    }
+                }
+            }
+        }
+        self.give(Order::Harvest { ships: harvesters, resource });
+    }
+
+    /// `clWrapDock`: the dock order, and the first ship's acknowledgement once it has somewhere
+    /// to dock (retiring is announced by the mothership's voice, a slipgate trip is a move). In
+    /// a network game the order is not applied yet, and the ship answers at once.
+    fn dock(&mut self, sel: &[ShipId], purpose: i32, dock_with: Option<ShipId>) {
+        use hwc_sim::speech::{self, event};
+        let applied = self.give(Order::Dock { ships: sel.to_vec(), purpose, with: dock_with });
+        let u = self.world.universe_mut();
+        let Some(&first) = sel.first() else { return };
+        if applied && u.ship(first).and_then(|s| s.base.dock_with).is_none() {
+            return;
+        }
+        match purpose {
+            dock::purpose::RETIRE => speech::queue(u, None, event::RETIRE, 0),
+            dock::purpose::SLIPGATE => speech::by_ship(u, first, event::MOVE),
+            _ => speech::by_ship(u, first, event::DOCK),
+        }
+    }
+
     // ---------------------------------------------------------------------------------------
     // Requests from the interface
     // ---------------------------------------------------------------------------------------
@@ -1838,51 +1883,48 @@ impl Game {
                 count,
             } => {
                 if let Some(t) = ShipType::from_index(ship_type as usize) {
-                    hwc_sim::construction::queue_build(
-                        self.world.universe_mut(),
-                        sim_id(factory),
-                        t,
-                        count,
-                    );
+                    self.give(Order::Build { factory: sim_id(factory), ship_type: t, count });
                 }
             }
             GameRequest::Unqueue {
                 factory,
                 ship_type,
                 count,
-            } => self.unqueue(sim_id(factory), ship_type, count),
+            } => {
+                if let Some(t) = ShipType::from_index(ship_type as usize) {
+                    self.give(Order::Unqueue { factory: sim_id(factory), ship_type: t, count });
+                }
+            }
             GameRequest::CancelBuild { factory, ship_type } => {
-                self.cancel_build(sim_id(factory), ship_type)
+                if let Some(t) = ShipType::from_index(ship_type as usize) {
+                    self.give(Order::CancelBuild { factory: sim_id(factory), ship_type: t });
+                }
             }
             GameRequest::PauseBuild {
                 factory,
                 ship_type,
                 paused,
             } => {
-                if let Some(j) = self.job_mut(sim_id(factory), ship_type) {
-                    j.paused = paused;
+                if let Some(t) = ShipType::from_index(ship_type as usize) {
+                    self.give(Order::PauseBuild { factory: sim_id(factory), ship_type: t, paused });
                 }
             }
             GameRequest::Research { tech, .. } => {
-                hwc_sim::research::research_tech_if_lab_free(
-                    self.world.universe_mut(),
-                    PLAYER,
-                    tech as usize,
-                );
+                self.give(Order::Research { tech: tech as usize });
             }
             GameRequest::ClearLab { lab } => {
-                hwc_sim::research::clear_research_lab(self.world.universe_mut(), PLAYER, lab)
+                self.give(Order::ClearLab { lab });
             }
             GameRequest::Launch { launcher, ships } => {
                 let ships: Vec<ShipId> = ships.into_iter().map(sim_id).collect();
-                dock::cl_launch_multiple_ships(self.world.universe_mut(), &ships, sim_id(launcher));
+                self.give(Order::Launch { launcher: sim_id(launcher), ships });
             }
             GameRequest::SetAutoLaunch { launcher, on } => {
                 let u = self.world.universe();
                 let bit = dock::auto_launch_bit(u, sim_id(launcher));
-                let bits = u.base.players[PLAYER].auto_launch;
+                let bits = u.base.players[player()].auto_launch;
                 let bits = if on { bits | bit } else { bits & !bit };
-                dock::cl_auto_launch(self.world.universe_mut(), bits, PLAYER);
+                self.give(Order::AutoLaunch { bits });
             }
             GameRequest::Command(Command::Hyperspace) => self.hyperspace_button(),
             GameRequest::Command(c) => self.command(c, audio),
@@ -1898,7 +1940,7 @@ impl Game {
                 self.selection.retain(|&id| {
                     u.ship(id).is_some_and(|s| {
                         s.ship_type.index() as u32 == ship_type
-                            && (owner == Owner::Enemy) == (s.player != PLAYER)
+                            && (owner == Owner::Enemy) == (s.player != player())
                     })
                 });
                 // `moProcessClick`: the first of them answers.
@@ -1924,9 +1966,8 @@ impl Game {
             }
             GameRequest::MimicItem(i) => {
                 let sel = self.selection.clone();
-                if let Some(r) = self.world.mission_run_mut() {
-                    let (t, slot) = (r.game.disguise_tables.clone(), r.game.mimic_slot);
-                    hwc_sim::player_orders::mimic_disguise_as(&mut r.universe, &t, slot, &sel, i);
+                if let Some(slot) = self.world.mission_run().map(|r| r.game.mimic_slot) {
+                    self.give(Order::MimicAs { ships: sel, slot, index: i });
                 }
             }
             GameRequest::FocusShip(id) => {
@@ -1974,20 +2015,14 @@ impl Game {
             }
             // `lmSlotNProcess` -> the mothership keeps a priority per module type.
             GameRequest::SetRepairPriority { module_type, priority } => {
-                let u = self.world.universe_mut();
-                if let Some(ms) = u.base.players[PLAYER].mothership {
-                    if let Some(t) = ShipType::from_index(module_type as usize) {
-                        hwc_sim::ships::mothership::set_repair_priority(u, ms, t, priority);
-                    }
+                if let Some(t) = ShipType::from_index(module_type as usize) {
+                    self.give(Order::RepairPriority { module_type: t, priority });
                 }
             }
             // `lmBeastSystemsSet` (0x49b210): the Beast mothership's emergency power goes where
             // the buttons say.
             GameRequest::BeastSystems(v) => {
-                let u = self.world.universe_mut();
-                if let Some(ms) = u.base.players[PLAYER].mothership {
-                    hwc_sim::ships::mothership::set_damage_mode(u, ms, v);
-                }
+                self.give(Order::BeastSystems { mode: v });
             }
             GameRequest::TraderAccept(_)
             | GameRequest::TraderLeave => {}
@@ -2004,7 +2039,7 @@ impl Game {
         let r = self.world.run_mut().hyperspace_button();
         if r.is_ok() {
             // `ccFocusOnMyMothership`: the camera turns to the mothership for the jump.
-            if let Some(ms) = self.world.universe().base.players[PLAYER].mothership {
+            if let Some(ms) = self.world.universe().base.players[player()].mothership {
                 self.world.focus_on(vec![ms], false);
             }
         }
@@ -2031,63 +2066,29 @@ impl Game {
         self.world.run_mut().abort_hyperspace();
     }
 
-    fn job_mut(
-        &mut self,
-        factory: ShipId,
-        ship_type: u32,
-    ) -> Option<&mut hwc_sim::construction::BuildJob> {
-        self.world
-            .universe_mut()
-            .base
-            .factories
-            .iter_mut()
-            .find(|f| f.ship == Some(factory))?
-            .jobs
-            .iter_mut()
-            .find(|j| j.n_jobs > 0 && j.info.is_some_and(|t| t.index() as u32 == ship_type))
-    }
-
-    /// `cmDecrement`: take queued ships off a job, never the one in progress.
-    fn unqueue(&mut self, factory: ShipId, ship_type: u32, count: i32) {
-        if let Some(j) = self.job_mut(factory, ship_type) {
-            let n = count.min(j.n_jobs - 1).max(0);
-            j.n_jobs -= n;
-            j.n_total = (j.n_total - n).max(j.n_jobs);
-        }
-    }
-
-    /// `cmCancelJobs`: the job goes, what it cost so far comes back and a half-built module
-    /// is removed.
-    fn cancel_build(&mut self, factory: ShipId, ship_type: u32) {
-        if let Some(t) = ShipType::from_index(ship_type as usize) {
-            hwc_sim::construction::cancel_job(self.world.universe_mut(), factory, t);
-        }
-    }
-
     pub(crate) fn command(&mut self, c: Command, audio: &mut Option<Audio>) {
         let sel = self.selection.clone();
         if sel.is_empty() {
             return;
         }
         let mission_15 = self.on_mission_15();
-        let u = self.world.universe_mut();
         match c {
             Command::Move => self.start_move(audio),
-            Command::Cancel => command::cl_halt(u, &sel),
-            Command::Dock => wrap_dock(u, &sel, dock::purpose::DOCK, None),
-            Command::Retire => wrap_dock(u, &sel, dock::purpose::RETIRE, None),
-            Command::Harvest => harvest(u, &sel, None),
+            Command::Cancel => {
+                self.give(Order::Halt { ships: sel });
+            }
+            Command::Dock => self.dock(&sel, dock::purpose::DOCK, None),
+            Command::Retire => self.dock(&sel, dock::purpose::RETIRE, None),
+            Command::Harvest => self.harvest(&sel, None),
             Command::TacticsEvasive => {
-                hwc_sim::player_orders::mr_set_tactics(u, &sel, hwc_sim::object::tactics::EVASIVE)
+                self.give(Order::Tactics { ships: sel, tactics: hwc_sim::object::tactics::EVASIVE });
             }
             Command::TacticsNeutral => {
-                hwc_sim::player_orders::mr_set_tactics(u, &sel, hwc_sim::object::tactics::NEUTRAL)
+                self.give(Order::Tactics { ships: sel, tactics: hwc_sim::object::tactics::NEUTRAL });
             }
-            Command::TacticsAggressive => hwc_sim::player_orders::mr_set_tactics(
-                u,
-                &sel,
-                hwc_sim::object::tactics::AGGRESSIVE,
-            ),
+            Command::TacticsAggressive => {
+                self.give(Order::Tactics { ships: sel, tactics: hwc_sim::object::tactics::AGGRESSIVE });
+            }
             Command::Formation(f) => {
                 let t = match f {
                     Formation::Delta => formation::kind::DELTA,
@@ -2105,43 +2106,45 @@ impl Game {
                     Formation::Parade => 8,
                     _ => t as i32,
                 };
-                hwc_sim::speech::queue(u, None, hwc_sim::speech::event::FORMATION_SET, line);
+                hwc_sim::speech::queue(self.world.universe_mut(), None, hwc_sim::speech::event::FORMATION_SET, line);
                 if sel.len() > 1 {
-                    command::cl_formation(u, &sel, t);
+                    self.give(Order::Formation { ships: sel, formation: t });
                 }
             }
-            Command::Upgrade => hwc_sim::player_orders::mr_upgrade_ships(u, &sel),
+            Command::Upgrade => {
+                self.give(Order::Upgrade { ships: sel });
+            }
             Command::EnterSlipgate => {
-                hwc_sim::player_orders::mr_enter_nearest_slipgate(u, PLAYER, &sel, mission_15);
+                self.give(Order::EnterSlipgate { ships: sel, mission_15 });
             }
             Command::BigGun => self.begin_big_gun(audio),
             // `mrBigGunCancel`.
             Command::CancelBigGun => {
-                for &id in &sel {
-                    if hwc_sim::ships::mothership::big_gun_is_active(u, id) {
-                        hwc_sim::ships::cl_special(u, &[id], &[]);
-                    }
-                }
+                self.give(Order::CancelBigGun { ships: sel });
             }
             // `kbcbKamikaze`: the selection keeps only the ships that can.
             Command::Kamikaze => {
-                if hwc_sim::player_orders::mr_kamikaze(u, &mut self.selection) {
+                if hwc_sim::player_orders::kamikaze_request(self.world.universe_mut(), &mut self.selection) {
+                    let ships = self.selection.clone();
+                    self.give(Order::Kamikaze { ships });
                     sound(audio, CLICK);
                 }
             }
             // `mrLeechSet` (the Spy / Leech / Vent keys and the "Select Leech" submenu): the
             // selected Leeches take the drain mode.
             Command::LeechMode(m) => {
-                hwc_sim::player_orders::mr_leech_set(u, &sel, m);
+                self.give(Order::LeechMode { ships: sel, mode: m });
             }
             // `mrScuttle`: a first press asks, a second within the reconfirm time scuttles.
             Command::Scuttle => {
-                let r = hwc_sim::player_orders::mr_scuttle(
-                    u,
+                let r = hwc_sim::player_orders::scuttle_request(
+                    self.world.universe_mut(),
                     &mut self.selection,
                     &mut self.scuttle_confirm,
                 );
                 if r == hwc_sim::player_orders::Scuttle::Confirmed {
+                    let ships = self.selection.clone();
+                    self.give(Order::Scuttle { ships });
                     sound(audio, CLICK);
                 }
             }
@@ -2165,11 +2168,10 @@ impl Game {
                 } else {
                     Vec::new()
                 };
-                let u = self.world.universe_mut();
                 if !from_menu && item == hwc_sim::player_orders::SpecialItem::Repair {
-                    hwc_sim::player_orders::repair_key(u, PLAYER, &sel);
+                    self.give(Order::RepairKey { ships: sel });
                 } else {
-                    hwc_sim::player_orders::execute_special(u, PLAYER, &sel, item, &targets);
+                    self.give(Order::Special { ships: sel, item, targets });
                 }
                 self.special_targets.clear();
             }
@@ -2271,9 +2273,8 @@ impl Game {
                     .iter()
                     .map(|p| hwc_math::Vector::new(p.x, p.y, p.z))
                     .collect();
-                let u = self.world.universe_mut();
-                command::cl_move(u, &sel, self.waypoint_mode, from, &wps);
-                hwc_sim::speech::by_first(u, &sel, hwc_sim::speech::event::MOVE);
+                self.give(Order::Move { ships: sel.clone(), mode: self.waypoint_mode, from, waypoints: wps });
+                hwc_sim::speech::by_first(self.world.universe_mut(), &sel, hwc_sim::speech::event::MOVE);
                 sound(audio, plate::SOUND_CHIMES);
             }
         }
@@ -2370,7 +2371,7 @@ impl Game {
             }
             keys::TOGGLE_SENSORS_MANAGER => self.toggle_sensors(audio),
             keys::FOCUS_ON_MOTHERSHIP => {
-                if let Some(ms) = self.world.universe().base.players[PLAYER].mothership {
+                if let Some(ms) = self.world.universe().base.players[player()].mothership {
                     self.world.focus_on(vec![ms], false);
                 }
             }
@@ -2434,11 +2435,7 @@ impl Game {
                 };
                 self.formation_index = (self.formation_index + step) % formation::CYCLE.len();
                 let sel = self.selection.clone();
-                command::cl_formation(
-                    self.world.universe_mut(),
-                    &sel,
-                    formation::CYCLE[self.formation_index],
-                );
+                self.give(Order::Formation { ships: sel, formation: formation::CYCLE[self.formation_index] });
             }
             _ => {}
         }
@@ -2477,6 +2474,9 @@ impl Game {
     /// A player's name in a multiplayer game: the local player's own, `Computer <n>` for the
     /// others (`gameStart`'s `"%s %i"` with `strComputerName`).
     fn player_name(&self, p: usize) -> String {
+        if let Some(name) = self.net.as_ref().and_then(|n| n.names.get(p)) {
+            return name.clone();
+        }
         if p == self.world.universe().mp.local_player {
             let n = self.local_name.clone().unwrap_or_else(|| self.ui.fe.game.options.get_str("PlayerName").to_string());
             if !n.trim().is_empty() {
@@ -2811,11 +2811,38 @@ impl Game {
         {
             self.reset_speed(true);
         }
+        // A network game neither pauses nor compresses time (every machine runs at the
+        // same pace), and reads the network every frame.
+        if self.net.is_some() {
+            self.paused = false;
+            self.world.paused = false;
+            if self.speed_level != GAME_SPEED_DEFAULT {
+                self.set_speed_level(GAME_SPEED_DEFAULT, false);
+            }
+            let lines = self.net.as_mut().map(|n| {
+                n.poll();
+                let mut lines = n.messages();
+                lines.extend(n.stall_note());
+                lines
+            });
+            for line in lines.unwrap_or_default() {
+                self.post(&line);
+            }
+        }
         let steps = self.world.due_steps(f64::from(dt));
         crate::watchdog::checkpoint("update: simulation steps");
         for _ in 0..steps {
             if self.movie || self.next_mission || self.nis_level_done {
                 break;
+            }
+            // In a network game a turn starts only once every player's orders for it have
+            // come (they are applied then); otherwise this frame waits.
+            if self.net.as_ref().is_some_and(|n| n.mid_turn == 0) {
+                let tables = self.world.mission_run().map(|r| r.game.disguise_tables.clone());
+                let net = self.net.as_mut().expect("network game");
+                if !net.before_update(self.world.universe_mut(), tables.as_ref()) {
+                    break;
+                }
             }
             // An NIS level has no mission yet: only its universe updates.
             let opening = self.world.nis_level().is_some();
@@ -2830,6 +2857,9 @@ impl Game {
                 self.kas_camera_in();
                 self.world.step();
                 self.kas_camera_orders();
+            }
+            if let Some(n) = self.net.as_mut() {
+                n.after_update(self.world.universe());
             }
             if let Some(a) = audio.as_mut() {
                 a.sim_events(self.world.universe(), !self.world.effects_on);
@@ -2949,7 +2979,7 @@ impl Game {
                 _ => None,
             })
             .collect();
-        for n in self.hotkeys.prune(u, PLAYER, &died) {
+        for n in self.hotkeys.prune(u, player(), &died) {
             if let Some(a) = audio.as_mut() {
                 a.fleet_speech(crate::hotkeys::SPEECH_DEFEAT, i32::from(n));
             }
@@ -2963,7 +2993,7 @@ impl Game {
         for f in &u.base.factories {
             let Some(fs) = f
                 .ship
-                .filter(|&id| u.ship(id).is_some_and(|s| s.player == PLAYER))
+                .filter(|&id| u.ship(id).is_some_and(|s| s.player == player()))
             else {
                 continue;
             };
@@ -3052,7 +3082,7 @@ impl Game {
         let found = |st: i32| st == proximity::state::FOUND || st == proximity::state::TRACKING;
         let mut states = Vec::new();
         for &id in &u.ship_list {
-            let Some(s) = u.ship(id).filter(|s| s.player == PLAYER) else {
+            let Some(s) = u.ship(id).filter(|s| s.player == player()) else {
                 continue;
             };
             let ShipSpec::ProximitySensor(spec) = &s.spec else {
@@ -3089,7 +3119,7 @@ impl Game {
             else {
                 continue;
             };
-            if player != PLAYER {
+            if player != crate::host::player() {
                 continue;
             }
             let done = pending.iter().position(|&(f, i, t)| {
@@ -3192,7 +3222,7 @@ impl Game {
             match e {
                 BaseEvent::ShipBuilt {
                     ship_type, player, ..
-                } if *player == PLAYER => {
+                } if *player == crate::host::player() => {
                     let name = self
                         .strings
                         .get(&format!("str{}", ship_type.name()))
@@ -3201,7 +3231,7 @@ impl Game {
                         .to_string();
                     posts.push(format!("{name} built"));
                 }
-                BaseEvent::Researched { player, tech } if *player == PLAYER => {
+                BaseEvent::Researched { player, tech } if *player == crate::host::player() => {
                     let name = Technology::from_index(*tech)
                         .and_then(|t| self.strings.get(&format!("str{}", t.name())))
                         .unwrap_or("")
@@ -4394,67 +4424,6 @@ fn gpu_profile(renderer: &mut Renderer, name: &'static str) {
 
 /// `mrHarvestResources`: the selection's harvesters collect `resource`, or each the nearest
 /// one (`FUN_00445260`). The first acknowledges; with nothing left to harvest each says so.
-fn harvest(
-    u: &mut hwc_sim::Universe,
-    sel: &[ShipId],
-    resource: Option<hwc_sim::resource::ResourceId>,
-) {
-    use hwc_sim::speech::{self, event};
-    let enabled = u.single_player
-        || u.base.options.flags & hwc_sim::base::game_flags::HARVESTING_ENABLED != 0;
-    let harvesters: Vec<ShipId> = sel
-        .iter()
-        .copied()
-        .filter(|&id| {
-            enabled
-                && u.ship(id)
-                    .and_then(|s| u.statics.ship(s.ship_type))
-                    .is_some_and(|st| {
-                        st.ship_class == Some(hwc_sim::statics::ShipClass::Resource)
-                            && 0 < st.harvest_amount
-                    })
-        })
-        .collect();
-    let Some(&first) = harvesters.first() else {
-        return;
-    };
-    match resource {
-        Some(_) => speech::by_ship(u, first, event::HARVEST),
-        None => {
-            for &id in &harvesters {
-                let found = hwc_sim::resource::find_nearest_resource(
-                    u,
-                    id,
-                    0.0,
-                    hwc_math::Vector::new(0.0, 0.0, 0.0),
-                );
-                match found {
-                    Some(_) if id == first => speech::by_ship(u, id, event::HARVEST),
-                    Some(_) => {}
-                    None => speech::by_ship(u, id, event::HARVEST_NOTHING),
-                }
-            }
-        }
-    }
-    hwc_sim::resource::cl_collect_resource(u, &harvesters, resource);
-}
-
-/// `clWrapDock`: the dock order, and the first ship's acknowledgement once it has somewhere
-/// to dock (retiring is announced by the mothership's voice, a slipgate trip is a move).
-fn wrap_dock(u: &mut hwc_sim::Universe, sel: &[ShipId], purpose: i32, dock_with: Option<ShipId>) {
-    use hwc_sim::speech::{self, event};
-    dock::cl_dock(u, sel, purpose, dock_with);
-    let Some(&first) = sel.first() else { return };
-    if u.ship(first).and_then(|s| s.base.dock_with).is_none() {
-        return;
-    }
-    match purpose {
-        dock::purpose::RETIRE => speech::queue(u, None, event::RETIRE, 0),
-        dock::purpose::SLIPGATE => speech::by_ship(u, first, event::MOVE),
-        _ => speech::by_ship(u, first, event::DOCK),
-    }
-}
-
 fn sound(audio: &mut Option<Audio>, e: u32) {
     if let Some(a) = audio.as_mut() {
         a.event(e);

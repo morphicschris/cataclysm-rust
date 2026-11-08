@@ -46,6 +46,8 @@ pub enum Request {
     ApplyOptions,
     /// Start a skirmish against the computer (`utyStartSkirmish`).
     StartSkirmish(crate::skirmish::SkirmishRequest),
+    /// The LAN screens ask the network for something.
+    Lan(crate::lan::LanRequest),
 }
 
 /// Seconds the "keep this display mode?" box waits before restoring the old mode
@@ -102,6 +104,8 @@ pub struct Cataclysm {
     pub ig: crate::ingame::IgState,
     /// The skirmish screens' state.
     pub skirmish: crate::skirmish::SkirmishUi,
+    /// What the LAN screens show.
+    pub lan: crate::lan::LanUi,
 }
 
 impl Cataclysm {
@@ -136,6 +140,7 @@ impl Cataclysm {
             ],
             ig: Default::default(),
             skirmish: Default::default(),
+            lan: Default::default(),
         }
     }
 
@@ -365,6 +370,7 @@ pub fn register(fe: &mut Fe) {
     });
     crate::colpick::register(fe);
     crate::skirmish::register(fe);
+    crate::lan::register(fe);
 
     // Options: navigation.
     fe.callback_add("OP_Options_Accept", options_accept);

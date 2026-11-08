@@ -92,6 +92,21 @@ out the battle chatter's and the effects' random streams, which only the machine
 draws from. Next: the game giving its orders through `orders` (and the local player not fixed at
 0), the LAN screens, recording games.
 
+Second part, in the game: the game screen gives every order through `Game::give`
+(`hwc_sim::orders`), applied at once offline and sent in the next packet online; the local player
+is `host::player()` (set when a network game starts; the `PLAYER` constant stays 0 for the tests);
+a network game's updates are paced by the turns (`net_game::NetLink`: a turn starts only when every
+player's orders for it have come, "Waiting for ..." after two seconds), with no pause or time
+compression, and chat, drop-outs and desyncs shown as messages. The LAN screens of
+`multiplayer_game.fib` are wired (`hwc_ui::lan`, `apps/cataclysm/src/lan.rs`): Connection
+Method's LAN, LAN Login, Available Games (the LAN browser's list, Ping All, Join, Create),
+Create Game on the option tabs, Connecting, and the waiting rooms (Captain Wait to start or
+dissolve, Player Wait to leave) with the game's players and chat; Player Setup sets the race. The
+original's lobby-server rooms (Channel Chat) have no LAN equivalent; the modern look leaves them,
+the ad banner and the dead WON links out. Tests: `hwc-ui/tests/lan_screens.rs` (both looks,
+screenshots `screenshots/front_end/lan_*`) and `lan::tests::two_front_ends_host_find_join_and_start`
+(two front ends on one machine: host, browse, join, chat, start the same game).
+
 ## 5. Internet
 
 Direct connection by address first, then a lightweight lobby (game list and relay for players behind

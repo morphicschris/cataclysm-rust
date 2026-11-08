@@ -16,7 +16,7 @@ use hwc_sim::statics::ShipClass;
 use hwc_sim::{ShipId, Universe};
 use hwc_ui::canvas::{Canvas, Color};
 
-use crate::host::PLAYER;
+use crate::host::player;
 use crate::sensors::{self, Fog, Icons};
 use crate::world::World;
 
@@ -390,7 +390,7 @@ pub fn draw_order_lines(
     let mut lines = Vec::new();
     for &id in selection {
         let Some(s) = u.ship(id) else { continue };
-        if s.player != PLAYER || s.flags & (sof::DEAD | sof::HIDE) != 0 {
+        if s.player != player() || s.flags & (sof::DEAD | sof::HIDE) != 0 {
             continue;
         }
         let Some((kind, target)) = order_of(u, id) else {
@@ -465,7 +465,7 @@ fn icon_color(u: &Universe, id: ShipId) -> Color {
     let handed_over = u.ship(id).is_some_and(crate::host::handed_over);
     if handed_over {
         crate::host::HANDED_OVER_COLOR
-    } else if u.ship(id).is_some_and(|s| s.player == PLAYER) {
+    } else if u.ship(id).is_some_and(|s| s.player == player()) {
         [0, 255, 0, 255]
     } else if sensors::looks_allied(u, id) {
         [0, 192, 255, 255]

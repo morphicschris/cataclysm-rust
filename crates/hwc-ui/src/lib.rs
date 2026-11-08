@@ -27,6 +27,7 @@ pub mod region;
 pub mod saves;
 pub mod scale;
 pub mod session;
+pub mod lan;
 pub mod skirmish;
 pub mod subtitle;
 pub mod text;

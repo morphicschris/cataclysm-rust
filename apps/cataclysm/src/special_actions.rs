@@ -20,7 +20,7 @@ use hwc_ui::session::{Session, Setup};
 use hwc_ui::AssetSource;
 
 use crate::game::Game;
-use crate::host::PLAYER;
+use crate::host::player;
 use crate::play::{Loading, Progress};
 
 const SIZE: (i32, i32) = (1024, 768);
@@ -142,11 +142,11 @@ fn z_menu_pick(rig: &mut Rig, g: &mut Game, label: &str) {
 
 fn acolytes(g: &mut Game) -> [ShipId; 2] {
     let u = g.world.universe_mut();
-    let ms = u.base.players[PLAYER].mothership.expect("mothership");
+    let ms = u.base.players[player()].mothership.expect("mothership");
     let p = u.ship(ms).unwrap().posinfo.position;
     let mut make = |off: Vector| {
         let id =
-            hwc_sim::base::create_ship(u, ShipType::sAcolyte, PLAYER, p + off, Default::default())
+            hwc_sim::base::create_ship(u, ShipType::sAcolyte, player(), p + off, Default::default())
                 .expect("acolyte");
         hwc_sim::construction::unit_cap_create_ship(u, id);
         id
@@ -164,7 +164,7 @@ fn acvs(g: &Game) -> Vec<ShipId> {
         .copied()
         .filter(|&id| {
             u.ship(id)
-                .is_some_and(|s| s.ship_type == ShipType::sACV && s.player == PLAYER)
+                .is_some_and(|s| s.ship_type == ShipType::sACV && s.player == player())
         })
         .collect()
 }
@@ -187,8 +187,8 @@ fn mission1_z_menu_links_acolytes_into_an_acv() {
     }
     // Linking researched.
     let u = g.world.universe_mut();
-    u.base.players[PLAYER].tech.add(Technology::Link.index());
-    hwc_sim::upgrade::player_update_from_research(u, PLAYER);
+    u.base.players[player()].tech.add(Technology::Link.index());
+    hwc_sim::upgrade::player_update_from_research(u, player());
     let pair = acolytes(g);
     g.selection = pair.to_vec();
     rig.frame(g);
@@ -346,14 +346,14 @@ fn mission2_workers_repair_the_bushan_re() {
     // beside the Bushan-Re, which finds it.
     let u = g.world.universe_mut();
     let repair = Technology::from_name("TECH_REPAIR").expect("TECH_REPAIR");
-    u.base.players[PLAYER].tech.add(repair.index());
-    hwc_sim::upgrade::player_update_from_research(u, PLAYER);
+    u.base.players[player()].tech.add(repair.index());
+    hwc_sim::upgrade::player_update_from_research(u, player());
     let target = u.ship(bushan).unwrap().posinfo.position;
-    let ms = u.base.players[PLAYER].mothership.expect("mothership");
+    let ms = u.base.players[player()].mothership.expect("mothership");
     let home = u.ship(ms).unwrap().posinfo.position;
     for k in 0..3 {
         let p = home + Vector::new(3000.0 + 400.0 * k as f32, 0.0, 0.0);
-        let id = hwc_sim::base::create_ship(u, ShipType::sWorker, PLAYER, p, Default::default())
+        let id = hwc_sim::base::create_ship(u, ShipType::sWorker, player(), p, Default::default())
             .expect("worker");
         hwc_sim::construction::unit_cap_create_ship(u, id);
     }
@@ -363,7 +363,7 @@ fn mission2_workers_repair_the_bushan_re() {
         .copied()
         .filter(|&id| {
             u.ship(id)
-                .is_some_and(|s| s.ship_type == ShipType::sWorker && s.player == PLAYER)
+                .is_some_and(|s| s.ship_type == ShipType::sWorker && s.player == player())
         })
         .collect();
     assert!(workers.len() >= 3, "{workers:?}");
@@ -392,7 +392,7 @@ fn mission2_workers_repair_the_bushan_re() {
     }
     assert_eq!(
         g.world.universe().ship(bushan).unwrap().player,
-        PLAYER,
+        player(),
         "the Bushan-Re is the player's"
     );
     let start = health_percent(g, bushan);
@@ -559,8 +559,8 @@ fn mission1_right_click_fires_acolyte_link_missiles() {
         assert!(n < 16 * 60, "the fleet never arrived");
     }
     let u = g.world.universe_mut();
-    u.base.players[PLAYER].tech.add(Technology::Missile.index());
-    hwc_sim::upgrade::player_update_from_research(u, PLAYER);
+    u.base.players[player()].tech.add(Technology::Missile.index());
+    hwc_sim::upgrade::player_update_from_research(u, player());
     let pair = acolytes(g);
     assert!(pair.iter().all(|&a| link_missiles_left(g, a) == 2));
     // An enemy within the missiles' 4 km.

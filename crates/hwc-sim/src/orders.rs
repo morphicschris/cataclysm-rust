@@ -93,8 +93,9 @@ fn own(u: &Universe, player: usize, ships: &[ShipId]) -> Vec<ShipId> {
     ships.iter().copied().filter(|&id| u.ships.get(id).is_some_and(|s| s.player == player && s.flags & crate::object::sof::DEAD == 0)).collect()
 }
 
+/// The targets still there: ships, and live mines (which share the ship numbers' space).
 fn live(u: &Universe, ships: &[ShipId]) -> Vec<ShipId> {
-    ships.iter().copied().filter(|&id| u.ships.get(id).is_some()).collect()
+    ships.iter().copied().filter(|&id| u.ships.get(id).is_some() || crate::target::exists(u, id)).collect()
 }
 
 /// The harvesters among the ships (harvesting allowed, resourcers able to harvest).
@@ -196,8 +197,8 @@ pub fn apply(u: &mut Universe, player: usize, order: &Order, disguises: Option<&
             }
         }
         Order::Kamikaze { ships } => {
-            let mut s = own(u, player, ships);
-            player_orders::mr_kamikaze(u, &mut s);
+            let s = own(u, player, ships);
+            player_orders::cl_kamikaze(u, &s);
         }
         Order::LeechMode { ships, mode } => {
             let s = own(u, player, ships);

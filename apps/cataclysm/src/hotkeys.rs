@@ -600,7 +600,7 @@ mod tests {
         loader.carry = Some(carry.clone());
         let run = loader.start(&assets).expect("mission 2");
         let u = &run.universe;
-        let player = crate::host::PLAYER;
+        let player = crate::host::player();
         let top: Vec<ShipId> = run.game.hyper.fleet_ids.iter().flatten().copied().collect();
         assert!(!top.is_empty(), "no fleet in hyperspace");
         let docked: Vec<ShipId> = top

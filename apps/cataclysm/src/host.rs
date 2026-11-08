@@ -17,8 +17,20 @@ use hwc_ui::ingame::host::{
 };
 use hwc_ui::ingame::strings::Strings;
 
-/// The local player (`universe.curPlayerIndex` in single player).
+/// The local player of single-player games and the tests (`universe.curPlayerIndex`).
 pub const PLAYER: usize = 0;
+
+static LOCAL_PLAYER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(PLAYER);
+
+/// The player at this machine: 0, except in a network game.
+pub fn player() -> usize {
+    LOCAL_PLAYER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Sets the player at this machine when a game starts.
+pub fn set_player(p: usize) {
+    LOCAL_PLAYER.store(p, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// UI ship number of a simulation ship.
 pub fn ui_id(id: ShipId) -> u32 {
@@ -70,7 +82,7 @@ impl SimHost<'_> {
     fn race(&self) -> ShipRace {
         self.u()
             .players
-            .get(PLAYER)
+            .get(player())
             .map_or(ShipRace::Somtaaw, |p| p.race)
     }
 
@@ -98,7 +110,7 @@ impl SimHost<'_> {
     }
 
     fn mothership(&self) -> Option<ShipId> {
-        self.u().base.players.get(PLAYER).and_then(|p| p.mothership)
+        self.u().base.players.get(player()).and_then(|p| p.mothership)
     }
 
     fn factory_ships(&self) -> Vec<ShipId> {
@@ -109,7 +121,7 @@ impl SimHost<'_> {
             if out.contains(&id) {
                 continue;
             }
-            if u.ship(id).is_some_and(|s| s.player == PLAYER) {
+            if u.ship(id).is_some_and(|s| s.player == player()) {
                 out.push(id);
             }
         }
@@ -132,7 +144,7 @@ impl SimHost<'_> {
         let s = u.ship(id)?;
         let st = u.statics.ship(s.ship_type)?;
         let class = st.ship_class.unwrap_or(ShipClass::Fighter);
-        let owner = if s.player == PLAYER {
+        let owner = if s.player == player() {
             if s.base.disabled {
                 Owner::Disabled
             } else {
@@ -237,7 +249,7 @@ const LAB_HEADINGS: [&str; 5] = [
 impl GameUiHost for SimHost<'_> {
     fn player(&self) -> PlayerInfo {
         let u = self.u();
-        let p = &u.base.players[PLAYER];
+        let p = &u.base.players[player()];
         let pending: i32 = self
             .build_jobs()
             .iter()
@@ -262,7 +274,7 @@ impl GameUiHost for SimHost<'_> {
             ship_count: u
                 .ships
                 .iter()
-                .filter(|s| s.player == PLAYER && s.flags & SOF_MODULE == 0)
+                .filter(|s| s.player == player() && s.flags & SOF_MODULE == 0)
                 .count() as i32,
             single_player: !u.mp.active,
             // `multiPlayerGame`: a network game (a skirmish is neither).
@@ -319,7 +331,7 @@ impl GameUiHost for SimHost<'_> {
             let status = if !researched {
                 BuildStatus::Hidden
             } else if !construction::can_build_ship_type(u, fid, t, true)
-                || !construction::player_has_support_units_for_type(u, t, PLAYER, 0)
+                || !construction::player_has_support_units_for_type(u, t, player(), 0)
                 || !construction::unit_cap_can_create_ship(u, t, fid, 0)
             {
                 BuildStatus::Greyed
@@ -350,7 +362,7 @@ impl GameUiHost for SimHost<'_> {
         let mut out = Vec::new();
         for f in &u.base.factories {
             let Some(fid) = f.ship else { continue };
-            if !u.ship(fid).is_some_and(|s| s.player == PLAYER) {
+            if !u.ship(fid).is_some_and(|s| s.player == player()) {
                 continue;
             }
             for j in f.jobs.iter().filter(|j| j.n_jobs > 0) {
@@ -378,7 +390,7 @@ impl GameUiHost for SimHost<'_> {
 
     fn labs(&self) -> Vec<Lab> {
         let u = self.u();
-        let p = &u.base.players[PLAYER];
+        let p = &u.base.players[player()];
         let table = research::table_for(u, p.research_table);
         let n = if self.race() == ShipRace::Beast { 1 } else { 5 };
         (0..n)
@@ -412,7 +424,7 @@ impl GameUiHost for SimHost<'_> {
 
     fn techs(&self) -> Vec<Tech> {
         let u = self.u();
-        let p = &u.base.players[PLAYER];
+        let p = &u.base.players[player()];
         let table = research::table_for(u, p.research_table);
         let prefix = if self.race() == ShipRace::Beast {
             "R2"
@@ -421,7 +433,7 @@ impl GameUiHost for SimHost<'_> {
         };
         // `rmUpdateTechList`: what the player may start researching comes from the
         // simulation (in single player, what the mission allowed).
-        let available = research::available_topics(u, PLAYER);
+        let available = research::available_topics(u, player());
         Technology::ALL
             .iter()
             .map(|&t| {
@@ -477,7 +489,7 @@ impl GameUiHost for SimHost<'_> {
 
     fn launchers(&self) -> Vec<Launcher> {
         let u = self.u();
-        let p = &u.base.players[PLAYER];
+        let p = &u.base.players[player()];
         self.factory_ships()
             .into_iter()
             .filter_map(|id| {
@@ -527,7 +539,7 @@ impl GameUiHost for SimHost<'_> {
             .copied()
             .filter(|&id| {
                 u.ship(id).is_some_and(|s| {
-                    s.player == PLAYER
+                    s.player == player()
                         && hwc_sim::modules::is_module(s.ship_type)
                         && (s.base.clamp.as_ref().and_then(|c| c.host) == Some(ms)
                             || self
@@ -550,7 +562,7 @@ impl GameUiHost for SimHost<'_> {
                     ship_type: s.ship_type.index() as u32,
                     name: self.ship_name(s.ship_type),
                     health: if max > 0.0 { s.health / max } else { 1.0 },
-                    repair_priority: u.base.players[PLAYER]
+                    repair_priority: u.base.players[player()]
                         .mothership
                         .and_then(|ms| hwc_sim::ships::mothership::repair_priority(u, ms, s.ship_type)),
                 })
@@ -560,7 +572,7 @@ impl GameUiHost for SimHost<'_> {
 
     fn beast_systems(&self) -> u32 {
         let u = self.world.universe();
-        u.base.players[PLAYER]
+        u.base.players[player()]
             .mothership
             .and_then(|ms| hwc_sim::ships::mothership::damage_mode(u, ms))
             .unwrap_or(4)
@@ -607,12 +619,12 @@ impl GameUiHost for SimHost<'_> {
             c.push(Command::Retire);
         }
         // `pmEnableMenuItems`: "Upgrade" while some ship has upgrades waiting.
-        if hwc_sim::player_orders::any_can_upgrade(u, PLAYER, self.selection) {
+        if hwc_sim::player_orders::any_can_upgrade(u, player(), self.selection) {
             c.push(Command::Upgrade);
         }
         // `pmBuildMenuItems`: the special-action menu's items.
         let items =
-            hwc_sim::player_orders::special_menu(u, PLAYER, self.selection, self.special_targets);
+            hwc_sim::player_orders::special_menu(u, player(), self.selection, self.special_targets);
         for cmd in items.into_iter().filter_map(special_command) {
             if !c.contains(&cmd) {
                 c.push(cmd);
@@ -804,7 +816,7 @@ pub fn special_item(c: Command) -> Option<hwc_sim::player_orders::SpecialItem> {
 /// them be selected but refuses them orders (CrasH asked that they not be selectable at all).
 pub fn selectable(u: &Universe, id: ShipId) -> bool {
     u.ship(id).is_some_and(|s| {
-        s.player == PLAYER
+        s.player == player()
             && s.flags & (sof::HIDE | sof::DEAD) == 0
             && s.flags & SOF_MODULE == 0
             && !handed_over(s)
@@ -815,7 +827,7 @@ pub fn selectable(u: &Universe, id: ShipId) -> bool {
 /// (specialFlags2 0x100000). The original's tactical overlay and sensors draw them in the
 /// allied colour (`toAllShipsDraw`, `smShipsDraw`): [`HANDED_OVER_COLOR`].
 pub fn handed_over(s: &hwc_sim::object::Ship) -> bool {
-    s.player == PLAYER && s.special_flags2 & NOT_PLAYER_CONTROLLED != 0
+    s.player == player() && s.special_flags2 & NOT_PLAYER_CONTROLLED != 0
 }
 
 /// specialFlags2 0x100000: not player controlled.

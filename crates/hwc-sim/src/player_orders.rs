@@ -145,6 +145,16 @@ pub fn kamikaze_capable(u: &Universe, list: &mut Vec<ShipId>) {
 /// those docking or launching), otherwise the first says it has no target. Returns true when
 /// the order went out (the click sound).
 pub fn mr_kamikaze(u: &mut Universe, selection: &mut Vec<ShipId>) -> bool {
+    if !kamikaze_request(u, selection) {
+        return false;
+    }
+    cl_kamikaze(u, selection);
+    true
+}
+
+/// `mrKamikaze`'s asking part, at the player's machine: the selection keeps the ships that
+/// can, and the first answers (no targets when none is attacking). True when the order goes.
+pub fn kamikaze_request(u: &mut Universe, selection: &mut Vec<ShipId>) -> bool {
     use crate::speech::event;
     kamikaze_capable(u, selection);
     if selection.is_empty() {
@@ -159,11 +169,17 @@ pub fn mr_kamikaze(u: &mut Universe, selection: &mut Vec<ShipId>) -> bool {
         return false;
     }
     crate::speech::by_first(u, selection, event::KAMIKAZE);
-    crate::command::make_ships_controllable(u, selection);
-    if !selection.is_empty() {
-        crate::command::cl_set_kamikaze(u, selection);
-    }
     true
+}
+
+/// The kamikaze order itself (`clWrapSetKamikaze`).
+pub fn cl_kamikaze(u: &mut Universe, selection: &[ShipId]) {
+    let mut sel = selection.to_vec();
+    kamikaze_capable(u, &mut sel);
+    crate::command::make_ships_controllable(u, &mut sel);
+    if !sel.is_empty() {
+        crate::command::cl_set_kamikaze(u, &sel);
+    }
 }
 
 /// `makeShipsScuttleable(selection, TRUE)` (0x50cfc0): disabled ships leave, and motherships
@@ -213,6 +229,16 @@ pub enum Scuttle {
 /// `TW_ScuttleReconfirmTime` scuttles them (`clWrapScuttle`), the first ship confirming.
 /// (Multiplayer games where capital ships must be captured refuse it: not modelled.)
 pub fn mr_scuttle(u: &mut Universe, selection: &mut Vec<ShipId>, confirm_time: &mut f32) -> Scuttle {
+    let r = scuttle_request(u, selection, confirm_time);
+    if r == Scuttle::Confirmed {
+        crate::command::cl_scuttle(u, selection);
+    }
+    r
+}
+
+/// `mrScuttle`'s asking part, at the player's machine: a first press asks, a second within
+/// the reconfirm time confirms (the scuttle order is then given).
+pub fn scuttle_request(u: &mut Universe, selection: &mut Vec<ShipId>, confirm_time: &mut f32) -> Scuttle {
     use crate::battle_chatter::{attempt, bce, can_chatter_at_this_time};
     if selection.is_empty() {
         return Scuttle::Nothing;
@@ -232,7 +258,6 @@ pub fn mr_scuttle(u: &mut Universe, selection: &mut Vec<ShipId>, confirm_time: &
             attempt(u, bce::SCUTTLE_REAFFIRM, first, t);
         }
         *confirm_time = -reset;
-        crate::command::cl_scuttle(u, selection);
         return Scuttle::Confirmed;
     }
     crate::speech::queue(u, None, crate::speech::event::SCUTTLE_REQUEST, -1);

@@ -37,7 +37,9 @@ mod menu_scene;
 mod menus_shots;
 mod mission;
 mod movie_script;
+mod lan;
 mod nebula_view;
+mod net_game;
 mod nis;
 #[cfg(test)]
 mod nis_shots;

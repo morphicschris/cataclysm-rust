@@ -140,7 +140,7 @@ impl SkirmishUi {
         }
     }
 
-    fn max_players(&self) -> usize {
+    pub fn max_players(&self) -> usize {
         self.scenarios
             .get(self.scenario)
             .map_or(2, |s| s.max_players)
@@ -226,7 +226,12 @@ pub fn register(fe: &mut Fe) {
     fe.callback_add("MG_Skirmish", skirmish);
     fe.callback_add("MG_BackFromOptions", |fe, _| {
         fe.all_screens_delete();
-        fe.screen_start("Connection_Method");
+        // Cancel on a LAN game's option tabs goes back to the game list.
+        if std::mem::take(&mut fe.game.lan.creating) {
+            fe.screen_start("Available_Games");
+        } else {
+            fe.screen_start("Connection_Method");
+        }
     });
     fe.callback_add("MG_GameType", game_type);
     for (name, _) in CHECKS {

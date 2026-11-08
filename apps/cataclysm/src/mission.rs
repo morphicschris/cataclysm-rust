@@ -271,6 +271,20 @@ impl Loader {
         Ok(MissionRun::from_skirmish(run, config))
     }
 
+    /// A network game: the setup every machine plays, this machine's player in it.
+    pub fn start_network(&mut self, assets: &Assets, setup: &hwc_sim::skirmish::GameSetup) -> Result<MissionRun, String> {
+        use hwc_sim::skirmish::SkirmishRun;
+        self.multiplayer = true;
+        self.load_statics(assets);
+        let statics = self.statics.clone().expect("statics");
+        let tweaks = self.tweaks.clone().expect("tweaks");
+        let config = MissionConfig::new(0);
+        let mut setup = setup.clone();
+        setup.effects = config.effects;
+        let run = SkirmishRun::start(statics, tweaks, assets, setup).map_err(|e| e.to_string())?;
+        Ok(MissionRun::from_skirmish(run, config))
+    }
+
     /// The level and the KAS script (`singlePlayerLoadNewLevel`).
     pub fn start(&mut self, assets: &Assets) -> Result<MissionRun, String> {
         if !supported(self.mission) {

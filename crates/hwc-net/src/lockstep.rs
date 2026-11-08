@@ -147,10 +147,19 @@ impl Lockstep {
         (0..self.waiting_for.len()).filter(|&p| self.waiting_for[p] && slot.is_none_or(|s| s[p].is_none()) && !self.dropping_by(p, self.turn)).collect()
     }
 
-    /// Runs the next turn: the players dropping out go, the orders are applied in player
-    /// order, then `step` runs the universe's updates. Afterwards the local packet for the
-    /// turn `delay` ahead goes in the outbox with the new checksum.
+    /// Runs the next turn: [`Lockstep::begin_turn`], `step` for each of its updates, then
+    /// [`Lockstep::end_turn`].
     pub fn run_turn(&mut self, u: &mut Universe, disguises: Option<&DisguiseTables>, mut step: impl FnMut(&mut Universe)) {
+        self.begin_turn(u, disguises);
+        for _ in 0..UPDATES_PER_TURN {
+            step(u);
+        }
+        self.end_turn(u);
+    }
+
+    /// The start of the next turn: the players dropping out go, then the orders are applied
+    /// in player order. The turn's [`UPDATES_PER_TURN`] universe updates come next.
+    pub fn begin_turn(&mut self, u: &mut Universe, disguises: Option<&DisguiseTables>) {
         assert!(self.ready(), "turn {} is not ready", self.turn);
         let t = self.turn;
         if let Some(ps) = self.drops.remove(&t) {
@@ -168,9 +177,12 @@ impl Lockstep {
                 orders::apply(u, p, &o, disguises);
             }
         }
-        for _ in 0..UPDATES_PER_TURN {
-            step(u);
-        }
+    }
+
+    /// The end of the turn after its updates: the checksum is kept and compared, and the local
+    /// packet for the turn `delay` ahead goes in the outbox with it.
+    pub fn end_turn(&mut self, u: &Universe) {
+        let t = self.turn;
         let sum = orders::sync_checksum(u);
         self.checksums.push_back((t, sum));
         while self.checksums.len() > CHECKSUMS_KEPT {
@@ -184,7 +196,6 @@ impl Lockstep {
             }
         }
         self.turn += 1;
-        // Our packet for the turn `delay` ahead.
         let orders = std::mem::take(&mut self.local_orders);
         let target = t + self.delay;
         if self.waiting_for.get(self.local).copied().unwrap_or(false) {

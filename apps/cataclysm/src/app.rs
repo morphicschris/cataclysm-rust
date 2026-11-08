@@ -74,6 +74,8 @@ struct App {
     saves: Rc<crate::saves::SaveDir>,
     /// The skirmish last started (the escape menu's restart starts it again).
     last_skirmish: Option<hwc_ui::skirmish::SkirmishRequest>,
+    /// The LAN screens' network (the browser, the game being set up).
+    lan: crate::lan::LanFront,
     session: Session,
     audio: Option<Audio>,
     intro: Option<Intro>,
@@ -254,6 +256,7 @@ pub fn run(session: Session, data: Rc<GameData>, args: &Args) -> Result<(), Stri
     session.fe.game.saves = Some(saves.clone());
     let mut app = App {
         last_skirmish: None,
+        lan: Default::default(),
         saves,
         session,
         audio,
@@ -856,6 +859,24 @@ impl App {
         }
     }
 
+    /// A network game loads behind the loading screen (the same game on every machine).
+    fn start_network_game(&mut self, start: crate::lan::NetStart) {
+        self.backdrop.drop_scene();
+        self.session.fe.all_screens_delete();
+        let size = self.session.placement.canvas;
+        let map = start.setup.map.clone();
+        match Loading::network(self.data.clone(), &self.session, start, size) {
+            Ok(mut l) => {
+                l.saves = Some(self.saves.clone());
+                self.loading = Some(Box::new(l))
+            }
+            Err(e) => {
+                eprintln!("cataclysm: cannot start the network game on {map}: {e}");
+                self.back_to_menu();
+            }
+        }
+    }
+
     /// `utyLoadMultiSinglePlayerGame` / `gpLoadGame`: a saved game loads behind its mission's
     /// loading screen (the game running, if any, ends first and the music stops).
     fn load_saved_game(&mut self, path: &std::path::Path) {
@@ -892,7 +913,7 @@ impl App {
             g.hotkeys.carry_out(
                 &run.universe,
                 &run.game.hyper.in_hyperspace,
-                crate::host::PLAYER,
+                crate::host::player(),
                 c,
                 mission + 1,
             )
@@ -1395,7 +1416,11 @@ impl App {
     /// go back to the front end (the next mission starts from them) and are saved
     /// (`opOptionsSaveSettings`).
     fn end_game(&mut self) -> Option<Box<Game>> {
-        let g = self.game.take()?;
+        let mut g = self.game.take()?;
+        if let Some(n) = g.net.as_mut() {
+            n.session.leave();
+        }
+        crate::host::set_player(crate::host::PLAYER);
         hand_back_options(&mut self.session, &g);
         Some(g)
     }
@@ -1548,6 +1573,9 @@ impl App {
             for r in self.session.update(dt) {
                 self.request(event_loop, r);
             }
+            if let Some(start) = self.lan.update(&mut self.session.fe) {
+                self.start_network_game(start);
+            }
         }
         if self.gpu.is_none() {
             return Ok(());
@@ -1642,6 +1670,11 @@ impl App {
             Request::LoadGame(key) => self.load_saved_game(std::path::Path::new(&key)),
             Request::Multiplayer => eprintln!("cataclysm: multiplayer is not available yet"),
             Request::StartSkirmish(s) => self.start_skirmish(s),
+            Request::Lan(r) => {
+                if let Some(start) = self.lan.request(&mut self.session.fe, r) {
+                    self.start_network_game(start);
+                }
+            }
             Request::OpenUrl(url) => eprintln!("cataclysm: troubleshooting page: {url}"),
         }
     }

@@ -40,6 +40,25 @@ pub const OPTION_TABS: [&str; 4] = [
 /// main menu).
 pub const DRAWN_ELSEWHERE: [&str; 1] = ["FE_DrawVersionNum"];
 
+/// What the modern front end leaves out of the multiplayer screens: the lobby server's rooms,
+/// its advertising banner and the links to services that are gone (the LAN screens have no
+/// rooms; the original look keeps them all).
+pub const LEFT_OUT: [&str; 7] = [
+    "MG_AdBanner",
+    "MG_ContestServer",
+    "MG_SierraCom",
+    "MG_CurrentChannel",
+    "MG_ChatHistoryWindow",
+    "MG_UserNameWindow",
+    "MG_ChatTextEntry",
+];
+
+/// The labels of what [`LEFT_OUT`] leaves out.
+pub const LEFT_OUT_TEXTS: [&str; 6] = ["GAMES IN", "ROOM", "ROOMS", "CONTEST SERVER", "SIERRA.COM", "QUIT"];
+
+/// The multiplayer screens [`LEFT_OUT`] applies to.
+pub const LOBBY_SCREENS: [&str; 6] = ["Channel_Chat", "Available_Games", "Player_Wait", "Captain_Wait", "LAN_Login", "Connecting"];
+
 /// 0: the options file decides; 1 modern; 2 original (`--front-end`).
 static OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
@@ -80,6 +99,9 @@ pub fn title_for(screen: &str) -> &'static str {
         "Press_Key" => "KEY BINDINGS",
         "List_Mappable_Keys" => "KEYS",
         "Video_Explanation" => "VIDEO OPTIONS",
+        "LAN_Login" => "LAN GAME",
+        "Available_Games" => "LAN GAMES",
+        "Connecting" => "CONNECTING",
         _ => "",
     }
 }

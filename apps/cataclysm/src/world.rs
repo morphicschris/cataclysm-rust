@@ -145,7 +145,7 @@ fn cloak_fade(s: &hwc_sim::object::Ship) -> f32 {
 /// `rndRenderObject` sets `0x8f18b2` for the player's own fully cloaked ship: the materials drop
 /// their textures.
 fn cloak_untextured(s: &hwc_sim::object::Ship) -> bool {
-    s.player == crate::host::PLAYER && hwc_sim::cloak::fade_level(s).is_none() && hwc_sim::cloak::is_cloaked(s)
+    s.player == crate::host::player() && hwc_sim::cloak::fade_level(s).is_none() && hwc_sim::cloak::is_cloaked(s)
 }
 
 /// `rndRenderObject`'s lightning state: the ship's flicker is on and within its window (not
@@ -1027,7 +1027,7 @@ impl World {
                 .iter()
                 .filter(|&&id| {
                     u.ship(id).is_some_and(|s| {
-                        s.player == crate::host::PLAYER && {
+                        s.player == crate::host::player() && {
                             let p = s.posinfo.position;
                             self.ship_in_view(s, Vec3::new(p.x, p.y, p.z))
                         }
@@ -1042,7 +1042,7 @@ impl World {
         let c = &mut u.chatter;
         c.frequency = self.chatter_frequency;
         c.camera_eye = Some(hwc_math::Vector::new(eye.x, eye.y, eye.z));
-        c.local_player = crate::host::PLAYER;
+        c.local_player = crate::host::player();
         c.reports_in_campaign = self.battle_reports;
     }
 

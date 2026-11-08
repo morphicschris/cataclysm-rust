@@ -29,7 +29,7 @@ use hwc_sim::{ShipId, Universe};
 use hwc_ui::canvas::{Canvas, Color};
 use hwc_ui::options::Options;
 
-use crate::host::PLAYER;
+use crate::host::player;
 use crate::profile;
 use crate::world::World;
 
@@ -298,7 +298,7 @@ pub struct Fog<'a> {
 impl<'a> Fog<'a> {
     pub fn of(u: &'a Universe) -> Fog<'a> {
         Fog {
-            grid: u.fog.grids.get(PLAYER).and_then(Option::as_ref),
+            grid: u.fog.grids.get(player()).and_then(Option::as_ref),
             mode: FOG_MODE,
         }
     }
@@ -360,13 +360,13 @@ pub fn ship_visible(u: &Universe, fog: &Fog, id: ShipId) -> bool {
     if s.flags & sof::HIDE != 0 {
         return false;
     }
-    let dead = u.base.players.get(PLAYER).is_some_and(|p| p.state == 1);
+    let dead = u.base.players.get(player()).is_some_and(|p| p.state == 1);
     if allied(u, s.player) || dead || fog.grid.is_none() {
         return true;
     }
     if !u.single_player
-        && (hwc_sim::ships::mimic::is_disguised_as_player(u, id, PLAYER)
-            || !hwc_sim::visibility::visible_to_player(u, id, PLAYER))
+        && (hwc_sim::ships::mimic::is_disguised_as_player(u, id, player())
+            || !hwc_sim::visibility::visible_to_player(u, id, player()))
     {
         return false;
     }
@@ -374,7 +374,7 @@ pub fn ship_visible(u: &Universe, fog: &Fog, id: ShipId) -> bool {
 }
 
 fn allied(u: &Universe, player: usize) -> bool {
-    player == PLAYER || u.players.get(PLAYER).is_some_and(|p| p.is_ally(player))
+    player == crate::host::player() || u.players.get(crate::host::player()).is_some_and(|p| p.is_ally(player))
 }
 
 /// Whether another player's ship is coloured as an ally (`smShipsDraw`, `toAllShipsDraw`): an
@@ -382,14 +382,14 @@ fn allied(u: &Universe, player: usize) -> bool {
 /// (`MimicIsDisguisedAsPlayer`).
 pub fn looks_allied(u: &Universe, id: ShipId) -> bool {
     let Some(s) = u.ship(id) else { return false };
-    allied(u, s.player) || hwc_sim::ships::mimic::is_disguised_as_player(u, id, PLAYER)
+    allied(u, s.player) || hwc_sim::ships::mimic::is_disguised_as_player(u, id, player())
 }
 
 /// The class a ship's overlay icon shows: a Mimic disguised as one of the local player's
 /// ships shows its disguise's (`MimicGetApparentShipClass` in `toAllShipsDraw`).
 pub fn apparent_class(u: &Universe, id: ShipId) -> Option<ShipClass> {
     let s = u.ship(id)?;
-    let t = if s.player != PLAYER && hwc_sim::ships::mimic::is_disguised_as_player(u, id, PLAYER) {
+    let t = if s.player != player() && hwc_sim::ships::mimic::is_disguised_as_player(u, id, player()) {
         hwc_sim::ships::mimic::apparent_ship_type(u, id).unwrap_or(s.ship_type)
     } else {
         s.ship_type
@@ -1340,7 +1340,7 @@ impl Sensors {
             .iter()
             .filter_map(|&id| {
                 let s = u.ship(id)?;
-                (s.player == PLAYER && s.flags & sof::HIDE == 0).then(|| {
+                (s.player == player() && s.flags & sof::HIDE == 0).then(|| {
                     let pos = v3(s.posinfo.position);
                     Disc {
                         on: true,
@@ -1494,7 +1494,7 @@ impl Sensors {
             {
                 continue;
             }
-            let own = s.player == PLAYER;
+            let own = s.player == player();
             // Own ships a script keeps out of the player's control are drawn as allies.
             let color = if crate::host::handed_over(s) {
                 crate::host::HANDED_OVER_COLOR

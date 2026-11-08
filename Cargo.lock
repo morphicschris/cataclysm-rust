@@ -270,6 +270,7 @@ dependencies = [
  "hwc-hwr",
  "hwc-kas",
  "hwc-math",
+ "hwc-net",
  "hwc-nis",
  "hwc-render",
  "hwc-sim",

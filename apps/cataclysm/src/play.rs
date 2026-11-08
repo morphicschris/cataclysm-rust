@@ -75,6 +75,8 @@ pub struct Loading {
     pub saves: Option<Rc<crate::saves::SaveDir>>,
     /// A skirmish to start instead of a mission.
     skirmish: Option<hwc_ui::skirmish::SkirmishRequest>,
+    /// A network game to start instead: its setup, and the session that plays it.
+    network: Option<crate::lan::NetStart>,
 }
 
 /// The player's team colours from the options (`PlayerBaseColor` / `PlayerStripeColor`, once
@@ -121,7 +123,17 @@ impl Loading {
             saved_ui: None,
             saves: None,
             skirmish: None,
+            network: None,
         })
+    }
+
+    /// A network game behind a loading screen: the same game on every machine.
+    pub fn network(data: Rc<GameData>, session: &Session, start: crate::lan::NetStart, size: (i32, i32)) -> Result<Loading, String> {
+        let mut l = Loading::new(data, session, 0, 2, size)?;
+        l.opening_nis = false;
+        l.loader.multiplayer = true;
+        l.network = Some(start);
+        Ok(l)
     }
 
     /// A skirmish (`utyStartSkirmish` → `gameStart`) behind a loading screen.
@@ -232,7 +244,7 @@ impl Loading {
                         Err(e) => eprintln!("cataclysm: {e}"),
                     }
                 }
-                if mission::supported(self.mission) || self.skirmish.is_some() {
+                if mission::supported(self.mission) || self.skirmish.is_some() || self.network.is_some() {
                     self.screen.set_progress(0.05);
                     Step::Statics
                 } else {
@@ -253,6 +265,10 @@ impl Loading {
                 let sim = match self.after_nis.take() {
                     Some(n) => self.loader.finish(*n, &self.assets).map(Sim::Mission),
                     None if self.saved.is_some() => self.read_saved().map(Sim::Mission),
+                    None if self.network.is_some() => {
+                        let setup = self.network.as_ref().expect("network game").setup.clone();
+                        self.loader.start_network(&self.assets, &setup).map(Sim::Mission)
+                    }
                     None if self.skirmish.is_some() => {
                         let req = self.skirmish.clone().expect("skirmish");
                         let seed = std::time::SystemTime::now()
@@ -311,6 +327,12 @@ impl Loading {
                         }
                         if let Some(req) = &self.skirmish {
                             g.local_name = Some(req.name.clone());
+                        }
+                        if let Some(n) = self.network.take() {
+                            let local = n.setup.local_player;
+                            crate::host::set_player(local);
+                            g.local_name = n.names.get(local).cloned();
+                            g.net = Some(crate::net_game::NetLink::new(n.session, n.names));
                         }
                         if let Some(ui) = self.saved_ui.take() {
                             g.restore_ui(ui);
