@@ -1,5 +1,9 @@
 # Homeworld: Cataclysm in Rust
 
+> **Work in progress.** All 17 missions and the tutorial are ported and should play through
+> correctly, but so far they have only been tested by hand up to Mission 8. Expect bugs from
+> Mission 9 onwards, and please report any you find.
+
 A 1:1 recreation of **Homeworld: Cataclysm** (Barking Dog Studios / Sierra, 2000) in Rust. The
 original game's source code was lost; this project rebuilds the game's behaviour from the
 original executable, function by function, and runs it on modern Windows with a modern renderer
