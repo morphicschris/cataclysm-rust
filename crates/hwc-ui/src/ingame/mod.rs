@@ -11,6 +11,7 @@ pub mod consmgr;
 pub mod cursor;
 pub mod draw;
 pub mod escmenu;
+pub mod gamechat;
 pub mod host;
 pub mod icons;
 pub mod keylist;
@@ -117,6 +118,8 @@ pub struct IgState {
     pub tm: trader::State,
     pub esc: escmenu::State,
     pub overlay: overlay::State,
+    /// The multiplayer chat line.
+    pub chat: gamechat::State,
     pub ship_print: shipprint::State,
     pub popup: popup::State,
     /// The game was paused by the UI (escape menu, objectives) and must resume on close.
@@ -456,6 +459,11 @@ impl InGameUi {
                 false
             }
             InputEvent::KeyDown(code) => {
+                // The multiplayer chat line takes the keys while it is open.
+                if self.fe.game.ig.chat.mode != 0 {
+                    self.fe.key_down(code);
+                    return true;
+                }
                 // A text entry with the keyboard eats the key (`regKeysFocussed`): it is not
                 // held for the game's polled keys (zoom, pan) either.
                 let typing = self.fe.game.ig.manager.is_some() && self.fe.keys_focussed();
@@ -484,6 +492,10 @@ impl InGameUi {
                 self.key_action_up(code)
             }
             InputEvent::Char(c) => {
+                if self.fe.game.ig.chat.mode != 0 {
+                    self.fe.char_typed(c);
+                    return true;
+                }
                 if self.fe.game.ig.manager.is_some() {
                     if self.fe.game.ig.mmenu.page.is_some() && modern_menu::active(&self.fe) {
                         return true;
@@ -662,6 +674,9 @@ impl InGameUi {
             research::tick(&mut self.fe);
             modern_research_manager::tick(&mut self.fe);
             modern_menu::tick(&mut self.fe);
+        } else if self.fe.game.ig.chat.mode != 0 {
+            // The chat line over the game.
+            self.fe.process(dt);
         } else {
             self.fe.time += f64::from(dt);
         }
@@ -724,8 +739,9 @@ impl InGameUi {
             modern_menu::draw(&mut self.fe, canvas);
         } else if modern_launch_manager::active(&self.fe) {
             modern_launch_manager::draw(&mut self.fe, canvas);
-        } else if self.fe.game.ig.manager.is_some() {
+        } else if self.fe.game.ig.manager.is_some() || self.fe.game.ig.chat.mode != 0 {
             self.fe.render_over(canvas);
+            gamechat::draw(&mut self.fe, canvas);
         }
         if full_screen {
             overlay::draw_modern_panels(&mut self.fe, canvas);
@@ -751,6 +767,7 @@ pub fn register(fe: &mut Fe) {
     trader::register(fe);
     escmenu::register(fe);
     rollcall::register(fe);
+    gamechat::register(fe);
 }
 
 /// The screen of a manager for the player's race.
@@ -854,6 +871,8 @@ pub fn execute_action(fe: &mut Fe, a: Action, down: bool) {
             NEXT_OVERLAY_VIEW => return overlay::next_view(fe),
             CHANGE_OVERLAY_BACKDROPS => return overlay::toggle_backdrops(fe),
             TOGGLE_TACTICAL_DISPLAY => overlay::toggle_tactical(fe),
+            START_ALLY_MESSAGE => return gamechat::start(fe, true),
+            START_GLOBAL_MESSAGE => return gamechat::start(fe, false),
             PAGE_UP_GAME_CHAT => {
                 fe.game.ig.overlay.message_scroll += 1;
                 return;

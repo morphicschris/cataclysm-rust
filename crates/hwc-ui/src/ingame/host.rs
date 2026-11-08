@@ -460,6 +460,8 @@ pub enum GameRequest {
     },
     /// Beast mothership emergency power allocation (`LM_BeastSystemsSet`, 0..5).
     BeastSystems(u32),
+    /// A line of the multiplayer chat, to everyone or the allies (`gcInGameChatEntry`).
+    Chat { allies: bool, text: String },
     /// Give the selected ships a command (popup menu or key).
     Command(Command),
     /// Narrow the selection to one ship type (clicking the selected-ships list).

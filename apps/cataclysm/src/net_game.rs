@@ -87,6 +87,10 @@ impl NetLink {
             .drain(..)
             .filter_map(|e| match e {
                 SessionEvent::Chat { from, text } => Some(format!("{from}: {text}")),
+                SessionEvent::GameChat { from, text, private } => {
+                    let name = self.names.get(from).cloned().unwrap_or_default();
+                    Some(if private { format!("<{name}> [to you] {text}") } else { format!("<{name}> {text}") })
+                }
                 SessionEvent::PlayerDropped { name, .. } => Some(format!("{name} has left the game")),
                 SessionEvent::Desync { turn, player } => Some(format!("Out of sync with {} at turn {turn}", self.names.get(player).cloned().unwrap_or_default())),
                 SessionEvent::Disconnected => Some("Lost the connection to the host".to_string()),

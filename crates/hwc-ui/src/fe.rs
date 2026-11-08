@@ -778,6 +778,14 @@ impl<G> FrontEnd<G> {
         }
     }
 
+    /// Gives a text entry the keyboard, as a click on it would (`regKeyChildAlloc` +
+    /// `uicTextEntryInit`'s focus for an entry that types at once: the in-game chat line).
+    pub fn text_entry_focus(&mut self, atom: AtomRef) {
+        let Some(id) = self.atom(atom).region else { return };
+        self.clear_current();
+        self.set_current(Some(id), true);
+    }
+
     /// Whether a text entry has the keyboard (`regKeysFocussed`).
     pub fn keys_focussed(&self) -> bool {
         self.keys_focussed

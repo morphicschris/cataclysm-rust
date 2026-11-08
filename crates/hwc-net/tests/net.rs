@@ -271,6 +271,16 @@ fn a_lan_game_over_tcp() {
     assert!(client_setup.players[2].computer);
     host_setup.effects = false;
     client_setup.effects = false;
+    // The game's chat: the host to the client only, the client to everyone.
+    host.game_chat(1 << 1, "gl hf");
+    client.game_chat(0b111, "you too");
+    let end = Instant::now() + Duration::from_secs(5);
+    let heard = |s: &Session, text: &str| s.events.iter().any(|e| matches!(e, SessionEvent::GameChat { text: t, .. } if t == text));
+    while !(heard(&client, "gl hf") && heard(&host, "you too")) && Instant::now() < end {
+        pump(&mut host, &mut client);
+    }
+    assert!(client.events.iter().any(|e| matches!(e, SessionEvent::GameChat { from: 0, text, private: true } if text == "gl hf")), "{:?}", client.events);
+    assert!(host.events.iter().any(|e| matches!(e, SessionEvent::GameChat { from: 1, text, private: false } if text == "you too")), "{:?}", host.events);
     let mut runs = [start(d, host_setup), start(d, client_setup)];
     let mut rngs = [Lcg(5), Lcg(6)];
     let turns = 400;

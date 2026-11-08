@@ -36,6 +36,9 @@ pub enum SessionEvent {
     PlayerDropped { player: usize, name: String },
     /// A player's simulation no longer matches ours.
     Desync { turn: u32, player: usize },
+    /// A line of the running game's chat for us; `private` when only we (or our allies) were
+    /// meant.
+    GameChat { from: usize, text: String, private: bool },
 }
 
 /// The running game's network side.
@@ -239,6 +242,17 @@ impl Session {
                         g.lockstep.receive(pkt);
                         Self::broadcast(peers, &relay, Some(client));
                     }
+                    Msg::GameChat { from, to, text } => {
+                        let Some(g) = self.game.as_ref() else { continue };
+                        if g.clients.get(usize::from(from)).copied().flatten() != Some(client) {
+                            continue;
+                        }
+                        let local = g.lockstep.local;
+                        if to & (1 << local) != 0 {
+                            self.events.push(SessionEvent::GameChat { from: usize::from(from), text: text.clone(), private: to & !(1u16 << local) == 0 || to.count_ones() == 1 });
+                        }
+                        Self::broadcast(peers, &Msg::GameChat { from, to, text }, Some(client));
+                    }
                     Msg::Leave => gone.push(client),
                     _ => {}
                 }
@@ -309,6 +323,14 @@ impl Session {
                         g.lockstep.receive(pkt);
                     }
                 }
+                Msg::GameChat { from, to, text } => {
+                    if let Some(g) = self.game.as_ref() {
+                        let local = g.lockstep.local;
+                        if to & (1 << local) != 0 && usize::from(from) != local {
+                            self.events.push(SessionEvent::GameChat { from: usize::from(from), text, private: to.count_ones() == 1 });
+                        }
+                    }
+                }
                 Msg::Dropped { player, from_turn } => {
                     if let Some(g) = self.game.as_mut() {
                         let p = usize::from(player);
@@ -342,6 +364,16 @@ impl Session {
                 self.events.push(SessionEvent::Chat { from: self.name.clone(), text: text.to_string() });
             }
             Role::Client { conn } => conn.send(&Msg::Chat { from: self.name.clone(), text: text.to_string() }),
+        }
+    }
+
+    /// A line of the running game's chat to the players of `to` (a bit each).
+    pub fn game_chat(&mut self, to: u16, text: &str) {
+        let Some(from) = self.game.as_ref().map(|g| g.lockstep.local as u8) else { return };
+        let msg = Msg::GameChat { from, to, text: text.to_string() };
+        match &mut self.role {
+            Role::Host { peers, .. } => Self::broadcast(peers, &msg, None),
+            Role::Client { conn } => conn.send(&msg),
         }
     }
 

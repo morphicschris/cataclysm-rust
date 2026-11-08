@@ -33,6 +33,9 @@ pub enum Msg {
     Dropped { player: u8, from_turn: u32 },
     /// The sender leaves.
     Leave,
+    /// A line of the running game's chat from a player to the players of the mask
+    /// (`sendChatMessage`).
+    GameChat { from: u8, to: u16, text: String },
 }
 
 /// The message with its length in front.

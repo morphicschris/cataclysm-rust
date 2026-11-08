@@ -850,3 +850,47 @@ fn double_clicking_a_selected_row_adds_one() {
     click_at(&mut ui, &mut host, x, y);
     assert_eq!(ui.state().cm.pending.get(&0x00), Some(&3));
 }
+
+/// The multiplayer chat line: the "start global message" key opens it at the top (nothing in
+/// single player), typed letters go into it, Return sends the line to the game.
+#[test]
+fn the_chat_key_opens_a_line_that_return_sends() {
+    let Some(src) = source() else { return };
+    let mut ui = InGameUi::new(
+        src,
+        Setup {
+            options: Options::default(),
+            default_keys: Some(format!("{DEFAULT_KEYS}key  Start_Global_Message  84\nkey  Start_Ally_Message  SHIFT+84\n")),
+            keys: None,
+            keys_path: None,
+            options_path: None,
+        },
+    )
+    .expect("in-game ui");
+    ui.resize(640, 480);
+    let mut host = MockHost::somtaaw();
+    frame(&mut ui, &mut host);
+    key(&mut ui, &mut host, 84);
+    frame(&mut ui, &mut host);
+    assert_eq!(ui.fe.game.ig.chat.mode, 0);
+    host.player.multiplayer = true;
+    frame(&mut ui, &mut host);
+    key(&mut ui, &mut host, 84);
+    frame(&mut ui, &mut host);
+    assert_eq!(ui.fe.game.ig.chat.mode, 1);
+    assert_eq!(ui.fe.current_screen_name(), Some(hwc_ui::ingame::gamechat::SAY_SCREEN));
+    for c in "gl hf".chars() {
+        let code = c.to_ascii_uppercase() as u16;
+        input(&mut ui, &mut host, InputEvent::KeyDown(code));
+        input(&mut ui, &mut host, InputEvent::Char(c));
+        frame(&mut ui, &mut host);
+        input(&mut ui, &mut host, InputEvent::KeyUp(code));
+    }
+    let a = ui.fe.find_atom("InGameChatEntry").expect("entry");
+    assert_eq!(ui.fe.text_entry(a), Some("gl hf"));
+    input(&mut ui, &mut host, InputEvent::KeyDown(13));
+    let out = frame(&mut ui, &mut host);
+    input(&mut ui, &mut host, InputEvent::KeyUp(13));
+    assert!(out.contains(&GameRequest::Chat { allies: false, text: "gl hf".into() }), "{out:?}");
+    assert_eq!(ui.fe.game.ig.chat.mode, 0);
+}

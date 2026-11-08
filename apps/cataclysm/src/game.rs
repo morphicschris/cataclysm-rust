@@ -2024,6 +2024,7 @@ impl Game {
             GameRequest::BeastSystems(v) => {
                 self.give(Order::BeastSystems { mode: v });
             }
+            GameRequest::Chat { allies, text } => self.chat(allies, &text),
             GameRequest::TraderAccept(_)
             | GameRequest::TraderLeave => {}
         }
@@ -2515,6 +2516,38 @@ impl Game {
                 _ => {}
             }
         }
+    }
+
+    /// `gcInGameChatEntry`'s send: to everyone else, to the allies, or (`/name ...`) to one
+    /// player; the line shows here too (`moMessageAdd`, blue when not for everyone).
+    fn chat(&mut self, allies: bool, text: &str) {
+        let Some(n) = self.net.as_ref() else { return };
+        let me = player();
+        let names = n.names.clone();
+        let count = names.len().min(16);
+        let everyone = ((1u32 << count) - 1) as u16 & !(1u16 << me);
+        let (to, line, private) = match hwc_ui::ingame::gamechat::whisper_to(&names, text) {
+            Some((p, rest)) if p != me && !rest.is_empty() => (1u16 << p, format!("[to {}] {rest}", names[p]), true),
+            Some(_) => return,
+            None if allies => {
+                let mask = self.world.universe().players.get(me).map_or(0, |pl| pl.allies) as u16 & everyone;
+                (mask, format!("[allies] {text}"), true)
+            }
+            None => (everyone, text.to_string(), false),
+        };
+        if to == 0 {
+            return;
+        }
+        if let Some(n) = self.net.as_mut() {
+            n.session.game_chat(to, text.strip_prefix('/').and_then(|_| line.split_once("] ").map(|(_, r)| r)).unwrap_or(text));
+        }
+        let me_name = names.get(me).cloned().unwrap_or_default();
+        self.messages.push(GameMessage {
+            text: format!("<{me_name}> {line}"),
+            colour: if private { [100, 140, 255, 255] } else { [255, 255, 255, 255] },
+            ship: None,
+            time: self.world.universe().total_time_elapsed,
+        });
     }
 
     fn post(&mut self, text: &str) {
