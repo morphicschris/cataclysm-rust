@@ -234,6 +234,8 @@ pub fn apply_damage_to_target(u: &mut Universe, tid: ShipId, damage: f32, bullet
     s.how_did_i_die = how;
     s.who_killed_me = who;
     let victim_player = s.player;
+    let victim_type = s.ship_type;
+    crate::multiplayer::bounty_ship_was_killed(u, victim_player, victim_type, how, who);
     let victim_class = class_index(stat.ship_class);
     if let Some(k) = killer {
         let hive = crate::ships::hive::swarmer_hive(u, k);

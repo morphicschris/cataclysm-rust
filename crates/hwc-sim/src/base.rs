@@ -345,6 +345,9 @@ pub struct PlayerStats {
     /// 0xa08880: players the player put out of the game (`univKillOtherPlayersIfDead`).
     #[serde(default, deserialize_with = "crate::save::added_in_12")]
     pub players_killed: i32,
+    /// 0xa080d4: resource units from bounties (`bountyShipWasKilled`).
+    #[serde(default, deserialize_with = "crate::save::added_in_13")]
+    pub ru_bounty: i32,
 }
 
 /// The game-wide statistics.

@@ -110,9 +110,22 @@ pub struct MpState {
     pub winners: Option<u32>,
     /// The game is over (the quit clock ran out).
     pub over: bool,
-    /// Each player's bounty (`player->bounty`, `TW_BountySizes[bountySize]`; bounties are
-    /// not recalculated during the game yet). Crates are placed with it.
+    /// Each player's bounty (`player->bounty`, from `TW_BountySizes[bountySize]`, then
+    /// [`calculate_player_bounties`]). Killing its ships pays it; crates are placed with it.
     pub bounties: Vec<u8>,
+    /// `tpGameCreated.bountySize` (3: off), `BountyInit`'s base (0xa08084) and the weights of
+    /// the bounties' fleet value and RUs.
+    #[serde(default, deserialize_with = "crate::save::added_in_13")]
+    pub bounty_size: u8,
+    #[serde(default, deserialize_with = "crate::save::added_in_13")]
+    pub bounty_base: i32,
+    #[serde(default, deserialize_with = "crate::save::added_in_13")]
+    pub bounty_ship_worth: f32,
+    #[serde(default, deserialize_with = "crate::save::added_in_13")]
+    pub bounty_resources: f32,
+    /// 0xa08080: the bounties have been worked out once.
+    #[serde(default, deserialize_with = "crate::save::added_in_13")]
+    pub bounties_done: bool,
     /// The crates (`MG_CratesEnabled`).
     pub crates: crate::crates::Crates,
     /// What happened since the front end last took them (not saved).
@@ -140,9 +153,113 @@ impl Default for MpState {
             winners: None,
             over: false,
             bounties: Vec::new(),
+            bounty_size: 3,
+            bounty_base: 0,
+            bounty_ship_worth: 0.0,
+            bounty_resources: 0.0,
+            bounties_done: false,
             crates: Default::default(),
             events: Vec::new(),
         }
+    }
+}
+
+/// `univUpdate`'s bounty step: [`calculate_player_bounties`] the first time and then every
+/// 128 updates (when `univUpdateCounter & 0x7f == 0x65`).
+pub fn update_bounties(u: &mut Universe) {
+    if !u.mp.active || u.single_player {
+        return;
+    }
+    if !u.mp.bounties_done || u.update_counter & 0x7f == 0x65 {
+        u.mp.bounties_done = true;
+        calculate_player_bounties(u);
+    }
+}
+
+/// `calculatePlayerBounties` (0x4280a0): the bounties shared out of `players * base` by each
+/// player's share of the fleets' value (`TW_Bounty_CurrentShipWorth`) and of the RUs held
+/// (`TW_Bounty_ResourcesInPossesion`; a computer player counts the humans' average), at most
+/// 250 each.
+pub fn calculate_player_bounties(u: &mut Universe) {
+    let n = num_players(u);
+    if n == 0 {
+        return;
+    }
+    let pool = (n as i32).wrapping_mul(u.mp.bounty_base);
+    let mut worth = vec![0f32; n];
+    let counts = |s: &crate::object::Ship| s.flags & (sof::DEAD | sof::DISABLED) == 0;
+    for &id in &u.ship_list {
+        let Some(s) = u.ships.get(id) else { continue };
+        if !counts(s) || s.player >= n {
+            continue;
+        }
+        let cost = |t| u.statics.ship(t).map_or(0, |st| st.build_cost) as f32;
+        worth[s.player] = st(ld(cost(s.ship_type)) + ld(worth[s.player]));
+        // The ships inside count for their owners.
+        for &i in s.base.inside.as_ref().map(|x| x.ships.as_slice()).unwrap_or(&[]) {
+            let Some(c) = u.ships.get(i) else { continue };
+            if counts(c) && c.player < n {
+                worth[c.player] = st(ld(cost(c.ship_type)) + ld(worth[c.player]));
+            }
+        }
+    }
+    // The humans' RUs; computer players count their average.
+    let humans = (0..n).filter(|&p| !u.base.players[p].ai).count();
+    let mut rus = vec![0f32; n];
+    let mut sum = 0f32;
+    for p in 0..humans.min(n) {
+        rus[p] = u.base.players[p].resource_units as f32;
+        sum = st(ld(rus[p]) + ld(sum));
+    }
+    let avg = if humans != 0 { st(ld(sum) / humans as f64) } else { sum };
+    if avg != 0.0 {
+        for r in rus.iter_mut().skip(humans) {
+            *r = avg;
+        }
+    }
+    let (mut total_worth, mut total_rus) = (0f32, 0f32);
+    for p in 0..n {
+        total_worth = st(ld(total_worth) + ld(worth[p]));
+        total_rus = st(ld(total_rus) + ld(rus[p]));
+    }
+    let mut share = vec![0f32; n];
+    let mut total = 0f32;
+    for p in 0..n {
+        let a = if total_worth == 0.0 { 0.0 } else { st(ld(st(ld(worth[p]) / ld(total_worth))) * ld(u.mp.bounty_ship_worth)) };
+        let b = if total_rus == 0.0 { 0.0 } else { st(ld(st(ld(u.mp.bounty_resources) / ld(total_rus))) * ld(rus[p])) };
+        share[p] = st(ld(b) + ld(a));
+        total = st(ld(share[p]) + ld(total));
+    }
+    if u.mp.bounties.len() < n {
+        u.mp.bounties.resize(n, 0);
+    }
+    for p in 0..n {
+        let v = st(ld(st(ld(share[p]) / ld(total))) * f64::from(pool as f32));
+        // The FPU's rounding to the nearest (the 6.7553994e15 trick); nothing to share is 0.
+        let b = if v.is_finite() { (f64::from(v)).round_ties_even() as i64 } else { 0 };
+        u.mp.bounties[p] = b.clamp(0, 0xfa) as u8;
+    }
+}
+
+/// `bountyShipWasKilled` (0x428310): a ship destroyed by another player's weapons pays that
+/// player its owner's bounty in hundredths of its cost.
+pub fn bounty_ship_was_killed(u: &mut Universe, owner: usize, ship_type: crate::statics::ShipType, how: i32, who: i32) {
+    if u.single_player || !u.mp.active || u.mp.bounty_size == 3 {
+        return;
+    }
+    if !(0x29a..=0x29c).contains(&how) || !(0..8).contains(&who) || owner >= 8 || owner as i32 == who {
+        return;
+    }
+    let bounty = u.mp.bounties.get(owner).copied().unwrap_or(0);
+    let cost = u.statics.ship(ship_type).map_or(0, |s| s.build_cost);
+    let pay = (f64::from(bounty) * f64::from(f32::from_bits(0x3c23_d70a)) * f64::from(cost)) as i32;
+    let k = who as usize;
+    if let Some(p) = u.base.players.get_mut(k) {
+        p.resource_units += pay;
+    }
+    if let Some(s) = u.base.stats.players.get_mut(k) {
+        s.ru_bounty += pay;
+        s.ru_total += pay;
     }
 }
 

@@ -45,7 +45,7 @@ pub const MAGIC: [u8; 8] = *b"HWCSAVE\0";
 /// removed, reordered or retyped). A field added at version `n` is read with `added_in_<n>`
 /// ([`added_in_2`]), so files of older versions still load with the field at its default;
 /// files of a newer version, or older ones whose shape is not known, are refused.
-pub const FORMAT_VERSION: u32 = 12;
+pub const FORMAT_VERSION: u32 = 13;
 
 /// The oldest version still read.
 pub const OLDEST_VERSION: u32 = 1;
@@ -231,6 +231,12 @@ pub fn added_in_11<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Defau
 /// players killed, crystals, time of death).
 pub fn added_in_12<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
     added_in(12, d)
+}
+
+/// [`added_in`] for shape 13 (the bounties: their size, base and weights, and the RUs they
+/// paid).
+pub fn added_in_13<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(d: D) -> Result<T, D::Error> {
+    added_in(13, d)
 }
 
 fn current<T>(f: impl FnOnce(&Relink) -> T) -> T {

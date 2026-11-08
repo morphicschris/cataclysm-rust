@@ -72,11 +72,15 @@ pub struct MpTweaks {
     pub wait_time_to_win: f32,
     /// `TW_BountySizes[0..3]` (small, medium, large; off is 0).
     pub bounty_sizes: [u8; 3],
+    /// `TW_Bounty_CurrentShipWorth`, `TW_Bounty_ResourcesInPossesion`: the weights of a
+    /// player's fleet value and RUs in its bounty.
+    pub bounty_ship_worth: f32,
+    pub bounty_resources: f32,
 }
 
 impl Default for MpTweaks {
     fn default() -> Self {
-        Self { resource_start: [400, 1000, 3000], ship_death_time_min: 5.0, ship_death_time_max: 10.0, wait_time_to_quit: 10.0, wait_time_to_win: 5.0, bounty_sizes: [0; 3] }
+        Self { resource_start: [400, 1000, 3000], ship_death_time_min: 5.0, ship_death_time_max: 10.0, wait_time_to_quit: 10.0, wait_time_to_win: 5.0, bounty_sizes: [0; 3], bounty_ship_worth: 0.0, bounty_resources: 0.0 }
     }
 }
 
@@ -95,6 +99,8 @@ impl MpTweaks {
                 "PLAYERLOSE_SHIPDEATHTIMEMAX" => t.ship_death_time_max = f().unwrap_or(t.ship_death_time_max),
                 "WAIT_TIME_TO_QUIT" => t.wait_time_to_quit = f().unwrap_or(t.wait_time_to_quit),
                 "WAIT_TIME_TO_WIN" => t.wait_time_to_win = f().unwrap_or(t.wait_time_to_win),
+                "TW_Bounty_CurrentShipWorth" => t.bounty_ship_worth = f().unwrap_or(t.bounty_ship_worth),
+                "TW_Bounty_ResourcesInPossesion" => t.bounty_resources = f().unwrap_or(t.bounty_resources),
                 "TW_BountySizes[0]" => t.bounty_sizes[0] = i().map_or(t.bounty_sizes[0], |v| v as u8),
                 "TW_BountySizes[1]" => t.bounty_sizes[1] = i().map_or(t.bounty_sizes[1], |v| v as u8),
                 "TW_BountySizes[2]" => t.bounty_sizes[2] = i().map_or(t.bounty_sizes[2], |v| v as u8),
@@ -251,6 +257,10 @@ impl SkirmishRun {
             wait_time_to_win: mpt.wait_time_to_win,
             deaths: vec![None; n],
             bounties: vec![mpt.bounty_sizes.get(usize::from(o.bounty_size)).copied().unwrap_or(0); n],
+            bounty_size: o.bounty_size,
+            bounty_base: i32::from(mpt.bounty_sizes.get(usize::from(o.bounty_size)).copied().unwrap_or(0)),
+            bounty_ship_worth: mpt.bounty_ship_worth,
+            bounty_resources: mpt.bounty_resources,
             crates: crate::crates::Crates { tweaks: crate::crates::CrateTweaks::load(src), ..Default::default() },
             ..Default::default()
         };

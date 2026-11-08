@@ -419,7 +419,8 @@ impl Universe {
         crate::damage::delete_dead_ships(self);
         crate::resource::delete_dead_resources(self);
         crate::missile::delete_dead(self);
-        // (Resource regrowth and bounties follow.)
+        // (Resource regrowth follows.) The bounties (`calculatePlayerBounties`).
+        crate::multiplayer::update_bounties(self);
         // The sound task's Leech check and the enemy-sighting warnings (`soundEventUpdate`,
         // `speechEnemySightingsUpdate`), run here once an update.
         crate::speech::leeches_in_view(self);

@@ -471,3 +471,41 @@ fn a_computer_player_defends_its_mothership() {
     assert!(attackers_seen, "the computer player sees its mothership attacked");
     assert!(defended, "its ships attack the attackers");
 }
+
+/// Bounties (`calculatePlayerBounties`, `bountyShipWasKilled`): with bounties on, each player's
+/// is worked out from the fleets' value and the RUs held, and a ship destroyed by another
+/// player's weapons pays that player its owner's bounty in hundredths of its cost.
+#[test]
+fn bounties_are_worked_out_and_paid() {
+    let Some(d) = data() else { return };
+    let src = GameDataSource(&d.gd);
+    let mut options = default_game(d);
+    options.bounty_size = 1;
+    let mut s = setup("Coldwar2", &[ShipRace::Somtaaw, ShipRace::Beast], options, 3);
+    for p in &mut s.players {
+        p.computer = false;
+    }
+    let mut run = SkirmishRun::start(d.statics.clone(), d.tweaks.clone(), &src, s).expect("start");
+    for _ in 0..4 {
+        run.step();
+    }
+    let b = run.universe.mp.bounties.clone();
+    println!("bounties {b:?}, base {}", run.universe.mp.bounty_base);
+    assert!(run.universe.mp.bounty_base > 0, "the medium size from tweak.script");
+    assert!(b.iter().all(|&x| x > 0), "{b:?}");
+    let u = &mut run.universe;
+    let victim = u.ship_list.iter().copied().find(|&id| {
+        let s = u.ships.ship(id);
+        s.player == 1 && u.base.players[1].mothership != Some(id) && s.flags & hwc_sim::object::sof::HIDE == 0 && s.flags2 & 4 == 0 && u.statics.ship(s.ship_type).is_some_and(|st| st.build_cost > 0 && st.ship_class != Some(hwc_sim::statics::ShipClass::Component))
+    });
+    let Some(victim) = victim else { return };
+    let cost = u.statics.ship(u.ships.ship(victim).ship_type).unwrap().build_cost;
+    let before = u.base.players[0].resource_units;
+    let hp = u.ships.ship(victim).health;
+    assert!(hwc_sim::damage::apply_damage_to_target(u, victim, hp + 1.0, 0, 0x29a, 0, None), "it dies");
+    let paid = u.base.players[0].resource_units - before;
+    let expect = (f64::from(b[1]) * f64::from(0.01f32) * f64::from(cost)) as i32;
+    println!("paid {paid} for a ship of cost {cost} at bounty {}", b[1]);
+    assert_eq!(paid, expect);
+    assert_eq!(u.base.stats.players[0].ru_bounty, expect);
+}
