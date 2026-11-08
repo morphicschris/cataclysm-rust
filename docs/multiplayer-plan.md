@@ -56,6 +56,14 @@ advanced and resource tabs, player colours, the map list with each map's descrip
 original look and the modern one, and a game started from them that plays like a mission: the same
 managers, sensors and orders, the multiplayer hyperspace, the end-of-game screen.
 
+Status: the original-look screens work (`hwc_ui::skirmish`, test `hwc-ui/tests/skirmish_screens.rs`):
+Connection Method's Skirmish, the Basic, Advanced and Resource tabs, CPU players and sliders, the
+player name, the scenario list with each map's description, and Player Setup's race buttons. Start
+Skirmish loads the map and plays it as a script-less mission (`MissionRun::from_skirmish`); losing,
+winning and the end of the game show and return to the menu (`campaign_shots::skirmish_plays`).
+Still to do: the modern look of these screens, drawing crates, the end-of-game statistics screen,
+and saving a skirmish (refused for now). The computer players do nothing until stage 3.
+
 ## 3. Computer players
 
 The original's computer player (`AIPlayer.c` and its parts, `aip* aia* aif* air* aid* ait* aiu*`:
